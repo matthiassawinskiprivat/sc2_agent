@@ -1,0 +1,8 @@
+﻿.idea
+src/agent/__pycache__
+src/transformers/__pycache__
+src/ui/__pycache__
+src/utils/__pycache__
+tests/__pycache__
+ui/__pycache__
+src/__pycache__

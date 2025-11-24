@@ -1,0 +1,2438 @@
+{
+  "COLOSSUS": {
+    "id": 4,
+    "name": "COLOSSUS",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 300,
+      "vespene": 200,
+      "supply": 6.0
+    },
+    "radius": 1.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 10.0,
+        "attacks": 2,
+        "period": 1.64990234375,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 5.0
+          }
+        ]
+      }
+    ]
+  },
+  "INFESTORTERRAN": {
+    "id": 7,
+    "name": "INFESTORTERRAN",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.375,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 8.0,
+        "attacks": 1,
+        "period": 0.86083984375,
+        "range": 5.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "BANELING": {
+    "id": 9,
+    "name": "BANELING",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 50,
+      "vespene": 25,
+      "supply": 0.5
+    },
+    "radius": 0.375,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 20.0,
+        "attacks": 1,
+        "period": 1.0,
+        "range": 6.0,
+        "upgrade_bonus": 2,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 15.0
+          }
+        ]
+      }
+    ]
+  },
+  "MOTHERSHIP": {
+    "id": 10,
+    "name": "MOTHERSHIP",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 400,
+      "vespene": 400,
+      "supply": 8.0
+    },
+    "radius": 1.375,
+    "sight": 9.0,
+    "detect": 11.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 6.0,
+        "attacks": 6,
+        "period": 2.2099609375,
+        "range": 7.0,
+        "upgrade_bonus": 4,
+        "bonuses": []
+      }
+    ]
+  },
+  "CHANGELINGZEALOT": {
+    "id": 13,
+    "name": "CHANGELINGZEALOT",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 8.0,
+        "attacks": 2,
+        "period": 1.199951171875,
+        "range": 0.10009765625,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "CHANGELINGMARINESHIELD": {
+    "id": 14,
+    "name": "CHANGELINGMARINESHIELD",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 6.0,
+        "attacks": 1,
+        "period": 0.86083984375,
+        "range": 5.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "CHANGELINGMARINE": {
+    "id": 15,
+    "name": "CHANGELINGMARINE",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 6.0,
+        "attacks": 1,
+        "period": 0.86083984375,
+        "range": 5.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "CHANGELINGZERGLINGWINGS": {
+    "id": 16,
+    "name": "CHANGELINGZERGLINGWINGS",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 5.0,
+        "attacks": 1,
+        "period": 0.696044921875,
+        "range": 0.10009765625,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "CHANGELINGZERGLING": {
+    "id": 17,
+    "name": "CHANGELINGZERGLING",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 5.0,
+        "attacks": 1,
+        "period": 0.696044921875,
+        "range": 0.10009765625,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "COMMANDCENTER": {
+    "id": 18,
+    "name": "COMMANDCENTER",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 400,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "SUPPLYDEPOT": {
+    "id": 19,
+    "name": "SUPPLYDEPOT",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "BARRACKS": {
+    "id": 21,
+    "name": "BARRACKS",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "MISSILETURRET": {
+    "id": 23,
+    "name": "MISSILETURRET",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 11.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 12.0,
+        "attacks": 2,
+        "period": 0.86083984375,
+        "range": 7.0,
+        "upgrade_bonus": 0,
+        "bonuses": []
+      }
+    ]
+  },
+  "BUNKER": {
+    "id": 24,
+    "name": "BUNKER",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "FACTORY": {
+    "id": 27,
+    "name": "FACTORY",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 100,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "STARPORT": {
+    "id": 28,
+    "name": "STARPORT",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 100,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "AUTOTURRET": {
+    "id": 31,
+    "name": "AUTOTURRET",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 8.0,
+        "attacks": 1,
+        "period": 0.800048828125,
+        "range": 6.0,
+        "upgrade_bonus": 0,
+        "bonuses": []
+      }
+    ]
+  },
+  "SIEGETANKSIEGED": {
+    "id": 32,
+    "name": "SIEGETANKSIEGED",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 125,
+      "supply": 3.0
+    },
+    "radius": 0.875,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 40.0,
+        "attacks": 1,
+        "period": 3.0,
+        "range": 13.0,
+        "upgrade_bonus": 3,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 30.0
+          }
+        ]
+      }
+    ]
+  },
+  "SIEGETANK": {
+    "id": 33,
+    "name": "SIEGETANK",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 125,
+      "supply": 3.0
+    },
+    "radius": 0.875,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 15.0,
+        "attacks": 1,
+        "period": 1.0400390625,
+        "range": 7.0,
+        "upgrade_bonus": 3,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 10.0
+          }
+        ]
+      }
+    ]
+  },
+  "VIKINGASSAULT": {
+    "id": 34,
+    "name": "VIKINGASSAULT",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 75,
+      "supply": 2.0
+    },
+    "radius": 0.75,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 12.0,
+        "attacks": 1,
+        "period": 1.0,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "VIKINGFIGHTER": {
+    "id": 35,
+    "name": "VIKINGFIGHTER",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 75,
+      "supply": 2.0
+    },
+    "radius": 0.75,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 10.0,
+        "attacks": 2,
+        "period": 2.0,
+        "range": 9.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 4.0
+          }
+        ]
+      }
+    ]
+  },
+  "SCV": {
+    "id": 45,
+    "name": "SCV",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 50,
+      "vespene": 0,
+      "supply": 1.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 5.0,
+        "attacks": 1,
+        "period": 1.5,
+        "range": 0.10009765625,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "MARINE": {
+    "id": 48,
+    "name": "MARINE",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 50,
+      "vespene": 0,
+      "supply": 1.0
+    },
+    "radius": 0.375,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 6.0,
+        "attacks": 1,
+        "period": 0.86083984375,
+        "range": 5.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "REAPER": {
+    "id": 49,
+    "name": "REAPER",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 50,
+      "vespene": 50,
+      "supply": 1.0
+    },
+    "radius": 0.375,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 4.0,
+        "attacks": 2,
+        "period": 1.10009765625,
+        "range": 5.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "GHOST": {
+    "id": 50,
+    "name": "GHOST",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 200,
+      "vespene": 100,
+      "supply": 2.0
+    },
+    "radius": 0.375,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 10.0,
+        "attacks": 1,
+        "period": 1.5,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 10.0
+          }
+        ]
+      }
+    ]
+  },
+  "MARAUDER": {
+    "id": 51,
+    "name": "MARAUDER",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 25,
+      "supply": 2.0
+    },
+    "radius": 0.5625,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 10.0,
+        "attacks": 1,
+        "period": 1.5,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 10.0
+          }
+        ]
+      }
+    ]
+  },
+  "THOR": {
+    "id": 52,
+    "name": "THOR",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 300,
+      "vespene": 200,
+      "supply": 6.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 6.0,
+        "attacks": 4,
+        "period": 3.0,
+        "range": 10.0,
+        "upgrade_bonus": 3,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 6.0
+          }
+        ]
+      },
+      {
+        "type": 1,
+        "damage": 30.0,
+        "attacks": 2,
+        "period": 1.280029296875,
+        "range": 7.0,
+        "upgrade_bonus": 3,
+        "bonuses": []
+      }
+    ]
+  },
+  "HELLION": {
+    "id": 53,
+    "name": "HELLION",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 8.0,
+        "attacks": 1,
+        "period": 2.5,
+        "range": 5.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 6.0
+          }
+        ]
+      }
+    ]
+  },
+  "MEDIVAC": {
+    "id": 54,
+    "name": "MEDIVAC",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 100,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "BANSHEE": {
+    "id": 55,
+    "name": "BANSHEE",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 100,
+      "supply": 3.0
+    },
+    "radius": 0.75,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 12.0,
+        "attacks": 2,
+        "period": 1.25,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "BATTLECRUISER": {
+    "id": 57,
+    "name": "BATTLECRUISER",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 400,
+      "vespene": 300,
+      "supply": 6.0
+    },
+    "radius": 1.25,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 8.0,
+        "attacks": 1,
+        "period": 0.22509765625,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      },
+      {
+        "type": 2,
+        "damage": 6.0,
+        "attacks": 1,
+        "period": 0.22509765625,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "NEXUS": {
+    "id": 59,
+    "name": "NEXUS",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 400,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "PYLON": {
+    "id": 60,
+    "name": "PYLON",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 1.125,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "GATEWAY": {
+    "id": 62,
+    "name": "GATEWAY",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 150,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "PHOTONCANNON": {
+    "id": 66,
+    "name": "PHOTONCANNON",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 150,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 11.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 20.0,
+        "attacks": 1,
+        "period": 1.25,
+        "range": 7.0,
+        "upgrade_bonus": 0,
+        "bonuses": []
+      }
+    ]
+  },
+  "STARGATE": {
+    "id": 67,
+    "name": "STARGATE",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 150,
+      "vespene": 150,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "ROBOTICSFACILITY": {
+    "id": 71,
+    "name": "ROBOTICSFACILITY",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 200,
+      "vespene": 100,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "ZEALOT": {
+    "id": 73,
+    "name": "ZEALOT",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 8.0,
+        "attacks": 2,
+        "period": 1.199951171875,
+        "range": 0.10009765625,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "STALKER": {
+    "id": 74,
+    "name": "STALKER",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 125,
+      "vespene": 50,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 13.0,
+        "attacks": 1,
+        "period": 1.43994140625,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 5.0
+          }
+        ]
+      }
+    ]
+  },
+  "HIGHTEMPLAR": {
+    "id": 75,
+    "name": "HIGHTEMPLAR",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 50,
+      "vespene": 150,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 4.0,
+        "attacks": 1,
+        "period": 1.25,
+        "range": 6.0,
+        "upgrade_bonus": 0,
+        "bonuses": []
+      }
+    ]
+  },
+  "DARKTEMPLAR": {
+    "id": 76,
+    "name": "DARKTEMPLAR",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 125,
+      "vespene": 125,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 45.0,
+        "attacks": 1,
+        "period": 1.694091796875,
+        "range": 0.10009765625,
+        "upgrade_bonus": 3,
+        "bonuses": []
+      }
+    ]
+  },
+  "SENTRY": {
+    "id": 77,
+    "name": "SENTRY",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 50,
+      "vespene": 100,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 6.0,
+        "attacks": 1,
+        "period": 1.0,
+        "range": 5.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "PHOENIX": {
+    "id": 78,
+    "name": "PHOENIX",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 150,
+      "vespene": 100,
+      "supply": 2.0
+    },
+    "radius": 0.75,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 5.0,
+        "attacks": 2,
+        "period": 1.10009765625,
+        "range": 5.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 5.0
+          }
+        ]
+      }
+    ]
+  },
+  "CARRIER": {
+    "id": 79,
+    "name": "CARRIER",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 350,
+      "vespene": 250,
+      "supply": 6.0
+    },
+    "radius": 1.25,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "VOIDRAY": {
+    "id": 80,
+    "name": "VOIDRAY",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 250,
+      "vespene": 150,
+      "supply": 4.0
+    },
+    "radius": 1.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 6.0,
+        "attacks": 1,
+        "period": 0.5,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 4.0
+          }
+        ]
+      }
+    ]
+  },
+  "WARPPRISM": {
+    "id": 81,
+    "name": "WARPPRISM",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 200,
+      "vespene": 0,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "OBSERVER": {
+    "id": 82,
+    "name": "OBSERVER",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 25,
+      "vespene": 75,
+      "supply": 1.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 11.0,
+    "weapons": []
+  },
+  "IMMORTAL": {
+    "id": 83,
+    "name": "IMMORTAL",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 250,
+      "vespene": 100,
+      "supply": 4.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 20.0,
+        "attacks": 1,
+        "period": 1.449951171875,
+        "range": 6.0,
+        "upgrade_bonus": 2,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 30.0
+          }
+        ]
+      }
+    ]
+  },
+  "PROBE": {
+    "id": 84,
+    "name": "PROBE",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 50,
+      "vespene": 0,
+      "supply": 1.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 5.0,
+        "attacks": 1,
+        "period": 1.5,
+        "range": 0.10009765625,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "INTERCEPTOR": {
+    "id": 85,
+    "name": "INTERCEPTOR",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 25,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.25,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 5.0,
+        "attacks": 2,
+        "period": 3.0,
+        "range": 2.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "HATCHERY": {
+    "id": 86,
+    "name": "HATCHERY",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 350,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "CREEPTUMOR": {
+    "id": 87,
+    "name": "CREEPTUMOR",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "SPAWNINGPOOL": {
+    "id": 89,
+    "name": "SPAWNINGPOOL",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 250,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "HYDRALISKDEN": {
+    "id": 91,
+    "name": "HYDRALISKDEN",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 150,
+      "vespene": 100,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "SPIRE": {
+    "id": 92,
+    "name": "SPIRE",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 250,
+      "vespene": 200,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "ROACHWARREN": {
+    "id": 97,
+    "name": "ROACHWARREN",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 200,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "SPINECRAWLER": {
+    "id": 98,
+    "name": "SPINECRAWLER",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 150,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 25.0,
+        "attacks": 1,
+        "period": 1.85009765625,
+        "range": 7.0,
+        "upgrade_bonus": 0,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 5.0
+          }
+        ]
+      }
+    ]
+  },
+  "SPORECRAWLER": {
+    "id": 99,
+    "name": "SPORECRAWLER",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 125,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 11.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 15.0,
+        "attacks": 1,
+        "period": 0.86083984375,
+        "range": 7.0,
+        "upgrade_bonus": 0,
+        "bonuses": []
+      }
+    ]
+  },
+  "LAIR": {
+    "id": 100,
+    "name": "LAIR",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 500,
+      "vespene": 100,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "HIVE": {
+    "id": 101,
+    "name": "HIVE",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 700,
+      "vespene": 250,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "EGG": {
+    "id": 103,
+    "name": "EGG",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "DRONE": {
+    "id": 104,
+    "name": "DRONE",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 50,
+      "vespene": 0,
+      "supply": 1.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 5.0,
+        "attacks": 1,
+        "period": 1.5,
+        "range": 0.10009765625,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "ZERGLING": {
+    "id": 105,
+    "name": "ZERGLING",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 25,
+      "vespene": 0,
+      "supply": 0.5
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 5.0,
+        "attacks": 1,
+        "period": 0.696044921875,
+        "range": 0.10009765625,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "OVERLORD": {
+    "id": 106,
+    "name": "OVERLORD",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "HYDRALISK": {
+    "id": 107,
+    "name": "HYDRALISK",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 100,
+      "vespene": 50,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 12.0,
+        "attacks": 1,
+        "period": 0.830078125,
+        "range": 5.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "MUTALISK": {
+    "id": 108,
+    "name": "MUTALISK",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 100,
+      "vespene": 100,
+      "supply": 2.0
+    },
+    "radius": 0.5,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 9.0,
+        "attacks": 1,
+        "period": 1.524658203125,
+        "range": 3.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "ULTRALISK": {
+    "id": 109,
+    "name": "ULTRALISK",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 300,
+      "vespene": 200,
+      "supply": 6.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 35.0,
+        "attacks": 1,
+        "period": 0.860107421875,
+        "range": 1.0,
+        "upgrade_bonus": 3,
+        "bonuses": []
+      }
+    ]
+  },
+  "ROACH": {
+    "id": 110,
+    "name": "ROACH",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 75,
+      "vespene": 25,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 16.0,
+        "attacks": 1,
+        "period": 2.0,
+        "range": 4.0,
+        "upgrade_bonus": 2,
+        "bonuses": []
+      }
+    ]
+  },
+  "INFESTOR": {
+    "id": 111,
+    "name": "INFESTOR",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 100,
+      "vespene": 150,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "CORRUPTOR": {
+    "id": 112,
+    "name": "CORRUPTOR",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 150,
+      "vespene": 100,
+      "supply": 2.0
+    },
+    "radius": 0.625,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 14.0,
+        "attacks": 1,
+        "period": 1.89990234375,
+        "range": 6.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 7,
+            "bonus": 6.0
+          }
+        ]
+      }
+    ]
+  },
+  "BROODLORD": {
+    "id": 114,
+    "name": "BROODLORD",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 300,
+      "vespene": 250,
+      "supply": 4.0
+    },
+    "radius": 1.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 20.0,
+        "attacks": 1,
+        "period": 2.5,
+        "range": 9.5,
+        "upgrade_bonus": 2,
+        "bonuses": []
+      }
+    ]
+  },
+  "QUEEN": {
+    "id": 126,
+    "name": "QUEEN",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 150,
+      "vespene": 0,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 9.0,
+        "attacks": 1,
+        "period": 1.0,
+        "range": 7.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      },
+      {
+        "type": 1,
+        "damage": 4.0,
+        "attacks": 2,
+        "period": 1.0,
+        "range": 5.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "PLANETARYFORTRESS": {
+    "id": 130,
+    "name": "PLANETARYFORTRESS",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 550,
+      "vespene": 150,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 40.0,
+        "attacks": 1,
+        "period": 2.0,
+        "range": 6.0,
+        "upgrade_bonus": 0,
+        "bonuses": []
+      }
+    ]
+  },
+  "ORBITALCOMMAND": {
+    "id": 132,
+    "name": "ORBITALCOMMAND",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 550,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "WARPGATE": {
+    "id": 133,
+    "name": "WARPGATE",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 150,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "CREEPTUMORBURROWED": {
+    "id": 137,
+    "name": "CREEPTUMORBURROWED",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "ARCHON": {
+    "id": 141,
+    "name": "ARCHON",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 175,
+      "vespene": 275,
+      "supply": 4.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 25.0,
+        "attacks": 1,
+        "period": 1.75390625,
+        "range": 3.0,
+        "upgrade_bonus": 3,
+        "bonuses": [
+          {
+            "type": 3,
+            "bonus": 10.0
+          }
+        ]
+      }
+    ]
+  },
+  "LARVA": {
+    "id": 151,
+    "name": "LARVA",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "MULE": {
+    "id": 268,
+    "name": "MULE",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 50,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "BROODLING": {
+    "id": 289,
+    "name": "BROODLING",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 4.0,
+        "attacks": 1,
+        "period": 0.6455078125,
+        "range": 0.10009765625,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "ADEPT": {
+    "id": 311,
+    "name": "ADEPT",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 100,
+      "vespene": 25,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 10.0,
+        "attacks": 1,
+        "period": 2.25,
+        "range": 4.0,
+        "upgrade_bonus": 1,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 12.0
+          }
+        ]
+      }
+    ]
+  },
+  "SCOPETEST": {
+    "id": 481,
+    "name": "SCOPETEST",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 50,
+      "vespene": 0,
+      "supply": 1.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 6.0,
+        "attacks": 1,
+        "period": 0.86083984375,
+        "range": 5.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "HELLIONTANK": {
+    "id": 484,
+    "name": "HELLIONTANK",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 18.0,
+        "attacks": 1,
+        "period": 2.0,
+        "range": 2.0,
+        "upgrade_bonus": 2,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 12.0
+          }
+        ]
+      }
+    ]
+  },
+  "MOTHERSHIPCORE": {
+    "id": 488,
+    "name": "MOTHERSHIPCORE",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 100,
+      "vespene": 100,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 8.0,
+        "attacks": 1,
+        "period": 0.85009765625,
+        "range": 5.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "LOCUSTMP": {
+    "id": 489,
+    "name": "LOCUSTMP",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 12.0,
+        "attacks": 1,
+        "period": 0.800048828125,
+        "range": 3.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "NYDUSCANALATTACKER": {
+    "id": 491,
+    "name": "NYDUSCANALATTACKER",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 200,
+      "vespene": 0,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 10.0,
+        "attacks": 1,
+        "period": 2.0,
+        "range": 7.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "ORACLE": {
+    "id": 495,
+    "name": "ORACLE",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 150,
+      "vespene": 150,
+      "supply": 3.0
+    },
+    "radius": 0.75,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 15.0,
+        "attacks": 1,
+        "period": 1.0,
+        "range": 6.0,
+        "upgrade_bonus": 0,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 7.0
+          }
+        ]
+      }
+    ]
+  },
+  "TEMPEST": {
+    "id": 496,
+    "name": "TEMPEST",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 300,
+      "vespene": 200,
+      "supply": 4.0
+    },
+    "radius": 1.25,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 30.0,
+        "attacks": 1,
+        "period": 3.300048828125,
+        "range": 15.0,
+        "upgrade_bonus": 3,
+        "bonuses": [
+          {
+            "type": 7,
+            "bonus": 50.0
+          }
+        ]
+      }
+    ]
+  },
+  "WARHOUND": {
+    "id": 497,
+    "name": "WARHOUND",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 75,
+      "supply": 3.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 23.0,
+        "attacks": 1,
+        "period": 1.300048828125,
+        "range": 7.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "VIPER": {
+    "id": 499,
+    "name": "VIPER",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 100,
+      "vespene": 200,
+      "supply": 3.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "LURKERMP": {
+    "id": 502,
+    "name": "LURKERMP",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 150,
+      "vespene": 150,
+      "supply": 3.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 20.0,
+        "attacks": 1,
+        "period": 1.0,
+        "range": 6.0,
+        "upgrade_bonus": 2,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 10.0
+          }
+        ]
+      }
+    ]
+  },
+  "LURKERMPBURROWED": {
+    "id": 503,
+    "name": "LURKERMPBURROWED",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 150,
+      "vespene": 150,
+      "supply": 3.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 20.0,
+        "attacks": 1,
+        "period": 2.0,
+        "range": 9.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "RAVAGER": {
+    "id": 688,
+    "name": "RAVAGER",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 100,
+      "vespene": 100,
+      "supply": 3.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 16.0,
+        "attacks": 1,
+        "period": 0.800048828125,
+        "range": 6.0,
+        "upgrade_bonus": 2,
+        "bonuses": []
+      }
+    ]
+  },
+  "LIBERATOR": {
+    "id": 689,
+    "name": "LIBERATOR",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 150,
+      "supply": 3.0
+    },
+    "radius": 0.75,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 5.0,
+        "attacks": 2,
+        "period": 1.800048828125,
+        "range": 5.0,
+        "upgrade_bonus": 5,
+        "bonuses": [
+          {
+            "type": 1,
+            "bonus": 2.0
+          }
+        ]
+      }
+    ]
+  },
+  "THORAP": {
+    "id": 691,
+    "name": "THORAP",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 300,
+      "vespene": 200,
+      "supply": 6.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 30.0,
+        "attacks": 2,
+        "period": 1.280029296875,
+        "range": 7.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      },
+      {
+        "type": 2,
+        "damage": 24.0,
+        "attacks": 1,
+        "period": 2.0,
+        "range": 10.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "CYCLONE": {
+    "id": 692,
+    "name": "CYCLONE",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 150,
+      "supply": 3.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 18.0,
+        "attacks": 1,
+        "period": 1.0,
+        "range": 5.0,
+        "upgrade_bonus": 1,
+        "bonuses": []
+      }
+    ]
+  },
+  "LOCUSTMPFLYING": {
+    "id": 693,
+    "name": "LOCUSTMPFLYING",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.375,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "GUARDIANMP": {
+    "id": 727,
+    "name": "GUARDIANMP",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 150,
+      "vespene": 200,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 20.0,
+        "attacks": 1,
+        "period": 1.300048828125,
+        "range": 9.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "DEVOURERMP": {
+    "id": 729,
+    "name": "DEVOURERMP",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 250,
+      "vespene": 150,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 25.0,
+        "attacks": 1,
+        "period": 3.0,
+        "range": 5.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "LIBERATORAG": {
+    "id": 734,
+    "name": "LIBERATORAG",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 150,
+      "vespene": 150,
+      "supply": 3.0
+    },
+    "radius": 0.75,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 85.0,
+        "attacks": 1,
+        "period": 1.60009765625,
+        "range": 13.0,
+        "upgrade_bonus": 5,
+        "bonuses": []
+      }
+    ]
+  },
+  "HERCPLACEMENT": {
+    "id": 820,
+    "name": "HERCPLACEMENT",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 200,
+      "vespene": 100,
+      "supply": 3.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 20.0,
+        "attacks": 1,
+        "period": 1.5,
+        "range": 6.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "HERC": {
+    "id": 838,
+    "name": "HERC",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 200,
+      "vespene": 100,
+      "supply": 3.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 20.0,
+        "attacks": 1,
+        "period": 1.5,
+        "range": 6.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "MOOPY": {
+    "id": 839,
+    "name": "MOOPY",
+    "race": "Race.NoRace",
+    "cost": {
+      "minerals": 0,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 1.0,
+        "attacks": 1,
+        "period": 1.0,
+        "range": 0.10009765625,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "CORSAIRMP": {
+    "id": 855,
+    "name": "CORSAIRMP",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 150,
+      "vespene": 100,
+      "supply": 2.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 5.0,
+        "attacks": 1,
+        "period": 0.472412109375,
+        "range": 5.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "SCOUTMP": {
+    "id": 856,
+    "name": "SCOUTMP",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 275,
+      "vespene": 125,
+      "supply": 3.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 1,
+        "damage": 8.0,
+        "attacks": 1,
+        "period": 1.694091796875,
+        "range": 4.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      },
+      {
+        "type": 2,
+        "damage": 7.0,
+        "attacks": 2,
+        "period": 1.25,
+        "range": 4.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": [
+          {
+            "type": 2,
+            "bonus": 7.0
+          }
+        ]
+      }
+    ]
+  },
+  "ARBITERMP": {
+    "id": 857,
+    "name": "ARBITERMP",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 100,
+      "vespene": 350,
+      "supply": 4.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 3,
+        "damage": 10.0,
+        "attacks": 1,
+        "period": 1.5,
+        "range": 5.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "SCOURGEMP": {
+    "id": 858,
+    "name": "SCOURGEMP",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 12,
+      "vespene": 37,
+      "supply": 0.5
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 110.0,
+        "attacks": 1,
+        "period": 0.833251953125,
+        "range": 0.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  },
+  "SHIELDBATTERY": {
+    "id": 1910,
+    "name": "SHIELDBATTERY",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "RENEGADEMISSILETURRET": {
+    "id": 1941,
+    "name": "RENEGADEMISSILETURRET",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 0,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": [
+      {
+        "type": 2,
+        "damage": 12.0,
+        "attacks": 2,
+        "period": 0.86083984375,
+        "range": 7.0,
+        "upgrade_bonus": 0.0,
+        "bonuses": []
+      }
+    ]
+  }
+}

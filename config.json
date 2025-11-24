@@ -1,0 +1,17 @@
+{
+  "map_size": [
+    200,
+    200
+  ],
+  "display_size": [
+    1200,
+    800
+  ],
+  "unit_data_file": "data/unit_data.json",
+  "fps_limit": 60,
+  "enable_ui": true,
+  "save_debug_data": false,
+  "debug_output_dir": "debug_output",
+  "sc2_path": "C:\\Program Files (x86)\\StarCraft II",
+  "game_version": "latest"
+}
