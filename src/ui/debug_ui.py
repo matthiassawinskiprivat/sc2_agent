@@ -3,7 +3,7 @@ import os
 import numpy as np
 import cv2
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QPushButton, QGroupBox, QCheckBox)
+                             QHBoxLayout, QGridLayout, QLabel, QPushButton, QGroupBox, QCheckBox)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap, QFont
 
@@ -25,6 +25,11 @@ class DebugUI(QMainWindow):
         self.is_realtime_mode = True
         self.current_frame = None
 
+        # Track layer groups for bulk toggling
+        self.allied_layer_names = []
+        self.enemy_layer_names = []
+        self.layer_checkboxes = {}
+
         self.init_ui()
 
         # Start UI manager
@@ -43,8 +48,8 @@ class DebugUI(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("StarCraft 2 Unit Control Agent - Debug UI")
-        # Adjusted window geometry to fit the new layout compact
-        self.setGeometry(100, 100, 1000, 600)
+        # Adjusted window geometry
+        self.setGeometry(100, 100, 1100, 600)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -55,7 +60,7 @@ class DebugUI(QMainWindow):
         self.display_label = QLabel("Waiting for game data...")
         self.display_label.setAlignment(Qt.AlignCenter)
 
-        # FIX: Enforce exact 512x512 size for the canvas
+        # Enforce exact 512x512 size for the canvas
         self.display_label.setFixedSize(512, 512)
 
         self.display_label.setStyleSheet("background-color: black; border: 2px solid gray;")
@@ -64,29 +69,97 @@ class DebugUI(QMainWindow):
         # Right panel - Controls
         control_panel = self.create_control_panel()
 
-        main_layout.addWidget(self.display_label)  # Removed stretch to prevent resizing
+        main_layout.addWidget(self.display_label)
         main_layout.addWidget(control_panel, stretch=1)
 
     def create_control_panel(self):
         """Create the control panel"""
         panel = QWidget()
-        panel.setMaximumWidth(400)
+        panel.setMaximumWidth(500)
         layout = QVBoxLayout(panel)
 
         # Layer controls
         layer_group = QGroupBox("Layer Controls")
-        layer_layout = QVBoxLayout(layer_group)
+
+        # Grid Layout
+        layer_layout = QGridLayout(layer_group)
+        layer_layout.setVerticalSpacing(1)
+        layer_layout.setHorizontalSpacing(10)
+        # Ensure columns share width
+        layer_layout.setColumnStretch(0, 1)
+        layer_layout.setColumnStretch(1, 1)
 
         self.layer_checkboxes = {}
-        # Make the checkbox list scrollable if it's too long, or compact
-        # For now, keeping standard layout
-        for layer_name in LayerConstants.LAYERS:
-            checkbox = QCheckBox(layer_name)
-            checkbox.setChecked(True)
-            checkbox.stateChanged.connect(lambda state, name=layer_name:
-                                          self.ui_manager.set_layer_visibility(name, state == Qt.Checked))
-            layer_layout.addWidget(checkbox)
-            self.layer_checkboxes[layer_name] = checkbox
+
+        # --- 1. Categorize Layers ---
+        all_layers = list(LayerConstants.LAYERS.keys())
+        self.allied_layer_names = []
+        self.enemy_layer_names = []
+        neutral_layers = []
+
+        for name in all_layers:
+            if name.startswith("allied") or name.startswith("command"):
+                self.allied_layer_names.append(name)
+            elif name.startswith("enemy"):
+                self.enemy_layer_names.append(name)
+            else:
+                neutral_layers.append(name)
+
+        # Helper to create styled checkbox
+        def make_cb(layer_name):
+            cb = QCheckBox(layer_name)
+            cb.setChecked(True)
+            cb.setStyleSheet("margin-bottom: 0px; margin-top: 0px; font-size: 10px;")
+            cb.stateChanged.connect(lambda state, n=layer_name:
+                                    self.ui_manager.set_layer_visibility(n, state == Qt.Checked))
+            self.layer_checkboxes[layer_name] = cb
+            return cb
+
+        # --- 2. Add Master Checkboxes (Headers) ---
+
+        # Master Allied
+        master_allied = QCheckBox("Allied / Command (All)")
+        master_allied.setChecked(True)
+        master_allied.setStyleSheet("font-weight: bold; font-size: 11px; margin-bottom: 5px;")
+        master_allied.stateChanged.connect(self.toggle_all_allied_layers)
+        layer_layout.addWidget(master_allied, 0, 0)
+
+        # Master Enemy
+        master_enemy = QCheckBox("Enemy Threat (All)")
+        master_enemy.setChecked(True)
+        master_enemy.setStyleSheet("font-weight: bold; font-size: 11px; margin-bottom: 5px;")
+        master_enemy.stateChanged.connect(self.toggle_all_enemy_layers)
+        layer_layout.addWidget(master_enemy, 0, 1)
+
+        # --- 3. Populate Columns Side-by-Side ---
+        max_rows = max(len(self.allied_layer_names), len(self.enemy_layer_names))
+        start_row = 1
+
+        for i in range(max_rows):
+            # Left Column (Allied)
+            if i < len(self.allied_layer_names):
+                cb = make_cb(self.allied_layer_names[i])
+                layer_layout.addWidget(cb, start_row + i, 0)
+
+            # Right Column (Enemy)
+            if i < len(self.enemy_layer_names):
+                cb = make_cb(self.enemy_layer_names[i])
+                layer_layout.addWidget(cb, start_row + i, 1)
+
+        # --- 4. Populate Neutral/Environment Below ---
+        env_row_start = start_row + max_rows + 1
+        lbl_env = QLabel("<b>Environment / Neutral</b>")
+        lbl_env.setStyleSheet("margin-top: 10px;")
+        # Span header across 2 columns
+        layer_layout.addWidget(lbl_env, env_row_start, 0, 1, 2)
+
+        env_content_start = env_row_start + 1
+        for i, name in enumerate(neutral_layers):
+            cb = make_cb(name)
+            # Fill left then right
+            row = env_content_start + (i // 2)
+            col = i % 2
+            layer_layout.addWidget(cb, row, col)
 
         layout.addWidget(layer_group)
 
@@ -94,12 +167,10 @@ class DebugUI(QMainWindow):
         control_group = QGroupBox("Controls")
         control_layout = QVBoxLayout(control_group)
 
-        # Real-time mode toggle
         self.realtime_button = QPushButton("Stop Real-time Mode")
         self.realtime_button.clicked.connect(self.toggle_realtime_mode)
         control_layout.addWidget(self.realtime_button)
 
-        # Reset button
         reset_button = QPushButton("Reset Agent")
         reset_button.clicked.connect(self.agent.reset)
         control_layout.addWidget(reset_button)
@@ -120,6 +191,21 @@ class DebugUI(QMainWindow):
         layout.addStretch()
 
         return panel
+
+    def toggle_all_allied_layers(self, state):
+        """Enable/Disable all allied layer checkboxes"""
+        is_checked = (state == Qt.Checked)
+        for name in self.allied_layer_names:
+            if name in self.layer_checkboxes:
+                # This programmatically triggers stateChanged, updating the UIManager
+                self.layer_checkboxes[name].setChecked(is_checked)
+
+    def toggle_all_enemy_layers(self, state):
+        """Enable/Disable all enemy layer checkboxes"""
+        is_checked = (state == Qt.Checked)
+        for name in self.enemy_layer_names:
+            if name in self.layer_checkboxes:
+                self.layer_checkboxes[name].setChecked(is_checked)
 
     def poll_and_update(self):
         """Poll for frame and update display"""
@@ -158,8 +244,6 @@ class DebugUI(QMainWindow):
 
         except Exception as e:
             print(f"Display update error: {e}")
-            # import traceback
-            # traceback.print_exc()
 
     def update_statistics_display(self):
         """Update statistics"""
