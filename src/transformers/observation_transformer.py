@@ -1,9 +1,17 @@
 """
 Professional Observation Transformer
+Transforms StarCraft II observations into a high-fidelity multi-layer feature map.
+
+Key Features:
+1. **Coordinate Alignment**: Maps SC2 World Coordinates to Image Coordinates using 'Playable Area' cropping (Letterboxing).
+2. **Robustness**: Handles transposed grids, missing Enum IDs, and MagicMock objects in tests.
+3. **Data-Driven**: Uses external JSON for weapon stats with safe fallbacks.
+4. **Special Mechanics**: Handles Nuke/Bile Air threats, Scanner Sweep detection, and Buried units.
+5. **Normalization**: Log1p and Tanh scaling for neural network stability.
+
 Fixed:
-1. Viewport now crops to 'playable_area' instead of full 'map_size' to remove black borders.
-2. Coordinate transforms updated to handle crop offsets (crop_x, crop_y).
-3. Preserved all previous logic (Effect/Unit rendering).
+- **Effect ID Comparison**: normalized to values (int) to support both Enums and Integers.
+- **Liberator Logic**: Distance calculation now correctly uses World Coordinates vs World Coordinates.
 """
 
 import numpy as np
@@ -28,20 +36,24 @@ class ObservationTransformer:
         self.feature_map_width = map_size[0]
         self.feature_map_height = map_size[1]
 
+        # Transformation State
         self.scale = 1.0
         self.offset_x = 0.0
         self.offset_y = 0.0
         self.crop_x = 0.0
         self.crop_y = 0.0
 
+        # Caching
         self._terrain_cache = None
         self._last_map_name = None
 
+        # Pre-allocated grids
         self._grid_y = np.arange(self.feature_map_height).reshape(-1, 1)
         self._grid_x = np.arange(self.feature_map_width).reshape(1, -1)
 
         self._liberator_positions = {'allied': [], 'enemy': []}
 
+        # Load DB
         if unit_data_file is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             unit_data_file = os.path.join(base_dir, "data", "unit_data.json")
@@ -64,6 +76,9 @@ class ObservationTransformer:
         return grid_obj
 
     def transform(self, raw_obs: Dict[str, Any]) -> np.ndarray:
+        """
+        Main transformation pipeline.
+        """
         total_layers = LayerConstants.get_num_layers()
         layers = np.zeros((total_layers, self.feature_map_height, self.feature_map_width), dtype=np.float32)
 
@@ -73,9 +88,10 @@ class ObservationTransformer:
         game_info = raw_obs.get('game_info')
         game_data = raw_obs.get('game_data')
 
-        # 1. Calculate Scale & Crop based on Playable Area
+        # ------------------------------------------------------------------
+        # 1. Calculate Scale & Crop (Focus on Playable Area)
+        # ------------------------------------------------------------------
         if game_info:
-            # Prefer Playable Area (Camera Bounds) to remove void borders
             if hasattr(game_info, 'playable_area'):
                 area = game_info.playable_area
                 self.crop_x = area.x
@@ -92,7 +108,6 @@ class ObservationTransformer:
         else:
             self.crop_x, self.crop_y, mw, mh = 0, 0, 200, 200
 
-        # Scale to fit the playable area within feature map
         self.scale = min(self.feature_map_width / max(mw, 1), self.feature_map_height / max(mh, 1))
         self.scale = min(self.scale, 1.0)
 
@@ -101,33 +116,51 @@ class ObservationTransformer:
         self.offset_x = max(0, (self.feature_map_width - scaled_w) // 2)
         self.offset_y = max(0, (self.feature_map_height - scaled_h) // 2)
 
+        # ------------------------------------------------------------------
         # 2. Draw Environment
+        # ------------------------------------------------------------------
         self._draw_terrain_pathing(game_info, layers)
         self._draw_terrain_creep(raw_obs, layers)
 
+        # ------------------------------------------------------------------
         # 3. Draw Units
+        # ------------------------------------------------------------------
         self._liberator_positions = {'allied': [], 'enemy': []}
+
+        # Robust Lib ID check
+        lib_enum = getattr(UnitTypeId, 'LIBERATORAG', 154)
+        lib_val = lib_enum.value if hasattr(lib_enum, "value") else 154
+
         for unit in allied_units:
-            type_name = getattr(unit.type_id, "name", None)
-            if type_name and "MINERAL" in type_name.upper(): continue
+            # Exclude Minerals
+            u_name = getattr(unit.type_id, "name", None)
+            if u_name and "MINERAL" in u_name.upper(): continue
 
             self._process_single_unit(unit, layers, False, mw, mh, game_data)
-            if unit.type_id == UnitTypeId.LIBERATORAG:
+
+            u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
+            if u_id == lib_val:
                 self._liberator_positions['allied'].append(unit.position)
 
         for unit in enemy_units:
-            type_name = getattr(unit.type_id, "name", None)
-            if type_name and "MINERAL" in type_name.upper(): continue
+            u_name = getattr(unit.type_id, "name", None)
+            if u_name and "MINERAL" in u_name.upper(): continue
 
             self._process_single_unit(unit, layers, True, mw, mh, game_data)
-            if unit.type_id == UnitTypeId.LIBERATORAG:
+
+            u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
+            if u_id == lib_val:
                 self._liberator_positions['enemy'].append(unit.position)
 
+        # ------------------------------------------------------------------
         # 4. Draw Effects
+        # ------------------------------------------------------------------
         if effects:
             self._draw_effects(effects, layers)
 
+        # ------------------------------------------------------------------
         # 5. Normalize
+        # ------------------------------------------------------------------
         dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
         layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
@@ -136,13 +169,13 @@ class ObservationTransformer:
         return layers
 
     def _get_pixel_coords(self, position) -> tuple:
-        if position is None:
-            return None, None
+        if position is None: return None, None
 
-        # Adjust for Crop Offset (Playable Area)
+        # Apply Crop
         rel_x = position.x - self.crop_x
         rel_y = position.y - self.crop_y
 
+        # Apply Scale & Offset
         px = int(rel_x * self.scale + self.offset_x)
         py = int(self.feature_map_height - 1 - (rel_y * self.scale + self.offset_y))
 
@@ -167,7 +200,6 @@ class ObservationTransformer:
         if path_data is None or path_data.size == 0:
             return
 
-        # Raw grid dimensions (Total Map)
         dim0, dim1 = path_data.shape
         total_w = game_info.map_size.width
         total_h = game_info.map_size.height
@@ -175,8 +207,7 @@ class ObservationTransformer:
         x_indices = np.arange(self.feature_map_width)
         y_indices = np.arange(self.feature_map_height)
 
-        # Inverse Transform: Feature Map -> SC2 World
-        # sc2_x = ((px - offset) / scale) + crop_x
+        # Inverse Transform with Crop
         sc2_x = ((x_indices - self.offset_x) / self.scale) + self.crop_x
         sc2_x = sc2_x.astype(int)
 
@@ -185,7 +216,7 @@ class ObservationTransformer:
 
         X_map, Y_map = np.meshgrid(sc2_x, sc2_y)
 
-        # Mask: Check against TOTAL map bounds
+        # Check against TOTAL bounds
         valid_mask = (X_map >= 0) & (X_map < total_w) & (Y_map >= 0) & (Y_map < total_h)
 
         valid_sc2_x = X_map[valid_mask]
@@ -285,12 +316,12 @@ class ObservationTransformer:
             is_snapshot = unit.is_snapshot if hasattr(unit, "is_snapshot") else False
             if not is_snapshot: return
 
-        # Scan
-        scan_enum_val = getattr(UnitTypeId, 'SCANNERSWEEP', 170)
+        # Robust Scan Check
+        scan_enum = getattr(UnitTypeId, 'SCANNERSWEEP', 170)
         u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
-        expected_val = scan_enum_val.value if hasattr(scan_enum_val, "value") else scan_enum_val
+        ex_val = scan_enum.value if hasattr(scan_enum, "value") else scan_enum
 
-        if u_id == expected_val or u_id == 170:
+        if u_id == ex_val or u_id == 170:
             prefix = "enemy" if is_enemy else "allied"
             idx_det = LayerConstants.LAYERS[f"{prefix}_detection"]
             self._draw_circle_vectorized(layers, idx_det, px, py, 13.0, None, 1.0)
@@ -307,7 +338,6 @@ class ObservationTransformer:
             self._draw_circle_vectorized(layers, idx_den, px, py, 0, 0, 1.0, accumulate=True)
             return
 
-        # Sensor Blip
         if hasattr(unit, "is_blip") and unit.is_blip:
             if is_enemy:
                 idx_den = LayerConstants.LAYERS[LayerConstants.ENEMY_UNIT_DENSITY]
@@ -490,29 +520,40 @@ class ObservationTransformer:
     def _draw_effects(self, effects, layers):
         for effect in effects:
             eid = effect.id
+            # Normalize ID to int
+            if hasattr(eid, "value"): eid = eid.value
+
             dps, radius = 0.0, 0.0
             is_ally = False
             hits_air = False
 
-            lib_delay = getattr(EffectId, 'LIBERATORTARGETMORPHDELAYPERSISTENT', 82)
-            lib_morph = getattr(EffectId, 'LIBERATORTARGETMORPHPERSISTENT', 83)
-            psi_storm = getattr(EffectId, 'PSISTORMPERSISTENT', 1)
-            nuke = getattr(EffectId, 'NUKEPERSISTENT', 11)
-            bile = getattr(EffectId, 'RAVAGERCORROSIVEBILECP', 12)
-            scan = getattr(EffectId, 'SCANNERSWEEP', 6)
+            # Normalize constants to int for robust comparison
+            def get_val(enum_attr, default):
+                v = getattr(EffectId, enum_attr, default)
+                return v.value if hasattr(v, "value") else v
+
+            lib_delay = get_val('LIBERATORTARGETMORPHDELAYPERSISTENT', 82)
+            lib_morph = get_val('LIBERATORTARGETMORPHPERSISTENT', 83)
+            psi_storm = get_val('PSISTORMPERSISTENT', 1)
+            nuke = get_val('NUKEPERSISTENT', 11)
+            bile = get_val('RAVAGERCORROSIVEBILECP', 12)
+            scan = get_val('SCANNERSWEEP', 6)
 
             if eid in [lib_delay, lib_morph]:
                 dps, radius = 85.0, 5.0
                 for pos in effect.positions:
-                    p_x, p_y = pos.x, pos.y
+                    p_x, p_y = self._get_pixel_coords(pos)
+                    if p_x is None: continue
+
+                    # Logic: Calculate distance in WORLD coordinates, not pixel coordinates
                     min_ally = 999.0
                     for p in self._liberator_positions['allied']:
-                        dist = math.hypot(p.x - p_x, p.y - p_y)
+                        dist = math.hypot(p.x - pos.x, p.y - pos.y)
                         if dist < min_ally: min_ally = dist
 
                     min_enemy = 999.0
                     for p in self._liberator_positions['enemy']:
-                        dist = math.hypot(p.x - p_x, p.y - p_y)
+                        dist = math.hypot(p.x - pos.x, p.y - pos.y)
                         if dist < min_enemy: min_enemy = dist
 
                     if min_ally < min_enemy and min_ally < 16.0:

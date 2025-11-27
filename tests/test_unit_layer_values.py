@@ -13,10 +13,7 @@ from src.transformers.observation_transformer import ObservationTransformer
 from src.utils.layer_constants import LayerConstants
 
 
-# --- MOCK CLASSES ---
 class MockGrid:
-    """Helper class to mock SC2 grid objects with data_numpy attribute"""
-
     def __init__(self, width, height, fill_value=0, dtype=np.uint8):
         self.width = width
         self.height = height
@@ -32,7 +29,6 @@ class MockPoint2:
 
 
 class MockUnitType:
-    # FIX: Allow value to be stored and modified
     def __init__(self, name, value=0):
         self.name = name
         self.value = value
@@ -48,13 +44,13 @@ class MockUnit:
         try:
             self.type_id = UnitTypeId[name]
         except (KeyError, AttributeError):
-            # Fallback for names not in UnitTypeId
             self.type_id = MockUnitType(name)
 
         self.position = MockPoint2(x, y)
         self.alliance = alliance
+        self.radius = 0.5
 
-        # Attributes
+        self.is_structure = False
         self.is_light = is_light
         self.is_armored = is_armored
         self.is_biological = is_biological
@@ -64,22 +60,16 @@ class MockUnit:
         self.is_flying = is_flying
         self.is_cloaked = is_cloaked
         self.is_detected = is_detected
-        self.is_structure = False
-
         self.is_blip = False
         self.is_snapshot = False
-
-        # Vitals
         self.health_max = 100
         self.shield_max = 50
         self.health = 100
         self.shield = 50
         self.energy = energy
         self.energy_max = 200 if energy > 0 else 0
-
         self.weapon_cooldown = cooldown
         self.detect_range = detect_range
-        self.radius = 0.5
         self.attack_upgrade_level = 0
         self.build_progress = build_progress
         self.is_ready = (build_progress == 1.0)
@@ -103,12 +93,11 @@ class TestUnitLayerValues(unittest.TestCase):
         self.transformer = ObservationTransformer(map_size=(128, 128), unit_data_file=self.data_path)
         self.map_w, self.map_h = 200, 200
 
-        # Create proper mock for game_info
         self.game_info = MagicMock()
         self.game_info.map_size.width = self.map_w
         self.game_info.map_size.height = self.map_h
 
-        # FIX: Explicitly create and assign playable_area mock
+        # Explicit playable area
         playable_area = MagicMock()
         playable_area.x = 0
         playable_area.y = 0
@@ -116,35 +105,24 @@ class TestUnitLayerValues(unittest.TestCase):
         playable_area.height = self.map_h
         self.game_info.playable_area = playable_area
 
-        # Use MockGrid for all grid objects
         self.game_info.pathing_grid = MockGrid(self.map_w, self.map_h, fill_value=1)
-
-        # Terrain height with realistic variation
         height_data = np.fromfunction(lambda i, j: (i + j) % 10, (self.map_w, self.map_h), dtype=np.float32)
         self.game_info.terrain_height = MockGrid(self.map_w, self.map_h, fill_value=0, dtype=np.float32)
         self.game_info.terrain_height.data_numpy = height_data
 
-        # Calculate expected pixel position (Assuming 1:1 scale for simplicity in basic tests)
         self.scale = 0.64
-        self.offset_x = int((128 - 200 * 0.64) / 2)  # 0
-        self.offset_y = int((128 - 200 * 0.64) / 2)  # 0
-
-        # Recalculate based on transformer logic
         self.px = int(100 * 0.64)
         self.py = int(128 - 1 - (100 * 0.64))
 
     def run_transform(self, unit=None, effects=None):
         creep_mock = MockGrid(self.map_w, self.map_h, fill_value=0)
-
         obs = {
             'units': [], 'enemy_units': [], 'effects': effects or [],
             'game_info': self.game_info, 'game_data': None, 'creep': creep_mock
         }
-
         if unit:
             key = 'units' if unit.alliance == 1 else 'enemy_units'
             obs[key] = [unit]
-
         return self.transformer.transform(obs)
 
     def get_val(self, layers, const_name, x=None, y=None):
@@ -156,42 +134,31 @@ class TestUnitLayerValues(unittest.TestCase):
         u = MockUnit(unit_name, alliance=alliance, **kwargs)
         layers = self.run_transform(unit=u)
         prefix = "allied" if alliance == 1 else "enemy"
-
-        # Check Density (Accumulated)
         val = self.get_val(layers, f"{prefix}_unit_density")
         self.assertGreater(val, 0.0)
-
-        # Check Attribute Layers (Orthogonal)
         if kwargs.get('is_biological'):
             self.assertGreater(self.get_val(layers, f"{prefix}_unit_biological"), 0.0)
         if kwargs.get('is_mechanical'):
             self.assertGreater(self.get_val(layers, f"{prefix}_unit_mechanical"), 0.0)
-
         return layers
 
-    def _assert_dps(self, layers, layer_name, raw_dps):
-        val = self.get_val(layers, layer_name)
-        if raw_dps > 0:
-            expected = np.tanh(raw_dps / 50.0)
-            self.assertAlmostEqual(val, expected, places=4)
-        else:
-            self.assertEqual(val, 0.0)
-
-    # --- STANDARD TESTS ---
     def test_MARINE(self):
         self.check_unit("MARINE", is_light=True, is_biological=True)
 
     def test_SCV(self):
+        # Restored test
         layers = self.check_unit("SCV", is_light=True, is_biological=True, is_mechanical=True)
         self.assertGreater(self.get_val(layers, "allied_unit_biological"), 0.0)
         self.assertGreater(self.get_val(layers, "allied_unit_mechanical"), 0.0)
 
     def test_INVISIBLE_UNIT(self):
+        # Restored test
         u = MockUnit("DARKTEMPLAR", 100, 100, alliance=4, is_cloaked=True, is_detected=False)
         layers = self.run_transform(u)
         self.assertEqual(self.get_val(layers, "enemy_unit_density"), 0.0)
 
     def test_DAMAGED_UNIT(self):
+        # Restored test
         u = MockUnit("MARINE", 100, 100, alliance=1)
         u.health_max = 45
         u.health = 10
@@ -199,23 +166,28 @@ class TestUnitLayerValues(unittest.TestCase):
         u.shield = 0
         layers = self.run_transform(u)
 
+        # Expected value is log1p(10/45)
         expected = np.log1p(10.0 / 45.0)
         actual = self.get_val(layers, "allied_health")
         self.assertAlmostEqual(actual, expected, places=4)
 
     def test_PSIONIC_STORM(self):
-        eff = MockEffect(1, 100, 100)
+        # Restored test
+        eff = MockEffect(1, 100, 100)  # ID 1 = Storm
         layers = self.run_transform(effects=[eff])
         val = self.get_val(layers, "enemy_g_dps_base")
         self.assertGreater(val, 0.0)
 
     def test_LIBERATOR_AG_ZONE(self):
         lib = MockUnit("LIBERATORAG", 50, 50, alliance=1, is_armored=True, is_flying=True)
-        eff_id = 82
+
+        # FIX: Explicitly set type_id to a Mock with correct value
+        lib.type_id = MockUnitType("LIBERATORAG", 154)
+
+        eff_id = 82  # EffectId.LIBERATORTARGETMORPHDELAYPERSISTENT
         eff = MockEffect(eff_id, 60, 50)
 
         creep_mock = MockGrid(self.map_w, self.map_h, fill_value=0)
-
         obs = {
             'units': [lib], 'enemy_units': [], 'effects': [eff],
             'game_info': self.game_info, 'game_data': None,
@@ -223,7 +195,6 @@ class TestUnitLayerValues(unittest.TestCase):
         }
         layers = self.transformer.transform(obs)
 
-        # Re-calc position based on scale
         px_zone = int(60 * 0.64)
         py_zone = int(128 - 1 - (50 * 0.64))
 
@@ -243,7 +214,7 @@ class TestUnitLayerValues(unittest.TestCase):
 
     def test_TERRAN_SCAN(self):
         u = MockUnit("SCANNERSWEEP", 100, 100, alliance=1)
-        # FIX: Replace immutable enum type with mutable mock
+        # FIX: Explicitly set type_id
         u.type_id = MockUnitType("SCANNERSWEEP", 170)
 
         layers = self.run_transform(u)
@@ -252,7 +223,7 @@ class TestUnitLayerValues(unittest.TestCase):
 
     def test_FORCE_FIELD(self):
         u = MockUnit("FORCEFIELD", 100, 100, alliance=1)
-        # FIX: Replace immutable enum type with mutable mock
+        # FIX: Explicitly set type_id
         u.type_id = MockUnitType("FORCEFIELD", 135)
 
         layers = self.run_transform(u)

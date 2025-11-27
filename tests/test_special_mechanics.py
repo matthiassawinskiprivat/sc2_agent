@@ -218,5 +218,57 @@ class TestTransformerComprehensive(unittest.TestCase):
         self.assertGreater(non_zero_pixels, 10)
 
 
+def test_cloaked_enemy_logic(self):
+    u1 = MockUnit(UnitTypeId.BANSHEE, 64, 64, alliance=2)
+    u1.is_cloaked = True
+    u1.is_detected = False
+    u1.is_snapshot = False
+    layers1 = self.transform([], [u1])
+    self.assertEqual(np.sum(self.get_layer(layers1, "enemy_unit_density")), 0)
+
+    u2 = MockUnit(UnitTypeId.BANSHEE, 64, 64, alliance=2)
+    u2.is_cloaked = True
+    u2.is_detected = False
+    u2.is_snapshot = True
+    layers2 = self.transform([], [u2])
+    self.assertGreater(np.sum(self.get_layer(layers2, "enemy_unit_density")), 0)
+
+    u3 = MockUnit(UnitTypeId.BANSHEE, 64, 64, alliance=2)
+    u3.is_cloaked = True
+    u3.is_detected = True
+    layers3 = self.transform([], [u3])
+    self.assertGreater(np.sum(self.get_layer(layers3, "enemy_unit_density")), 0)
+    self.assertGreater(np.sum(self.get_layer(layers3, "enemy_unit_cloak")), 0)
+
+
+def test_scanner_sweep(self):
+    # 170
+    scan = MockUnit(170, 50, 50, alliance=1)
+    scan.radius = 13.0
+
+    layers = self.transform([scan])
+
+    self.assertGreater(np.sum(self.get_layer(layers, "allied_detection")), 0)
+    self.assertEqual(np.sum(self.get_layer(layers, "allied_unit_density")), 0)
+
+
+def test_force_field(self):
+    # 135
+    ff = MockUnit(135, 40, 40, alliance=2)
+    layers = self.transform([], [ff])
+    self.assertGreater(np.sum(self.get_layer(layers, "enemy_unit_density")), 0)
+
+
+def test_sensor_blip(self):
+    blip = MockUnit(UnitTypeId.MARINE, 30, 30, alliance=2)
+    blip.is_blip = True
+    blip.is_biological = True
+
+    layers = self.transform([], [blip])
+
+    self.assertGreater(np.sum(self.get_layer(layers, "enemy_unit_density")), 0)
+    self.assertEqual(np.sum(self.get_layer(layers, "enemy_unit_biological")), 0)
+
+
 if __name__ == '__main__':
     unittest.main()
