@@ -1,6 +1,7 @@
 """
 UI Manager for StarCraft 2 Unit Control Agent
 Handles all UI-related functionality separate from core agent logic
+Updated: Default resolution 512x512
 """
 
 import sys
@@ -22,22 +23,22 @@ from src.utils.layer_constants import LayerConstants
 
 class UIManager:
     """Manages UI functionality separate from core agent"""
-    
-    def __init__(self, agent: UnitControlAgent, display_size: tuple[int, int] = (800, 600)):
+
+    def __init__(self, agent: UnitControlAgent, display_size: tuple[int, int] = (512, 512)):
         """
         Initialize UI Manager
-        
+
         Args:
             agent: Core unit control agent
-            display_size: (width, height) for UI display
+            display_size: (width, height) for UI display. Default 512x512 (4x upscale for 128x128).
         """
         self.agent = agent
         self.display_size = display_size
-        
+
         # UI components
         self.ui_transformer = RealTimeUITransformer(display_size=display_size)
 
-        # FIX: Robustly load layers directly from the dictionary keys
+        # Robustly load layers directly from the dictionary keys
         self.enabled_layers = list(LayerConstants.LAYERS.keys())
 
         # Threading
@@ -88,6 +89,8 @@ class UIManager:
 
                     if current_obs is not None:
                         # Create UI visualization
+                        # The UI Transformer internally handles the resizing from Obs Size -> display_size
+                        # using Nearest Neighbor to keep it crisp.
                         frame = self.ui_transformer.update_display(
                             current_obs,
                             self.enabled_layers,
@@ -110,7 +113,7 @@ class UIManager:
                 time.sleep(0.033)  # ~30 FPS
 
             except Exception as e:
-                # print(f"UI update error: {e}")
+                print(f"UI update error: {e}")
                 time.sleep(1.0)
 
     def _update_fps(self):

@@ -18,7 +18,8 @@ class DebugUI(QMainWindow):
     def __init__(self, agent: UnitControlAgent, ui_manager: UIManager = None):
         super().__init__()
         self.agent = agent
-        self.ui_manager = ui_manager or UIManager(agent, display_size=(800, 600))
+        # Updated: Default to 512x512 for 4x upscale of 128x128 features
+        self.ui_manager = ui_manager or UIManager(agent, display_size=(512, 512))
 
         # State
         self.is_realtime_mode = True
@@ -42,7 +43,8 @@ class DebugUI(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("StarCraft 2 Unit Control Agent - Debug UI")
-        self.setGeometry(100, 100, 1400, 900)
+        # Adjusted window geometry to fit the new layout compact
+        self.setGeometry(100, 100, 1000, 600)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -52,14 +54,17 @@ class DebugUI(QMainWindow):
         # Left panel - Display area
         self.display_label = QLabel("Waiting for game data...")
         self.display_label.setAlignment(Qt.AlignCenter)
-        self.display_label.setMinimumSize(800, 600)
+
+        # FIX: Enforce exact 512x512 size for the canvas
+        self.display_label.setFixedSize(512, 512)
+
         self.display_label.setStyleSheet("background-color: black; border: 2px solid gray;")
         self.display_label.setScaledContents(True)
 
         # Right panel - Controls
         control_panel = self.create_control_panel()
 
-        main_layout.addWidget(self.display_label, stretch=3)
+        main_layout.addWidget(self.display_label)  # Removed stretch to prevent resizing
         main_layout.addWidget(control_panel, stretch=1)
 
     def create_control_panel(self):
@@ -73,6 +78,8 @@ class DebugUI(QMainWindow):
         layer_layout = QVBoxLayout(layer_group)
 
         self.layer_checkboxes = {}
+        # Make the checkbox list scrollable if it's too long, or compact
+        # For now, keeping standard layout
         for layer_name in LayerConstants.LAYERS:
             checkbox = QCheckBox(layer_name)
             checkbox.setChecked(True)
@@ -151,13 +158,13 @@ class DebugUI(QMainWindow):
 
         except Exception as e:
             print(f"Display update error: {e}")
-            import traceback
-            traceback.print_exc()
+            # import traceback
+            # traceback.print_exc()
 
     def update_statistics_display(self):
         """Update statistics"""
         try:
-            stats = self.agent.get_observation_statistics()
+            stats = self.agent.get_observation_statistics() if hasattr(self.agent, "get_observation_statistics") else {}
             if stats:
                 process_time = stats.get('processing_time_ms', 1.0)
                 fps = 1000.0 / process_time if process_time > 0 else 0

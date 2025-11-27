@@ -1,6 +1,6 @@
 """
 UI Transformer for rendering observation layers to display
-Supports the full 40-Layer Architecture
+Supports the 46-Layer Architecture with Orthogonal Attributes
 """
 
 import numpy as np
@@ -9,108 +9,109 @@ from typing import List, Tuple
 from src.utils.layer_constants import LayerConstants
 
 class RealTimeUITransformer:
-    def __init__(self, display_size: Tuple[int, int] = (800, 600)):
+    def __init__(self, display_size: Tuple[int, int] = (600, 600)):
         self.display_size = display_size
 
-        # Colors are defined in BGR format (Blue, Green, Red) range 0.0-1.0
         self.layer_colors = {
             # --- GROUP 1: ALLIED STATE ---
-            LayerConstants.ALLIED_UNIT_DENSITY: [1.0, 1.0, 1.0], # White
-            LayerConstants.ALLIED_UNIT_ARMOR:   [1.0, 1.0, 0.0], # Cyan
-            LayerConstants.ALLIED_UNIT_TYPE:    [0.0, 1.0, 0.0], # Green (Bio/Mech)
-            LayerConstants.ALLIED_UNIT_SPECIAL: [0.0, 0.5, 1.0], # Orange (Massive/Psi)
-            LayerConstants.ALLIED_UNIT_FLYING:  [1.0, 0.8, 0.8], # Pale Blue
-            LayerConstants.ALLIED_UNIT_CLOAK:   [0.5, 0.0, 0.5], # Dark Purple
+            LayerConstants.ALLIED_UNIT_DENSITY:     [1.0, 1.0, 1.0], # White
+            LayerConstants.ALLIED_UNIT_BIOLOGICAL:  [0.0, 1.0, 0.0], # Green
+            LayerConstants.ALLIED_UNIT_MECHANICAL:  [0.0, 0.0, 1.0], # Blue
+            LayerConstants.ALLIED_UNIT_ARMORED:     [1.0, 1.0, 0.0], # Yellow (Bio/Mech + Armored = Mix)
+            LayerConstants.ALLIED_UNIT_MASSIVE:     [1.0, 0.5, 0.0], # Orange
+            LayerConstants.ALLIED_UNIT_FLYING:      [0.0, 1.0, 1.0], # Cyan
+            LayerConstants.ALLIED_UNIT_CLOAK:       [0.5, 0.0, 0.5], # Purple
 
             # --- GROUP 2: ENEMY STATE ---
-            LayerConstants.ENEMY_UNIT_DENSITY:  [0.5, 0.5, 0.5], # Gray
-            LayerConstants.ENEMY_UNIT_ARMOR:    [1.0, 0.0, 1.0], # Magenta
-            LayerConstants.ENEMY_UNIT_TYPE:     [0.2, 0.2, 0.8], # Dark Red
-            LayerConstants.ENEMY_UNIT_SPECIAL:  [0.0, 0.5, 1.0], # Orange
-            LayerConstants.ENEMY_UNIT_FLYING:   [0.5, 0.5, 1.0], # Pale Red
-            LayerConstants.ENEMY_UNIT_CLOAK:    [0.0, 0.0, 0.8], # Deep Red
+            LayerConstants.ENEMY_UNIT_DENSITY:      [0.5, 0.5, 0.5], # Gray
+            LayerConstants.ENEMY_UNIT_BIOLOGICAL:   [0.5, 0.0, 0.0], # Dark Red
+            LayerConstants.ENEMY_UNIT_MECHANICAL:   [0.0, 0.0, 0.5], # Dark Blue
+            LayerConstants.ENEMY_UNIT_ARMORED:      [0.5, 0.5, 0.0], # Olive
+            LayerConstants.ENEMY_UNIT_MASSIVE:      [0.6, 0.2, 0.0], # Brown
+            LayerConstants.ENEMY_UNIT_FLYING:       [0.5, 0.5, 1.0], # Lavender
+            LayerConstants.ENEMY_UNIT_CLOAK:        [0.2, 0.0, 0.2], # Dark Purple
 
             # --- GROUP 3: VITALS ---
-            LayerConstants.ALLIED_HEALTH:       [0.0, 1.0, 0.0], # Green
-            LayerConstants.ENEMY_HEALTH:        [0.0, 0.0, 1.0], # Red
-            LayerConstants.ALLIED_ENERGY:       [1.0, 0.0, 1.0], # Neon Purple
-            LayerConstants.ENEMY_ENERGY:        [0.8, 0.5, 1.0], # Pink
+            LayerConstants.ALLIED_HEALTH:           [0.0, 1.0, 0.0],
+            LayerConstants.ENEMY_HEALTH:            [1.0, 0.0, 0.0],
+            LayerConstants.ALLIED_ENERGY:           [1.0, 0.0, 1.0],
+            LayerConstants.ENEMY_ENERGY:            [0.8, 0.5, 1.0],
 
-            # --- GROUP 4: ALLIED OFFENSE (Blue/Cyan/Purple Themes) ---
-            # Ground Targets (Blue spectrum)
-            LayerConstants.ALLIED_G_DPS_BASE:    [1.0, 0.0, 0.0], # Pure Blue
-            LayerConstants.ALLIED_G_DPS_LIGHT:   [1.0, 1.0, 0.0], # Cyan
-            LayerConstants.ALLIED_G_DPS_ARMOR:   [0.5, 0.5, 0.0], # Teal
-            LayerConstants.ALLIED_G_DPS_MASSIVE: [0.5, 0.0, 0.0], # Navy
+            # --- GROUP 4: ALLIED OFFENSE (Blue/Cyan Themes) ---
+            LayerConstants.ALLIED_G_DPS_BASE:       [0.0, 0.0, 1.0],
+            LayerConstants.ALLIED_G_DPS_LIGHT:      [0.0, 0.5, 1.0],
+            LayerConstants.ALLIED_G_DPS_ARMOR:      [0.0, 1.0, 1.0],
+            LayerConstants.ALLIED_G_DPS_MASSIVE:    [0.0, 0.0, 0.5],
 
-            # Air Targets (Purple spectrum)
-            LayerConstants.ALLIED_A_DPS_BASE:    [0.8, 0.0, 0.5], # Purple
-            LayerConstants.ALLIED_A_DPS_LIGHT:   [1.0, 0.6, 0.8], # Lavender
-            LayerConstants.ALLIED_A_DPS_ARMOR:   [0.5, 0.0, 0.3], # Indigo
-            LayerConstants.ALLIED_A_DPS_MASSIVE: [0.4, 0.0, 0.2], # Dark Violet
+            LayerConstants.ALLIED_A_DPS_BASE:       [0.5, 0.0, 1.0],
+            LayerConstants.ALLIED_A_DPS_LIGHT:      [0.7, 0.3, 1.0],
+            LayerConstants.ALLIED_A_DPS_ARMOR:      [0.3, 0.0, 0.7],
+            LayerConstants.ALLIED_A_DPS_MASSIVE:    [0.2, 0.0, 0.4],
 
-            # --- GROUP 5: ENEMY THREAT (Red/Orange/Magenta Themes) ---
-            # Ground Threats (Red/Orange spectrum)
-            LayerConstants.ENEMY_G_DPS_BASE:     [0.0, 0.0, 1.0], # Pure Red
-            LayerConstants.ENEMY_G_DPS_LIGHT:    [0.0, 0.6, 1.0], # Orange
-            LayerConstants.ENEMY_G_DPS_ARMOR:    [0.0, 1.0, 1.0], # Yellow
-            LayerConstants.ENEMY_G_DPS_MASSIVE:  [0.0, 0.0, 0.5], # Dark Red
+            # --- GROUP 5: ENEMY THREAT (Red/Orange Themes) ---
+            LayerConstants.ENEMY_G_DPS_BASE:        [1.0, 0.0, 0.0],
+            LayerConstants.ENEMY_G_DPS_LIGHT:       [1.0, 0.5, 0.0],
+            LayerConstants.ENEMY_G_DPS_ARMOR:       [1.0, 1.0, 0.0],
+            LayerConstants.ENEMY_G_DPS_MASSIVE:     [0.5, 0.0, 0.0],
 
-            # Air Threats (Pink/Magenta spectrum)
-            LayerConstants.ENEMY_A_DPS_BASE:     [0.6, 0.0, 1.0], # Magenta
-            LayerConstants.ENEMY_A_DPS_LIGHT:    [0.8, 0.6, 1.0], # Pink
-            LayerConstants.ENEMY_A_DPS_ARMOR:    [0.4, 0.0, 0.8], # Deep Pink
-            LayerConstants.ENEMY_A_DPS_MASSIVE:  [0.3, 0.0, 0.5], # Dark Magenta
+            LayerConstants.ENEMY_A_DPS_BASE:        [1.0, 0.0, 1.0],
+            LayerConstants.ENEMY_A_DPS_LIGHT:       [1.0, 0.5, 0.5],
+            LayerConstants.ENEMY_A_DPS_ARMOR:       [0.8, 0.0, 0.0],
+            LayerConstants.ENEMY_A_DPS_MASSIVE:     [0.5, 0.0, 0.2],
 
-            # --- GROUP 6: UTILITY ---
-            LayerConstants.ALLIED_HPS_FIELD:     [0.5, 1.0, 0.0], # Bright Green
-            LayerConstants.ENEMY_HPS_FIELD:      [0.0, 0.5, 0.0], # Dark Green
+            # --- UTILITY ---
+            LayerConstants.ALLIED_HPS_FIELD:        [0.5, 1.0, 0.0],
+            LayerConstants.ENEMY_HPS_FIELD:         [0.0, 0.5, 0.0],
 
-            # --- GROUP 7: INTEL ---
-            LayerConstants.ALLIED_DETECTION:     [0.0, 1.0, 1.0], # Yellow
-            LayerConstants.ENEMY_DETECTION:      [0.0, 0.5, 1.0], # Orange
-            LayerConstants.TERRAIN_PATHABLE:     [0.2, 0.2, 0.2], # Dark Gray
-            LayerConstants.TERRAIN_CREEP:        [0.8, 0.0, 0.8], # Bright Purple
+            # --- INTEL ---
+            LayerConstants.ALLIED_DETECTION:        [0.0, 1.0, 1.0],
+            LayerConstants.ENEMY_DETECTION:         [1.0, 0.5, 0.0],
+            LayerConstants.TERRAIN_PATHABLE:        [0.3, 0.3, 0.3],
+            LayerConstants.TERRAIN_CREEP:           [0.4, 0.0, 0.4],
 
-            # --- GROUP 8: PROTOCOL ---
-            LayerConstants.COMMAND_ASSIGNMENT:   [0.0, 1.0, 0.0], # Green Overlay
-            LayerConstants.COMMAND_OBJECTIVE:    [0.0, 1.0, 1.0], # Yellow Overlay
+            LayerConstants.COMMAND_ASSIGNMENT:      [0.0, 1.0, 0.0],
+            LayerConstants.COMMAND_OBJECTIVE:       [1.0, 1.0, 0.0],
         }
 
     def update_display(self, observation: np.ndarray, enabled_layers: List[str],
-                      fps: float = 0) -> np.ndarray:
+                       fps: float = 0) -> np.ndarray:
         if observation is None:
             return self._create_black_frame()
 
         num_layers, obs_height, obs_width = observation.shape
         frame = np.zeros((obs_height, obs_width, 3), dtype=np.float32)
 
-        # Blend layers
         for layer_name in enabled_layers:
             if layer_name not in LayerConstants.LAYERS: continue
-
             layer_idx = LayerConstants.LAYERS[layer_name]
             if layer_idx >= num_layers: continue
 
             layer_data = observation[layer_idx]
+
+            # Optimization: Skip empty layers
             if layer_data.max() == 0: continue
 
-            # Data is already normalized (0-1) from transformer
-            # We just multiply by color
+            # --- FIX: STABLE VISUALIZATION ---
+            # Remove dynamic scaling based on frame max.
+            # Just clip at 1.0 (or slightly higher if you want to see density gradients).
+            # log1p(1) = 0.69 (Visible)
+            # log1p(2) = 1.10 (Saturated)
+            # This ensures 1 unit always looks the same brightness, regardless of clumps elsewhere.
+
+            visual_data = np.clip(layer_data, 0.0, 1.0)
+
             color = self.layer_colors.get(layer_name, [1, 1, 1])
 
-            # Additive Blending: Max(current, new) ensures layers don't wash out
-            for c in range(3):
-                frame[:, :, c] = np.maximum(frame[:, :, c], layer_data * color[c])
+            # Vectorized Blending
+            color_arr = np.array(color).reshape(1, 1, 3)
+            data_expanded = visual_data[:, :, np.newaxis]
+            colored_layer = data_expanded * color_arr
 
-        # Clip and Convert
+            frame = np.maximum(frame, colored_layer)
+
         frame = np.clip(frame, 0, 1)
         frame = (frame * 255).astype(np.uint8)
         frame = cv2.resize(frame, self.display_size, interpolation=cv2.INTER_NEAREST)
-
-        if fps > 0:
-            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
         return frame
 
