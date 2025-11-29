@@ -2,7 +2,7 @@
 StarCraft 2 Unit Control Agent
 Includes:
 1. Observation Caching
-2. Action Masking (NO Dilation)
+2. Action Masking (with Dilation)
 3. Coordinate Conversion
 """
 
@@ -11,8 +11,9 @@ import cv2
 from typing import Any, Tuple, Dict
 
 class UnitControlAgent:
-    def __init__(self, cnn_input_size: Tuple[int, int] = (128, 128)):
+    def __init__(self, cnn_input_size: Tuple[int, int] = (128, 128), dilation_size: int = 3):
         self.cnn_width, self.cnn_height = cnn_input_size
+        self.dilation_size = dilation_size
         self.transformed_observation = None
         self.last_game_info = None
         self.last_action = None
@@ -74,15 +75,19 @@ class UnitControlAgent:
         valid_y = sc2_y_grid[valid_coords]
 
         if dim0 == total_w and dim1 == total_h:
-            mask_2d[valid_coords] = (raw_data[valid_x, valid_y] != 0).astype(np.uint8)
+            mask_2d[valid_coords] = (raw_data[valid_y, valid_x] != 0).astype(np.uint8)
         elif dim0 == total_h and dim1 == total_w:
             mask_2d[valid_coords] = (raw_data[valid_y, valid_x] != 0).astype(np.uint8)
         else:
-            cx = np.clip(valid_x, 0, dim0 - 1)
-            cy = np.clip(valid_y, 0, dim1 - 1)
-            mask_2d[valid_coords] = (raw_data[cx, cy] != 0).astype(np.uint8)
+            cx = np.clip(valid_x, 0, dim1 - 1)
+            cy = np.clip(valid_y, 0, dim0 - 1)
+            mask_2d[valid_coords] = (raw_data[cy, cx] != 0).astype(np.uint8)
 
-        # NO Dilation as requested
+        # Dilation to prevent getting stuck
+        if self.dilation_size > 0:
+            kernel = np.ones((self.dilation_size, self.dilation_size), np.uint8)
+            mask_2d = cv2.dilate(mask_2d, kernel, iterations=1)
+
         return mask_2d.flatten().astype(bool)
 
     def convert_spatial_action_to_world(self, action_idx: int) -> Tuple[float, float]:

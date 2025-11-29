@@ -27,7 +27,7 @@ from src.ui.ui_manager import UIManager
 
 # --- Configuration ---
 # Change this to "Zerg_Lower_Left" to test your training map
-MAP_NAME = "Middle_Only"
+MAP_NAME = "Middle_Only_test"
 BOT_RACE = Race.Terran
 OPPONENT_RACE = Race.Zerg
 DIFFICULTY = Difficulty.Easy
@@ -105,9 +105,9 @@ class SC2Visualizer:
         print("[Main] Initializing Agent System...")
 
         # 1. Init Agent System
-        self.system = HierarchicalAgentSystem(map_size=(128, 128))
+        self.system = HierarchicalAgentSystem(map_size=(128, 128), training_conf={'render_beacon': True, 'larger_units': True})
         self.agent_id = "main_agent"
-        self.main_agent = self.system.create_unit_agent(self.agent_id)
+        self.main_agent = self.system.create_unit_agent(self.agent_id, dilation_size=0)
 
         # 2. Init Bot Logic
         self.bot = UnitControlBot(self.system, agent_id=self.agent_id)

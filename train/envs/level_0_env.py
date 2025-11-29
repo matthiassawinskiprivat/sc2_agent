@@ -68,7 +68,7 @@ class Level0Env(gym.Env):
         self.last_target_pos = None
 
         self.steps = 0
-        self.max_steps = 50000000
+        self.max_steps = 300
         self.first_launch = True
         self.valid_spawn_points = []
         self.previous_distance = None
@@ -252,10 +252,12 @@ class Level0Env(gym.Env):
             # This returns the scalar reward and a bool if we won
             reward, reached_target = self._calculate_reward()
 
+            done = reached_target
+
             # 5. Handle Continuous Task Logic (Respawn)
             if reached_target:
                 # Kill old beacon, spawn new one (Async)
-                self.loop.run_until_complete(self._respawn_beacon_async())
+                self.loop.run_until_complete(self._soft_reset_logic())
 
                 # CRITICAL: Refresh observation immediately!
                 # The agent needs to see the NEW beacon position for the next inference step.
@@ -271,9 +273,9 @@ class Level0Env(gym.Env):
                     self.previous_distance = None
 
             # 6. Check Episode Termination (Time Limit)
-            done = False
             if self.steps >= self.max_steps:
                 done = True
+                reward = -10
 
             return obs, reward, done, False, {}
 
@@ -319,7 +321,12 @@ class Level0Env(gym.Env):
             'creep': self.state.creep,
             'command_target': self.last_target_pos  # FIX: Pass command target
         }
-        processed = self.system.process_observation(raw_obs)
+        conf = {'render_beacon': True, 'larger_units': True}
+        processed = self.system.process_observation(
+            observation=raw_obs,
+            training_conf=conf
+        )
+
         return processed[self.agent_id]
 
     def _calculate_reward(self):

@@ -23,9 +23,10 @@ from src.utils.layer_constants import LayerConstants
 
 
 class ObservationTransformer:
-    def __init__(self, map_size: tuple[int, int] = (128, 128), unit_data_file: str = None):
+    def __init__(self, map_size: tuple[int, int] = (128, 128), unit_data_file: str = None, training_conf: Dict = None):
         self.feature_map_width = map_size[0]
         self.feature_map_height = map_size[1]
+        self.training_conf = training_conf if training_conf is not None else {}
 
         # Transformation State
         self.scale = 1.0
@@ -66,7 +67,11 @@ class ObservationTransformer:
             return grid_obj.data_numpy
         return grid_obj
 
-    def transform(self, raw_obs: Dict[str, Any]) -> np.ndarray:
+    def transform(self, raw_obs: Dict[str, Any], training_conf: Optional[Dict] = None) -> np.ndarray:
+        # Use call-specific config if provided, otherwise use instance default
+        if training_conf is None:
+            training_conf = self.training_conf
+
         total_layers = LayerConstants.get_num_layers()
         layers = np.zeros((total_layers, self.feature_map_height, self.feature_map_width), dtype=np.float32)
 
@@ -367,16 +372,26 @@ class ObservationTransformer:
         prefix = "enemy" if is_enemy else "allied"
         idx_den = LayerConstants.LAYERS[f"{prefix}_unit_density"]
 
+        val = 1.0
         r = 0
 
-        # --- Make Beacon VISIBLE ---
+        # --- Training-Specific Rendering ---
         u_name = getattr(unit.type_id, "name", "")
+        render_beacon = self.training_conf.get('render_beacon', False)
+        larger_units = self.training_conf.get('larger_units', False)
+
         if "BEACON" in u_name.upper():
-            r = 3
+            if render_beacon:
+                val = 20.0
+                r = 3  # Make beacon visible for training
+            else:
+                return  # Skip drawing beacon if not in training mode
         elif unit.is_structure:
             r = int(unit.radius * self.scale)
+        elif larger_units and not is_enemy and not unit.is_structure:
+            # Make our controlled unit larger for training
+            r = 2
 
-        val = 1.0
         if not is_enemy and not unit.is_structure:
             cd = getattr(unit, 'weapon_cooldown', 0.0)
             norm_cd = min(cd, 60.0) / 60.0

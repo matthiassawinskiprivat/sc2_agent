@@ -16,27 +16,28 @@ class HierarchicalAgentSystem:
     """Manages shared observation transformation and multiple agents"""
 
     def __init__(self, map_size: Tuple[int, int] = (128, 128),
-                 unit_data_file: str = None):
+                 unit_data_file: str = None, training_conf: Dict = None):
         self.shared_transformer = SharedObservationTransformer(
             map_size=map_size,
-            unit_data_file=unit_data_file
+            unit_data_file=unit_data_file,
+            training_conf=training_conf
         )
         self.unit_agents = {}
         self.current_observation_id = 0
 
-    def create_unit_agent(self, agent_id: str, cnn_input_size: Tuple[int, int] = (128, 128)) -> UnitControlAgent:
-        agent = UnitControlAgent(cnn_input_size=cnn_input_size)
+    def create_unit_agent(self, agent_id: str, cnn_input_size: Tuple[int, int] = (128, 128), dilation_size: int = 3) -> UnitControlAgent:
+        agent = UnitControlAgent(cnn_input_size=cnn_input_size, dilation_size=dilation_size)
         self.unit_agents[agent_id] = agent
         return agent
 
-    def process_observation(self, observation: Dict[str, Any], player_id: int = 1) -> Dict[str, np.ndarray]:
+    def process_observation(self, observation: Dict[str, Any], player_id: int = 1, training_conf: Optional[Dict] = None) -> Dict[str, np.ndarray]:
         """
         Process observation through the hierarchical system
         """
         # Transform observation once
         obs_id = f"obs_{self.current_observation_id}"
         full_transformed = self.shared_transformer.transform_observation(
-            observation, observation_id=obs_id, player_id=player_id
+            observation, player_id=player_id, observation_id=obs_id, training_conf=training_conf
         )
 
         # Extract Game Info for agents (Critical for Coordinate Mapping)
