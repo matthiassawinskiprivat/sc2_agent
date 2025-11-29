@@ -43,10 +43,24 @@ def get_latest_model():
     return max(checkpoints, key=get_steps)
 
 
+def linear_schedule(initial_value: float):
+    """
+    Linear learning rate schedule.
+    :param initial_value: Initial learning rate.
+    :return: schedule function.
+    """
+
+    def func(progress_remaining: float) -> float:
+        # progress_remaining starts at 1.0 and decreases to 0.0 during training
+        return progress_remaining * initial_value
+
+    return func
+
+
 if __name__ == "__main__":
     # --- CONFIGURATION ---
     # Reduced to 4 to save RAM (Buffer size depends on this)
-    NUM_ENVS = 2
+    NUM_ENVS = 4
     # Reduced steps per update to lower RAM usage
     N_STEPS = 256
     BATCH_SIZE = 512  # n_steps * num_envs / 2
@@ -79,14 +93,15 @@ if __name__ == "__main__":
             env,
             verbose=1,
             tensorboard_log=LOG_DIR,
-            learning_rate=3e-4,
+            learning_rate=linear_schedule(1e-4),
             batch_size=BATCH_SIZE,
             n_steps=N_STEPS,
             gamma=0.99,
             policy_kwargs={
                 "features_extractor_kwargs": {"features_dim": 512}
             },
-            device="cuda"
+            device="cuda",
+            ent_coef=0.01
         )
 
     print("Model Initialized. Starting Learn Loop...", flush=True)

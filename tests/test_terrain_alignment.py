@@ -26,7 +26,7 @@ class TestTerrainAlignment(unittest.TestCase):
         info.map_size.height = height
         info.map_name = "TestMap"
 
-        # FIX: Define playable_area matching map size for these tests
+        # Define playable_area matching map size for these tests
         info.playable_area.x = 0
         info.playable_area.y = 0
         info.playable_area.width = width
@@ -92,21 +92,36 @@ class TestTerrainAlignment(unittest.TestCase):
     def test_transposed_grid_handling(self):
         w, h = 100, 50
         game_info = self.create_mock_game_info(w, h, data_shape_transposed=True)
+        # Mark Top-Right corner in transposed coords [y, x] -> [49, 99]
         self.pathing[49, 99] = 1
         self.height[49, 99] = 10
 
         raw_obs = {'game_info': game_info}
         layers = self.transformer.transform(raw_obs)
 
+        # Calculate expected pixel with new "Zoom Fit" scaling
+        # Scale = 128 / 100 = 1.28
+        # Offset X = 0
+        # Offset Y = (128 - 50*1.28)/2 = (128 - 64)/2 = 32
+
+        # Target Point: World(99, 49)
+        # px = int(99 * 1.28) = 126
+        # py_content = 49 * 1.28 + 32 = 62.72 + 32 = 94.72
+        # py = 128 - 1 - 94 = 33
+
+        # We look around (126, 33)
+
         terrain_layer = layers[LayerConstants.LAYERS[LayerConstants.TERRAIN_PATHABLE]]
 
         found = False
-        for y in range(38, 41):
-            for x in range(112, 115):
+        # Scan small area around expectation
+        for y in range(31, 35):
+            for x in range(124, 128):
                 if terrain_layer[y, x] > 0:
                     found = True
 
-        self.assertTrue(found)
+        self.assertTrue(found,
+                        f"Top-Right corner pixel missing. Scale: {self.transformer.scale}, Offsets: {self.transformer.offset_x},{self.transformer.offset_y}")
 
 
 if __name__ == '__main__':

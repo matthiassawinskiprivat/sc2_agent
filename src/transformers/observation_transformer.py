@@ -1,17 +1,8 @@
 """
 Professional Observation Transformer
-Transforms StarCraft II observations into a high-fidelity multi-layer feature map.
-
-Key Features:
-1. **Coordinate Alignment**: Maps SC2 World Coordinates to Image Coordinates using 'Playable Area' cropping (Letterboxing).
-2. **Robustness**: Handles transposed grids, missing Enum IDs, and MagicMock objects in tests.
-3. **Data-Driven**: Uses external JSON for weapon stats with safe fallbacks.
-4. **Special Mechanics**: Handles Nuke/Bile Air threats, Scanner Sweep detection, and Buried units.
-5. **Normalization**: Log1p and Tanh scaling for neural network stability.
-
 Fixed:
-- **Effect ID Comparison**: normalized to values (int) to support both Enums and Integers.
-- **Liberator Logic**: Distance calculation now correctly uses World Coordinates vs World Coordinates.
+1. COMMAND_ASSIGNMENT now draws ALL allied units (Bots don't 'select' units).
+2. Preserved scaling/cropping logic.
 """
 
 import numpy as np
@@ -76,9 +67,6 @@ class ObservationTransformer:
         return grid_obj
 
     def transform(self, raw_obs: Dict[str, Any]) -> np.ndarray:
-        """
-        Main transformation pipeline.
-        """
         total_layers = LayerConstants.get_num_layers()
         layers = np.zeros((total_layers, self.feature_map_height, self.feature_map_width), dtype=np.float32)
 
@@ -109,7 +97,8 @@ class ObservationTransformer:
             self.crop_x, self.crop_y, mw, mh = 0, 0, 200, 200
 
         self.scale = min(self.feature_map_width / max(mw, 1), self.feature_map_height / max(mh, 1))
-        self.scale = min(self.scale, 1.0)
+        # Removed min(1.0) clamp to allow upscaling on small maps
+        self.scale = self.scale
 
         scaled_w = int(mw * self.scale)
         scaled_h = int(mh * self.scale)
@@ -127,12 +116,10 @@ class ObservationTransformer:
         # ------------------------------------------------------------------
         self._liberator_positions = {'allied': [], 'enemy': []}
 
-        # Robust Lib ID check
         lib_enum = getattr(UnitTypeId, 'LIBERATORAG', 154)
         lib_val = lib_enum.value if hasattr(lib_enum, "value") else 154
 
         for unit in allied_units:
-            # Exclude Minerals
             u_name = getattr(unit.type_id, "name", None)
             if u_name and "MINERAL" in u_name.upper(): continue
 
@@ -159,7 +146,12 @@ class ObservationTransformer:
             self._draw_effects(effects, layers)
 
         # ------------------------------------------------------------------
-        # 5. Normalize
+        # 5. Draw Command/State
+        # ------------------------------------------------------------------
+        self._draw_command_info(raw_obs, layers)
+
+        # ------------------------------------------------------------------
+        # 6. Normalize
         # ------------------------------------------------------------------
         dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
@@ -171,17 +163,43 @@ class ObservationTransformer:
     def _get_pixel_coords(self, position) -> tuple:
         if position is None: return None, None
 
-        # Apply Crop
         rel_x = position.x - self.crop_x
         rel_y = position.y - self.crop_y
 
-        # Apply Scale & Offset
         px = int(rel_x * self.scale + self.offset_x)
         py = int(self.feature_map_height - 1 - (rel_y * self.scale + self.offset_y))
 
         if 0 <= px < self.feature_map_width and 0 <= py < self.feature_map_height:
             return px, py
         return None, None
+
+    def _draw_command_info(self, raw_obs, layers):
+        """Draws Selected Units and Last Action Target."""
+
+        # Layer 40: COMMAND_ASSIGNMENT
+        # FIX: Draw ALL allied units.
+        # 'raw_obs["units"]' already contains only our own units (filtered in sc2_bot.py).
+        units = raw_obs.get('units', [])
+        idx_sel = LayerConstants.LAYERS[LayerConstants.COMMAND_ASSIGNMENT]
+
+        for unit in units:
+            px, py = self._get_pixel_coords(unit.position)
+            if px is not None:
+                # Use scaled radius
+                r = int(unit.radius * self.scale)
+                if r < 1: r = 1
+                # Draw solid circle
+                self._draw_circle_vectorized(layers, idx_sel, px, py, 0, r, 1.0, True)
+
+        # Layer 41: COMMAND_OBJECTIVE (Last Target)
+        target = raw_obs.get('command_target')
+        idx_obj = LayerConstants.LAYERS[LayerConstants.COMMAND_OBJECTIVE]
+
+        if target is not None:
+            px, py = self._get_pixel_coords(target)
+            if px is not None:
+                # Draw a crosshair/marker (radius 2 pixels)
+                self._draw_circle_vectorized(layers, idx_obj, px, py, 0, 2, 1.0, False)
 
     def _draw_terrain_pathing(self, game_info, layers):
         layer_idx = LayerConstants.LAYERS[LayerConstants.TERRAIN_PATHABLE]
@@ -207,7 +225,6 @@ class ObservationTransformer:
         x_indices = np.arange(self.feature_map_width)
         y_indices = np.arange(self.feature_map_height)
 
-        # Inverse Transform with Crop
         sc2_x = ((x_indices - self.offset_x) / self.scale) + self.crop_x
         sc2_x = sc2_x.astype(int)
 
@@ -215,8 +232,6 @@ class ObservationTransformer:
         sc2_y = (sc2_y + self.crop_y).astype(int)
 
         X_map, Y_map = np.meshgrid(sc2_x, sc2_y)
-
-        # Check against TOTAL bounds
         valid_mask = (X_map >= 0) & (X_map < total_w) & (Y_map >= 0) & (Y_map < total_h)
 
         valid_sc2_x = X_map[valid_mask]
@@ -316,7 +331,6 @@ class ObservationTransformer:
             is_snapshot = unit.is_snapshot if hasattr(unit, "is_snapshot") else False
             if not is_snapshot: return
 
-        # Robust Scan Check
         scan_enum = getattr(UnitTypeId, 'SCANNERSWEEP', 170)
         u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
         ex_val = scan_enum.value if hasattr(scan_enum, "value") else scan_enum
@@ -327,7 +341,6 @@ class ObservationTransformer:
             self._draw_circle_vectorized(layers, idx_det, px, py, 13.0, None, 1.0)
             return
 
-        # Force Field
         ff_id = getattr(UnitTypeId, 'FORCEFIELD', 135)
         ff_val = ff_id.value if hasattr(ff_id, "value") else 135
         if u_id == ff_val or u_id == 135:
@@ -355,7 +368,12 @@ class ObservationTransformer:
         idx_den = LayerConstants.LAYERS[f"{prefix}_unit_density"]
 
         r = 0
-        if unit.is_structure:
+
+        # --- Make Beacon VISIBLE ---
+        u_name = getattr(unit.type_id, "name", "")
+        if "BEACON" in u_name.upper():
+            r = 3
+        elif unit.is_structure:
             r = int(unit.radius * self.scale)
 
         val = 1.0
@@ -520,14 +538,12 @@ class ObservationTransformer:
     def _draw_effects(self, effects, layers):
         for effect in effects:
             eid = effect.id
-            # Normalize ID to int
             if hasattr(eid, "value"): eid = eid.value
 
             dps, radius = 0.0, 0.0
             is_ally = False
             hits_air = False
 
-            # Normalize constants to int for robust comparison
             def get_val(enum_attr, default):
                 v = getattr(EffectId, enum_attr, default)
                 return v.value if hasattr(v, "value") else v
@@ -544,8 +560,6 @@ class ObservationTransformer:
                 for pos in effect.positions:
                     p_x, p_y = self._get_pixel_coords(pos)
                     if p_x is None: continue
-
-                    # Logic: Calculate distance in WORLD coordinates, not pixel coordinates
                     min_ally = 999.0
                     for p in self._liberator_positions['allied']:
                         dist = math.hypot(p.x - pos.x, p.y - pos.y)

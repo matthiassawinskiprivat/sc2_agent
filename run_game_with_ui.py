@@ -12,6 +12,7 @@ from PyQt5.QtCore import QThread
 # --- SC2 Imports ---
 import sc2
 from sc2 import maps
+from sc2.maps import Map  # <--- CRITICAL IMPORT
 from sc2.player import Bot, Computer
 from sc2.data import Race, Difficulty
 from sc2.main import run_game
@@ -25,7 +26,8 @@ from src.ui.debug_ui import DebugUI
 from src.ui.ui_manager import UIManager
 
 # --- Configuration ---
-MAP_NAME = "TorchesAIE_v4"
+# Change this to "Zerg_Lower_Left" to test your training map
+MAP_NAME = "Middle_Only"
 BOT_RACE = Race.Terran
 OPPONENT_RACE = Race.Zerg
 DIFFICULTY = Difficulty.Easy
@@ -45,7 +47,6 @@ class GameThread(QThread):
         print(f"[GameThread] Starting SC2 on map: {self.map_name}")
 
         # --- 1. Signal Hack ---
-        # Prevent python-sc2 from trying to register Ctrl+C handlers in a thread
         original_signal = signal.signal
 
         def no_op_signal(sig, handler):
@@ -54,17 +55,38 @@ class GameThread(QThread):
         signal.signal = no_op_signal
 
         try:
-            # --- 2. Resolve Map ---
+            # --- 2. Resolve Map Object (FIXED) ---
+            game_map = None
+
+            # A. Try Standard Library
             try:
                 game_map = maps.get(self.map_name)
             except KeyError:
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                print(f"[GameThread] Map '{self.map_name}' not found in library. Attempting launch by name...")
-                game_map = self.map_name
+                pass
+
+            # B. Try Local File Search (if library lookup failed)
+            if game_map is None:
+                print(f"[GameThread] Map '{self.map_name}' not in library. Searching local files...")
+
+                base_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+
+                # Check probable locations
+                candidates = [
+                    base_dir / "train" / "maps" / "level_0" / f"{self.map_name}.SC2Map",
+                    base_dir / "Maps" / f"{self.map_name}.SC2Map",
+                    base_dir / f"{self.map_name}.SC2Map"
+                ]
+
+                for path in candidates:
+                    if path.exists():
+                        print(f"[GameThread] Found map at: {path}")
+                        game_map = Map(path)  # Create proper Map object
+                        break
+
+                if game_map is None:
+                    raise FileNotFoundError(f"Could not find map file '{self.map_name}.SC2Map' in project folders.")
 
             # --- 3. Run Game ---
-            # realtime=True: Visual speed
-            # disable_fog=True: Agent sees everything (Updates Enemy UI Layers)
             run_game(game_map, [
                 Bot(BOT_RACE, self.bot),
                 Computer(OPPONENT_RACE, DIFFICULTY)
@@ -74,7 +96,6 @@ class GameThread(QThread):
             print(f"[GameThread] SC2 Crashed: {e}")
             traceback.print_exc()
         finally:
-            # Restore signal handler
             signal.signal = original_signal
             print("[GameThread] Game Ended.")
 
@@ -105,13 +126,8 @@ class SC2Visualizer:
 
 def main():
     app = QApplication(sys.argv)
-
-    # Create the Visualizer
     visualizer = SC2Visualizer()
-
-    # Ensure clean exit
     app.aboutToQuit.connect(lambda: visualizer.game_thread.terminate())
-
     sys.exit(app.exec_())
 
 
