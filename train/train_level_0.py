@@ -23,11 +23,6 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
-def make_env():
-    env = Level0Env(visualize=False)
-    return Monitor(env)
-
-
 def get_latest_model():
     final_path = os.path.join(MODEL_DIR, "final_model.zip")
     if os.path.exists(final_path): return final_path
@@ -66,7 +61,12 @@ if __name__ == "__main__":
     BATCH_SIZE = 1024  # n_steps * num_envs / 2
 
     print(f"Launching {NUM_ENVS} parallel SC2 processes...", flush=True)
-    env = SubprocVecEnv([make_env for _ in range(NUM_ENVS)], start_method='spawn')
+    
+    # Create the vectorized environment, passing the worker_index to each one
+    env = SubprocVecEnv([
+        lambda i=i: Monitor(Level0Env(visualize=False, worker_index=i, num_workers=NUM_ENVS))
+        for i in range(NUM_ENVS)
+    ], start_method='spawn')
 
     # 2. Model Setup
     latest_model_path = get_latest_model()

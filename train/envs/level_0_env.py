@@ -35,22 +35,31 @@ class MockState:
 
 
 class Level0Env(gym.Env):
-    def __init__(self, visualize=False, grid_size: int = 16):
+    def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1):
         super(Level0Env, self).__init__()
         self.visualize = visualize
-        self.map_name = "32x32_No_Middle"
         self.grid_size = grid_size
+        self.worker_index = worker_index
+        self.num_workers = num_workers
+        self.episode_counter = 0
+
+        # --- Map Selection Logic ---
+        self.map_list = self._discover_maps()
+        if not self.map_list:
+            raise FileNotFoundError("No maps found in train/maps/level_0/. Please add maps to this directory.")
+        self.map_name = self.map_list[self.worker_index % len(self.map_list)]
+        # --------------------------
 
         self.worker_id = f"{random.randint(1000, 9999)}"
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/worker_{self.worker_id}.log"
-        self._log(f"Initialized Worker {self.worker_id}")
+        self._log(f"Initialized Worker {self.worker_id} (Index: {self.worker_index}) with map {self.map_name}")
 
         self.observation_space = spaces.Box(low=0, high=255, shape=(42, 128, 128), dtype=np.uint8)
         self.action_space = spaces.Discrete(self.grid_size * self.grid_size)
 
         self.system = HierarchicalAgentSystem(
-            map_size=(128, 128), 
+            map_size=(128, 128),
             grid_size=self.grid_size,
             training_conf={'render_beacon': True, 'larger_units': True}
         )
@@ -78,6 +87,17 @@ class Level0Env(gym.Env):
         self.valid_spawn_points = []
         self.previous_distance = None
 
+    def _discover_maps(self):
+        """Finds and sorts maps in the training directory."""
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Go up one level from 'train/envs' to 'train'
+        maps_dir = Path(current_dir).parent / "maps" / "level_0"
+        if not maps_dir.exists():
+            return []
+        map_files = [f.stem for f in maps_dir.glob("*.SC2Map")]
+        map_files.sort()
+        return map_files
+
     def _log(self, message):
         try:
             with open(self.log_file, "a") as f:
@@ -94,8 +114,23 @@ class Level0Env(gym.Env):
 
     def reset(self, seed=None, options=None):
         self.steps = 0
-        self.last_target_pos = None  # Reset target on new episode
+        self.last_target_pos = None
         self.previous_distance = None
+        self.episode_counter += 1
+
+        # --- Hard Reset Logic ---
+        # Hard reset every 50 episodes (and on the very first run)
+        if self.episode_counter > 1 and self.episode_counter % 50 == 0:
+            self._log(f"Episode {self.episode_counter}: Performing hard reset and changing map.")
+            self.close() # Ensure client and process are killed
+
+            # Calculate next map
+            round_num = (self.episode_counter // 50)
+            map_offset = round_num * self.num_workers
+            map_idx = (map_offset + self.worker_index) % len(self.map_list)
+            self.map_name = self.map_list[map_idx]
+            self._log(f"New map: {self.map_name}")
+        # --------------------------
 
         if self.client:
             try:
@@ -107,13 +142,15 @@ class Level0Env(gym.Env):
 
                 return obs, {}
             except Exception as e:
-                self._log(f"Soft Reset Failed: {e}")
+                self._log(f"Soft Reset Failed: {e}. Forcing hard reset.")
                 self.close()
 
+        # This part will execute on the first run and after a hard reset
         attempts = 0
         while attempts < 5:
             try:
                 self._launch_client()
+                self.valid_spawn_points = [] # Reset spawn points as it's a new map
                 if not self.valid_spawn_points: self._calculate_spawn_points()
                 self.loop.run_until_complete(self._soft_reset_logic())
 
@@ -128,19 +165,27 @@ class Level0Env(gym.Env):
                 attempts += 1
                 time.sleep(5 + attempts)
 
-        raise RuntimeError(f"Worker {self.worker_id} failed to launch SC2")
+        raise RuntimeError(f"Worker {self.worker_id} failed to launch SC2 after hard reset.")
 
     async def _soft_reset_logic(self):
         for i in range(20):
             try:
                 response = await self.client.observation()
+                if not response: continue
                 raw_units = response.observation.observation.raw_data.units
                 tags = [u.tag for u in raw_units]
                 if not tags: break
                 await self.client.debug_kill_unit(tags)
                 await self.client.step()
-            except Exception:
+            except (ProtocolError, ConnectionAlreadyClosed) as e:
+                self._log(f"Connection lost during cleanup: {e}")
                 raise ConnectionAlreadyClosed("Lost connection during cleanup")
+            except Exception as e:
+                self._log(f"Error during unit cleanup: {e}")
+                # Don't re-raise, try to continue
+                
+        if not self.valid_spawn_points:
+             self._calculate_spawn_points()
 
         if self.valid_spawn_points:
             while True:
@@ -149,7 +194,11 @@ class Level0Env(gym.Env):
                 if ((start.x - end.x)**2 + (start.y - end.y)**2)**0.5 > 8:
                     break
         else:
-            start, end = Point2((10, 10)), Point2((20, 20))
+            # Fallback if pathing grid is empty
+            w, h = self.game_info.map_size
+            start = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
+            end = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
+
 
         await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, start, 1]])
         await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRAN, 1, end, 2]])
@@ -362,32 +411,32 @@ class Level0Env(gym.Env):
         return self.agent.get_action_mask()
 
     def close(self):
+        self._log("Close method called.")
         if self.client:
             try:
+                self._log("Leaving game.")
                 self.loop.run_until_complete(self.client.leave())
-            except:
-                pass
+            except (asyncio.CancelledError, ConnectionResetError, ProtocolError) as e:
+                self._log(f"Error leaving game: {e}")
+            except Exception as e:
+                self._log(f"An unexpected error occurred while leaving game: {e}")
             self.client = None
+
         if self.sc2_process:
             try:
+                self._log("Closing SC2 process.")
                 self.loop.run_until_complete(self.sc2_process.__aexit__(None, None, None))
-            except:
-                pass
-            try:
-                pid = self.sc2_process._process.pid
-                parent = psutil.Process(pid)
-                for child in parent.children(recursive=True):
-                    try:
-                        child.kill()
-                    except:
-                        pass
-                parent.kill()
-            except:
-                pass
+            except (asyncio.CancelledError, ConnectionResetError) as e:
+                self._log(f"Error closing SC2 process: {e}")
+            except Exception as e:
+                self._log(f"An unexpected error occurred while closing SC2 process: {e}")
             self.sc2_process = None
-        if self.loop:
+
+        if self.loop and self.loop.is_running():
             try:
+                self._log("Closing event loop.")
                 self.loop.close()
-            except:
-                pass
-            self.loop = None
+            except Exception as e:
+                self._log(f"An unexpected error occurred while closing the event loop: {e}")
+        self.loop = None
+        self._log("Close method finished.")
