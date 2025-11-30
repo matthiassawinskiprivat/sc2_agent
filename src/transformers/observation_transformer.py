@@ -67,10 +67,7 @@ class ObservationTransformer:
             return grid_obj.data_numpy
         return grid_obj
 
-    def transform(self, raw_obs: Dict[str, Any], training_conf: Optional[Dict] = None) -> np.ndarray:
-        # Use call-specific config if provided, otherwise use instance default
-        if training_conf is None:
-            training_conf = self.training_conf
+    def transform(self, raw_obs: Dict[str, Any]) -> np.ndarray:
 
         total_layers = LayerConstants.get_num_layers()
         layers = np.zeros((total_layers, self.feature_map_height, self.feature_map_width), dtype=np.float32)

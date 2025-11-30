@@ -101,7 +101,7 @@ if __name__ == "__main__":
                 "features_extractor_kwargs": {"features_dim": 512}
             },
             device="cuda",
-            ent_coef=0.005,1
+            ent_coef=0.01,
             n_epochs=3
         )
 

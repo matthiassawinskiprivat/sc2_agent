@@ -35,10 +35,11 @@ class MockState:
 
 
 class Level0Env(gym.Env):
-    def __init__(self, visualize=False):
+    def __init__(self, visualize=False, grid_size: int = 16):
         super(Level0Env, self).__init__()
         self.visualize = visualize
-        self.map_name = "128x128"
+        self.map_name = "32x32_No_Middle"
+        self.grid_size = grid_size
 
         self.worker_id = f"{random.randint(1000, 9999)}"
         os.makedirs("logs", exist_ok=True)
@@ -46,9 +47,13 @@ class Level0Env(gym.Env):
         self._log(f"Initialized Worker {self.worker_id}")
 
         self.observation_space = spaces.Box(low=0, high=255, shape=(42, 128, 128), dtype=np.uint8)
-        self.action_space = spaces.Discrete(128 * 128)
+        self.action_space = spaces.Discrete(self.grid_size * self.grid_size)
 
-        self.system = HierarchicalAgentSystem(map_size=(128, 128))
+        self.system = HierarchicalAgentSystem(
+            map_size=(128, 128), 
+            grid_size=self.grid_size,
+            training_conf={'render_beacon': True, 'larger_units': True}
+        )
         self.agent_id = "zergling"
         self.agent = self.system.create_unit_agent(self.agent_id)
 
@@ -322,10 +327,8 @@ class Level0Env(gym.Env):
             'creep': self.state.creep,
             'command_target': self.last_target_pos  # FIX: Pass command target
         }
-        conf = {'render_beacon': True, 'larger_units': True}
         processed = self.system.process_observation(
-            observation=raw_obs,
-            training_conf=conf
+            observation=raw_obs
         )
 
         return processed[self.agent_id]

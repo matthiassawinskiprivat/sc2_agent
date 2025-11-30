@@ -32,14 +32,13 @@ class SharedObservationTransformer:
         self.last_observation_id = None
 
     def transform_observation(self, observation: Dict[str, Any],
-                              observation_id: Any = None, player_id: int = 1, training_conf: Optional[Dict] = None) -> np.ndarray:
+                              observation_id: Any = None, player_id: int = 1) -> np.ndarray:
         """
         Transform observation if it's new, otherwise return cached result
         
         Args:
             observation: Raw SC2 observation
             observation_id: Unique identifier for the observation (for caching)
-            training_conf: Optional dictionary to override training settings
             
         Returns:
             Transformed observation [6×H×W] for all 6 core layers
@@ -50,7 +49,7 @@ class SharedObservationTransformer:
 
         # Transform the observation
         self.current_observation = observation
-        self.transformed_observation = self.transformer.transform(observation, training_conf=training_conf)
+        self.transformed_observation = self.transformer.transform(observation)
         self.last_observation_id = observation_id
 
         return self.transformed_observation

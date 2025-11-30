@@ -11,8 +11,9 @@ import cv2
 from typing import Any, Tuple, Dict
 
 class UnitControlAgent:
-    def __init__(self, cnn_input_size: Tuple[int, int] = (128, 128), dilation_size: int = 3):
+    def __init__(self, cnn_input_size: Tuple[int, int] = (128, 128), grid_size: int = 128, dilation_size: int = 3):
         self.cnn_width, self.cnn_height = cnn_input_size
+        self.grid_size = grid_size
         self.dilation_size = dilation_size
         self.transformed_observation = None
         self.last_game_info = None
@@ -36,7 +37,7 @@ class UnitControlAgent:
         True = Valid Action (Walkable), False = Invalid (Wall/Void).
         """
         if self.last_game_info is None:
-            return np.ones(self.cnn_width * self.cnn_height, dtype=bool)
+            return np.ones(self.grid_size * self.grid_size, dtype=bool)
 
         # 1. Get Geometry
         grid = self.last_game_info.pathing_grid
@@ -88,13 +89,24 @@ class UnitControlAgent:
             kernel = np.ones((self.dilation_size, self.dilation_size), np.uint8)
             mask_2d = cv2.dilate(mask_2d, kernel, iterations=1)
 
-        return mask_2d.flatten().astype(bool)
+        # Downsample the 128x128 mask to grid_size x grid_size
+        resized_mask = cv2.resize(mask_2d, (self.grid_size, self.grid_size), interpolation=cv2.INTER_AREA)
+
+        return (resized_mask.flatten() > 0).astype(bool)
+
 
     def convert_spatial_action_to_world(self, action_idx: int) -> Tuple[float, float]:
         self.last_action = action_idx
         if self.last_game_info is None: return (0.0, 0.0)
 
-        y_cnn, x_cnn = divmod(action_idx, self.cnn_width)
+        # Convert 1D action index from grid (e.g., 16x16) to 2D grid coordinates
+        grid_y, grid_x = divmod(action_idx, self.grid_size)
+
+        # Scale grid coordinates to CNN coordinates (e.g., 128x128)
+        # This targets the center of the grid cell
+        scale_factor = self.cnn_width / self.grid_size
+        y_cnn = (grid_y * scale_factor) + (scale_factor / 2)
+        x_cnn = (grid_x * scale_factor) + (scale_factor / 2)
 
         crop_x, crop_y = 0, 0
         mw, mh = self.last_game_info.map_size.width, self.last_game_info.map_size.height
