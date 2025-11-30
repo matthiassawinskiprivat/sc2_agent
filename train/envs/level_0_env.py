@@ -38,7 +38,7 @@ class Level0Env(gym.Env):
     def __init__(self, visualize=False):
         super(Level0Env, self).__init__()
         self.visualize = visualize
-        self.map_name = "Middle_Only"
+        self.map_name = "128x128"
 
         self.worker_id = f"{random.randint(1000, 9999)}"
         os.makedirs("logs", exist_ok=True)
@@ -85,7 +85,7 @@ class Level0Env(gym.Env):
         return action
 
     def _distance_squared_unit_to_unit(self, unit1, unit2):
-        return (unit1.position.x - unit2.position.x) ** 2 + (unit1.position.y - unit2.position.y) ** 2
+        return ((unit1.position.x - unit2.position.x) ** 2 + (unit1.position.y - unit2.position.y) ** 2)**0.5
 
     def reset(self, seed=None, options=None):
         self.steps = 0
@@ -273,11 +273,12 @@ class Level0Env(gym.Env):
                     self.previous_distance = None
 
             # 6. Check Episode Termination (Time Limit)
+            truncated = False
             if self.steps >= self.max_steps:
-                done = True
+                truncated = True
                 reward = -10
 
-            return obs, reward, done, False, {}
+            return obs, reward, done, truncated, {}
 
         except Exception as e:
             self._log(f"Step Error: {e}")
@@ -330,58 +331,19 @@ class Level0Env(gym.Env):
         return processed[self.agent_id]
 
     def _calculate_reward(self):
-        """
-        Calculates reward based on a Potential Field (Distance Difference).
-
-        Returns:
-            reward (float): The calculated reward for this step.
-            reached_target (bool): True if the beacon was collected.
-        """
-        # 1. Safety Check: If units are missing, return 0
         if not self.zergling or not self.beacon:
-            return 0.0, False
+            return 0, False, {"is_success": False}
 
-        # 2. Calculate Current Distance
-        dist = self.zergling.distance_to(self.beacon)
+        dist = self._distance_squared_unit_to_unit(self.zergling, self.beacon)
 
-        # 3. WIN CONDITION (Jackpot)
-        # If we are close enough to "touch" it
-        if dist < 2.5:
-            self._log(f"SUCCESS! Reached Beacon at step {self.steps}")
+        # Win Condition
+        if dist < 2.0:  # Slightly larger radius to ensure hit
+            print(f"[Worker {self.worker_id}] SUCCESS! Reached Beacon.")
+            return 100, True
 
-            # CRITICAL: Reset previous_distance so the next step (after respawn)
-            # doesn't calculate a huge penalty for the distance jumping from 0 -> 50.
-            self.previous_distance = None
-
-            return 10.0, True
-
-        # 4. INITIALIZATION (First step of episode or after respawn)
-        if self.previous_distance is None:
-            self.previous_distance = dist
-            return 0.0, False
-
-        # 5. PROGRESS REWARD (Potential Field)
-        # diff > 0: Moved Closer (Good)
-        # diff < 0: Moved Away (Bad)
-        diff = self.previous_distance - dist
-        self.previous_distance = dist
-
-        # Scaling: Moving 1 game meter gives +0.5 reward.
-        # This provides a dense signal to guide the agent.
-        progress_reward = diff * 0.5
-
-        # 6. TIME PENALTY (Urgency)
-        # A small negative value to force the agent to take the shortest path.
-        # Without this, the agent might zig-zag unnecessarily.
-        step_penalty = -0.01
-
-        total_reward = progress_reward + step_penalty
-
-        # 7. Stability Clipping
-        # Prevents exploding gradients if units glitch or teleport.
-        total_reward = np.clip(total_reward, -1.0, 1.0)
-
-        return total_reward, False
+        # Shaping: -0.01 (far) to +0.99 (on top)
+        # This forces movement
+        return (1.0 - (dist / 45.0)), False
 
     def _safe_create_unit(self, proto_unit):
         try:

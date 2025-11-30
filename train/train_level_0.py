@@ -62,8 +62,8 @@ if __name__ == "__main__":
     # Reduced to 4 to save RAM (Buffer size depends on this)
     NUM_ENVS = 4
     # Reduced steps per update to lower RAM usage
-    N_STEPS = 256
-    BATCH_SIZE = 512  # n_steps * num_envs / 2
+    N_STEPS = 2048
+    BATCH_SIZE = 1024  # n_steps * num_envs / 2
 
     print(f"Launching {NUM_ENVS} parallel SC2 processes...", flush=True)
     env = SubprocVecEnv([make_env for _ in range(NUM_ENVS)], start_method='spawn')
@@ -81,7 +81,7 @@ if __name__ == "__main__":
             device="cuda",
             tensorboard_log=LOG_DIR,
             custom_objects={
-                "learning_rate": 3e-4,
+                "learning_rate": 5e-4,
                 "n_steps": N_STEPS,
                 "batch_size": BATCH_SIZE
             }
@@ -93,7 +93,7 @@ if __name__ == "__main__":
             env,
             verbose=1,
             tensorboard_log=LOG_DIR,
-            learning_rate=linear_schedule(1e-4),
+            learning_rate=5e-4,
             batch_size=BATCH_SIZE,
             n_steps=N_STEPS,
             gamma=0.99,
@@ -101,7 +101,8 @@ if __name__ == "__main__":
                 "features_extractor_kwargs": {"features_dim": 512}
             },
             device="cuda",
-            ent_coef=0.01
+            ent_coef=0.005,1
+            n_epochs=3
         )
 
     print("Model Initialized. Starting Learn Loop...", flush=True)
@@ -109,9 +110,9 @@ if __name__ == "__main__":
     checkpoint_callback = CheckpointCallback(save_freq=10000, save_path=MODEL_DIR, name_prefix="zerg")
 
     model.learn(
-        total_timesteps=1_000_000,
+        total_timesteps=10_000_000,
         callback=checkpoint_callback,
-        reset_num_timesteps=(latest_model_path is None)
+        reset_num_timesteps=True
     )
 
     model.save(f"{MODEL_DIR}/final_model")
