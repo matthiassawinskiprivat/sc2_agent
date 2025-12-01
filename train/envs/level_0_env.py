@@ -26,6 +26,7 @@ from sc2.protocol import ProtocolError, ConnectionAlreadyClosed
 # Project Imports
 from src.hierarchical_agent import HierarchicalAgentSystem
 
+HARD_RESET_COUNT = 10
 
 class MockState:
     def __init__(self, game_loop):
@@ -120,7 +121,7 @@ class Level0Env(gym.Env):
 
         # --- Hard Reset Logic ---
         # Hard reset every 50 episodes (and on the very first run)
-        if self.episode_counter > 1 and self.episode_counter % 50 == 0:
+        if self.episode_counter > 1 and self.episode_counter % HARD_RESET_COUNT == 0:
             self._log(f"Episode {self.episode_counter}: Performing hard reset and changing map.")
             self.close() # Ensure client and process are killed
 
@@ -158,7 +159,10 @@ class Level0Env(gym.Env):
                     time.sleep(random.uniform(1, 5))
                     self.first_launch = False
 
-                return self._get_observation(), {}
+                obs = self._get_observation()
+                if self.zergling and self.beacon:
+                    self.previous_distance = self.zergling.distance_to(self.beacon)
+                return obs, {}
             except Exception as e:
                 self._log(f"Launch Error: {e}")
                 self.close()
@@ -384,18 +388,25 @@ class Level0Env(gym.Env):
 
     def _calculate_reward(self):
         if not self.zergling or not self.beacon:
-            return 0, False, {"is_success": False}
+            return 0, False # No reward if zergling or beacon are missing
 
-        dist = self._distance_squared_unit_to_unit(self.zergling, self.beacon)
+        current_dist = self._distance_squared_unit_to_unit(self.zergling, self.beacon)
+        reward = 0.0
+        reached_target = False
 
-        # Win Condition
-        if dist < 2.0:  # Slightly larger radius to ensure hit
-            print(f"[Worker {self.worker_id}] SUCCESS! Reached Beacon.")
-            return 100, True
+        # Win Condition: Agent reached the beacon
+        if current_dist < 2.0:  # Slightly larger radius to ensure hit
+            self._log(f"[Worker {self.worker_id}] SUCCESS! Reached Beacon.")
+            reward = 100.0
+            reached_target = True
+        elif self.previous_distance is not None:
+            # Reward for getting closer (positive) or penalty for moving away (negative)
+            reward = (self.previous_distance - current_dist) * 1.0 # Scale the reward
+        
+        # Update previous distance for the next step
+        self.previous_distance = current_dist
 
-        # Shaping: -0.01 (far) to +0.99 (on top)
-        # This forces movement
-        return (1.0 - (dist / 45.0)), False
+        return reward, reached_target
 
     def _safe_create_unit(self, proto_unit):
         try:
