@@ -36,18 +36,19 @@ class MockState:
 
 
 class Level0Env(gym.Env):
-    def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1):
+    def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1, level_name: str = "level_0"):
         super(Level0Env, self).__init__()
         self.visualize = visualize
         self.grid_size = grid_size
         self.worker_index = worker_index
         self.num_workers = num_workers
         self.episode_counter = 0
+        self.level_name = level_name
 
         # --- Map Selection Logic ---
         self.map_list = self._discover_maps()
         if not self.map_list:
-            raise FileNotFoundError("No maps found in train/maps/level_0/. Please add maps to this directory.")
+            raise FileNotFoundError(f"No maps found in train/maps/{self.level_name}/. Please add maps to this directory.")
         self.map_name = self.map_list[self.worker_index % len(self.map_list)]
         # --------------------------
 
@@ -92,7 +93,7 @@ class Level0Env(gym.Env):
         """Finds and sorts maps in the training directory."""
         current_dir = os.path.dirname(os.path.abspath(__file__))
         # Go up one level from 'train/envs' to 'train'
-        maps_dir = Path(current_dir).parent / "maps" / "level_0"
+        maps_dir = Path(current_dir).parent / "maps" / self.level_name
         if not maps_dir.exists():
             return []
         map_files = [f.stem for f in maps_dir.glob("*.SC2Map")]
@@ -156,7 +157,8 @@ class Level0Env(gym.Env):
                 self.loop.run_until_complete(self._soft_reset_logic())
 
                 if self.first_launch:
-                    time.sleep(random.uniform(1, 5))
+                    self._log("First launch, waiting 15 seconds for game to stabilize...")
+                    time.sleep(15)
                     self.first_launch = False
 
                 obs = self._get_observation()
