@@ -1,0 +1,5 @@
+# config/pipeline.yaml
+# Defines the sequence of training levels.
+levels:
+  - "level_0"
+  - "level_1"
