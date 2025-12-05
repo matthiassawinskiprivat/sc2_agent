@@ -1,5 +1,6 @@
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
+from loguru import logger
 
 class StopTrainingOnMetricThreshold(BaseCallback):
     """
@@ -16,10 +17,11 @@ class StopTrainingOnMetricThreshold(BaseCallback):
         self.threshold = threshold
         self.patience = patience
         self.patience_counter = 0
+        self.continue_training = True
 
         if comparison not in ['<', '>', '<=', '>=']:
             raise ValueError("Invalid comparison operator.")
-        
+
         self.compare_op = {
             '>': np.greater,
             '<': np.less,
@@ -28,31 +30,45 @@ class StopTrainingOnMetricThreshold(BaseCallback):
         }[comparison]
         self.comparison_str = comparison
 
+    def _on_rollout_end(self) -> None:
+        """
+        This method is called at the end of each rollout.
+        """
+        logger.info("[Callback] _on_rollout_end triggered.")
+        # ep_info_buffer provides more up-to-date values for rollout metrics
+        if self.monitor == 'rollout/ep_len_mean' and self.model.ep_info_buffer:
+            current_value = np.mean([ep_info['l'] for ep_info in self.model.ep_info_buffer])
+        elif self.monitor == 'rollout/ep_rew_mean' and self.model.ep_info_buffer:
+            current_value = np.mean([ep_info['r'] for ep_info in self.model.ep_info_buffer])
+        elif self.monitor in self.model.logger.name_to_value:
+            current_value = self.model.logger.name_to_value[self.monitor]
+        else:
+            logger.warning(f"[Callback] Metric '{self.monitor}' not found in logger or ep_info_buffer is empty.")
+            # Set patience counter to 0 to avoid false positive on next call
+            self.patience_counter = 0
+            return
+
+        logger.info(f"[Callback DEBUG] Monitored metric '{self.monitor}' value: {current_value:.4f}, Threshold: {self.threshold:.4f}, Comparison: {self.comparison_str}")
+
+        if self.compare_op(current_value, self.threshold):
+            self.patience_counter += 1
+            logger.info(f"[Callback] Condition met. Patience counter is now {self.patience_counter}/{self.patience}")
+        else:
+            if self.patience_counter > 0:
+                logger.info(f"[Callback] Condition not met. Resetting patience counter from {self.patience_counter} to 0.")
+                self.patience_counter = 0
+            else:
+                logger.info(f"[Callback] Condition not met. Patience counter is already 0.")
+
+        if self.patience_counter >= self.patience:
+            logger.success(f"[Callback] Patience reached. Stopping training.")
+            self.continue_training = False
+
     def _on_step(self) -> bool:
         """
         This method will be called by the model after each call to `env.step()`.
-        For child callback (of an `EventCallback`), this will be called
-        when the event is triggered.
         :return: (bool) If the callback returns False, training is aborted early.
         """
-        # Check if the monitored value is in the logs
-        if self.monitor in self.model.logger.name_to_value:
-            current_value = self.model.logger.name_to_value[self.monitor]
-            
-            # Check if the condition is met
-            if self.compare_op(current_value, self.threshold):
-                self.patience_counter += 1
-                if self.verbose > 0:
-                    print(f"Stopping condition met for '{self.monitor}': {current_value} {self.comparison_str} {self.threshold}. "
-                          f"Patience counter: {self.patience_counter}/{self.patience}")
-            else:
-                self.patience_counter = 0 # Reset counter if condition is not met
-
-            # Check if patience is reached
-            if self.patience_counter >= self.patience:
-                if self.verbose > 0:
-                    print(f"Stopping training because '{self.monitor}' has been {self.comparison_str} {self.threshold} "
-                          f"for {self.patience} consecutive checks.")
-                return False # Return False to stop training
-
-        return True
+        if not self.continue_training:
+            logger.error("[Callback] _on_step is returning False. Training should stop.")
+        return self.continue_training

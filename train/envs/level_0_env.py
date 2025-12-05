@@ -85,9 +85,11 @@ class Level0Env(gym.Env):
 
         self.steps = 0
         self.max_steps = 300
-        self.first_launch = True
         self.valid_spawn_points = []
         self.previous_distance = None
+
+        self.current_episode_reward = 0.0
+        self.current_episode_length = 0
 
     def _discover_maps(self):
         """Finds and sorts maps in the training directory."""
@@ -120,9 +122,13 @@ class Level0Env(gym.Env):
         self.previous_distance = None
         self.episode_counter += 1
 
+        self.current_episode_reward = 0.0
+        self.current_episode_length = 0
+
         # --- Hard Reset Logic ---
-        # Hard reset every 50 episodes (and on the very first run)
-        if self.episode_counter > 1 and self.episode_counter % HARD_RESET_COUNT == 0:
+        # Hard reset every HARD_RESET_COUNT episodes.
+        # We add the worker_index to the episode_counter to stagger the resets across workers.
+        if self.episode_counter > 1 and (self.episode_counter + self.worker_index) % HARD_RESET_COUNT == 0:
             self._log(f"Episode {self.episode_counter}: Performing hard reset and changing map.")
             self.close() # Ensure client and process are killed
 
@@ -152,14 +158,8 @@ class Level0Env(gym.Env):
         while attempts < 5:
             try:
                 self._launch_client()
-                self.valid_spawn_points = [] # Reset spawn points as it's a new map
-                if not self.valid_spawn_points: self._calculate_spawn_points()
+                self._calculate_spawn_points()
                 self.loop.run_until_complete(self._soft_reset_logic())
-
-                if self.first_launch:
-                    self._log("First launch, waiting 15 seconds for game to stabilize...")
-                    time.sleep(15)
-                    self.first_launch = False
 
                 obs = self._get_observation()
                 if self.zergling and self.beacon:
@@ -227,7 +227,7 @@ class Level0Env(gym.Env):
         except KeyError:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.dirname(os.path.dirname(current_dir))
-            map_path = Path(project_root) / "train" / "maps" / "level_0" / f"{map_name}.SC2Map"
+            map_path = Path(project_root) / "train" / "maps" / self.level_name / f"{map_name}.SC2Map"
             if not map_path.exists():
                 raise FileNotFoundError(f"Map not found: {map_path}")
             return Map(map_path)
@@ -242,6 +242,9 @@ class Level0Env(gym.Env):
             self.loop.run_until_complete(self.sc2_process.__aenter__())
         except AttributeError:
             self.loop.run_until_complete(self.sc2_process.launch())
+
+        self._log("Waiting 5 seconds for game to stabilize...")
+        time.sleep(5)
 
         self.client = Client(self.sc2_process._ws)
 
@@ -274,6 +277,8 @@ class Level0Env(gym.Env):
 
     def step(self, action):
         self.steps += 1
+        self.current_episode_length += 1
+        info = {}
 
         try:
             # 1. Convert Spatial Action to World Coordinates
@@ -311,11 +316,18 @@ class Level0Env(gym.Env):
             # 4. Calculate Reward
             # This returns the scalar reward and a bool if we won
             reward, reached_target = self._calculate_reward()
-
-            done = reached_target
+            self.current_episode_reward += reward
 
             # 5. Handle Continuous Task Logic (Respawn)
+            done = False
+            truncated = False
+
             if reached_target:
+                # Log "sub-episode" stats via info dict
+                info['episode'] = {
+                    'r': self.current_episode_reward,
+                    'l': self.current_episode_length
+                }
                 # Kill old beacon, spawn new one (Async)
                 self.loop.run_until_complete(self._soft_reset_logic())
 
@@ -332,13 +344,17 @@ class Level0Env(gym.Env):
                 else:
                     self.previous_distance = None
 
+                # Reset sub-episode counters
+                self.current_episode_reward = 0.0
+                self.current_episode_length = 0
+
             # 6. Check Episode Termination (Time Limit)
-            truncated = False
             if self.steps >= self.max_steps:
                 truncated = True
-                reward = -10
+                done = True # Mark as done if max_steps reached
+                reward = -10 # Apply penalty
 
-            return obs, reward, done, truncated, {}
+            return obs, reward, done, truncated, info
 
         except Exception as e:
             self._log(f"Step Error: {e}")

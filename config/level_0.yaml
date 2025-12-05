@@ -31,4 +31,4 @@ evaluation:
     monitor: "rollout/ep_len_mean"
     threshold: 299.0
     comparison: "<"
-    patience: 5
+    patience: 1
