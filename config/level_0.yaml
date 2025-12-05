@@ -5,12 +5,12 @@ training:
   training_steps: 1_000_000
   num_envs: 4
   n_steps: 2048
-  batch_size: 1024
+  batch_size: 256
   learning_rate: 0.0005
 
 # Environment parameters
 env:
-  grid_size: 16
+  grid_size: 32
   headless: True
   max_steps: 300
   maps_dir: "train/maps/level_0"
@@ -29,6 +29,6 @@ model:
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_len_mean"
-    threshold: 299.0
+    threshold: 250.0
     comparison: "<"
-    patience: 1
+    patience: 5
