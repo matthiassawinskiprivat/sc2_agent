@@ -48,6 +48,12 @@ def train_pipeline():
     logger.info(f"Starting training pipeline for levels: {pipeline_config['levels']}")
     
     last_model_path = None
+    last_grid_size = None
+
+    # Get all available levels from the config directory
+    all_level_files = sorted(glob.glob(os.path.join(CONFIG_DIR, "level_*.yaml")))
+    all_levels = [os.path.splitext(os.path.basename(f))[0] for f in all_level_files]
+
 
     for level_name in pipeline_config["levels"]:
         logger.info(f"--- Starting Level: {level_name} ---")
@@ -59,11 +65,26 @@ def train_pipeline():
         training_params = level_config["training"]
         env_params = level_config["env"]
         model_params = level_config["model"]
-        
+
+        # Check for grid size change
+        current_grid_size = env_params["grid_size"]
+        if last_grid_size is not None and current_grid_size != last_grid_size:
+            logger.warning(f"Grid size changed from {last_grid_size} to {current_grid_size}. "
+                           f"The model from the previous level will be loaded, but with a new policy head.")
+        last_grid_size = current_grid_size
+
         model_dir = os.path.join(MODEL_DIR_BASE, level_name)
         log_dir = os.path.join(LOG_DIR_BASE, level_name)
         os.makedirs(model_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
+
+        # Find model from previous level
+        previous_level_model_path = None
+        current_level_index = all_levels.index(level_name)
+        if current_level_index > 0:
+            previous_level_name = all_levels[current_level_index-1]
+            previous_level_model_dir = os.path.join(MODEL_DIR_BASE, previous_level_name)
+            previous_level_model_path = get_latest_model(previous_level_model_dir)
 
         # 2. Create Vectorized Environment
         num_envs = training_params["num_envs"]
@@ -98,22 +119,53 @@ def train_pipeline():
         try:
             # 3. Setup or Load Model
             # If there's a model from a previous level, use it (curriculum learning)
-            model_path_to_load = last_model_path or get_latest_model(model_dir)
+            model_path_to_load = last_model_path or previous_level_model_path or get_latest_model(model_dir)
 
             if model_path_to_load:
                 logger.info(f"Resuming/Loading training from: {model_path_to_load}")
-                custom_objects = {
-                    "learning_rate": training_params["learning_rate"],
-                    "n_steps": training_params["n_steps"],
-                    "batch_size": training_params["batch_size"],
-                }
-                model = MaskablePPO.load(
-                    model_path_to_load,
-                    env=env,
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                    tensorboard_log=log_dir,
-                    custom_objects=custom_objects
-                )
+                
+                # Check if action space is different
+                saved_model_policy = MaskablePPO.load(model_path_to_load).policy
+                logger.info(f"Current env action space: {env.action_space.n}")
+                logger.info(f"Saved model action space: {saved_model_policy.action_space.n}")
+                if env.action_space.n != saved_model_policy.action_space.n:
+                    logger.warning("Action space has changed. Transferring weights to a new model.")
+                    
+                    # Load the old model
+                    old_model = MaskablePPO.load(model_path_to_load)
+                    
+                    # Create a new model with the new environment
+                    model = MaskablePPO(
+                        policy=model_params["policy"],
+                        env=env,
+                        verbose=1,
+                        tensorboard_log=log_dir,
+                        learning_rate=training_params["learning_rate"],
+                        batch_size=training_params["batch_size"],
+                        n_steps=training_params["n_steps"],
+                        gamma=model_params["gamma"],
+                        ent_coef=model_params["ent_coef"],
+                        n_epochs=model_params["n_epochs"],
+                        policy_kwargs=model_params.get("policy_kwargs", {}),
+                        device="cuda" if torch.cuda.is_available() else "cpu",
+                    )
+                    
+                    # Copy the weights from the old model's feature extractor to the new model's feature extractor
+                    model.policy.features_extractor.load_state_dict(old_model.policy.features_extractor.state_dict())
+                    
+                else:
+                    custom_objects = {
+                        "learning_rate": training_params["learning_rate"],
+                        "n_steps": training_params["n_steps"],
+                        "batch_size": training_params["batch_size"],
+                    }
+                    model = MaskablePPO.load(
+                        model_path_to_load,
+                        env=env,
+                        device="cuda" if torch.cuda.is_available() else "cpu",
+                        tensorboard_log=log_dir,
+                        custom_objects=custom_objects
+                    )
             else:
                 logger.info("Starting new training session with MaskablePPO.")
                 model = MaskablePPO(

@@ -29,6 +29,6 @@ model:
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_len_mean"
-    threshold: 250.0
+    threshold: 230.0
     comparison: "<"
     patience: 5

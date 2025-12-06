@@ -44,6 +44,7 @@ class Level0Env(gym.Env):
         self.num_workers = num_workers
         self.episode_counter = 0
         self.level_name = level_name
+        self.map_rotation_index = 0
 
         # --- Map Selection Logic ---
         self.map_list = self._discover_maps()
@@ -133,9 +134,8 @@ class Level0Env(gym.Env):
             self.close() # Ensure client and process are killed
 
             # Calculate next map
-            round_num = (self.episode_counter // 50)
-            map_offset = round_num * self.num_workers
-            map_idx = (map_offset + self.worker_index) % len(self.map_list)
+            self.map_rotation_index += 1
+            map_idx = (self.worker_index + self.map_rotation_index) % len(self.map_list)
             self.map_name = self.map_list[map_idx]
             self._log(f"New map: {self.map_name}")
         # --------------------------

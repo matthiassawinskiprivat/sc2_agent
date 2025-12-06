@@ -1,0 +1,34 @@
+# config/level_1.yaml
+# Configuration for the second level of training (curriculum learning).
+
+training:
+  training_steps: 2_000_000
+  num_envs: 4
+  n_steps: 2048
+  batch_size: 1024
+  learning_rate: 0.0003
+
+# Environment parameters
+env:
+  grid_size: 128
+  headless: True
+  max_steps: 500
+  maps_dir: "train/maps/level_2"
+
+# Model parameters
+model:
+  policy: "CnnPolicy"
+  policy_kwargs:
+    features_extractor_kwargs:
+      features_dim: 512
+  gamma: 0.99
+  ent_coef: 0.01
+  n_epochs: 4
+
+# Evaluation parameters
+evaluation:
+  stop_on_metric:
+    monitor: "rollout/ep_len_mean"
+    threshold: 200.0
+    comparison: "<"
+    patience: 5
