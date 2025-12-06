@@ -27,7 +27,7 @@ from src.ui.ui_manager import UIManager
 
 # --- Configuration ---
 # Change this to "Zerg_Lower_Left" to test your training map
-MAP_NAME = "128x128"
+MAP_NAME = "PersephoneAIE_v4"
 BOT_RACE = Race.Terran
 OPPONENT_RACE = Race.Zerg
 DIFFICULTY = Difficulty.Easy
@@ -72,7 +72,7 @@ class GameThread(QThread):
 
                 # Check probable locations
                 candidates = [
-                    base_dir / "train" / "maps" / "level_0" / f"{self.map_name}.SC2Map",
+                    base_dir / "train" / "maps" / f"{self.map_name}.SC2Map",
                     base_dir / "Maps" / f"{self.map_name}.SC2Map",
                     base_dir / f"{self.map_name}.SC2Map"
                 ]
