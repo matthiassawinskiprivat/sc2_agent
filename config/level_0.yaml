@@ -5,7 +5,7 @@ training:
   training_steps: 1_000_000
   num_envs: 4
   n_steps: 2048
-  batch_size: 256
+  batch_size: 128
   learning_rate: 0.0005
 
 # Environment parameters
@@ -29,6 +29,6 @@ model:
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_len_mean"
-    threshold: 230.0
+    threshold: 150.0
     comparison: "<"
     patience: 5

@@ -27,64 +27,75 @@ LOG_DIR_BASE = "logs"
 logger.remove()
 logger.add(sys.stderr, level="INFO")
 
-def get_latest_model(model_dir):
-    """Gets the path to the latest model in a directory."""
-    final_path = os.path.join(model_dir, "final_model.zip")
-    if os.path.exists(final_path):
-        logger.info(f"Found final model: {final_path}")
-        return final_path
-    
-    checkpoints = glob.glob(os.path.join(model_dir, "zerg_*_steps.zip"))
-    if not checkpoints:
-        return None
+class PipelineManager:
+    """
+    Orchestrates the multi-level training pipeline.
+    The manager checks each level defined in pipeline.yaml and determines the course of action.
+    - If a 'final_model.zip' exists for a level, it's considered complete and skipped.
+    - If no final model exists but checkpoints (e.g., 'zerg_*_steps.zip') are found,
+      training will resume from the latest checkpoint.
+    - If no models are found for a level, a new training session is initiated.
+      For curriculum learning, it will use the 'final_model.zip' from the last successfully
+      completed level as a starting point.
+    - The pipeline finishes when all levels are completed.
+    """
 
-    return max(checkpoints, key=os.path.getmtime)
+    def __init__(self, config_dir=CONFIG_DIR, model_dir_base=MODEL_DIR_BASE, log_dir_base=LOG_DIR_BASE):
+        self.config_dir = config_dir
+        self.model_dir_base = model_dir_base
+        self.log_dir_base = log_dir_base
+        
+        with open(os.path.join(self.config_dir, "pipeline.yaml"), 'r') as f:
+            self.pipeline_config = yaml.safe_load(f)
+            
+        self.all_level_files = sorted(glob.glob(os.path.join(self.config_dir, "level_*.yaml")))
+        self.all_levels = [os.path.splitext(os.path.basename(f))[0] for f in self.all_level_files]
 
-def train_pipeline():
-    """Main training pipeline."""
-    with open(os.path.join(CONFIG_DIR, "pipeline.yaml"), 'r') as f:
-        pipeline_config = yaml.safe_load(f)
+    def get_level_status(self, level_name):
+        """
+        Determines the training status of a given level.
 
-    logger.info(f"Starting training pipeline for levels: {pipeline_config['levels']}")
-    
-    last_model_path = None
-    last_grid_size = None
+        Returns:
+            A tuple (status, path):
+            - status (str): "COMPLETED", "CONTINUE_TRAINING", or "NEEDS_TRAINING".
+            - path (str or None): Path to the relevant model file if it exists.
+        """
+        model_dir = os.path.join(self.model_dir_base, level_name)
+        final_model_path = os.path.join(model_dir, "final_model.zip")
 
-    # Get all available levels from the config directory
-    all_level_files = sorted(glob.glob(os.path.join(CONFIG_DIR, "level_*.yaml")))
-    all_levels = [os.path.splitext(os.path.basename(f))[0] for f in all_level_files]
+        if os.path.exists(final_model_path):
+            logger.info(f"Level '{level_name}' is already completed. Found final model: {final_model_path}")
+            return "COMPLETED", final_model_path
 
+        checkpoints = glob.glob(os.path.join(model_dir, "zerg_*_steps.zip"))
+        if checkpoints:
+            latest_checkpoint = max(checkpoints, key=os.path.getmtime)
+            logger.info(f"Found checkpoint for level '{level_name}'. Resuming training from: {latest_checkpoint}")
+            return "CONTINUE_TRAINING", latest_checkpoint
 
-    for level_name in pipeline_config["levels"]:
-        logger.info(f"--- Starting Level: {level_name} ---")
+        logger.info(f"No models found for level '{level_name}'. Needs new training session.")
+        return "NEEDS_TRAINING", None
 
+    def _train_level(self, level_name, model_path_to_load=None):
+        """
+        Trains a single level.
+        This method contains the core logic for setting up the environment,
+        loading/creating a model, training it, and saving the final result.
+        """
+        logger.info(f"--- Starting Training for Level: {level_name} ---")
+        
         # 1. Load Level Configuration
-        with open(os.path.join(CONFIG_DIR, f"{level_name}.yaml"), 'r') as f:
+        with open(os.path.join(self.config_dir, f"{level_name}.yaml"), 'r') as f:
             level_config = yaml.safe_load(f)
 
         training_params = level_config["training"]
         env_params = level_config["env"]
         model_params = level_config["model"]
 
-        # Check for grid size change
-        current_grid_size = env_params["grid_size"]
-        if last_grid_size is not None and current_grid_size != last_grid_size:
-            logger.warning(f"Grid size changed from {last_grid_size} to {current_grid_size}. "
-                           f"The model from the previous level will be loaded, but with a new policy head.")
-        last_grid_size = current_grid_size
-
-        model_dir = os.path.join(MODEL_DIR_BASE, level_name)
-        log_dir = os.path.join(LOG_DIR_BASE, level_name)
+        model_dir = os.path.join(self.model_dir_base, level_name)
+        log_dir = os.path.join(self.log_dir_base, level_name)
         os.makedirs(model_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
-
-        # Find model from previous level
-        previous_level_model_path = None
-        current_level_index = all_levels.index(level_name)
-        if current_level_index > 0:
-            previous_level_name = all_levels[current_level_index-1]
-            previous_level_model_dir = os.path.join(MODEL_DIR_BASE, previous_level_name)
-            previous_level_model_path = get_latest_model(previous_level_model_dir)
 
         # 2. Create Vectorized Environment
         num_envs = training_params["num_envs"]
@@ -99,7 +110,7 @@ def train_pipeline():
             vec_env_cls = DummyVecEnv
             vec_env_kwargs = {}
         
-        logger.info(f"Creating {num_envs} environment(s) using {vec_env_cls.__name__}...")
+        logger.info(f"Creating {num_envs} environment(s) for level '{level_name}' using {vec_env_cls.__name__}...")
 
         env_fns = [
             lambda i=i: Monitor(
@@ -118,9 +129,6 @@ def train_pipeline():
 
         try:
             # 3. Setup or Load Model
-            # If there's a model from a previous level, use it (curriculum learning)
-            model_path_to_load = last_model_path or previous_level_model_path or get_latest_model(model_dir)
-
             if model_path_to_load:
                 logger.info(f"Resuming/Loading training from: {model_path_to_load}")
                 
@@ -131,10 +139,8 @@ def train_pipeline():
                 if env.action_space.n != saved_model_policy.action_space.n:
                     logger.warning("Action space has changed. Transferring weights to a new model.")
                     
-                    # Load the old model
                     old_model = MaskablePPO.load(model_path_to_load)
                     
-                    # Create a new model with the new environment
                     model = MaskablePPO(
                         policy=model_params["policy"],
                         env=env,
@@ -150,7 +156,6 @@ def train_pipeline():
                         device="cuda" if torch.cuda.is_available() else "cpu",
                     )
                     
-                    # Copy the weights from the old model's feature extractor to the new model's feature extractor
                     model.policy.features_extractor.load_state_dict(old_model.policy.features_extractor.state_dict())
                     
                 else:
@@ -215,7 +220,7 @@ def train_pipeline():
             logger.info("Training for this level complete. Saving final model.")
             final_model_path = os.path.join(model_dir, "final_model.zip")
             model.save(final_model_path)
-            last_model_path = final_model_path # For the next level in the curriculum
+            return final_model_path
 
         finally:
             # 6. Clean Up
@@ -223,7 +228,48 @@ def train_pipeline():
             env.close()
         logger.info(f"--- Finished Level: {level_name} ---")
 
-    logger.info("Training pipeline finished.")
+
+    def run(self):
+        """Executes the entire training pipeline."""
+        logger.info(f"Starting training pipeline for levels: {self.pipeline_config['levels']}")
+        last_final_model_path = None
+
+        # Find the last completed level to start curriculum from, even across sessions
+        for i in range(len(self.pipeline_config['levels']) -1, -1, -1):
+            level = self.pipeline_config['levels'][i]
+            status, path = self.get_level_status(level)
+            if status == "COMPLETED":
+                last_final_model_path = path
+                break
+
+
+        for level_name in self.pipeline_config["levels"]:
+            logger.info(f"--- Processing Level: {level_name} ---")
+            status, model_path = self.get_level_status(level_name)
+
+            if status == "COMPLETED":
+                last_final_model_path = model_path
+                continue
+            
+            # Determine the model to load for curriculum learning
+            model_to_load = None
+            if status == "CONTINUE_TRAINING":
+                model_to_load = model_path # Continue from the checkpoint
+            elif status == "NEEDS_TRAINING":
+                # If it's a new training, try to load the model from the previous level
+                model_to_load = last_final_model_path
+            
+            # Train the level
+            final_model_path = self._train_level(level_name, model_path_to_load=model_to_load)
+            last_final_model_path = final_model_path
+
+        logger.info("Training pipeline finished.")
+
+
+def train_pipeline():
+    """Main training pipeline."""
+    manager = PipelineManager()
+    manager.run()
 
 if __name__ == "__main__":
     try:
