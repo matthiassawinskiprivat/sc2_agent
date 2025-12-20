@@ -7,7 +7,7 @@ from stable_baselines3 import PPO
 # Add path to ensure imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from train.envs.level_0_env import Level0Env
+from train.envs.minimal_sc2_env import MinimalSC2Env
 
 def make_env(rank: int):
     """
@@ -16,11 +16,8 @@ def make_env(rank: int):
     :param rank: index of the subprocess
     """
     def _init():
-        env = Level0Env(
-            level_name="level_0",
-            visualize=False, # Must be false for multiprocessing usually
-            worker_index=rank,
-            num_workers=2
+        env = MinimalSC2Env(
+            visualize=False
         )
         return env
     return _init
