@@ -4,7 +4,7 @@
 *   [x] Task: Run existing training script to capture crash logs. <!-- id: 0 --> [7c6ed60]
     *   *Goal:* obtain the exact stack trace and error behavior.
     *   *Context:* `debug_train.py` or `train/train_pipeline.py`.
-*   [ ] Task: Analyze `train/train_pipeline.py` and Environment structure.
+*   [x] Task: Analyze train/train_pipeline.py and Environment structure. <!-- id: 1 --> [fe16498]
     *   *Goal:* Identify non-picklable objects and windows-specific multiprocessing violations.
     *   *Context:* Check for lambda functions, open file handles, or complex SC2 API objects stored in the Env.
 
