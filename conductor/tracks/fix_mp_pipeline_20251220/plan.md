@@ -1,7 +1,7 @@
 # Track Plan: Fix and Stabilize Multi-Processing Training Pipeline
 
 ## Phase 1: Analysis & Reproduction
-*   [ ] Task: Run existing training script to capture crash logs.
+*   [x] Task: Run existing training script to capture crash logs. <!-- id: 0 --> [7c6ed60]
     *   *Goal:* obtain the exact stack trace and error behavior.
     *   *Context:* `debug_train.py` or `train/train_pipeline.py`.
 *   [ ] Task: Analyze `train/train_pipeline.py` and Environment structure.
