@@ -4,7 +4,6 @@ import glob
 import yaml
 from loguru import logger
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from sb3_contrib import MaskablePPO
 import torch
@@ -15,7 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # The pipeline will now use the original, stable Level0Env
 from train.envs.level_0_env import Level0Env
 from train.callbacks import StopTrainingOnMetricThreshold
-from train.subproc_vec_env_logger import SubprocVecEnvLogger
+from train.sync_vec_env import SyncVecEnv
 
 
 # Directories
@@ -25,7 +24,8 @@ LOG_DIR_BASE = "logs"
 
 # Clean logs
 logger.remove()
-logger.add(sys.stderr, level="INFO")
+log_level = os.environ.get("LOG_LEVEL", "INFO")
+logger.add(sys.stderr, level=log_level)
 
 class PipelineManager:
     """
@@ -101,31 +101,42 @@ class PipelineManager:
         num_envs = training_params["num_envs"]
         headless = env_params.get("headless", True)
 
-        vec_env_cls = SubprocVecEnv
-        vec_env_kwargs = {'start_method': 'spawn'}
-        
+        # Use SubprocVecEnv for parallel training if num_envs > 1 and headless
         if not headless:
-            logger.warning("Running in non-headless mode. Forcing num_envs=1 and using DummyVecEnv.")
+            logger.warning("Running in non-headless mode. Forcing num_envs=1.")
             num_envs = 1
-            vec_env_cls = DummyVecEnv
-            vec_env_kwargs = {}
+            vec_env_cls = SyncVecEnv
+        else:
+            from stable_baselines3.common.vec_env import SubprocVecEnv
+            vec_env_cls = SubprocVecEnv
         
         logger.info(f"Creating {num_envs} environment(s) for level '{level_name}' using {vec_env_cls.__name__}...")
 
-        env_fns = [
-            lambda i=i: Monitor(
-                Level0Env(
-                    level_name=level_name,
-                    visualize=not headless,
-                    grid_size=env_params["grid_size"],
-                    worker_index=i,
-                    num_workers=num_envs
+        # For SubprocVecEnv, we need to pass a list of callables that return the env
+        def make_env(rank):
+            def _init():
+                return Monitor(
+                    Level0Env(
+                        level_name=level_name,
+                        visualize=not headless,
+                        grid_size=env_params["grid_size"],
+                        worker_index=rank,
+                        num_workers=num_envs
+                    )
                 )
-            )
-            for i in range(num_envs)
-        ]
+            return _init
+
+        env_fns = [make_env(i) for i in range(num_envs)]
         
-        env = vec_env_cls(env_fns, **vec_env_kwargs)
+        if vec_env_cls == SyncVecEnv:
+             # SyncVecEnv expects list of lambdas that call Monitor(Env) directly, 
+             # but our make_env returns a function that returns the env. 
+             # SyncVecEnv usually calls fn() to get the env.
+             env = vec_env_cls(env_fns)
+        else:
+             # SubprocVecEnv also expects list of functions
+             # On Windows, strictly use 'spawn'
+             env = vec_env_cls(env_fns, start_method='spawn')
 
         try:
             # 3. Setup or Load Model
@@ -194,9 +205,6 @@ class PipelineManager:
             checkpoint_callback = CheckpointCallback(save_freq=20000, save_path=model_dir, name_prefix="zerg")
             
             callback_list = [checkpoint_callback]
-
-            if vec_env_cls == SubprocVecEnv:
-                callback_list.append(SubprocVecEnvLogger())
 
             if "evaluation" in level_config and "stop_on_metric" in level_config["evaluation"]:
                 eval_params = level_config["evaluation"]["stop_on_metric"]
