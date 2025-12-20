@@ -1,0 +1,24 @@
+name: sc2_agent_repro
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - numpy<2.0
+    - opencv-python>=4.5.0
+    - matplotlib>=3.3.0
+    - PyQt5>=5.15.0
+    - burnysc2
+    - protobuf==3.20.0
+    - torch==1.13.1
+    - tensorboard>=2.7.0
+    - PyYAML>=5.4.0
+    - websockets>=10.0
+    - aiohttp>=3.7.0
+    - loguru
+    - gymnasium
+    - stable-baselines3==2.0.0
+    - sb3-contrib==2.0.0
+    - pytest
