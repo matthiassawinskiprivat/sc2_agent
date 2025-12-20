@@ -8,13 +8,13 @@
     *   *Goal:* Identify non-picklable objects and windows-specific multiprocessing violations.
     *   *Context:* Check for lambda functions, open file handles, or complex SC2 API objects stored in the Env.
 
-## Phase 2: Core Refactoring
+## Phase 2: Core Refactoring [checkpoint: 60929de]
 *   [x] Task: Create a Minimal Reproducible Environment Wrapper. <!-- id: 2 --> [71e2913]
     *   *Goal:* Create a simplified version of the environment to test basic parallel launching without full game logic, if needed, or isolate the culprit.
     *   *Context:* `tests/test_mp_isolation.py`.
 *   [x] Task: Refactor level_0_env.py for Serialization. <!-- id: 3 --> [65d2c90]
     *   *Goal:* Ensure `__init__` and state handling are safe for `spawn`.
-*   [ ] Task: Implement/Fix `SubprocVecEnv` instantiation.
+*   [~] Task: Implement/Fix `SubprocVecEnv` instantiation.
     *   *Goal:* Use correct start methods (`spawn` for Windows) and ensure proper closing of processes.
 
 ## Phase 3: Validation & Optimization
