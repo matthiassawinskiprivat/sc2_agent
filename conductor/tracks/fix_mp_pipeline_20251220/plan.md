@@ -14,7 +14,7 @@
     *   *Context:* `tests/test_mp_isolation.py`.
 *   [x] Task: Refactor level_0_env.py for Serialization. <!-- id: 3 --> [65d2c90]
     *   *Goal:* Ensure `__init__` and state handling are safe for `spawn`.
-*   [~] Task: Implement/Fix `SubprocVecEnv` instantiation.
+*   [x] Task: Implement/Fix `SubprocVecEnv` instantiation. <!-- id: 4 --> [07d828b]
     *   *Goal:* Use correct start methods (`spawn` for Windows) and ensure proper closing of processes.
 
 ## Phase 3: Validation & Optimization
