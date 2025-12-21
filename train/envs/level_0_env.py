@@ -3,6 +3,7 @@ import numpy as np
 import os
 import time
 import random
+import psutil
 import asyncio
 from pathlib import Path
 from gymnasium import spaces
@@ -19,6 +20,12 @@ from sc2.sc2process import SC2Process
 from src.sc2_bot import SC2Bot
 from src.hierarchical_agent import HierarchicalAgentSystem
 
+HARD_RESET_COUNT = 10
+
+class ProtoWrapper:
+    def __init__(self, info):
+        self.game_info = info
+
 class Level0Env(gym.Env):
     def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1,
                  level_name: str = "level_0"):
@@ -28,7 +35,7 @@ class Level0Env(gym.Env):
         self.worker_index = worker_index
         self.num_workers = num_workers
         self.level_name = level_name
-        self.map_rotation_index = 0
+        self.episode_counter = 0
 
         self.map_list = self._discover_maps()
         if not self.map_list:
@@ -45,7 +52,7 @@ class Level0Env(gym.Env):
 
         self.sc2_process = None
         self.client = None
-        self.protocol = None
+        self.controller = None
         self.bot = None
         self.loop = None
 
@@ -71,104 +78,130 @@ class Level0Env(gym.Env):
 
     def reset(self, seed=None, options=None):
         self._log("Resetting environment...")
-        if self.sc2_process:
-            self.close()
-
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        self.steps = 0
+        self.episode_counter += 1
         
-        try:
-            self.loop.run_until_complete(self._launch_and_setup_game())
-        except Exception as e:
-            self._log(f"Error during game launch: {e}")
+        # --- Hard Reset / Map Rotation Logic ---
+        # We perform a hard reset every HARD_RESET_COUNT episodes.
+        # The staggered condition ensures that workers don't all reset at the same time.
+        if self.episode_counter > 1 and (self.episode_counter + self.worker_index) % HARD_RESET_COUNT == 0:
+            self._log(f"Episode {self.episode_counter}: Performing hard reset and changing map.")
             self.close()
-            raise
+            
+            # Use a deterministic formula to pick the next map without overlap between workers.
+            # 'resets_done' tracks how many times THIS worker has hard-reset.
+            resets_done = (self.episode_counter + self.worker_index) // HARD_RESET_COUNT
+            
+            # By jumping by 'num_workers', we ensure that each worker cycles through 
+            # a unique set of maps in each "round" of resets.
+            map_idx = (self.worker_index + resets_done * self.num_workers) % len(self.map_list)
+            self.map_name = self.map_list[map_idx]
+            self._log(f"New map: {self.map_name} (Index: {map_idx}, Worker Resets: {resets_done})")
+        
+        if self.sc2_process is None:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            try:
+                self.loop.run_until_complete(self._launch_sc2_process())
+                self.loop.run_until_complete(self._setup_game_session())
+            except Exception as e:
+                import traceback
+                self._log(f"Error during SC2 startup: {e}\n{traceback.format_exc()}")
+                self.close()
+                raise
+        else:
+            # Game is already running, just reset the bot state
+            try:
+                self.loop.run_until_complete(self._reset_bot_state())
+            except Exception as e:
+                import traceback
+                self._log(f"Error during bot state reset: {e}\n{traceback.format_exc()}")
+                # If reset fails, process might be dead, so restart everything next time
+                self.close()
+                return self.reset(seed, options)
 
         obs, _ = self.bot._get_observation()
         self._log("Environment reset complete.")
         return obs, {}
 
-    async def _launch_and_setup_game(self):
+    async def _reset_bot_state(self):
+        self._log("Resetting bot state...")
+        # Step the game once to ensure we have a fresh observation
+        await self.client.step()
+        observation = await self.client.observation()
+        
+        from sc2.game_state import GameState
+        state = GameState(observation.observation)
+        
+        # Re-prepare step to update bot's unit lists
+        self.bot._prepare_step(state, ProtoWrapper(self.bot.game_info._proto))
+        
+        # Call the bot's own reset logic
+        await self.bot.reset_game_state()
+        
+        # Advance again to see the results of unit creation
+        await self.client.step()
+        observation = await self.client.observation()
+        state = GameState(observation.observation)
+        self.bot._prepare_step(state, ProtoWrapper(self.bot.game_info._proto))
+    
+    async def _launch_sc2_process(self):
+        # Randomized sleep to avoid simultaneous SC2 launches
+        await asyncio.sleep(random.random() * 5)
         self._log("Launching SC2 process...")
         self.sc2_process = SC2Process(fullscreen=self.visualize)
         self.controller = await self.sc2_process.__aenter__()
         self.client = Client(self.sc2_process._ws)
-        
+
+    async def _setup_game_session(self):
         game_map = self._resolve_map(self.map_name)
+
+        if self.bot is None:
+            self._log("Creating SC2Bot...")
+            class DummyConn:
+                def send(self, data): pass
+                def recv(self): return "continue", None
+            self.bot = SC2Bot(conn=DummyConn())
+            self.bot.distance_calculation_method = 2
 
         self._log("Creating game...")
         await self.controller.create_game(
             game_map,
-            [Bot(Race.Zerg, None), Computer(Race.Zerg, Difficulty.Easy)],
+            [Bot(Race.Zerg, self.bot), Computer(Race.Zerg, Difficulty.Easy)],
             realtime=self.visualize,
         )
         
         self._log("Joining game...")
         await self.client.join_game(race=Race.Zerg)
 
-        self._log("Creating SC2Bot...")
-        class DummyConn:
-            def send(self, data): pass
-            def recv(self): return "continue", None
-        self.bot = SC2Bot(conn=DummyConn())
-        self.bot.distance_calculation_method = 2
         self.bot._generated_frame = -1
         
         self._log("Getting game info and data...")
-        # Client.get_game_info() returns a GameInfo object.
-        # However, _prepare_step expects 'proto_game_info' which has .game_info.start_raw.pathing_grid
-        # In burnysc2, GameInfo is a wrapper.
-        # Let's check how GameInfo is constructed or if we have the raw proto.
-        
-        # We can re-request the raw info via the protocol to get the protobuf directly if needed.
-        # Or checking GameInfo implementation.
-        # Based on the error: AttributeError: game_info
-        # The object passed as proto_game_info does NOT have a .game_info attribute.
-        # We passed game_info._proto.
-        
-        # Let's inspect what game_info._proto actually is.
-        # But to fix it quickly: The logic in bot_ai.py is:
-        # proto_game_info.game_info.start_raw.pathing_grid
-        
-        # If we look at sc2/client.py:
-        # result = await self._execute(game_info=sc_pb.RequestGameInfo())
-        # return GameInfo(result.game_info)
-        
-        # So client.get_game_info() returns GameInfo(result.game_info).
-        # result.game_info IS the ResponseGameInfo protobuf.
-        # But bot_ai.py expects something that HAS .game_info.
-        
-        # It seems bot_ai.py expects the 'result' from the _execute call, NOT just the game_info part.
-        # OR it expects a structure that mimics it.
-        
-        # Let's try to pass a dummy object that has the structure it wants, 
-        # using the game_info we already have.
-        
         game_info = await self.client.get_game_info()
         game_data = await self.client.get_game_data()
 
         self._log("Preparing bot start...")
+        try:
+            from sc2.unit import UnitGameData
+            UnitGameData._game_data = game_data
+            UnitGameData._bot_object = self.bot
+        except ImportError:
+            # Older version of python-sc2/burnysc2, no global UnitGameData needed
+            pass
+        
+        # _prepare_start sets self._client, self._game_info, self._game_data
         self.bot._prepare_start(client=self.client, player_id=1, game_info=game_info, game_data=game_data)
         
         self._log("Getting initial observation...")
         initial_observation = await self.client.observation()
         
-        # We need to create a GameState from the observation
         from sc2.game_state import GameState
-        state = GameState(initial_observation)
+        state = GameState(initial_observation.observation)
         
         self._log("Preparing bot step...")
-        
-        # Hack/Fix: construct a dummy object to satisfy bot_ai.py:789
-        class ProtoWrapper:
-            def __init__(self, info):
-                self.game_info = info
-        
         self.bot._prepare_step(state, ProtoWrapper(game_info._proto))
 
         self._log("Running bot on_step(0)...")
-        # We need to monkey-patch or avoid on_step if it uses self.conn
-        # Actually, let's see what happens.
         try:
             await self.bot.on_step(0)
         except Exception as e:
@@ -193,7 +226,8 @@ class Level0Env(gym.Env):
 
     async def _async_step(self, action):
         world_x, world_y = self.bot.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(action)
-        self.bot.last_target_pos = (world_x, world_y)
+        from sc2.position import Point2
+        self.bot.last_target_pos = Point2((world_x, world_y))
 
         if self.bot.zergling:
             cmd = self.bot.zergling.move(self.bot.last_target_pos)
@@ -202,13 +236,12 @@ class Level0Env(gym.Env):
 
         await self.client.step()
 
-        observation = await self.client.observation()
-        self.bot.units = []
-        self.bot.structures = []
-        self.bot.enemy_units = []
-        self.bot.enemy_structures = []
-        self.bot.all_units = []
-        self.bot._prepare_step(observation, self.bot.game_info._proto)
+        response = await self.client.observation()
+        from sc2.game_state import GameState
+        state = GameState(response.observation)
+        
+        # We need the ProtoWrapper for _prepare_step as well
+        self.bot._prepare_step(state, ProtoWrapper(self.bot.game_info._proto))
         
         return self.bot._get_step_results()
 

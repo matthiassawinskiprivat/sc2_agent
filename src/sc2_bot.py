@@ -1,85 +1,150 @@
 """
-StarCraft 2 Bot Interface
-Passes rich data including Effects to the hierarchical system.
-Fixed:
-1. Robust action execution using 'client.actions'.
-2. Correct 'all_units' passing for observation.
-3. Cleaned up debug random actions (Agent logic should be inserted where marked).
+A simple bot that acts as a wrapper for the HierarchicalAgentSystem,
+and handles the communication with the main process.
 """
+
+import numpy as np
+from typing import Dict, Any, Optional, Tuple
+import multiprocessing
+import random
+from loguru import logger
+
 from sc2.bot_ai import BotAI
-from sc2.ids.ability_id import AbilityId
+from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
+from sc2.unit import Unit
+from src.hierarchical_agent import HierarchicalAgentSystem
 
-class UnitControlBot(BotAI):
-    def __init__(self, system, agent_id="main_agent"):
+
+class SC2Bot(BotAI):
+    """A simple bot that wraps the HierarchicalAgentSystem."""
+
+    @property
+    def game_data(self):
+        return self._game_data
+
+    @property
+    def game_info(self):
+        return self._game_info
+
+    @property
+    def client(self):
+        return self._client
+
+    def __init__(self, conn: multiprocessing.connection.Connection):
         super().__init__()
-        self.system = system
-        self.agent_id = agent_id
-        self.agent = None
-        self._previous_upgrades = set()
+        self.conn = conn
+        self.agent_system: Optional[HierarchicalAgentSystem] = None
+        self.zergling: Optional[Unit] = None
+        self.beacon: Optional[Unit] = None
+        self.previous_distance = None
+        self.last_target_pos: Optional[Point2] = None
 
-    async def on_start(self):
-        print(f"[Bot] Game started on {self.game_info.map_name}")
+    async def on_step(self, iteration: int):
+        if iteration == 0:
+            self.agent_system = HierarchicalAgentSystem(
+                map_size=(128, 128),
+                grid_size=128
+            )
+            self.agent_system.create_unit_agent("agent_0")
 
-        # Log Map Dimensions for confirmation
-        print(f"[Bot] Map Dimensions: {self.game_info.map_size.width}x{self.game_info.map_size.height}")
-        area = self.game_info.playable_area
-        print(f"[Bot] Playable Area: {area.width}x{area.height} (x:{area.x}, y:{area.y})")
+            await self.reset_game_state()
+            obs, info = self._get_observation()
+            self.conn.send((obs, info))
 
-        if self.agent_id in self.system.unit_agents:
-            self.agent = self.system.unit_agents[self.agent_id]
+        command, data = self.conn.recv()
+        if command == "step":
+            action = data
+            world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(action)
+            self.last_target_pos = Point2((world_x, world_y))
+
+            if self.zergling:
+                cmd = self.zergling.move(self.last_target_pos)
+                if cmd and not isinstance(cmd, bool):
+                    await self.do(cmd)
+            
+            obs, reward, done, truncated, info = self._get_step_results()
+            self.conn.send((obs, reward, done, truncated, info))
+
+        elif command == "reset":
+            await self.reset_game_state()
+            obs, info = self._get_observation()
+            self.conn.send((obs, info))
+
+        elif command == "close":
+            await self.client.leave()
+
+    async def reset_game_state(self):
+        zergling = self.units(UnitTypeId.ZERGLING).first
+        beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first
+        
+        grid = self.game_info.pathing_grid
+        valid_spawn_points = []
+        for x in range(4, grid.width - 4, 4):
+            for y in range(4, grid.height - 4, 4):
+                if grid[(x, y)] != 0:
+                    valid_spawn_points.append(Point2((x, y)))
+        
+        if valid_spawn_points:
+            start = random.choice(valid_spawn_points)
+            end = random.choice(valid_spawn_points)
         else:
-            self.agent = self.system.create_unit_agent(self.agent_id)
+            w, h = self.game_info.map_size
+            start = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
+            end = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
 
-    async def on_step(self, iteration):
-        # 1. Filter Units Explicitly
-        # Move Beacons from 'own_units' to 'enemy_units' if they snuck in
-        raw_own = self.all_units
-        raw_enemy = self.all_enemy_units
+        if zergling:
+            await self.client.debug_kill_unit([zergling.tag])
+            await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, start, self.player_id]])
 
-        real_own = []
-        real_enemy = []
+        if beacon:
+            await self.client.debug_kill_unit([beacon.tag])
+            await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, end, self.player_id]])
+        
+        await self._client.send_debug()
 
-        # Helper to identify beacons
-        def is_beacon(u):
-            return "BEACON" in u.name.upper()
 
-        # Process Allied List
-        for u in raw_own:
-            if is_beacon(u):
-                real_enemy.append(u)  # Force Beacon to Enemy List
-            else:
-                real_own.append(u)
+    def _get_observation(self) -> Tuple[np.ndarray, Dict]:
+        self.zergling = self.units(UnitTypeId.ZERGLING).first
+        self.beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first
 
-        # Process Enemy List
-        for u in raw_enemy:
-            real_enemy.append(u)
-
-        # 2. Construct Observation
-        obs = {
-            'units': real_own,
-            'enemy_units': real_enemy,
+        enemies = [self.beacon] if self.beacon else []
+        
+        raw_obs = {
+            'units': self.units,
+            'enemy_units': enemies,
             'effects': self.state.effects,
-            'creep': self.state.creep,
             'game_info': self.game_info,
-            'game_data': self._game_data,
+            'game_data': self.game_data,
+            'creep': self.state.creep,
+            'command_target': self.last_target_pos
         }
+        
+        processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+        return processed_obs, {}
 
-        self.system.process_observation(obs, player_id=1)
+    def _calculate_reward(self) -> Tuple[float, bool]:
+        if not self.zergling or not self.beacon:
+            return 0, False
 
-        actions = []
+        current_dist = self.zergling.distance_to(self.beacon)
+        reward = 0.0
+        reached_target = False
 
-        # --- INSERT AGENT INFERENCE LOGIC HERE ---
-        # Example if you have a trained model:
-        # Example if you have a trained model:
-        # action_idx = model.predict(obs)
-        # world_x, world_y = self.agent.convert_spatial_action_to_world(action_idx)
-        # cmd = unit(AbilityId.MOVE, Point2((world_x, world_y)))
-        # actions.append(cmd)
-        # -----------------------------------------
+        if current_dist < 2.0:
+            reward = 100.0
+            reached_target = True
+        elif self.previous_distance is not None:
+            reward = (self.previous_distance - current_dist) * 1.0
+        
+        self.previous_distance = current_dist
+        return reward, reached_target
 
-        if actions:
-            # Filter valid commands and execute
-            valid_actions = [a for a in actions if hasattr(a, 'combining_tuple')]
-            if valid_actions:
-                await self.client.actions(valid_actions)
+    def _get_step_results(self) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+        obs, info = self._get_observation()
+        reward, reached_target = self._calculate_reward()
+        done = False
+        truncated = False
+        if reached_target:
+            done = True
+        return obs, reward, done, truncated, info

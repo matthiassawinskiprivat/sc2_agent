@@ -18,7 +18,7 @@
     *   *Goal:* Use correct start methods (`spawn` for Windows) and ensure proper closing of processes.
 
 ## Phase 3: Validation & Optimization
-*   [ ] Task: Verify parallel training stability (Short Run).
+*   [x] Task: Verify parallel training stability (Short Run). <!-- id: 5 --> [2a43a52]
     *   *Goal:* Run for 100 updates with 2+ envs.
-*   [ ] Task: Benchmark performance.
+*   [x] Task: Benchmark performance. <!-- id: 6 --> [2a43a52]
     *   *Goal:* Compare FPS of 1 env vs 4 envs to ensure scaling.
