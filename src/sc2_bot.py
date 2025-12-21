@@ -19,18 +19,6 @@ from src.hierarchical_agent import HierarchicalAgentSystem
 class SC2Bot(BotAI):
     """A simple bot that wraps the HierarchicalAgentSystem."""
 
-    @property
-    def game_data(self):
-        return self._game_data
-
-    @property
-    def game_info(self):
-        return self._game_info
-
-    @property
-    def client(self):
-        return self._client
-
     def __init__(self, conn: multiprocessing.connection.Connection):
         super().__init__()
         self.conn = conn
@@ -39,6 +27,20 @@ class SC2Bot(BotAI):
         self.beacon: Optional[Unit] = None
         self.previous_distance = None
         self.last_target_pos: Optional[Point2] = None
+        
+        from sc2.units import Units
+        self.units = Units([], self)
+        self.structures = Units([], self)
+        self.enemy_units = Units([], self)
+        self.enemy_structures = Units([], self)
+        self.all_units = Units([], self)
+        self.enemy_race = None
+        self.unit_command_uses_self_do = False
+        self.actions = []
+        self.unit_tags_received_action = set()
+        # self._game_info = None  # Removed: can't set attribute
+        # self._game_data = None  # Removed: can't set attribute
+        # self._client = None     # Removed: can't set attribute
 
     async def on_step(self, iteration: int):
         if iteration == 0:
@@ -101,7 +103,7 @@ class SC2Bot(BotAI):
             await self.client.debug_kill_unit([beacon.tag])
             await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, end, self.player_id]])
         
-        await self._client.send_debug()
+        await self.client._send_debug()
 
 
     def _get_observation(self) -> Tuple[np.ndarray, Dict]:
