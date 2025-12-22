@@ -8,12 +8,16 @@ from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from sb3_contrib import MaskablePPO
 import torch
 
+# Disable distribution validation to avoid Simplex errors with MaskablePPO
+# caused by numerical precision issues when masking logits with -1e8
+torch.distributions.Distribution.set_default_validate_args(False)
+
 # Add path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # The pipeline will now use the original, stable Level0Env
 from train.envs.level_0_env import Level0Env
-from train.callbacks import StopTrainingOnMetricThreshold
+from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
 
 
@@ -24,8 +28,42 @@ LOG_DIR_BASE = "logs"
 
 # Clean logs
 logger.remove()
-log_level = os.environ.get("LOG_LEVEL", "INFO")
-logger.add(sys.stderr, level=log_level)
+log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
+logger.add(sys.stderr, level=log_level, colorize=False)
+
+class MaskableSubprocVecEnv(SyncVecEnv):
+    """
+    SubprocVecEnv doesn't natively support get_action_masks. 
+    We wrap it to add support, inheriting from SyncVecEnv to share the get_action_masks logic 
+    if possible, but actually SubprocVecEnv is quite different. 
+    Actually, let's just implement it directly or inherit from SubprocVecEnv.
+    """
+    pass # Wait, let's re-evaluate. 
+
+# Re-defining more cleanly:
+from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env.base_vec_env import VecEnvStepReturn
+import numpy as np
+
+class MaskableSubprocVecEnv(SubprocVecEnv):
+    def get_action_masks(self) -> np.ndarray:
+        logger.debug("MaskableSubprocVecEnv: get_action_masks() called.")
+        # Explicitly cast to bool to ensure compatibility with MaskablePPO
+        masks = np.stack(self.env_method("action_masks")).astype(bool)
+        logger.debug("MaskableSubprocVecEnv: get_action_masks() completed.")
+        return masks
+
+    def step_wait(self) -> VecEnvStepReturn:
+        logger.debug("MaskableSubprocVecEnv: step_wait() waiting for workers...")
+        results = super().step_wait()
+        logger.debug("MaskableSubprocVecEnv: step_wait() received results.")
+        return results
+
+    def reset(self) -> np.ndarray:
+        logger.debug("MaskableSubprocVecEnv: reset() waiting for workers...")
+        results = super().reset()
+        logger.debug("MaskableSubprocVecEnv: reset() completed.")
+        return results
 
 class PipelineManager:
     """
@@ -101,14 +139,13 @@ class PipelineManager:
         num_envs = training_params["num_envs"]
         headless = env_params.get("headless", True)
 
-        # Use SubprocVecEnv for parallel training if num_envs > 1 and headless
+        # Use MaskableSubprocVecEnv for parallel training if num_envs > 1 and headless
         if not headless:
             logger.warning("Running in non-headless mode. Forcing num_envs=1.")
             num_envs = 1
             vec_env_cls = SyncVecEnv
         else:
-            from stable_baselines3.common.vec_env import SubprocVecEnv
-            vec_env_cls = SubprocVecEnv
+            vec_env_cls = MaskableSubprocVecEnv
         
         logger.info(f"Creating {num_envs} environment(s) for level '{level_name}' using {vec_env_cls.__name__}...")
 
@@ -203,8 +240,9 @@ class PipelineManager:
             logger.info(f"Training for up to {training_params['training_steps']} timesteps...")
             
             checkpoint_callback = CheckpointCallback(save_freq=20000, save_path=model_dir, name_prefix="zerg")
+            diagnostics_callback = DiagnosticsCallback(check_freq=1024)
             
-            callback_list = [checkpoint_callback]
+            callback_list = [checkpoint_callback, diagnostics_callback]
 
             if "evaluation" in level_config and "stop_on_metric" in level_config["evaluation"]:
                 eval_params = level_config["evaluation"]["stop_on_metric"]

@@ -6,6 +6,7 @@ and handles the communication with the main process.
 import numpy as np
 from typing import Dict, Any, Optional, Tuple
 import multiprocessing
+import multiprocessing.connection
 import random
 from loguru import logger
 
@@ -44,9 +45,16 @@ class SC2Bot(BotAI):
 
     async def on_step(self, iteration: int):
         if iteration == 0:
+            # Try to get grid_size from parent env if possible
+            grid_size = 128
+            if hasattr(self, "_bot_object") and hasattr(self._bot_object, "grid_size"):
+                grid_size = self._bot_object.grid_size
+            elif hasattr(self, "grid_size"):
+                grid_size = self.grid_size
+
             self.agent_system = HierarchicalAgentSystem(
                 map_size=(128, 128),
-                grid_size=128
+                grid_size=grid_size
             )
             self.agent_system.create_unit_agent("agent_0")
 
@@ -77,8 +85,8 @@ class SC2Bot(BotAI):
             await self.client.leave()
 
     async def reset_game_state(self):
-        zergling = self.units(UnitTypeId.ZERGLING).first
-        beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first
+        zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None
+        beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first if self.units(UnitTypeId.BEACON_TERRANSMALL).exists else None
         
         grid = self.game_info.pathing_grid
         valid_spawn_points = []
@@ -106,9 +114,19 @@ class SC2Bot(BotAI):
         await self.client._send_debug()
 
 
+    def action_masks(self) -> np.ndarray:
+        if self.agent_system and "agent_0" in self.agent_system.unit_agents:
+            return self.agent_system.unit_agents["agent_0"].get_action_mask()
+        
+        # Determine fallback grid_size
+        gs = 128
+        if self.agent_system:
+            gs = self.agent_system.grid_size
+        return np.ones(gs * gs, dtype=bool)
+
     def _get_observation(self) -> Tuple[np.ndarray, Dict]:
-        self.zergling = self.units(UnitTypeId.ZERGLING).first
-        self.beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first
+        self.zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None
+        self.beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first if self.units(UnitTypeId.BEACON_TERRANSMALL).exists else None
 
         enemies = [self.beacon] if self.beacon else []
         
