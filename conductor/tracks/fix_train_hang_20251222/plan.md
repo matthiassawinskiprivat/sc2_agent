@@ -15,16 +15,16 @@
     - [x] Verify logging output
 - [x] Task: Conductor - User Manual Verification 'Diagnostic Instrumentation & Observability' (Protocol in workflow.md) (5ff509f)
 
-## Phase 2: Watchdog Implementation
-- [ ] Task: Develop a generic Watchdog utility
-    - [ ] Write failing tests for a watchdog that triggers a callback on timeout
-    - [ ] Implement `Watchdog` class with start/stop/reset and stack trace dumping
-    - [ ] Verify watchdog triggers correctly in isolation
-- [ ] Task: Integrate Watchdog into the training loop
-    - [ ] Write failing test where a simulated hang triggers the watchdog
-    - [ ] Integrate watchdog into `train_pipeline.py` to monitor the main training loop
-    - [ ] Verify watchdog detects simulated hangs in the pipeline
-- [ ] Task: Conductor - User Manual Verification 'Watchdog Implementation' (Protocol in workflow.md)
+## Phase 2: Watchdog Implementation [checkpoint: dd1c23d]
+- [x] Task: Develop a generic Watchdog utility (dd1c23d)
+    - [x] Write failing tests for a watchdog that triggers a callback on timeout
+    - [x] Implement `Watchdog` class with start/stop/reset and stack trace dumping
+    - [x] Verify watchdog triggers correctly in isolation
+- [x] Task: Integrate Watchdog into the training loop (dd1c23d)
+    - [x] Write failing test where a simulated hang triggers the watchdog
+    - [x] Integrate watchdog into `train_pipeline.py` to monitor the main training loop
+    - [x] Verify watchdog detects simulated hangs in the pipeline
+- [x] Task: Conductor - User Manual Verification 'Watchdog Implementation' (Protocol in workflow.md) (dd1c23d)
 
 ## Phase 3: Root Cause Analysis & Resolution
 - [ ] Task: Reproduce hang and analyze diagnostic data
