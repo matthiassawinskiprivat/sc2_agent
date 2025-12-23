@@ -26,16 +26,16 @@
     - [x] Verify watchdog detects simulated hangs in the pipeline
 - [x] Task: Conductor - User Manual Verification 'Watchdog Implementation' (Protocol in workflow.md) (dd1c23d)
 
-## Phase 3: Root Cause Analysis & Resolution
-- [ ] Task: Reproduce hang and analyze diagnostic data
-    - [ ] Run the training pipeline until a hang occurs
-    - [ ] Capture and analyze logs and watchdog stack traces to identify the hang point
-- [ ] Task: Implement fix for identified hang/deadlock
-    - [ ] Write a regression test that reproduces the hang condition (if possible) or validates the fix logic
-    - [ ] Apply the fix to the identified component (e.g., communication timeout, process join lock)
-    - [ ] Verify the fix resolves the hang in the test environment
-- [ ] Task: Strengthen StarCraft 2 process cleanup
-    - [ ] Write failing test to verify orphaned SC2 processes are detected and killed
-    - [ ] Implement robust cleanup logic in `game_process.py` (e.g., using `psutil` to ensure all children are gone)
-    - [ ] Verify cleanup works even after a pipeline hang/crash
-- [ ] Task: Conductor - User Manual Verification 'Root Cause Analysis & Resolution' (Protocol in workflow.md)
+## Phase 3: Root Cause Analysis & Resolution [checkpoint: df41bdb]
+- [x] Task: Reproduce hang and analyze diagnostic data (df41bdb)
+    - [x] Run the training pipeline until a hang occurs
+    - [x] Capture and analyze logs and watchdog stack traces to identify the hang point
+- [x] Task: Implement fix for identified hang/deadlock (df41bdb)
+    - [x] Write a regression test that reproduces the hang condition (if possible) or validates the fix logic
+    - [x] Apply the fix to the identified component (e.g., communication timeout, process join lock)
+    - [x] Verify the fix resolves the hang in the test environment
+- [x] Task: Strengthen StarCraft 2 process cleanup (df41bdb)
+    - [x] Write failing test to verify orphaned SC2 processes are detected and killed
+    - [x] Implement robust cleanup logic in `game_process.py` (e.g., using `psutil` to ensure all children are gone)
+    - [x] Verify cleanup works even after a pipeline hang/crash
+- [x] Task: Conductor - User Manual Verification 'Root Cause Analysis & Resolution' (Protocol in workflow.md) (df41bdb)
