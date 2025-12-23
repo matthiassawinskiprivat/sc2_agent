@@ -1,19 +1,19 @@
 # Plan - Fix premature train_pipeline termination/hang
 
-## Phase 1: Diagnostic Instrumentation & Observability
-- [~] Task: Add high-resolution logging to `train/game_process.py`
-    - [ ] Write failing test to verify logging output during process lifecycle
-    - [ ] Implement detailed logging for SC2 process creation, monitoring, and termination
-    - [ ] Verify logging in test environment
-- [~] Task: Add detailed instrumentation to `train/sync_vec_env.py`
-    - [ ] Write failing test to verify logging during `step` and `reset` synchronization
-    - [ ] Implement logging around inter-process communication (queues/pipes)
-    - [ ] Verify logging captures state transitions
-- [~] Task: Enhance `train/train_pipeline.py` with loop diagnostics
-    - [ ] Write failing test to verify logging of iteration counts and exit conditions
-    - [ ] Implement logging for session start, soft/hard resets, and termination checks
-    - [ ] Verify logging output
-- [ ] Task: Conductor - User Manual Verification 'Diagnostic Instrumentation & Observability' (Protocol in workflow.md)
+## Phase 1: Diagnostic Instrumentation & Observability [checkpoint: 5ff509f]
+- [x] Task: Add high-resolution logging to `train/game_process.py` (5ff509f)
+    - [x] Write failing test to verify logging output during process lifecycle
+    - [x] Implement detailed logging for SC2 process creation, monitoring, and termination
+    - [x] Verify logging in test environment
+- [x] Task: Add detailed instrumentation to `train/sync_vec_env.py` (5ff509f)
+    - [x] Write failing test to verify logging during `step` and `reset` synchronization
+    - [x] Implement logging around inter-process communication (queues/pipes)
+    - [x] Verify logging captures state transitions
+- [x] Task: Enhance `train/train_pipeline.py` with loop diagnostics (5ff509f)
+    - [x] Write failing test to verify logging of iteration counts and exit conditions
+    - [x] Implement logging for session start, soft/hard resets, and termination checks
+    - [x] Verify logging output
+- [x] Task: Conductor - User Manual Verification 'Diagnostic Instrumentation & Observability' (Protocol in workflow.md) (5ff509f)
 
 ## Phase 2: Watchdog Implementation
 - [ ] Task: Develop a generic Watchdog utility
