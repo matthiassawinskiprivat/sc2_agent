@@ -11,6 +11,7 @@ from sc2.data import Race, Difficulty
 from sc2.main import run_game
 from sc2.maps import Map
 from src.sc2_bot import SC2Bot
+from src.utils.sc2_cleanup import kill_switch_sc2
 
 
 class GameProcess(multiprocessing.Process):
@@ -72,5 +73,6 @@ class GameProcess(multiprocessing.Process):
             logger.error(traceback.format_exc())
             self.conn.send(e)
         finally:
-            logger.info(f"GameProcess ({self.pid}) finished. Closing connection.")
+            logger.info(f"GameProcess ({self.pid}) finished. Closing connection and cleaning up SC2.")
             self.conn.close()
+            kill_switch_sc2()

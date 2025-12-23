@@ -20,6 +20,7 @@ from train.envs.level_0_env import Level0Env
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
 from src.utils.watchdog import Watchdog
+from src.utils.sc2_cleanup import kill_switch_sc2
 
 
 # Directories
@@ -286,6 +287,10 @@ class PipelineManager:
     def run(self):
         """Executes the entire training pipeline."""
         logger.info(f"Starting training pipeline for levels: {self.pipeline_config['levels']}")
+        
+        # Ensure clean state before starting
+        kill_switch_sc2()
+        
         last_final_model_path = None
 
         # Find the last completed level to start curriculum from, even across sessions
@@ -318,6 +323,7 @@ class PipelineManager:
             last_final_model_path = final_model_path
 
         logger.info("Training pipeline finished.")
+        kill_switch_sc2()
 
 
 def train_pipeline():
