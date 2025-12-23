@@ -19,6 +19,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from train.envs.level_0_env import Level0Env
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
+from src.utils.watchdog import Watchdog
 
 
 # Directories
@@ -239,8 +240,13 @@ class PipelineManager:
             # 4. Train Model
             logger.info(f"Training for up to {training_params['training_steps']} timesteps...")
             
+            # Watchdog to detect hangs in the training loop
+            # Timeout of 300s (5 minutes) should be enough for even slow SC2 loads/resets
+            watchdog = Watchdog(timeout=300.0, recurring=True)
+            watchdog.start()
+
             checkpoint_callback = CheckpointCallback(save_freq=20000, save_path=model_dir, name_prefix="zerg")
-            diagnostics_callback = DiagnosticsCallback(check_freq=1024)
+            diagnostics_callback = DiagnosticsCallback(check_freq=1024, watchdog=watchdog)
             
             callback_list = [checkpoint_callback, diagnostics_callback]
 
@@ -270,6 +276,8 @@ class PipelineManager:
 
         finally:
             # 6. Clean Up
+            if 'watchdog' in locals():
+                watchdog.stop()
             logger.info("Closing environments for this level.")
             env.close()
         logger.info(f"--- Finished Level: {level_name} ---")

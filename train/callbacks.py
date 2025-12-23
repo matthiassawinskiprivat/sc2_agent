@@ -77,14 +77,18 @@ class DiagnosticsCallback(BaseCallback):
     """
     Callback for logging training loop vitality and diagnostics.
     """
-    def __init__(self, check_freq: int = 1000, verbose: int = 0):
+    def __init__(self, check_freq: int = 1000, watchdog=None, verbose: int = 0):
         super(DiagnosticsCallback, self).__init__(verbose)
         self.check_freq = check_freq
+        self.watchdog = watchdog
 
     def _on_training_start(self) -> None:
         logger.info("DiagnosticsCallback: Training started.")
 
     def _on_step(self) -> bool:
+        if self.watchdog:
+            self.watchdog.reset()
+            
         if self.n_calls % self.check_freq == 0:
             logger.info(f"DiagnosticsCallback: Training is alive. Step: {self.num_timesteps}")
         return True
