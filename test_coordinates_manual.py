@@ -1,12 +1,18 @@
 import time
 import numpy as np
 from train.envs.level_0_env import Level0Env
+import traceback
 
 
 def test_coords():
     print("Initializing Environment...")
-    env = Level0Env(visualize=True)
-    env.reset()
+    try:
+        env = Level0Env(visualize=True)
+        env.reset()
+    except Exception as e:
+        print(f"AN ERROR OCCURRED DURING ENV INITIALIZATION: {e}")
+        print(traceback.format_exc())
+        raise
 
     # 1. Define Test Clicks (Image Coordinates)
     # Recall: Image (0,0) is Top-Left. (127,127) is Bottom-Right.

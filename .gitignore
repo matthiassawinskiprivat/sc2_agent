@@ -1,4 +1,4 @@
-﻿.idea
+.idea
 src/agent/__pycache__
 src/transformers/__pycache__
 src/ui/__pycache__
@@ -12,3 +12,5 @@ debug_output
 train/__pycache__
 train/envs/__pycache__
 __pycache__
+temp_config/
+temp_logs/

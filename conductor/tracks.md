@@ -24,5 +24,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [~] Track: Fix premature train_pipeline termination and hanging processes.
+## [x] Track: Fix premature train_pipeline termination and hanging processes.
 *Link: [./conductor/tracks/fix_train_hang_20251222/](./conductor/tracks/fix_train_hang_20251222/)*

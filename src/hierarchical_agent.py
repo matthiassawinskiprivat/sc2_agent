@@ -4,12 +4,10 @@ Manages shared observation transformation and multiple unit control agents
 """
 
 import numpy as np
-import time
 from typing import Dict, List, Any, Optional, Tuple
 
 from src.agent.unit_control_agent import UnitControlAgent
 from src.transformers.shared_observation_transformer import SharedObservationTransformer
-from src.utils.layer_constants import LayerConstants
 
 
 class HierarchicalAgentSystem:

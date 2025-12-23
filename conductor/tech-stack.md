@@ -15,6 +15,7 @@
 ## Data Processing & Utilities
 *   **NumPy (<2.0)**: Essential for high-performance tensor and matrix operations in observation transformation.
 *   **OpenCV**: Used for image-like processing of spatial observation layers.
+*   **psutil**: Used for robust system process management and StarCraft 2 instance cleanup.
 *   **PyYAML**: Configuration management via YAML files.
 *   **Loguru**: Modern, structured logging for debugging training and game loops.
 

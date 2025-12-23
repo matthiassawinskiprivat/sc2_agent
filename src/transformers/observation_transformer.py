@@ -110,7 +110,7 @@ class ObservationTransformer:
         # ------------------------------------------------------------------
         # 2. Draw Environment
         # ------------------------------------------------------------------
-        # self._draw_terrain_pathing(game_info, layers)
+        self._draw_terrain_pathing(game_info, layers)
         self._draw_terrain_creep(raw_obs, layers)
 
         # ------------------------------------------------------------------
