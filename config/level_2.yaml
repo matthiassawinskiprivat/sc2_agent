@@ -3,8 +3,8 @@
 
 training:
   training_steps: 2_000_000
-  num_envs: 2
-  n_steps: 512
+  num_envs: 4
+  n_steps: 1024
   batch_size: 512
   learning_rate: 0.0003
 

@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_beacon_rendering_20251225",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2025-12-25T03:03:00Z",
+  "updated_at": "2025-12-25T03:03:00Z",
+  "description": "Agent is blind to the beacon on the ENEMY_UNIT_DENSITY layer, preventing learning."
+}

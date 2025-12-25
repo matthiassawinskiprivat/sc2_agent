@@ -2,9 +2,9 @@
 # Configuration for the first level of training.
 
 training:
-  training_steps: 1000000
-  num_envs: 2
-  n_steps: 512
+  training_steps: 1_000_000
+  num_envs: 4
+  n_steps: 1024
   batch_size: 128
   learning_rate: 0.0005
 
