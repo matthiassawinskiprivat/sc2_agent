@@ -44,5 +44,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [~] Track: Fix Beacon Rendering in Observation
+## [x] Track: Fix Beacon Rendering in Observation
 *Link: [./conductor/tracks/fix_beacon_rendering_20251225/](./conductor/tracks/fix_beacon_rendering_20251225/)*

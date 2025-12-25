@@ -12,8 +12,8 @@
 - [x] Task: Verify the fix using the `tests/test_beacon_visibility.py` regression test (Green Phase). 69ab492
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Implementation' (Protocol in workflow.md) 69ab492
 
-## Phase 3: Validation and Quality Assurance
-- [x] Task: Run a short training run (approx. 5-10 minutes) using `debug_train.py` or similar to confirm the agent's reward improves or movement becomes directed. 
-- [x] Task: Execute the full test suite `pytest tests/` to ensure no regressions in other layers or agent behavior. 
-- [x] Task: Conductor - User Manual Verification 'Phase 3: Validation and Quality Assurance' (Protocol in workflow.md) 69ab492
+## Phase 3: Validation and Quality Assurance [checkpoint: b888c8d]
+- [x] Task: Run a short training run (approx. 5-10 minutes) using `debug_train.py` or similar to confirm the agent's reward improves or movement becomes directed. b888c8d
+- [x] Task: Execute the full test suite `pytest tests/` to ensure no regressions in other layers or agent behavior. b888c8d
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Validation and Quality Assurance' (Protocol in workflow.md) b888c8d
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Validation and Quality Assurance' (Protocol in workflow.md)
