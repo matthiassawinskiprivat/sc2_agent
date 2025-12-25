@@ -48,8 +48,9 @@ async def reproduce():
     
     print("Attempting to initialize GameState...")
     try:
-        state = GameState(initial_observation)
-        print("GameState initialized successfully (Unexpected!)")
+        # The FIX: pass .observation
+        state = GameState(initial_observation.observation)
+        print("GameState initialized successfully!")
     except AttributeError as e:
         print(f"Caught expected error: {e}")
         import traceback

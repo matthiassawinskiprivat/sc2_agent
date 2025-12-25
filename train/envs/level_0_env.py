@@ -8,6 +8,7 @@ import asyncio
 import aiohttp
 from pathlib import Path
 from gymnasium import spaces
+from unittest.mock import MagicMock
 
 from sc2 import maps
 from sc2.client import Client
@@ -24,12 +25,24 @@ from src.hierarchical_agent import HierarchicalAgentSystem
 HARD_RESET_COUNT = 10
 
 class ProtoWrapper:
-    def __init__(self, info):
-        self.game_info = info
+    def __init__(self, proto):
+        self._proto = proto
+
+    def __getattr__(self, name):
+        # First try to get it from self._proto directly
+        try:
+            return getattr(self._proto, name)
+        except AttributeError:
+            # If not found, try to get it from self._proto.game_info if it exists
+            # This handles cases where we wrapped a ResponseGameInfo but 
+            # library code expect it to act like GameInfo
+            if hasattr(self._proto, "game_info"):
+                return getattr(self._proto.game_info, name)
+            raise AttributeError(f"'{type(self._proto).__name__}' has no attribute '{name}'")
 
 class Level0Env(gym.Env):
     def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1,
-                 level_name: str = "level_0"):
+                 level_name: str = "level_0", sc2_process_cls=None, client_cls=None):
         super(Level0Env, self).__init__()
         self.visualize = visualize
         self.grid_size = grid_size
@@ -37,6 +50,10 @@ class Level0Env(gym.Env):
         self.num_workers = num_workers
         self.level_name = level_name
         self.episode_counter = 0
+        
+        # Dependency Injection for testing
+        self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
+        self._client_cls = client_cls if client_cls else Client
 
         self.map_list = self._discover_maps()
         if not self.map_list:
@@ -129,21 +146,27 @@ class Level0Env(gym.Env):
         self._log("Resetting bot state...")
         await self._client.step()
         observation = await self._client.observation()
+        
         from sc2.game_state import GameState
         state = GameState(observation.observation)
+            
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
         await self._bot.reset_game_state()
         await self._client.step()
         observation = await self._client.observation()
+        
         state = GameState(observation.observation)
+            
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
     
     async def _launch_sc2_process(self):
         await asyncio.sleep(random.random() * 5)
         self._log("Launching SC2 process...")
-        self._sc2_process = SC2Process(fullscreen=self.visualize)
+        self._sc2_process = self._sc2_process_cls(fullscreen=self.visualize)
         self._controller = await self._sc2_process.__aenter__()
-        self._client = Client(self._sc2_process._ws)
+        # Use _ws if available (real SC2Process), fallback to ws (for some mocks)
+        ws = getattr(self._sc2_process, "_ws", getattr(self._sc2_process, "ws", None))
+        self._client = self._client_cls(ws)
         # Give the client a moment to stabilize
         await asyncio.sleep(0.5)
 
@@ -186,8 +209,10 @@ class Level0Env(gym.Env):
         
         self._bot._prepare_start(client=self._client, player_id=1, game_info=game_info, game_data=game_data)
         initial_observation = await self._client.observation()
+        
         from sc2.game_state import GameState
         state = GameState(initial_observation.observation)
+            
         self._bot._prepare_step(state, ProtoWrapper(game_info._proto))
         try:
             await self._bot.on_step(0)
@@ -216,10 +241,23 @@ class Level0Env(gym.Env):
             cmd = self._bot.zergling.move(self._bot.last_target_pos)
             if cmd and not isinstance(cmd, bool):
                 await self._bot.do(cmd)
+        
+        # Send queued actions to the client before stepping
+        # SC2Bot uses 'actions', but standard BotAI uses '_actions'
+        actions = getattr(self._bot, "_actions", None)
+        if actions is None:
+            actions = getattr(self._bot, "actions", None)
+        
+        if actions:
+            await self._client.actions(actions[:])
+            actions.clear()
+
         await self._client.step()
         response = await self._client.observation()
+        
         from sc2.game_state import GameState
         state = GameState(response.observation)
+            
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
         return self._bot._get_step_results()
 
