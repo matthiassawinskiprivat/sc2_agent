@@ -80,10 +80,15 @@ class PipelineManager:
     - The pipeline finishes when all levels are completed.
     """
 
-    def __init__(self, config_dir=CONFIG_DIR, model_dir_base=MODEL_DIR_BASE, log_dir_base=LOG_DIR_BASE):
+    def __init__(self, config_dir=CONFIG_DIR, model_dir_base=MODEL_DIR_BASE, log_dir_base=LOG_DIR_BASE, 
+                 sc2_process_cls=None, client_cls=None):
         self.config_dir = config_dir
         self.model_dir_base = model_dir_base
         self.log_dir_base = log_dir_base
+        
+        # Injected dependencies for testing
+        self.sc2_process_cls = sc2_process_cls
+        self.client_cls = client_cls
         
         with open(os.path.join(self.config_dir, "pipeline.yaml"), 'r') as f:
             self.pipeline_config = yaml.safe_load(f)
@@ -160,7 +165,9 @@ class PipelineManager:
                         visualize=not headless,
                         grid_size=env_params["grid_size"],
                         worker_index=rank,
-                        num_workers=num_envs
+                        num_workers=num_envs,
+                        sc2_process_cls=self.sc2_process_cls,
+                        client_cls=self.client_cls
                     )
                 )
             return _init

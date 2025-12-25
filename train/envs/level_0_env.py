@@ -29,6 +29,10 @@ class ProtoWrapper:
         self._proto = proto
 
     def __getattr__(self, name):
+        # Handle library expecting a Response object when we have a ResponseGameInfo
+        if name == "game_info" and not hasattr(self._proto, "game_info"):
+            return self._proto
+
         # First try to get it from self._proto directly
         try:
             return getattr(self._proto, name)
