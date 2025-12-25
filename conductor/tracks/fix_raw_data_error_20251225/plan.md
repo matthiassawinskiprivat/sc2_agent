@@ -21,7 +21,7 @@
 - [x] Task: Run existing environment tests
     - [x] Run `pytest tests/test_action_mask_validity.py`.
     - [x] Run `pytest tests/test_robustness_and_init.py`.
-- [~] Task: Verify full `train_pipeline`
-    - [ ] Run `python -m train.train_pipeline` for a short duration (e.g., 1000 steps).
-    - [ ] Confirm no crashes occur during multiple resets.
+- [x] Task: Verify full `train_pipeline`
+    - [x] Run `python -m train.train_pipeline` for a short duration (e.g., 1000 steps).
+    - [x] Confirm no crashes occur during multiple resets. ed37605
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration and Regression Testing' (Protocol in workflow.md)
