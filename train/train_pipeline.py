@@ -167,7 +167,8 @@ class PipelineManager:
                         worker_index=rank,
                         num_workers=num_envs,
                         sc2_process_cls=self.sc2_process_cls,
-                        client_cls=self.client_cls
+                        client_cls=self.client_cls,
+                        training_conf=training_params
                     )
                 )
             return _init

@@ -6,6 +6,7 @@ import random
 import psutil
 import asyncio
 import aiohttp
+from typing import Dict
 from pathlib import Path
 from gymnasium import spaces
 from unittest.mock import MagicMock
@@ -46,7 +47,7 @@ class ProtoWrapper:
 
 class Level0Env(gym.Env):
     def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1,
-                 level_name: str = "level_0", sc2_process_cls=None, client_cls=None):
+                 level_name: str = "level_0", sc2_process_cls=None, client_cls=None, training_conf: Dict = None):
         super(Level0Env, self).__init__()
         self.visualize = visualize
         self.grid_size = grid_size
@@ -54,6 +55,7 @@ class Level0Env(gym.Env):
         self.num_workers = num_workers
         self.level_name = level_name
         self.episode_counter = 0
+        self.training_conf = training_conf or {}
         
         # Dependency Injection for testing
         self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
@@ -188,7 +190,7 @@ class Level0Env(gym.Env):
             class DummyConn:
                 def send(self, data): pass
                 def recv(self): return "continue", None
-            self._bot = SC2Bot(conn=DummyConn())
+            self._bot = SC2Bot(conn=DummyConn(), training_conf=self.training_conf)
             self._bot.distance_calculation_method = 2
             self._bot.grid_size = self.grid_size
 

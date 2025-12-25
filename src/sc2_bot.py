@@ -20,9 +20,10 @@ from src.hierarchical_agent import HierarchicalAgentSystem
 class SC2Bot(BotAI):
     """A simple bot that wraps the HierarchicalAgentSystem."""
 
-    def __init__(self, conn: multiprocessing.connection.Connection):
+    def __init__(self, conn: multiprocessing.connection.Connection, training_conf: Optional[Dict] = None):
         super().__init__()
         self.conn = conn
+        self.training_conf = training_conf or {}
         self.agent_system: Optional[HierarchicalAgentSystem] = None
         self.zergling: Optional[Unit] = None
         self.beacon: Optional[Unit] = None
@@ -39,9 +40,6 @@ class SC2Bot(BotAI):
         self.unit_command_uses_self_do = False
         self.actions = []
         self.unit_tags_received_action = set()
-        # self._game_info = None  # Removed: can't set attribute
-        # self._game_data = None  # Removed: can't set attribute
-        # self._client = None     # Removed: can't set attribute
 
     async def on_step(self, iteration: int):
         if iteration == 0:
@@ -54,7 +52,8 @@ class SC2Bot(BotAI):
 
             self.agent_system = HierarchicalAgentSystem(
                 map_size=(128, 128),
-                grid_size=grid_size
+                grid_size=grid_size,
+                training_conf=self.training_conf
             )
             self.agent_system.create_unit_agent("agent_0")
 

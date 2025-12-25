@@ -80,40 +80,53 @@ class MockClient:
     async def get_game_data(self): return None
         
     async def get_observation(self):
-        class ResponseObservation:
-            def __init__(self):
-                self.player_result = []
-                self.observation = MagicMock()
-                self.observation.game_loop = 0
-                self.observation.score = MagicMock()
-                self.observation.abilities = []
-                self.observation.player_common.player_id = 1
-                self.observation.player_common.minerals = 1000
-                self.observation.player_common.vespene = 1000
-                self.observation.player_common.food_used = 10
-                self.observation.player_common.food_cap = 200
-                
-                # Raw data
-                raw_data = MagicMock()
-                raw_data.map_state.visibility = MockProto(128, 128, in_bits=False)
-                raw_data.map_state.creep = MockProto(128, 128, in_bits=True)
-                raw_data.player.power_sources = []
-                raw_data.player.upgrade_ids = []
-                raw_data.effects = []
-                
-                # Units
-                u = MagicMock()
-                u.type_id = UnitTypeId.ZERGLING
-                u.alliance = 1
-                u.tag = 1
-                u.position.x = 10.0
-                u.position.y = 10.0
-                raw_data.units = [u]
-                
-                self.observation.raw_data = raw_data
-                self.observation_raw = raw_data
+        # Create a more structured mock for the observation
+        raw_data = MagicMock()
+        visibility_mock = MockProto(128, 128, in_bits=False)
+        creep_mock = MockProto(128, 128, in_bits=True)
         
-        return ResponseObservation()
+        # Ensure the mock returns our objects
+        raw_data.map_state.visibility = visibility_mock
+        raw_data.map_state.creep = creep_mock
+        raw_data.player.power_sources = []
+        raw_data.player.upgrade_ids = []
+        raw_data.effects = []
+        
+        # Units
+        u = MagicMock()
+        u.type_id = UnitTypeId.ZERGLING
+        u.alliance = 1
+        u.tag = 1
+        u.position.x = 10.0
+        u.position.y = 10.0
+        raw_data.units = [u]
+
+        # Use a simple namespace-like object for the observation
+        class ObservationMock:
+            def __init__(self, raw):
+                self.game_loop = 0
+                self.score = MagicMock()
+                self.abilities = []
+                self.player_common = MagicMock()
+                self.player_common.player_id = 1
+                self.player_common.minerals = 1000
+                self.player_common.vespene = 1000
+                self.player_common.food_used = 10
+                self.player_common.food_cap = 200
+                self.raw_data = raw
+                # GameState might expect some nested structure
+                self.observation = self 
+                self.player_result = []
+
+        class ResponseObservation:
+            def __init__(self, raw):
+                self.player_result = []
+                self.observation = ObservationMock(raw)
+                # Ensure ResponseObservation also has raw_data if accessed directly
+                self.raw_data = raw
+                self.observation_raw = raw
+        
+        return ResponseObservation(raw_data)
 
     async def step(self): pass
     async def leave(self): pass
