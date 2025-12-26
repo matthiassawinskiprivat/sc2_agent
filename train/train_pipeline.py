@@ -281,7 +281,7 @@ class PipelineManager:
             watchdog = Watchdog(timeout=300.0, recurring=True)
             watchdog.start()
 
-            checkpoint_callback = CheckpointCallback(save_freq=20000, save_path=model_dir, name_prefix="zerg")
+            checkpoint_callback = CheckpointCallback(save_freq=5000, save_path=model_dir, name_prefix="zerg")
             diagnostics_callback = DiagnosticsCallback(check_freq=1024, watchdog=watchdog)
             
             callback_list = [checkpoint_callback, diagnostics_callback]
