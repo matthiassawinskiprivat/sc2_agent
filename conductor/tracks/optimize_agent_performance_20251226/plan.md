@@ -9,13 +9,14 @@
 - [x] Task: Compile "Agent Optimization Report" with a ranked list of potential improvements.
 - [ ] Task: Conductor - User Manual Verification 'Deep Investigation & Audit' (Protocol in workflow.md)
 
-## Phase 2: Implementation of Top Improvement
-*Goal: Apply the highest-impact fix (Observation Space Pruning) using the TDD workflow.*
+## Phase 2: Implementation of Additive Layer Configuration
+*Goal: Implement dynamic, additive observation layers driven by level YAMLs.*
 
-- [ ] Task: Implement `LayerPruner` or configuration in `ObservationTransformer` to allow selecting a subset of layers.
-- [ ] Task: Update `Level0Env` and `SC2Bot` to use the pruned observation space (e.g., 6 layers instead of 42).
-- [ ] Task: Write Failing Tests (Red Phase) for observation pruning and shape consistency.
-- [ ] Task: Implement the improvement to pass tests (Green Phase).
-- [ ] Task: Refactor implementation and verify code coverage >80%.
-- [ ] Task: Run existing integration tests (`tests/test_reward_logic.py`, etc.) to ensure no regressions.
-- [ ] Task: Conductor - User Manual Verification 'Implementation of Top Improvement' (Protocol in workflow.md)
+- [ ] Task: Create helper logic to load and merge additive layer configurations from YAMLs.
+- [ ] Task: Update `ObservationTransformer` to support an explicit list of output layers (implemented but needs refinement for this flow).
+- [ ] Task: Update `Level0Env` to load the config, determine the active layers, and set `observation_space`.
+- [ ] Task: Update `config/level_0.yaml` (and others) to define the initial layer sets.
+- [ ] Task: Write Failing Tests (Red Phase) for additive config loading and dynamic environment initialization.
+- [ ] Task: Implement the logic to pass tests (Green Phase).
+- [ ] Task: Verify that `Level0Env` uses the correct pruned observation space.
+- [ ] Task: Conductor - User Manual Verification 'Implementation of Additive Layer Configuration' (Protocol in workflow.md)

@@ -15,6 +15,11 @@ env:
   headless: True
   max_steps: 300
   maps_dir: "train/maps/level_0"
+  active_layers:
+    - "allied_unit_density"
+    - "enemy_unit_density"
+    - "terrain_pathable"
+    - "command_objective"
 
 # Model parameters
 model:

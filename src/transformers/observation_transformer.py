@@ -28,6 +28,10 @@ class ObservationTransformer:
         self.feature_map_height = map_size[1]
         self.training_conf = training_conf if training_conf is not None else {}
 
+        # Layer Pruning
+        self.active_layers = self.training_conf.get('active_layers', [])
+        self.num_active_layers = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
+
         # Transformation State
         self.scale = 1.0
         self.offset_x = 0.0
@@ -159,6 +163,11 @@ class ObservationTransformer:
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
         layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
         layers[0:dps_start] = np.log1p(layers[0:dps_start])
+
+        if self.active_layers:
+            # Extract indices for active layers
+            indices = [LayerConstants.LAYERS[layer_name] for layer_name in self.active_layers]
+            return layers[indices]
 
         return layers
 

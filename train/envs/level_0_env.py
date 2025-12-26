@@ -22,6 +22,8 @@ from sc2.sc2process import SC2Process
 
 from src.sc2_bot import SC2Bot
 from src.hierarchical_agent import HierarchicalAgentSystem
+from src.utils.config_manager import ConfigManager
+from src.utils.layer_constants import LayerConstants
 
 HARD_RESET_COUNT = 10
 
@@ -57,6 +59,16 @@ class Level0Env(gym.Env):
         self.episode_counter = 0
         self.training_conf = training_conf or {}
         
+        # Load Additive Layer Configuration
+        # We assume 'config' directory is in the root of the project
+        try:
+            self.config_manager = ConfigManager("config")
+            self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
+            self.training_conf['active_layers'] = self.active_layers
+        except Exception as e:
+            print(f"Warning: Failed to load config for {self.level_name}: {e}")
+            self.active_layers = []
+
         # Dependency Injection for testing
         self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
         self._client_cls = client_cls if client_cls else Client
@@ -71,7 +83,8 @@ class Level0Env(gym.Env):
         self.log_file = f"logs/worker_{self.worker_id}.log"
         self._log(f"Initialized Worker {self.worker_id} (Index: {self.worker_index}) with map {self.map_name}")
 
-        self.observation_space = spaces.Box(low=0, high=255, shape=(42, 128, 128), dtype=np.uint8)
+        num_channels = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
+        self.observation_space = spaces.Box(low=0, high=255, shape=(num_channels, 128, 128), dtype=np.uint8)
         self.action_space = spaces.Discrete(self.grid_size * self.grid_size)
 
         self._sc2_process = None
