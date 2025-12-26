@@ -49,7 +49,8 @@ class ProtoWrapper:
 
 class Level0Env(gym.Env):
     def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1,
-                 level_name: str = "level_0", sc2_process_cls=None, client_cls=None, training_conf: Dict = None):
+                 level_name: str = "level_0", sc2_process_cls=None, client_cls=None, training_conf: Dict = None,
+                 max_steps: int = 300):
         super(Level0Env, self).__init__()
         self.visualize = visualize
         self.grid_size = grid_size
@@ -94,7 +95,7 @@ class Level0Env(gym.Env):
         self._loop = None
 
         self.steps = 0
-        self.max_steps = 300
+        self.max_steps = max_steps
 
     def _discover_maps(self):
         current_dir = os.path.dirname(os.path.abspath(__file__))
