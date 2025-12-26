@@ -51,3 +51,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Fix Beacon Visibility Regression
 *Link: [./conductor/tracks/fix_beacon_visibility_regression_20251225/](./conductor/tracks/fix_beacon_visibility_regression_20251225/)*
+
+---
+
+## [x] Track: Revert Reward Function to Master Branch Logic
+*Link: [./conductor/tracks/revert_reward_logic_20251226/](./conductor/tracks/revert_reward_logic_20251226/)*
