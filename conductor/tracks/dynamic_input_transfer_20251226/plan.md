@@ -9,11 +9,11 @@
 - [x] Task: Refactor and ensure >80% coverage for the utility.
 - [x] Task: Conductor - User Manual Verification 'Model Surgery Utility' (Protocol in workflow.md)
 
-## Phase 2: Pipeline Integration & Verification
+## Phase 2: Pipeline Integration & Verification [checkpoint: efe088a]
 *Goal: Integrate the utility into the training pipeline and verify end-to-step curriculum loading.*
 
-- [~] Task: Update `PipelineManager._train_level` in `train_pipeline.py` to detect and handle `observation_space` mismatches.
-- [ ] Task: Update `PipelineManager` to handle simultaneous observation and action space transitions.
-- [ ] Task: Write Integration Test simulating a full level transition (L0 model -> L1 environment).
-- [ ] Task: Verify the entire loading flow with a dummy model surgery.
-- [ ] Task: Conductor - User Manual Verification 'Pipeline Integration & Verification' (Protocol in workflow.md)
+- [x] Task: Update `PipelineManager._train_level` in `train_pipeline.py` to detect and handle `observation_space` mismatches.
+- [x] Task: Update `PipelineManager` to handle simultaneous observation and action space transitions.
+- [x] Task: Write Integration Test simulating a full level transition (L0 model -> L1 environment).
+- [x] Task: Verify the entire loading flow with a dummy model surgery.
+- [x] Task: Conductor - User Manual Verification 'Pipeline Integration & Verification' (Protocol in workflow.md)
