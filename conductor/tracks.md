@@ -49,5 +49,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [~] Track: Fix Beacon Visibility Regression
+## [x] Track: Fix Beacon Visibility Regression
 *Link: [./conductor/tracks/fix_beacon_visibility_regression_20251225/](./conductor/tracks/fix_beacon_visibility_regression_20251225/)*

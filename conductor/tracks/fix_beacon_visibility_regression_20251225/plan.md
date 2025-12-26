@@ -11,7 +11,7 @@
 - [x] Task: Fix `src/sc2_bot.py` to ensure Beacon and Zergling are always respawned during `reset_game_state`, even if they are missing/dead.
 - [x] Task: Conductor - User Manual Verification 'Fix Implementation' (Protocol in workflow.md)
 
-## Phase 3: Integration and Regression Testing
-- [ ] Task: Run `train_pipeline.py` with a short duration/headless mode to ensure no initialization crashes occur with the new fixes.
-- [ ] Task: Verify that all existing unit tests pass to ensure no regressions in other observation layers.
-- [ ] Task: Conductor - User Manual Verification 'Integration and Regression Testing' (Protocol in workflow.md)
+## Phase 3: Integration and Regression Testing [x]
+- [x] Task: Run `train_pipeline.py` with a short duration/headless mode to ensure no initialization crashes occur with the new fixes. (Confirmed by user)
+- [x] Task: Verify that all existing unit tests pass to ensure no regressions in other observation layers.
+- [x] Task: Conductor - User Manual Verification 'Integration and Regression Testing' (Protocol in workflow.md)
