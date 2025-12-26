@@ -21,6 +21,7 @@ from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
 from src.utils.watchdog import Watchdog
 from src.utils.sc2_cleanup import kill_switch_sc2
+from src.utils.model_utils import graft_model_weights
 
 
 # Directories
@@ -190,15 +191,39 @@ class PipelineManager:
             if model_path_to_load:
                 logger.info(f"Resuming/Loading training from: {model_path_to_load}")
                 
-                # Check if action space is different
-                saved_model_policy = MaskablePPO.load(model_path_to_load).policy
-                logger.info(f"Current env action space: {env.action_space.n}")
-                logger.info(f"Saved model action space: {saved_model_policy.action_space.n}")
-                if env.action_space.n != saved_model_policy.action_space.n:
-                    logger.warning("Action space has changed. Transferring weights to a new model.")
+                # Check for space mismatches
+                saved_model = MaskablePPO.load(model_path_to_load, device="cpu")
+                saved_policy = saved_model.policy
+                
+                current_obs_shape = env.observation_space.shape
+                saved_obs_shape = saved_policy.observation_space.shape
+                
+                obs_mismatch = current_obs_shape != saved_obs_shape
+                act_mismatch = env.action_space.n != saved_policy.action_space.n
+                
+                if obs_mismatch or act_mismatch:
+                    logger.warning(f"Space mismatch detected. Obs: {saved_obs_shape} -> {current_obs_shape}, Act: {saved_policy.action_space.n} -> {env.action_space.n}")
+                    logger.info("Transferring weights to a new model structure.")
                     
-                    old_model = MaskablePPO.load(model_path_to_load)
+                    state_dict = saved_policy.state_dict()
                     
+                    # Handle Observation Mismatch (Weight Surgery)
+                    if obs_mismatch:
+                        logger.info("Performing weight surgery for observation space mismatch...")
+                        try:
+                            state_dict = graft_model_weights(state_dict, current_obs_shape[0])
+                        except Exception as e:
+                            logger.error(f"Weight surgery failed: {e}")
+                            raise e
+                            
+                    # Handle Action Mismatch (Drop incompatible heads)
+                    if act_mismatch:
+                         logger.info("Dropping incompatible action/value heads...")
+                         keys_to_drop = [k for k in state_dict.keys() if "action_net" in k or "value_net" in k]
+                         for k in keys_to_drop:
+                             del state_dict[k]
+                    
+                    # Create fresh model
                     model = MaskablePPO(
                         policy=model_params["policy"],
                         env=env,
@@ -214,7 +239,9 @@ class PipelineManager:
                         device="cuda" if torch.cuda.is_available() else "cpu",
                     )
                     
-                    model.policy.features_extractor.load_state_dict(old_model.policy.features_extractor.state_dict())
+                    # Load compatible weights
+                    missing, unexpected = model.policy.load_state_dict(state_dict, strict=False)
+                    logger.info(f"Weights loaded. Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
                     
                 else:
                     custom_objects = {

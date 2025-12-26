@@ -59,5 +59,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [~] Track: Improve agent performance through research and optimization
+## [x] Track: Improve agent performance through research and optimization
 *Link: [./conductor/tracks/optimize_agent_performance_20251226/](./conductor/tracks/optimize_agent_performance_20251226/)*
+
+---
+
+## [~] Track: Dynamic Input Dimension Transfer (Weight Surgery)
+*Link: [./conductor/tracks/dynamic_input_transfer_20251226/](./conductor/tracks/dynamic_input_transfer_20251226/)*
