@@ -16,10 +16,10 @@
     - [ ] Pass `max_steps` to the `Level0Env` constructor within the `make_env` function.
 - [x] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md) a0fcdb6
 
-## Phase 3: Verification
-- [ ] Task: Update test case
+## Phase 3: Verification [checkpoint: 9a29e65]
+- [x] Task: Update test case d08213e
     - [ ] Update `tests/test_max_steps_config.py` to assert that `Level0Env` now respects the custom `max_steps` and truncates correctly.
     - [ ] Verify that `Level0Env` falls back to the default if no `max_steps` is provided (if applicable/tested).
-- [ ] Task: Run full test suite
+- [x] Task: Run full test suite 9a29e65
     - [ ] Run `pytest` to ensure no regressions in other parts of the system.
-- [ ] Task: Conductor - User Manual Verification 'Verification' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Verification' (Protocol in workflow.md) 9a29e65
