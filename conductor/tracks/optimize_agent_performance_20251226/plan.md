@@ -1,6 +1,6 @@
 # Plan: Agent Performance Optimization Research & Fix
 
-## Phase 1: Deep Investigation & Audit
+## Phase 1: Deep Investigation & Audit [checkpoint: 7536e17]
 *Goal: Identify the primary bottleneck through a detailed analysis of reward, observation, and action logic.*
 
 - [x] Task: Audit Reward Function logic in `level_0_env.py` and base classes for sparsity or magnitude issues.
