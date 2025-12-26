@@ -84,6 +84,7 @@ class SC2Bot(BotAI):
             await self.client.leave()
 
     async def reset_game_state(self):
+        self.previous_distance = None
         zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None
         beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first if self.units(UnitTypeId.BEACON_TERRANSMALL).exists else None
         
@@ -127,6 +128,10 @@ class SC2Bot(BotAI):
         self.zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None
         self.beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first if self.units(UnitTypeId.BEACON_TERRANSMALL).exists else None
 
+        # Initialize previous_distance on first observation if zergling and beacon are present
+        if self.previous_distance is None and self.zergling and self.beacon:
+            self.previous_distance = ((self.zergling.position.x - self.beacon.position.x)**2 + (self.zergling.position.y - self.beacon.position.y)**2)**0.5
+
         enemies = [self.beacon] if self.beacon else []
         
         raw_obs = {
@@ -144,19 +149,25 @@ class SC2Bot(BotAI):
 
     def _calculate_reward(self) -> Tuple[float, bool]:
         if not self.zergling or not self.beacon:
-            return 0, False
+            return 0, False # No reward if zergling or beacon are missing
 
-        current_dist = self.zergling.distance_to(self.beacon)
+        # Manual distance calculation to ensure parity with master branch
+        current_dist = ((self.zergling.position.x - self.beacon.position.x) ** 2 + (self.zergling.position.y - self.beacon.position.y) ** 2)**0.5
         reward = 0.0
         reached_target = False
 
-        if current_dist < 2.0:
+        # Win Condition: Agent reached the beacon
+        if current_dist < 2.0:  # Slightly larger radius to ensure hit
+            logger.info("SUCCESS! Reached Beacon.")
             reward = 100.0
             reached_target = True
         elif self.previous_distance is not None:
-            reward = (self.previous_distance - current_dist) * 1.0
-        
+            # Reward for getting closer (positive) or penalty for moving away (negative)
+            reward = (self.previous_distance - current_dist) * 1.0 # Scale the reward
+
+        # Update previous distance for the next step
         self.previous_distance = current_dist
+
         return reward, reached_target
 
     def _get_step_results(self) -> Tuple[np.ndarray, float, bool, bool, Dict]:
