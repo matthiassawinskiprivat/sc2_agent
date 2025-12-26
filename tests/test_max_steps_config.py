@@ -47,55 +47,42 @@ class TestMaxStepsConfig:
         """
         max_steps = 100
         
-        # This is expected to fail currently because Level0Env.__init__ 
-        # does not accept max_steps
-        try:
-            env = Level0Env(
-                level_name="level_0",
-                visualize=False,
-                grid_size=32,
-                sc2_process_cls=MockSC2Process,
-                client_cls=MockClient,
-                max_steps=max_steps
-            )
-            assert env.max_steps == max_steps
-        except TypeError as e:
-            pytest.fail(f"Level0Env does not accept max_steps argument: {e}")
+        env = Level0Env(
+            level_name="level_0",
+            visualize=False,
+            grid_size=32,
+            sc2_process_cls=MockSC2Process,
+            client_cls=MockClient,
+            max_steps=max_steps
+        )
+        assert env.max_steps == max_steps
 
     def test_level0_env_truncation(self):
         """
         Test that the environment actually truncates at max_steps.
-        We force max_steps manually here to test the logic separate from the init bug,
-        or we assume the init bug is fixed. 
-        Actually, for TDD, let's try to set it via init.
         """
         max_steps = 10
         
-        try:
-            env = Level0Env(
-                level_name="level_0",
-                visualize=False,
-                grid_size=32,
-                sc2_process_cls=MockSC2Process,
-                client_cls=MockClient,
-                max_steps=max_steps
-            )
-        except TypeError:
-            # If init fails, we manually set it to test the logic part
-            # But the goal of THIS test is to ensure the parameter is respected.
-            # So failing at init is a valid failure for this test.
-            pytest.fail("Level0Env does not accept max_steps argument")
+        env = Level0Env(
+            level_name="level_0",
+            visualize=False,
+            grid_size=32,
+            sc2_process_cls=MockSC2Process,
+            client_cls=MockClient,
+            max_steps=max_steps
+        )
 
         # Mock the async loop parts to avoid real game launch
         env._launch_sc2_process = AsyncMock()
         env._setup_game_session = AsyncMock()
         env._reset_bot_state = AsyncMock()
         
-        # Mock bot
+        # Mock _async_step directly to return dummy results
+        env._async_step = AsyncMock(return_value=(None, 0, False, False, {}))
+        
+        # Mock bot for reset
         env._bot = MagicMock()
         env._bot._get_observation.return_value = (None, {})
-        env._bot._get_step_results.return_value = (None, 0, False, False, {})
-        env._bot.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world.return_value = (0, 0)
         
         env._loop = asyncio.new_event_loop()
         
@@ -111,3 +98,17 @@ class TestMaxStepsConfig:
         _, _, done, truncated, _ = env.step(0)
         assert truncated
         assert done
+        assert env.steps == max_steps
+
+    def test_level0_env_default_max_steps(self):
+        """
+        Test that Level0Env falls back to default max_steps (300).
+        """
+        env = Level0Env(
+            level_name="level_0",
+            visualize=False,
+            grid_size=32,
+            sc2_process_cls=MockSC2Process,
+            client_cls=MockClient
+        )
+        assert env.max_steps == 300
