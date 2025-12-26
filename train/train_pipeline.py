@@ -169,7 +169,8 @@ class PipelineManager:
                         num_workers=num_envs,
                         sc2_process_cls=self.sc2_process_cls,
                         client_cls=self.client_cls,
-                        training_conf=training_params
+                        training_conf=training_params,
+                        max_steps=env_params.get("max_steps", 300)
                     )
                 )
             return _init
