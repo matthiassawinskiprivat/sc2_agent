@@ -104,11 +104,11 @@ class SC2Bot(BotAI):
 
         if zergling:
             await self.client.debug_kill_unit([zergling.tag])
-            await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, start, self.player_id]])
+        await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, start, self.player_id]])
 
         if beacon:
             await self.client.debug_kill_unit([beacon.tag])
-            await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, end, self.player_id]])
+        await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, end, self.player_id]])
         
         await self.client._send_debug()
 

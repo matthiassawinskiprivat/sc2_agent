@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_beacon_visibility_regression_20251225",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2025-12-25T21:31:00Z",
+  "updated_at": "2025-12-25T21:31:00Z",
+  "description": "Fix the issue with the agent not learning correctly due to potential beacon visibility regression in the clean-up-with-conductor branch."
+}
