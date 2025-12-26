@@ -56,3 +56,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Revert Reward Function to Master Branch Logic
 *Link: [./conductor/tracks/revert_reward_logic_20251226/](./conductor/tracks/revert_reward_logic_20251226/)*
+
+---
+
+## [~] Track: Improve agent performance through research and optimization
+*Link: [./conductor/tracks/optimize_agent_performance_20251226/](./conductor/tracks/optimize_agent_performance_20251226/)*

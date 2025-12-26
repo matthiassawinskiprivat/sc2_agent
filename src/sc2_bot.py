@@ -159,7 +159,7 @@ class SC2Bot(BotAI):
         # Win Condition: Agent reached the beacon
         if current_dist < 2.0:  # Slightly larger radius to ensure hit
             logger.info("SUCCESS! Reached Beacon.")
-            reward = 100.0
+            reward = 10.0
             reached_target = True
         elif self.previous_distance is not None:
             # Reward for getting closer (positive) or penalty for moving away (negative)

@@ -46,7 +46,7 @@ def test_reward_logic_win():
     # dist = (1**2 + 1**2)**0.5 = 1.414 < 2.0
     
     reward, reached = bot._calculate_reward()
-    assert reward == 100.0
+    assert reward == 10.0
     assert reached
 
 def test_reward_logic_reset():
