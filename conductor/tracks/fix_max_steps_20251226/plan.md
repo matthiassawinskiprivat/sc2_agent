@@ -1,10 +1,10 @@
 # Implementation Plan - Fix `max_steps` configuration
 
-## Phase 1: Test & Reproduce
+## Phase 1: Test & Reproduce [checkpoint: 9711853]
 - [x] Task: Create reproduction test case 856a7db
     - [ ] Create `tests/test_max_steps_config.py`.
     - [ ] Implement a test that initializes `Level0Env` with a custom `max_steps` value (e.g., 100) and verifies that the environment does *not* truncate at 100 steps (reproducing the bug) or fails to accept the parameter.
-- [ ] Task: Conductor - User Manual Verification 'Test & Reproduce' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Test & Reproduce' (Protocol in workflow.md) 9711853
 
 ## Phase 2: Implementation
 - [ ] Task: Update `Level0Env` signature
