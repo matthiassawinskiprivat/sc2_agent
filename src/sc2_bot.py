@@ -11,6 +11,7 @@ import random
 from loguru import logger
 
 from sc2.bot_ai import BotAI
+from sc2.data import Race
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from sc2.unit import Unit
@@ -36,6 +37,7 @@ class SC2Bot(BotAI):
         self.enemy_units = Units([], self)
         self.enemy_structures = Units([], self)
         self.all_units = Units([], self)
+        self._enemy_race = Race.Random
         self.unit_command_uses_self_do = False
         self.actions = []
         self.unit_tags_received_action = set()
