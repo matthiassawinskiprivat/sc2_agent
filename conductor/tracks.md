@@ -95,10 +95,15 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 
 
-## [~] Track: Reward Logic Refinement and Hyperparameter Tuning
+## [x] Track: Reward Logic Refinement and Hyperparameter Tuning
 
 
 
 *Link: [./conductor/tracks/reward_refinement_20251227/](./conductor/tracks/reward_refinement_20251227/)*
+
+---
+
+## [x] Track: Fix SC2Bot AttributeError (enemy_race)
+*Link: [./conductor/tracks/fix_sc2bot_attribute_error_20251227/](./conductor/tracks/fix_sc2bot_attribute_error_20251227/)*
 
 
