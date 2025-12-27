@@ -5,7 +5,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 ---
 
 ## [x] Track: Fix and Stabilize Multi-Processing Training Pipeline
-*Link: [./conductor/tracks/fix_mp_pipeline_20251220/](./conductor/tracks/fix_mp_pipeline_20251220/)*
+*Link: [./conductor/tracks/fix_mp_pipeline_20251220/](./conductor/tracks/fix_mp_pipeline_20251220/)*      
 
 ---
 
@@ -20,12 +20,12 @@ This file tracks all major tracks for the project. Each track has its own detail
 ---
 
 ## [x] Track: Fix Action Masking Simplex Error
-*Link: [./conductor/tracks/fix_mask_simplex_20251222/](./conductor/tracks/fix_mask_simplex_20251222/)*
+*Link: [./conductor/tracks/fix_mask_simplex_20251222/](./conductor/tracks/fix_mask_simplex_20251222/)*    
 
 ---
 
 ## [x] Track: Fix premature train_pipeline termination and hanging processes.
-*Link: [./conductor/tracks/fix_train_hang_20251222/](./conductor/tracks/fix_train_hang_20251222/)*
+*Link: [./conductor/tracks/fix_train_hang_20251222/](./conductor/tracks/fix_train_hang_20251222/)*        
 
 
 ---
@@ -66,3 +66,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Dynamic Input Dimension Transfer (Weight Surgery)
 *Link: [./conductor/tracks/dynamic_input_transfer_20251226/](./conductor/tracks/dynamic_input_transfer_20251226/)*
+
+---
+
+
+
+## [x] Track: Fix max_steps configuration
+
+*Link: [./conductor/tracks/fix_max_steps_20251226/](./conductor/tracks/fix_max_steps_20251226/)*
