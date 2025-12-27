@@ -51,3 +51,7 @@ class ConfigManager:
             accumulated_layers = level_conf.get("env", {}).get("active_layers", [])
 
         return accumulated_layers
+
+    def get_level_config(self, level_name: str) -> Dict[str, Any]:
+        """Loads and returns the configuration for a specific level."""
+        return self._load_yaml(f"{level_name}.yaml")

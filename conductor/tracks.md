@@ -73,4 +73,32 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Fix max_steps configuration
 
+
+
+
+
+
+
 *Link: [./conductor/tracks/fix_max_steps_20251226/](./conductor/tracks/fix_max_steps_20251226/)*
+
+
+
+
+
+
+
+---
+
+
+
+
+
+
+
+## [~] Track: Reward Logic Refinement and Hyperparameter Tuning
+
+
+
+*Link: [./conductor/tracks/reward_refinement_20251227/](./conductor/tracks/reward_refinement_20251227/)*
+
+

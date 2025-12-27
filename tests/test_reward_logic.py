@@ -32,7 +32,8 @@ def test_reward_logic_dense():
     
     reward, reached = bot._calculate_reward()
     
-    expected_reward = (initial_dist - new_dist) * 1.0
+    # New logic: (prev - current) * 0.1 - 0.05 (step penalty)
+    expected_reward = (initial_dist - new_dist) * 0.1 - 0.05
     assert reward == pytest.approx(expected_reward)
     assert not reached
     assert bot.previous_distance == new_dist
@@ -46,7 +47,8 @@ def test_reward_logic_win():
     # dist = (1**2 + 1**2)**0.5 = 1.414 < 2.0
     
     reward, reached = bot._calculate_reward()
-    assert reward == 10.0
+    # New logic: 100.0 (success) - 0.05 (step penalty) = 99.95
+    assert reward == 99.95
     assert reached
 
 def test_reward_logic_reset():
@@ -68,7 +70,8 @@ def test_reward_logic_reset():
     # We need to mock a lot of things to call reset_game_state fully,
     # or we just test the specific line.
     # Let's try to mock enough.
-    bot.game_info = MagicMock()
+    from unittest.mock import PropertyMock
+    type(bot).game_info = PropertyMock()
     bot.game_info.pathing_grid.width = 100
     bot.game_info.pathing_grid.height = 100
     

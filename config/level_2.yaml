@@ -4,7 +4,7 @@
 training:
   training_steps: 2_000_000
   num_envs: 4
-  n_steps: 1024
+  n_steps: 2048
   batch_size: 512
   learning_rate: 0.0003
   render_beacon: True
@@ -15,6 +15,10 @@ env:
   headless: True
   max_steps: 700
   maps_dir: "train/maps/level_2"
+  rewards:
+    success: 100.0
+    step_penalty: -0.05
+    distance_multiplier: 0.1
 
 # Model parameters
 model:
@@ -22,7 +26,7 @@ model:
   policy_kwargs:
     features_extractor_kwargs:
       features_dim: 512
-  gamma: 0.99
+  gamma: 0.995
   ent_coef: 0.01
   n_epochs: 4
 

@@ -15,6 +15,10 @@ env:
   headless: True
   max_steps: 500
   maps_dir: "train/maps/level_1"
+  rewards:
+    success: 100.0
+    step_penalty: -0.05
+    distance_multiplier: 0.1
   active_layers:
     - "command_assignment"
 

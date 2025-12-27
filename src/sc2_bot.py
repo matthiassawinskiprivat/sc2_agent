@@ -36,7 +36,6 @@ class SC2Bot(BotAI):
         self.enemy_units = Units([], self)
         self.enemy_structures = Units([], self)
         self.all_units = Units([], self)
-        self.enemy_race = None
         self.unit_command_uses_self_do = False
         self.actions = []
         self.unit_tags_received_action = set()
@@ -111,9 +110,6 @@ class SC2Bot(BotAI):
             await self.client.debug_kill_unit([beacon.tag])
         await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, end, self.player_id]])
         
-        await self.client._send_debug()
-
-
     def action_masks(self) -> np.ndarray:
         if self.agent_system and "agent_0" in self.agent_system.unit_agents:
             return self.agent_system.unit_agents["agent_0"].get_action_mask()
@@ -137,10 +133,10 @@ class SC2Bot(BotAI):
         raw_obs = {
             'units': self.units,
             'enemy_units': enemies,
-            'effects': self.state.effects,
-            'game_info': self.game_info,
-            'game_data': self.game_data,
-            'creep': self.state.creep,
+            'effects': getattr(self.state, "effects", []),
+            'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
+            'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
+            'creep': getattr(self.state, "creep", None),
             'command_target': self.last_target_pos
         }
         
@@ -151,6 +147,12 @@ class SC2Bot(BotAI):
         if not self.zergling or not self.beacon:
             return 0, False # No reward if zergling or beacon are missing
 
+        # Load reward constants from training_conf or use defaults
+        rewards_conf = self.training_conf.get('rewards', {})
+        success_reward = rewards_conf.get('success', 100.0)
+        step_penalty = rewards_conf.get('step_penalty', -0.05)
+        dist_multiplier = rewards_conf.get('distance_multiplier', 0.1)
+
         # Manual distance calculation to ensure parity with master branch
         current_dist = ((self.zergling.position.x - self.beacon.position.x) ** 2 + (self.zergling.position.y - self.beacon.position.y) ** 2)**0.5
         reward = 0.0
@@ -159,11 +161,14 @@ class SC2Bot(BotAI):
         # Win Condition: Agent reached the beacon
         if current_dist < 2.0:  # Slightly larger radius to ensure hit
             logger.info("SUCCESS! Reached Beacon.")
-            reward = 10.0
+            reward = success_reward
             reached_target = True
         elif self.previous_distance is not None:
             # Reward for getting closer (positive) or penalty for moving away (negative)
-            reward = (self.previous_distance - current_dist) * 1.0 # Scale the reward
+            reward = (self.previous_distance - current_dist) * dist_multiplier # Scale the reward
+
+        # Add constant step penalty to encourage speed
+        reward += step_penalty
 
         # Update previous distance for the next step
         self.previous_distance = current_dist

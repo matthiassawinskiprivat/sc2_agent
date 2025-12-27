@@ -66,6 +66,11 @@ class Level0Env(gym.Env):
             self.config_manager = ConfigManager("config")
             self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
             self.training_conf['active_layers'] = self.active_layers
+            
+            # Load rewards from level config
+            level_conf = self.config_manager.get_level_config(self.level_name)
+            if 'env' in level_conf and 'rewards' in level_conf['env']:
+                self.training_conf['rewards'] = level_conf['env']['rewards']
         except Exception as e:
             print(f"Warning: Failed to load config for {self.level_name}: {e}")
             self.active_layers = []
@@ -224,6 +229,9 @@ class Level0Env(gym.Env):
             from sc2.unit import UnitGameData
             UnitGameData._game_data = game_data
             UnitGameData._bot_object = self._bot
+            self._bot.client = self._client
+            self._bot._game_info = game_info
+            self._bot._game_data = game_data
         except ImportError:
             pass
         
@@ -249,8 +257,9 @@ class Level0Env(gym.Env):
             obs, reward, done, truncated, info = np.zeros(self.observation_space.shape, dtype=np.uint8), 0, True, True, {}
         if self.steps >= self.max_steps:
             truncated = True
-            done = True
-            reward = -10
+            if not done:
+                done = True
+                reward = -10
         return obs, reward, done, truncated, info
 
     async def _async_step(self, action):
