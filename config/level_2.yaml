@@ -13,7 +13,7 @@ training:
 env:
   grid_size: 128
   headless: True
-  max_steps: 500
+  max_steps: 700
   maps_dir: "train/maps/level_2"
 
 # Model parameters
