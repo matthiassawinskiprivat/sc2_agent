@@ -1,7 +1,53 @@
 import torch
+import torch.nn.functional as F
 import copy
 from typing import Dict, Any
 from loguru import logger
+
+def interpolate_spatial_weights(weights: torch.Tensor, old_size: int, new_size: int) -> torch.Tensor:
+    """
+    Interpolates spatial weights (e.g., action head weights) from old_size to new_size.
+    Assumes weights are flattened spatially in the first dimension: (old_size*old_size, in_features)
+    
+    Args:
+        weights: Tensor of shape (old_size*old_size, in_features)
+        old_size: The original spatial dimension (e.g., 32)
+        new_size: The target spatial dimension (e.g., 64)
+        
+    Returns:
+        Interpolated tensor of shape (new_size*new_size, in_features)
+    """
+    if weights.shape[0] != old_size * old_size:
+        raise ValueError(f"Weights first dimension {weights.shape[0]} does not match spatial size {old_size}x{old_size}")
+
+    # weights: (spatial, features) -> (features, spatial)
+    # Then reshape to (1, features, old_size, old_size) for 2D interpolation
+    in_features = weights.shape[1]
+    x = weights.t().view(1, in_features, old_size, old_size)
+    
+    # Perform bilinear interpolation
+    # align_corners=True ensures the edges match correctly
+    x_new = F.interpolate(x, size=(new_size, new_size), mode='bilinear', align_corners=True)
+    
+    # Reshape back to (new_size*new_size, in_features)
+    # (1, features, new_size, new_size) -> (features, new_size*new_size) -> (new_size*new_size, features)
+    new_weights = x_new.view(in_features, new_size * new_size).t()
+    
+    # Preservation of statistics: Bilinear interpolation tends to smooth values, 
+    # which can reduce variance. We rescale to match original standard deviation.
+    # Note: Mean is generally preserved by bilinear interpolation.
+    
+    old_std = weights.std()
+    new_std = new_weights.std()
+    
+    if new_std > 1e-6:
+        new_weights = new_weights * (old_std / new_std)
+        
+    # Also adjust mean if there's a significant shift
+    mean_shift = weights.mean() - new_weights.mean()
+    new_weights = new_weights + mean_shift
+    
+    return new_weights
 
 def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int) -> Dict[str, Any]:
     """
