@@ -208,21 +208,17 @@ class PipelineManager:
                     
                     state_dict = saved_policy.state_dict()
                     
-                    # Handle Observation Mismatch (Weight Surgery)
-                    if obs_mismatch:
-                        logger.info("Performing weight surgery for observation space mismatch...")
-                        try:
-                            state_dict = graft_model_weights(state_dict, current_obs_shape[0])
-                        except Exception as e:
-                            logger.error(f"Weight surgery failed: {e}")
-                            raise e
-                            
-                    # Handle Action Mismatch (Drop incompatible heads)
-                    if act_mismatch:
-                         logger.info("Dropping incompatible action/value heads...")
-                         keys_to_drop = [k for k in state_dict.keys() if "action_net" in k or "value_net" in k]
-                         for k in keys_to_drop:
-                             del state_dict[k]
+                    # Handle Mismatches via Smart Grafting
+                    logger.info(f"Performing smart weight transfer (Inputs: {current_obs_shape[0]} ch, Actions: {env.action_space.n})...")
+                    try:
+                        state_dict = graft_model_weights(
+                            state_dict, 
+                            new_in_channels=current_obs_shape[0],
+                            new_action_dim=env.action_space.n
+                        )
+                    except Exception as e:
+                        logger.error(f"Weight grafting failed: {e}")
+                        raise e
                     
                     # Create fresh model
                     model = MaskablePPO(
