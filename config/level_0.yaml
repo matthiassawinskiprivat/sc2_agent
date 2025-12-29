@@ -16,9 +16,9 @@ env:
   max_steps: 300
   maps_dir: "train/maps/level_0"
   rewards:
-    success: 100.0
+    success: 10.0
     step_penalty: -0.05
-    distance_multiplier: 0.1
+    distance_multiplier: 0.5
   active_layers:
     - "allied_unit_density"
     - "enemy_unit_density"

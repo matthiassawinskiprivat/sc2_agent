@@ -2,7 +2,7 @@
 # Configuration for the second level of training (curriculum learning).
 
 training:
-  training_steps: 2_000_000
+  training_steps: 1_000_000
   num_envs: 4
   n_steps: 1024
   batch_size: 256
@@ -16,11 +16,9 @@ env:
   max_steps: 500
   maps_dir: "train/maps/level_1"
   rewards:
-    success: 100.0
-    step_penalty: -0.05
-    distance_multiplier: 0.1
-  active_layers:
-    - "command_assignment"
+    success: 20.0
+    step_penalty: -0.025
+    distance_multiplier: 0.5
 
 # Model parameters
 model:
