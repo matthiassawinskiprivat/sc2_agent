@@ -1,5 +1,5 @@
-# config/level_1.yaml
-# Configuration for the second level of training (curriculum learning).
+# config/level_2.yaml
+# Configuration for the third level of training (curriculum learning).
 
 training:
   training_steps: 2_000_000
@@ -19,6 +19,7 @@ env:
     success: 50.0
     step_penalty: -0.05
     distance_multiplier: 0.5
+  active_layers: []
 
 # Model parameters
 model:

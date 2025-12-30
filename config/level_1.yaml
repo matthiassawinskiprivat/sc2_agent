@@ -19,6 +19,7 @@ env:
     success: 20.0
     step_penalty: -0.05
     distance_multiplier: 0.5
+  active_layers: []
 
 # Model parameters
 model:
