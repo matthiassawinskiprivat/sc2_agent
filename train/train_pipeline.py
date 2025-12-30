@@ -17,12 +17,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # The pipeline will now use the original, stable Level0Env
 from train.envs.level_0_env import Level0Env
+from train.envs.level_3_env import Level3Env
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
 from src.utils.watchdog import Watchdog
 from src.utils.sc2_cleanup import kill_switch_sc2
 from src.utils.model_utils import graft_model_weights
 
+# Environment Registry
+ENV_REGISTRY = {
+    "Level0Env": Level0Env,
+    "Level3Env": Level3Env
+}
 
 # Directories
 CONFIG_DIR = "config"
@@ -157,11 +163,23 @@ class PipelineManager:
         
         logger.info(f"Creating {num_envs} environment(s) for level '{level_name}' using {vec_env_cls.__name__}...")
 
+        # Resolve Environment Class
+        env_class_name = env_params.get("env_class", "Level0Env")
+        EnvClass = ENV_REGISTRY.get(env_class_name)
+        
+        if EnvClass is None:
+            # Attempt to dynamically import if not in registry (Optional, but good for extensibility)
+            # For now, just log and fallback or raise
+            logger.error(f"Environment class '{env_class_name}' not found in registry. Available: {list(ENV_REGISTRY.keys())}")
+            raise ValueError(f"Unknown environment class: {env_class_name}")
+
+        logger.info(f"Selected Environment Class: {EnvClass.__name__}")
+
         # For SubprocVecEnv, we need to pass a list of callables that return the env
         def make_env(rank):
             def _init():
                 return Monitor(
-                    Level0Env(
+                    EnvClass(
                         level_name=level_name,
                         visualize=not headless,
                         grid_size=env_params["grid_size"],

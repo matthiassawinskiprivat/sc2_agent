@@ -37,7 +37,7 @@ class SC2Bot(BotAI):
         self.enemy_units = Units([], self)
         self.enemy_structures = Units([], self)
         self.all_units = Units([], self)
-        self.enemy_race = Race.Random
+        # self.enemy_race = Race.Random  # Removed: Read-only property in BotAI
         self.unit_command_uses_self_do = False
         self.actions = []
         self.unit_tags_received_action = set()

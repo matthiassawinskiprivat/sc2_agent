@@ -110,3 +110,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Smart Weight Transfer (32x32 -> 64x64)
 *Link: [./conductor/tracks/smart_weight_transfer_20251229/](./conductor/tracks/smart_weight_transfer_20251229/)*
+
+---
+
+## [x] Track: Level 3 Environment - Multi-Zergling Control
+*Link: [./conductor/tracks/level_3_env_20251230/](./conductor/tracks/level_3_env_20251230/)*
