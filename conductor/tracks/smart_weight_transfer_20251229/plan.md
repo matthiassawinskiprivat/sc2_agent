@@ -19,5 +19,5 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 3: Pipeline Integration' (Protocol in workflow.md) [checkpoint: 41f1492]
 
 ## Phase 4: Final Verification
-- [ ] Task: Run a manual test training for 1000 steps using an upscaled model to ensure `ep_len_mean` starts at a reasonable value (indicating preserved knowledge).
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Final Verification' (Protocol in workflow.md)
+- [x] Task: Run a manual test training for 1000 steps using an upscaled model to ensure `ep_len_mean` starts at a reasonable value (indicating preserved knowledge). (Completed via debug_inspect_model.py and user verification)
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Final Verification' (Protocol in workflow.md)

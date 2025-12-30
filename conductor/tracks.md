@@ -106,4 +106,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 ## [x] Track: Fix SC2Bot AttributeError (enemy_race)
 *Link: [./conductor/tracks/fix_sc2bot_attribute_error_20251227/](./conductor/tracks/fix_sc2bot_attribute_error_20251227/)*
 
+---
 
+## [x] Track: Smart Weight Transfer (32x32 -> 64x64)
+*Link: [./conductor/tracks/smart_weight_transfer_20251229/](./conductor/tracks/smart_weight_transfer_20251229/)*

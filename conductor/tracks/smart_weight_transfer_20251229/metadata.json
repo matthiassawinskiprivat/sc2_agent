@@ -1,0 +1,8 @@
+{
+  "track_id": "smart_weight_transfer_20251229",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2025-12-29T10:00:00Z",
+  "updated_at": "2025-12-29T10:00:00Z",
+  "description": "Implement Smart Weight Transfer to adapt trained agent's policy when the spatial action resolution (grid size) changes (e.g., from 32x32 to 64x64)."
+}

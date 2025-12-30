@@ -17,7 +17,7 @@ env:
   maps_dir: "train/maps/level_1"
   rewards:
     success: 20.0
-    step_penalty: -0.025
+    step_penalty: -0.05
     distance_multiplier: 0.5
 
 # Model parameters
