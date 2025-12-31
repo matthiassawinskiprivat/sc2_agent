@@ -21,7 +21,7 @@ This plan implements a globally optimal matching algorithm for reward calculatio
 - [x] Task: Write integration tests in `tests/test_level_3_pipeline.py` to verify end-to-end reward flow. [f540016]
 - [x] Task: Conductor - User Manual Verification 'Phase 3: Environment Integration' (Protocol in workflow.md) [ebdd517]
 
-## Phase 4: Validation & Training
+## Phase 4: Validation & Training [checkpoint: 595fdfe]
 - [x] Task: Run a short training run (100k steps) for Level 3 and verify splitting behavior in `debug_visuals.py` or logs. [db6d792]
 - [x] Task: Verify that Level 4 (4 units) also benefits from the logic without additional code changes. [db6d792]
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Validation & Training' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Validation & Training' (Protocol in workflow.md) [595fdfe]
