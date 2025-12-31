@@ -1,8 +1,8 @@
 # Plan: Fix Level 3 Training Initialization and Execution Errors
 
 ## Phase 1: Core Logic Fixes (Completed/Formalization)
-- [x] Task: Verify initialization of BotAI attributes in `src/sc2_bot.py` (ensure `enemy_race` is present)
-- [x] Task: Verify synchronous invocation of `do()` in `src/sc2_bot.py`, `src/level_3_bot.py`, and `train/envs/level_0_env.py`
+- [x] Task: Verify initialization of BotAI attributes in src/sc2_bot.py (ensure enemy_race is present) (91ac725)
+- [x] Task: Verify synchronous invocation of do() in src/sc2_bot.py, src/level_3_bot.py, and 	rain/envs/level_0_env.py (91ac725)
 - [ ] Task: Conductor - User Manual Verification 'Core Logic Fixes' (Protocol in workflow.md)
 
 ## Phase 2: Integration Testing
