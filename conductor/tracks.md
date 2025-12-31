@@ -118,5 +118,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [~] Track: Fix Level 3 Training Initialization and Execution Errors
+## [x] Track: Fix Level 3 Training Initialization and Execution Errors
 *Link: [./conductor/tracks/fix_level_3_training_20251231/](./conductor/tracks/fix_level_3_training_20251231/)*
+
+---
+
+## [~] Track: Fix Failing Tests and Level 3 Spawning
+*Link: [./conductor/tracks/fix_tests_and_spawning_20251231/](./conductor/tracks/fix_tests_and_spawning_20251231/)*

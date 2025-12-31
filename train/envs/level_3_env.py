@@ -11,7 +11,15 @@ class Level3Env(Level0Env):
         # Load specific Level 3 configuration
         # Level0Env initialized config_manager
         level_conf = self.config_manager.get_level_config(self.level_name)
-        self.targets = level_conf.get("env", {}).get("targets", 1)
+        env_conf = level_conf.get("env", {})
+        self.targets = env_conf.get("targets", 1)
+        
+        # Ensure targets and other env-level configs are propagated to training_conf 
+        # so they reach the Level3Bot
+        self.training_conf["targets"] = self.targets
+        if "rewards" in env_conf:
+            self.training_conf["rewards"] = env_conf["rewards"]
+            
         self.current_unit_index = 0
         self.active_unit_tags = []
         

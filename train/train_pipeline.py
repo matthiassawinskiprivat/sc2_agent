@@ -175,6 +175,10 @@ class PipelineManager:
 
         logger.info(f"Selected Environment Class: {EnvClass.__name__}")
 
+        # Combine training and env parameters for the environment's view
+        combined_conf = training_params.copy()
+        combined_conf.update(env_params)
+
         # For SubprocVecEnv, we need to pass a list of callables that return the env
         def make_env(rank):
             def _init():
@@ -187,7 +191,7 @@ class PipelineManager:
                         num_workers=num_envs,
                         sc2_process_cls=self.sc2_process_cls,
                         client_cls=self.client_cls,
-                        training_conf=training_params,
+                        training_conf=combined_conf,
                         max_steps=env_params.get("max_steps", 300)
                     )
                 )
