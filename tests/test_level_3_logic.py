@@ -16,7 +16,7 @@ async def _test_collection_logic_impl():
     }
     bot = Level3Bot(conn=MagicMock(), training_conf=training_conf)
     bot.client = AsyncMock()
-    bot._game_info = MagicMock()
+    bot.game_info = MagicMock()
     
     # Mock Units
     z1 = MagicMock()

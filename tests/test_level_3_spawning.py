@@ -11,7 +11,7 @@ async def _test_level3_spawn_logic_impl():
     # Mock bot and client
     bot = Level3Bot(conn=MagicMock(), training_conf={"targets": 2})
     bot.client = AsyncMock()
-    bot._game_info = MagicMock()
+    bot.game_info = MagicMock()
     
     # Mock pathing grid
     mock_grid = MagicMock()
@@ -45,7 +45,7 @@ async def _test_level3_spawn_cleanup_impl():
     # Test that existing units are killed
     bot = Level3Bot(conn=MagicMock(), training_conf={"targets": 1})
     bot.client = AsyncMock()
-    bot._game_info = MagicMock()
+    bot.game_info = MagicMock()
     mock_grid = MagicMock()
     mock_grid.width = 100
     mock_grid.height = 100
