@@ -5,7 +5,8 @@ from sc2.unit import Unit
 import random
 import numpy as np
 from loguru import logger
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List
+from src.utils.model_utils import solve_optimal_assignment
 
 class Level3Bot(SC2Bot):
     """
@@ -19,9 +20,10 @@ class Level3Bot(SC2Bot):
         self.active_zerglings = [] 
         self.active_beacons = []
         
-        # previous_distances is used to calculate reward based on progress towards beacons
-        # for each individual zergling.
-        self.previous_distances = {} # Map zergling_tag -> distance to nearest beacon
+        # previous_distances is used to calculate reward based on progress towards beacons.
+        # Fixed: Now maps zergling_tag -> distance to OPTIMALLY ASSIGNED beacon.
+        self.previous_distances = {} # Map zergling_tag -> distance to assigned beacon
+        self.current_assignments = {} # Map zergling_tag -> beacon_tag
 
     async def reset_game_state(self):
         """
@@ -29,6 +31,7 @@ class Level3Bot(SC2Bot):
         This is called at the start of each episode.
         """
         self.previous_distances = {}
+        self.current_assignments = {}
         
         # Kill existing units to ensure a clean slate
         tags_to_kill = []
@@ -65,6 +68,73 @@ class Level3Bot(SC2Bot):
                 end = locations[self.targets_count + i]
                 await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, start, self.player_id]])
                 await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, end, self.player_id]])
+
+    def _calculate_optimal_assignment(self) -> Dict[int, int]:
+        """
+        Calculates the globally optimal unit-to-beacon assignment using the Hungarian algorithm.
+        Returns:
+            Dict mapping zergling_tag -> beacon_tag
+        """
+        zerglings = self.get_active_zerglings()
+        beacons = self.units(UnitTypeId.BEACON_TERRANSMALL)
+        
+        if not zerglings or not beacons:
+            return {}
+            
+        z_coords = np.array([[z.position.x, z.position.y] for z in zerglings])
+        b_coords = np.array([[b.position.x, b.position.y] for b in beacons])
+        
+        z_idx, b_idx = solve_optimal_assignment(z_coords, b_coords)
+        
+        assignment = {}
+        for i, j in zip(z_idx, b_idx):
+            z_tag = zerglings[i].tag
+            b_tag = beacons[j].tag
+            assignment[z_tag] = b_tag
+            
+        return assignment
+
+    def get_assigned_distances(self) -> Dict[int, float]:
+        """
+        Calculates optimal assignment and returns distances to assigned beacons.
+        Used by Level3Env for reward calculation.
+        """
+        self.current_assignments = self._calculate_optimal_assignment()
+        distances = {}
+        for z_tag, b_tag in self.current_assignments.items():
+            unit = self.units.find_by_tag(z_tag)
+            beacon = self.units.find_by_tag(b_tag)
+            if unit and beacon:
+                distances[z_tag] = unit.distance_to(beacon)
+        return distances
+
+    def calculate_distance_reward(self) -> float:
+        """
+        Calculates the distance-based shaping reward using optimal assignments.
+        Updates internal self.previous_distances.
+        """
+        rewards_conf = self.training_conf.get('rewards', {})
+        step_penalty = rewards_conf.get('step_penalty', -0.05)
+        dist_multiplier = rewards_conf.get('distance_multiplier', 0.1)
+        
+        current_distances = self.get_assigned_distances()
+        total_dist_change = 0.0
+        
+        for z_tag, dist in current_distances.items():
+            prev_dist = self.previous_distances.get(z_tag)
+            if prev_dist is not None:
+                # Progress reward: how much closer we got to the ASSIGNED beacon
+                total_dist_change += (prev_dist - dist)
+            
+            # Update for next frame
+            self.previous_distances[z_tag] = dist
+            
+        # Average distance reward across all currently active zerglings
+        # to keep the scale consistent regardless of unit count.
+        active_count = len(self.get_active_zerglings())
+        avg_dist_reward = (total_dist_change * dist_multiplier) / max(1, active_count)
+        
+        return avg_dist_reward + step_penalty
 
     def get_active_zerglings(self):
         """Returns sorted list of active zerglings to ensure deterministic iteration order."""
