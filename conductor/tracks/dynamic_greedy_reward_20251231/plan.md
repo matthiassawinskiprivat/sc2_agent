@@ -2,11 +2,11 @@
 
 This plan implements a globally optimal matching algorithm for reward calculation in multi-unit environments (Level 3/4).
 
-## Phase 1: Foundation & Utilities
+## Phase 1: Foundation & Utilities [checkpoint: 7c455d7]
 - [x] Task: Implement `scipy.optimize.linear_sum_assignment` (Hungarian Algorithm) wrapper or manual equivalent. [b1530cf]
 - [x] Task: Create a utility function in `src/utils/model_utils.py` to calculate the distance matrix between two sets of points. [b1530cf]
 - [x] Task: Write tests for the distance matrix and assignment logic in `tests/test_reward_logic.py`. [b1530cf]
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Foundation & Utilities' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Foundation & Utilities' (Protocol in workflow.md) [7c455d7]
 
 ## Phase 2: Bot Logic Update
 - [ ] Task: Update `Level3Bot` to store `previous_min_distances` for the optimal assignment rather than a simple per-unit nearest.
