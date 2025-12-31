@@ -141,6 +141,9 @@ class SC2Bot(BotAI):
 
         enemies = [self.beacon] if self.beacon else []
         
+        # Unified Observation: command_target is the GOAL (Beacon), not the last action.
+        target_pos = self.beacon.position if self.beacon else self.last_target_pos
+        
         raw_obs = {
             'units': self.units,
             'enemy_units': enemies,
@@ -148,7 +151,7 @@ class SC2Bot(BotAI):
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
-            'command_target': self.last_target_pos
+            'command_target': target_pos
         }
         
         processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
