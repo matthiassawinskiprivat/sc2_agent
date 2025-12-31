@@ -20,6 +20,7 @@ env:
   rewards:
     success: 50.0
     step_penalty: -0.1
+    # distance_multiplier applies to the progress towards optimally assigned beacons
     distance_multiplier: 0.5
   active_layers:
     - "command_assignment"

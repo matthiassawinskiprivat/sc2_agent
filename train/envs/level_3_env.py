@@ -181,36 +181,10 @@ class Level3Env(Level0Env):
             return obs, total_reward, done, False, {}
 
     def _calculate_avg_distance_reward(self):
-        zerglings = self._bot.units(UnitTypeId.ZERGLING)
-        beacons = self._bot.units(UnitTypeId.BEACON_TERRANSMALL)
-        
-        if not zerglings or not beacons:
+        if not self._bot:
             return 0.0
             
-        rewards_conf = self.training_conf.get('rewards', {})
-        step_penalty = rewards_conf.get('step_penalty', -0.05)
-        dist_multiplier = rewards_conf.get('distance_multiplier', 0.1)
-        
-        total_dist_change = 0.0
-        
-        current_distances = {}
-        for z in zerglings:
-            # Find nearest beacon
-            nearest_beacon = beacons.closest_to(z)
-            dist = z.distance_to(nearest_beacon)
-            current_distances[z.tag] = dist
-            
-            prev_dist = self._bot.previous_distances.get(z.tag)
-            if prev_dist is not None:
-                change = prev_dist - dist
-                total_dist_change += change
-        
-        # Update previous
-        self._bot.previous_distances = current_distances
-        
-        # Average distance reward
-        avg_dist_reward = (total_dist_change * dist_multiplier) / max(1, len(zerglings))
-        
-        return avg_dist_reward + step_penalty
+        # Delegate to bot's optimal assignment-based reward logic
+        return self._bot.calculate_distance_reward()
 
 
