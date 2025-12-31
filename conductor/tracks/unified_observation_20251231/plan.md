@@ -5,4 +5,4 @@
 - [x] Task: Create `tests/test_unified_observation.py` to verify the fix. [0d795a8]
 
 ## Phase 2: Finalize
-- [x] Task: Commit changes and mark track as complete.
+- [x] Task: Commit changes and mark track as complete. [c96b2f2]
