@@ -1,5 +1,5 @@
-# config/level_1.yaml
-# Configuration for the second level of training (curriculum learning).
+# config/level_2.yaml
+# Configuration for the third level of training (curriculum learning).
 
 training:
   training_steps: 2_000_000
@@ -13,12 +13,13 @@ training:
 env:
   grid_size: 128
   headless: True
-  max_steps: 400
+  max_steps: 500
   maps_dir: "train/maps/level_2"
   rewards:
-    success: 50.0
-    step_penalty: -0.05
+    success: 100.0
+    step_penalty: -0.075
     distance_multiplier: 0.5
+  active_layers: []
 
 # Model parameters
 model:
@@ -27,7 +28,7 @@ model:
     features_extractor_kwargs:
       features_dim: 512
   gamma: 0.995
-  ent_coef: 0.01
+  ent_coef: 0.005
   n_epochs: 4
 
 # Evaluation parameters
