@@ -16,9 +16,9 @@ This plan implements a globally optimal matching algorithm for reward calculatio
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Bot Logic Update' (Protocol in workflow.md) [04a1e25]
 
 ## Phase 3: Environment Integration
-- [~] Task: Update `Level3Env._calculate_avg_distance_reward` to use the bot's optimal assignment results.
-- [ ] Task: Refactor reward configuration in `config/level_3.yaml` to support potential new weighting for the greedy reward.
-- [ ] Task: Write integration tests in `tests/test_level_3_pipeline.py` to verify end-to-end reward flow.
+- [x] Task: Update `Level3Env._calculate_avg_distance_reward` to use the bot's optimal assignment results. [f540016]
+- [x] Task: Refactor reward configuration in `config/level_3.yaml` to support potential new weighting for the greedy reward. [f540016]
+- [x] Task: Write integration tests in `tests/test_level_3_pipeline.py` to verify end-to-end reward flow. [f540016]
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Environment Integration' (Protocol in workflow.md)
 
 ## Phase 4: Validation & Training
