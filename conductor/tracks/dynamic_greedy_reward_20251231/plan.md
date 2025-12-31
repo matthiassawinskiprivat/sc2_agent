@@ -15,13 +15,13 @@ This plan implements a globally optimal matching algorithm for reward calculatio
 - [x] Task: Write tests in `tests/test_level_3_logic.py` ensuring that if Unit A is closer to Beacon B but assigned to Beacon A, the reward reflects progress toward A. [517002b]
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Bot Logic Update' (Protocol in workflow.md) [04a1e25]
 
-## Phase 3: Environment Integration
+## Phase 3: Environment Integration [checkpoint: ebdd517]
 - [x] Task: Update `Level3Env._calculate_avg_distance_reward` to use the bot's optimal assignment results. [f540016]
 - [x] Task: Refactor reward configuration in `config/level_3.yaml` to support potential new weighting for the greedy reward. [f540016]
 - [x] Task: Write integration tests in `tests/test_level_3_pipeline.py` to verify end-to-end reward flow. [f540016]
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Environment Integration' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Environment Integration' (Protocol in workflow.md) [ebdd517]
 
 ## Phase 4: Validation & Training
-- [ ] Task: Run a short training run (100k steps) for Level 3 and verify splitting behavior in `debug_visuals.py` or logs.
+- [~] Task: Run a short training run (100k steps) for Level 3 and verify splitting behavior in `debug_visuals.py` or logs.
 - [ ] Task: Verify that Level 4 (4 units) also benefits from the logic without additional code changes.
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: Validation & Training' (Protocol in workflow.md)
