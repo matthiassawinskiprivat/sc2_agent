@@ -25,7 +25,7 @@ def test_coords():
     ]
 
     # Get access to the internal agent logic for conversion
-    agent = env.agent
+    agent = env._bot.agent_system.unit_agents["agent_0"]
 
     for y_img, x_img, label in test_actions:
         print(f"\n--- TESTING CLICK: {label} (Img: {x_img}, {y_img}) ---")
@@ -41,7 +41,7 @@ def test_coords():
         time.sleep(2)
 
         # Get Unit Position
-        unit = env.zergling
+        unit = env._bot.zergling
         if unit:
             print(f"Unit Position: ({unit.position.x:.1f}, {unit.position.y:.1f})")
         else:
