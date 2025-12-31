@@ -188,9 +188,13 @@ class ObservationTransformer:
         """Draws Selected Units and Last Action Target."""
 
         # Layer 40: COMMAND_ASSIGNMENT
-        # FIX: Draw ALL allied units.
-        # 'raw_obs["units"]' already contains only our own units (filtered in sc2_bot.py).
-        units = raw_obs.get('units', [])
+        # Priority: 'selected_units' > 'units' (fallback for backward compatibility)
+        units = raw_obs.get('selected_units')
+        if units is None:
+            # FIX: Draw ALL allied units.
+            # 'raw_obs["units"]' already contains only our own units (filtered in sc2_bot.py).
+            units = raw_obs.get('units', [])
+
         idx_sel = LayerConstants.LAYERS[LayerConstants.COMMAND_ASSIGNMENT]
 
         for unit in units:

@@ -120,6 +120,7 @@ class Level3Bot(SC2Bot):
         
         raw_obs = {
             'units': self.units,
+            'selected_units': [unit],  # Explicitly mark THIS unit as selected
             'enemy_units': enemies,
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
