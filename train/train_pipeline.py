@@ -36,9 +36,10 @@ MODEL_DIR_BASE = "models"
 LOG_DIR_BASE = "logs"
 
 # Clean logs
-logger.remove()
-log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
-logger.add(sys.stderr, level=log_level, colorize=False)
+if __name__ == "__main__":
+    logger.remove()
+    log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
+    logger.add(sys.stderr, level=log_level, colorize=False)
 
 class MaskableSubprocVecEnv(SyncVecEnv):
     """

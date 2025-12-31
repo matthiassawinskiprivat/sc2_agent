@@ -9,9 +9,10 @@ from loguru import logger
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from train.envs import level_0_env
 
-# Configure logger to capture output
-logger.remove()
-logger.add(sys.stderr, level="INFO")
+# Configure logger to capture output if run as script
+if __name__ == "__main__":
+    logger.remove()
+    logger.add(sys.stderr, level="INFO")
 
 class TestResetStress:
     def test_rapid_resets(self):

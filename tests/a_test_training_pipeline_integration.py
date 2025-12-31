@@ -67,7 +67,6 @@ class MockClient:
         class ResponseGameInfo:
             def __init__(self):
                 self.game_info = MagicMock()
-                # BotAI uses proto_game_info.game_info.start_raw.pathing_grid
                 self.game_info.start_raw.pathing_grid = MockProto(128, 128, in_bits=True)
                 
         class GameInfoMock:
@@ -75,9 +74,18 @@ class MockClient:
                 self.map_size = MockSize(128, 128)
                 self.player_races = {1: Race.Zerg, 2: Race.Zerg}
                 self._proto = ResponseGameInfo()
+            
+            @property
+            def player_id(self): return 1
+
         return GameInfoMock()
 
-    async def get_game_data(self): return None
+    async def get_game_data(self):
+        m = MagicMock()
+        m.units = []
+        m.upgrades = []
+        m.abilities = []
+        return m
         
     async def get_observation(self):
         # Create a more structured mock for the observation
@@ -133,10 +141,12 @@ class MockClient:
 
 class MonitorWithActionMask(Monitor):
     def action_masks(self):
-        return self.env.action_masks()
+        if hasattr(self.env, "action_masks"):
+            return self.env.action_masks()
+        return np.ones(self.env.action_space.n, dtype=bool)
     
     def get_action_masks(self):
-        return self.env.action_masks()
+        return self.action_masks()
 
 @pytest.fixture
 def mock_env_fn():
@@ -152,8 +162,15 @@ def mock_env_fn():
 
 def test_level0env_with_mocked_sc2(mock_env_fn):
     """Tests the Level0Env with mocked SC2Process and Client."""
+    print(f"\nDEBUG: Level0Env type is {type(Level0Env)}")
+    print(f"DEBUG: Level0Env is {Level0Env}")
     env = mock_env_fn()
-    obs, info = env.reset()
+    print(f"DEBUG: env type is {type(env)}")
+    result = env.reset()
+    assert result is not None
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    obs, info = result
     assert obs is not None
     assert isinstance(obs, np.ndarray)
     
@@ -167,10 +184,14 @@ def test_level0env_with_mocked_sc2(mock_env_fn):
 @pytest.fixture(scope="module")
 def temp_project_setup():
     """Fixture for setting up a temporary project structure for pipeline tests."""
-    temp_config_dir = "temp_config"
-    temp_model_dir = "temp_models"
-    temp_log_dir = "temp_logs"
+    temp_config_dir = "temp_config_integration"
+    temp_model_dir = "temp_models_integration"
+    temp_log_dir = "temp_logs_integration"
     original_config_dir = "config"
+
+    if os.path.exists(temp_config_dir): shutil.rmtree(temp_config_dir)
+    if os.path.exists(temp_model_dir): shutil.rmtree(temp_model_dir)
+    if os.path.exists(temp_log_dir): shutil.rmtree(temp_log_dir)
 
     os.makedirs(temp_config_dir, exist_ok=True)
     os.makedirs(temp_model_dir, exist_ok=True)
@@ -188,9 +209,9 @@ def temp_project_setup():
 
     yield temp_config_dir, temp_model_dir, temp_log_dir
 
-    shutil.rmtree(temp_config_dir)
-    shutil.rmtree(temp_model_dir)
-    shutil.rmtree(temp_log_dir)
+    if os.path.exists(temp_config_dir): shutil.rmtree(temp_config_dir)
+    if os.path.exists(temp_model_dir): shutil.rmtree(temp_model_dir)
+    if os.path.exists(temp_log_dir): shutil.rmtree(temp_log_dir)
 
 def test_pipeline_manager_with_mock(temp_project_setup, monkeypatch):
     """Tests that the PipelineManager can run a short training loop with a mocked env."""

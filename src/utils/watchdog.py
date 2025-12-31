@@ -68,6 +68,7 @@ class Watchdog:
 
     def reset(self):
         """Resets the watchdog timer."""
+        # print("DEBUG: Watchdog resetting...")
         with self._lock:
             if not self._is_running:
                 return
