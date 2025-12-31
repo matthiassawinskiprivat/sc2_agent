@@ -115,3 +115,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Level 3 Environment - Multi-Zergling Control
 *Link: [./conductor/tracks/level_3_env_20251230/](./conductor/tracks/level_3_env_20251230/)*
+
+---
+
+## [ ] Track: Fix Level 3 Training Initialization and Execution Errors
+*Link: [./conductor/tracks/fix_level_3_training_20251231/](./conductor/tracks/fix_level_3_training_20251231/)*

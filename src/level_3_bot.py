@@ -8,23 +8,29 @@ from loguru import logger
 from typing import Tuple, Dict
 
 class Level3Bot(SC2Bot):
+    """
+    Level 3 Bot for handling multiple units and multiple targets (beacons).
+    It implements a cycle-based control where each unit gets an observation
+    and takes an action sequentially within a single game step.
+    """
     def __init__(self, conn, training_conf=None):
         super().__init__(conn, training_conf)
         self.targets_count = self.training_conf.get("targets", 1)
-        self.active_zerglings = [] # List of unit tags? Or Unit objects (be careful with staleness)
+        self.active_zerglings = [] 
         self.active_beacons = []
-        # We need to map zergling -> beacon? 
-        # Spec says: "Direct multiple zerglings to multiple beacons". 
-        # Usually any zergling can take any beacon.
-        # "Sequential Collection: When a zergling touches a beacon, both that specific zergling and the beacon are collected"
         
-        # We will use lists and remove as we go.
+        # previous_distances is used to calculate reward based on progress towards beacons
+        # for each individual zergling.
         self.previous_distances = {} # Map zergling_tag -> distance to nearest beacon
 
     async def reset_game_state(self):
+        """
+        Cleans up the map and spawns new Zerglings and Beacons.
+        This is called at the start of each episode.
+        """
         self.previous_distances = {}
         
-        # Kill existing
+        # Kill existing units to ensure a clean slate
         tags_to_kill = []
         if self.units(UnitTypeId.ZERGLING).exists:
              tags_to_kill.extend([u.tag for u in self.units(UnitTypeId.ZERGLING)])
@@ -34,15 +40,16 @@ class Level3Bot(SC2Bot):
         if tags_to_kill:
             await self.client.debug_kill_unit(tags_to_kill)
         
-        # Spawn new ones
+        # Spawn new units at valid pathable locations
         grid = self.game_info.pathing_grid
         valid_spawn_points = []
+        # Sample points on a grid to avoid spawning units inside walls or on top of each other
         for x in range(4, grid.width - 4, 4):
             for y in range(4, grid.height - 4, 4):
                 if grid[(x, y)] != 0:
                     valid_spawn_points.append(Point2((x, y)))
         
-        # If not enough points, fallback to random
+        # Fallback to random sampling if the grid approach doesn't provide enough points
         if len(valid_spawn_points) < self.targets_count * 2:
             w, h = self.game_info.map_size
             for _ in range(self.targets_count):
@@ -51,6 +58,7 @@ class Level3Bot(SC2Bot):
                 await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, start, self.player_id]])
                 await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, end, self.player_id]])
         else:
+            # Pair each Zergling with a Beacon by sampling unique locations
             locations = random.sample(valid_spawn_points, self.targets_count * 2)
             for i in range(self.targets_count):
                 start = locations[i]
@@ -59,57 +67,55 @@ class Level3Bot(SC2Bot):
                 await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, end, self.player_id]])
 
     def get_active_zerglings(self):
-        """Returns sorted list of active zerglings."""
+        """Returns sorted list of active zerglings to ensure deterministic iteration order."""
         if not hasattr(self, "units"): return []
         return sorted(self.units(UnitTypeId.ZERGLING), key=lambda u: u.tag)
 
     async def apply_action(self, unit_tag, action):
-        """Applies action to specific unit."""
+        """
+        Translates the agent's spatial action (index in grid) to a world-space move command
+        for a specific unit identified by its tag.
+        """
         if not self.agent_system: return
         
-        # Convert action
+        # Convert the discrete action index to world coordinates (x, y)
         world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(action)
         target_pos = Point2((world_x, world_y))
         
-        # Find unit
+        # Find the specific unit and issue the move command
         unit = self.units.find_by_tag(unit_tag)
         if unit:
             cmd = unit.move(target_pos)
             if cmd:
-                await self.do(cmd)
+                # We use self.do(cmd) which adds the action to the batch 
+                # to be sent in the next client.step() call in Level3Env
+                self.do(cmd)
 
     def get_observation_for_unit(self, unit_tag) -> Tuple[np.ndarray, Dict]:
-        """Returns observation centered on specific unit."""
-        # We need to hack SC2Bot or AgentSystem to center on specific unit?
-        # The ObservationTransformer typically centers on the "agent".
-        # SC2Bot._get_observation sets self.zergling/self.beacon.
-        # We should set self.zergling to the specific unit before calling agent_system.process_observation.
-        
+        """
+        Generates an observation that is centered on the specified unit.
+        This is a 'hack' to allow the single-unit AgentSystem to process 
+        observations for multiple units by swapping the focused unit.
+        """
         unit = self.units.find_by_tag(unit_tag)
         if not unit:
-            # Fallback if unit missing (should not happen in loop if careful)
-            return np.zeros((1, 1, 1)), {} # Should return correct shape
+            # If the unit is missing (e.g., died or collected), return an empty observation
+            # The environment should ideally prevent this via proper tag management.
+            return np.zeros((1, 1, 1)), {} 
             
-        # Temporarily override self.zergling for observation generation
+        # Temporarily override self.zergling so the ObservationTransformer 
+        # treats THIS unit as the primary agent for centering and feature layers.
         original_zergling = self.zergling
         self.zergling = unit
         
-        # Find nearest beacon for this unit?
-        # Level0Env uses self.beacon.
-        # We should find the nearest beacon to THIS unit.
+        # Find the nearest beacon for THIS unit to include in the observation
         beacons = self.units(UnitTypeId.BEACON_TERRANSMALL)
         if beacons.exists:
             self.beacon = beacons.closest_to(unit)
         else:
             self.beacon = None
             
-        # Call original _get_observation logic (but adapted)
-        # SC2Bot._get_observation does:
-        # self.zergling = ... (overwrites what we just set)
-        # So we cannot call super()._get_observation() directly if it overwrites self.zergling.
-        
-        # We must copy logic from SC2Bot._get_observation but respect our selection.
-        
+        # Construct the raw observation dictionary that the transformer expects
         enemies = [self.beacon] if self.beacon else []
         
         raw_obs = {
@@ -122,12 +128,13 @@ class Level3Bot(SC2Bot):
             'command_target': self.last_target_pos
         }
         
+        # Process the observation through the HierarchicalAgentSystem's transformer
         if self.agent_system:
              processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
         else:
-             processed_obs = np.zeros((1, 64, 64)) # Fallback
+             processed_obs = np.zeros((1, 64, 64))
              
-        # Restore (optional)
+        # Restore the original zergling state (though it might not be strictly necessary)
         self.zergling = original_zergling
         
         return processed_obs, {}
