@@ -9,10 +9,10 @@ This plan implements a globally optimal matching algorithm for reward calculatio
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Foundation & Utilities' (Protocol in workflow.md) [7c455d7]
 
 ## Phase 2: Bot Logic Update
-- [ ] Task: Update `Level3Bot` to store `previous_min_distances` for the optimal assignment rather than a simple per-unit nearest.
-- [ ] Task: Implement `_calculate_optimal_assignment` in `Level3Bot`.
-- [ ] Task: Modify `check_collections` to handle rewards based on the new assignment logic.
-- [ ] Task: Write tests in `tests/test_level_3_logic.py` ensuring that if Unit A is closer to Beacon B but assigned to Beacon A, the reward reflects progress toward A.
+- [x] Task: Update `Level3Bot` to store `previous_min_distances` for the optimal assignment rather than a simple per-unit nearest. [517002b]
+- [x] Task: Implement `_calculate_optimal_assignment` in `Level3Bot`. [517002b]
+- [x] Task: Modify `check_collections` to handle rewards based on the new assignment logic. [517002b]
+- [x] Task: Write tests in `tests/test_level_3_logic.py` ensuring that if Unit A is closer to Beacon B but assigned to Beacon A, the reward reflects progress toward A. [517002b]
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Bot Logic Update' (Protocol in workflow.md)
 
 ## Phase 3: Environment Integration
