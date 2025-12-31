@@ -124,4 +124,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 ---
 
 ## [x] Track: Fix Failing Tests and Level 3 Spawning
-*Link: [./conductor/tracks/fix_tests_and_spawning_20251231/](./conductor/tracks/fix_tests_and_spawning_20251231/)*
+---
+
+## [ ] Track: Fix Level 3 Agent Clumping
+*Link: [./conductor/tracks/fix_level_3_clumping_20251231/](./conductor/tracks/fix_level_3_clumping_20251231/)*
+
+## [x] Track: Dynamic Greedy Reward Optimization
+*Link: [./conductor/tracks/dynamic_greedy_reward_20251231/](./conductor/tracks/dynamic_greedy_reward_20251231/)*
