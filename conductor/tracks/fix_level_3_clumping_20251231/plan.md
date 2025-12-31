@@ -10,4 +10,4 @@
 - [x] Task: Run a short training loop (100k steps) to check for crash regressions. [1fee77a]
 
 ## Phase 3: Finalize
-- [x] Task: Commit changes and mark track as complete. [a1b2c3d]
+- [x] Task: Commit changes and mark track as complete. [a587523]
