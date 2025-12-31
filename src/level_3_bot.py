@@ -178,25 +178,35 @@ class Level3Bot(SC2Bot):
         original_zergling = self.zergling
         self.zergling = unit
         
-        # Find the nearest beacon for THIS unit to include in the observation
+        # Unblind the agent: Include ALL beacons in the observation
         beacons = self.units(UnitTypeId.BEACON_TERRANSMALL)
         if beacons.exists:
+            # self.beacon is kept as closest for any legacy logic that might use it
             self.beacon = beacons.closest_to(unit)
         else:
             self.beacon = None
             
-        # Construct the raw observation dictionary that the transformer expects
-        enemies = [self.beacon] if self.beacon else []
+        # Calculate optimal assignment to provide Visual Guidance
+        # We recalculate here to ensure the guidance is always strictly optimal for the current frame
+        assignments = self._calculate_optimal_assignment()
+        assigned_beacon_tag = assignments.get(unit.tag)
         
+        target_pos = None
+        if assigned_beacon_tag:
+            assigned_beacon = self.units.find_by_tag(assigned_beacon_tag)
+            if assigned_beacon:
+                target_pos = assigned_beacon.position
+
+        # Construct the raw observation dictionary that the transformer expects
         raw_obs = {
             'units': self.units,
             'selected_units': [unit],  # Explicitly mark THIS unit as selected
-            'enemy_units': enemies,
+            'enemy_units': list(beacons) if beacons.exists else [], # Pass ALL beacons
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
-            'command_target': self.last_target_pos
+            'command_target': target_pos # Visual guidance: "Go here"
         }
         
         # Process the observation through the HierarchicalAgentSystem's transformer
