@@ -37,13 +37,13 @@
 - [x] **Crucial:** Modify `src/utils/model_utils.py` -> `graft_model_weights`. 73c9210
     - [x] Add logic: If `new_action_dim == 2 * old_action_dim`, copy old weights to `[:old_dim]` and initialize `[old_dim:]` randomly.
 
-## [ ] Phase 5: Testing
-- [ ] Create `tests/test_level_7_env.py`.
-    - [ ] Test 1: Initialization (Units spawned correct types).
-    - [ ] Test 2: Action parsing (Move vs Attack commands sent).
-    - [ ] Test 3: Reward generation (Damage gives reward).
-- [ ] Create `tests/test_level_7_grafting.py`.
-    - [ ] Verify that after grafting, the first half of the action head matches the old model's weights exactly (or interpolated equivalent).
+## [x] Phase 5: Testing
+- [x] Create `tests/test_level_7_env.py`. 827a93b
+    - [x] Test 1: Initialization (Units spawned correct types).
+    - [x] Test 2: Action parsing (Move vs Attack commands sent).
+    - [x] Test 3: Reward generation (Damage gives reward).
+- [x] Create `tests/test_level_7_grafting.py`. 73c9210
+    - [x] Verify that after grafting, the first half of the action head matches the old model's weights exactly (or interpolated equivalent).
 
 ## [ ] Phase 6: Pipeline
 - [ ] Update `config/pipeline.yaml` to include `level_7`.
