@@ -10,19 +10,19 @@
 *   **Rewards:** Damage dealt (small), Kill (large).
 *   **Weight Transfer:** Modify `graft_model_weights` to explicitly preserve "Move" weights in the first half of the new action head.
 
-## [~] Phase 1: Configuration
+## [x] Phase 1: Configuration
 - [x] Create `config/level_7.yaml`. e2ed44c
-    - [ ] Clone from `level_3.yaml`.
-    - [ ] Update `env` (Marine vs Zergling, rewards).
-    - [ ] Update `observation` (Active layers: allied/enemy health).
-    - [ ] Update `training` (Steps, larger_units).
+    - [x] Clone from `level_3.yaml`.
+    - [x] Update `env` (Marine vs Zergling, rewards).
+    - [x] Update `observation` (Active layers: allied/enemy health).
+    - [x] Update `training` (Steps, larger_units).
 
-## [ ] Phase 2: Bot Logic (Level7Bot)
-- [ ] Create `src/level_7_bot.py`.
-    - [ ] Inherit from `Level3Bot` (reusing unit cycling/assignment).
-    - [ ] Update `reset_game_state` for Marine/Zergling spawning.
-    - [ ] Override `apply_action` to handle Move (0..N) vs Attack (N..2N).
-    - [ ] Implement `calculate_combat_reward` (tracking health deltas).
+## [x] Phase 2: Bot Logic (Level7Bot)
+- [x] Create `src/level_7_bot.py`. 7311c47
+    - [x] Inherit from `Level3Bot` (reusing unit cycling/assignment).
+    - [x] Update `reset_game_state` for Marine/Zergling spawning.
+    - [x] Override `apply_action` to handle Move (0..N) vs Attack (N..2N).
+    - [x] Implement `calculate_combat_reward` (tracking health deltas).
 
 ## [ ] Phase 3: Environment Implementation
 - [ ] Create `train/envs/level_7_env.py`.
