@@ -35,29 +35,37 @@ class Level7Bot(Level3Bot):
 
     async def reset_game_state(self):
         """
-        Spawns Allied and Enemy units based on configuration.
+        Spawns Allied and Enemy units based on configuration with high reliability.
         """
-        # Ensure we can see everything to clean it up correctly
-        await self.client.debug_show_map()
-        
         self.previous_distances = {}
         self.current_assignments = {}
         self.previous_health = {}
         self.previous_allied_health = {}
         
-        # Cleanup
-        tags_to_kill = []
-        # Kill everything
-        all_units = self.all_units
-        if all_units:
-             tags_to_kill.extend([u.tag for u in all_units])
-             
-        if tags_to_kill:
+        # 1. Robust Cleanup Loop
+        # We repeat cleanup up to 3 times to ensure everything is gone
+        for cleanup_attempt in range(3):
+            # Ensure we can see everything
+            await self.client.debug_show_map()
+            
+            tags_to_kill = [u.tag for u in self.all_units]
+            if not tags_to_kill:
+                break
+                
             await self.client.debug_kill_unit(tags_to_kill)
-            # Ensure engine processes the kills before we spawn new units
             await self.client.step()
-        
-        # Grid Sampling for Spawns
+            
+            # Refresh observation to verify cleanup
+            obs = await self.client.observation()
+            from sc2.game_state import GameState
+            from train.envs.level_0_env import ProtoWrapper
+            self._prepare_step(GameState(obs.observation), ProtoWrapper(self.game_info._proto))
+            
+            if not self.all_units:
+                break
+            logger.warning(f"Cleanup attempt {cleanup_attempt+1} failed to clear all units. Remaining: {self.all_units.amount}")
+
+        # 2. Grid Sampling for Spawns
         grid = self.game_info.pathing_grid
         valid_spawn_points = []
         # Safety check for grid bounds
@@ -71,21 +79,52 @@ class Level7Bot(Level3Bot):
              w, h = self.game_info.map_size
              valid_spawn_points = [Point2((w/2, h/2)) for _ in range(self.targets_count * 2)]
 
-        locations = random.sample(valid_spawn_points, self.targets_count * 2)
-        
-        # Spawn Pairs
-        for i in range(self.targets_count):
-            start = locations[i]
-            end = locations[self.targets_count + i]
+        # 3. Spawning with Verification
+        max_spawn_retries = 3
+        expected_allied = self.targets_count
+        expected_enemy = self.targets_count * (2 if self.enemy_unit_type == UnitTypeId.ZERGLING else 1)
+
+        for spawn_attempt in range(max_spawn_retries):
+            locations = random.sample(valid_spawn_points, self.targets_count * 2)
             
-            # Ally (Player 1)
-            await self.client.debug_create_unit([[self.allied_unit_type, 1, start, self.player_id]])
+            # Spawn Pairs
+            for i in range(self.targets_count):
+                start = locations[i]
+                end = locations[self.targets_count + i]
+                
+                # Ally (Player 1)
+                await self.client.debug_create_unit([[self.allied_unit_type, 1, start, self.player_id]])
+                
+                # Enemy (Player 2)
+                enemy_amount = 1
+                if self.enemy_unit_type == UnitTypeId.ZERGLING:
+                    enemy_amount = 2
+                await self.client.debug_create_unit([[self.enemy_unit_type, enemy_amount, end, 2]])
+
+            # Wait for engine to place units
+            await self.client.step()
             
-            # Enemy (Player 2)
-            enemy_amount = 1
-            if self.enemy_unit_type == UnitTypeId.ZERGLING:
-                enemy_amount = 2
-            await self.client.debug_create_unit([[self.enemy_unit_type, enemy_amount, end, 2]])
+            # Refresh observation to verify counts
+            obs = await self.client.observation()
+            from sc2.game_state import GameState
+            from train.envs.level_0_env import ProtoWrapper
+            self._prepare_step(GameState(obs.observation), ProtoWrapper(self.game_info._proto))
+            
+            actual_allied = self.units(self.allied_unit_type).amount
+            actual_enemy = self.enemy_units(self.enemy_unit_type).amount
+            
+            if actual_allied == expected_allied and actual_enemy == expected_enemy:
+                # Success!
+                return
+            
+            logger.warning(f"Spawning attempt {spawn_attempt+1} failed. Expected {expected_allied}/{expected_enemy}, got {actual_allied}/{actual_enemy}")
+            
+            # If we have too many, it means accumulation. If too few, collision.
+            # Clean up and try again.
+            await self.client.debug_kill_unit([u.tag for u in self.all_units])
+            await self.client.step()
+            
+        logger.error(f"Failed to spawn correct unit counts after {max_spawn_retries} attempts.")
 
     def get_active_units(self):
         """Returns active allied units."""

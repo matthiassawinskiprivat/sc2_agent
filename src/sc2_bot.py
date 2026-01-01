@@ -31,22 +31,16 @@ class SC2Bot(BotAI):
         self.previous_distance = None
         self.last_target_pos: Optional[Point2] = None
         
-        # Manual initialization of BotAI attributes.
-        # This is necessary because we are running the game session manually in Level0Env
-        # and bypassing sc2.main.run_game(), which normally calls self._initialize_variables()
-        # and self._prepare_start() at the appropriate times.
-        from sc2.units import Units
-        self.units = Units([], self)
-        self.structures = Units([], self)
-        self.enemy_units = Units([], self)
-        self.enemy_structures = Units([], self)
-        self.all_units = Units([], self)
-        
         # enemy_race must be set to avoid AttributeError in BotAIInternal._prepare_step
         # when it checks for Race.Random to update it from observations.
         self.enemy_race = Race.Random
         self._enemy_race = Race.Random
         
+        # Manual initialization of BotAI attributes.
+        # This is necessary because we are running the game session manually in Level0Env
+        # and bypassing sc2.main.run_game(), which normally calls self._initialize_variables()
+        # and self._prepare_start() at the appropriate times.
+        from sc2.units import Units
         self.unit_command_uses_self_do = False
         self.actions = []
         self.unit_tags_received_action = set()
