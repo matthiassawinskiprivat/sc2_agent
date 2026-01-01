@@ -31,11 +31,11 @@
     - [x] Integrate `Level7Bot`.
     - [x] Update reward calculation to include combat rewards.
 
-## [ ] Phase 4: Integration
-- [ ] Update `train/envs/__init__.py` to export `Level7Env`.
-- [ ] Update `train/train_pipeline.py` to register `Level7Env` in `ENV_REGISTRY`.
-- [ ] **Crucial:** Modify `src/utils/model_utils.py` -> `graft_model_weights`.
-    - [ ] Add logic: If `new_action_dim == 2 * old_action_dim`, copy old weights to `[:old_dim]` and initialize `[old_dim:]` randomly.
+## [x] Phase 4: Integration
+- [x] Update `train/envs/__init__.py` to export `Level7Env`. 73c9210
+- [x] Update `train/train_pipeline.py` to register `Level7Env` in `ENV_REGISTRY`. 73c9210
+- [x] **Crucial:** Modify `src/utils/model_utils.py` -> `graft_model_weights`. 73c9210
+    - [x] Add logic: If `new_action_dim == 2 * old_action_dim`, copy old weights to `[:old_dim]` and initialize `[old_dim:]` randomly.
 
 ## [ ] Phase 5: Testing
 - [ ] Create `tests/test_level_7_env.py`.
