@@ -24,12 +24,12 @@
     - [x] Override `apply_action` to handle Move (0..N) vs Attack (N..2N).
     - [x] Implement `calculate_combat_reward` (tracking health deltas).
 
-## [ ] Phase 3: Environment Implementation
-- [ ] Create `train/envs/level_7_env.py`.
-    - [ ] Inherit from `Level3Env`.
-    - [ ] Disable fog of war in `reset` (`debug_show_map`).
-    - [ ] Integrate `Level7Bot`.
-    - [ ] Update reward calculation to include combat rewards.
+## [x] Phase 3: Environment Implementation
+- [x] Create `train/envs/level_7_env.py`. cf4f1a6
+    - [x] Inherit from `Level3Env`.
+    - [x] Disable fog of war in `reset` (`debug_show_map`).
+    - [x] Integrate `Level7Bot`.
+    - [x] Update reward calculation to include combat rewards.
 
 ## [ ] Phase 4: Integration
 - [ ] Update `train/envs/__init__.py` to export `Level7Env`.
