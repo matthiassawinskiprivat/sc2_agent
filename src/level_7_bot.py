@@ -14,7 +14,8 @@ class Level7Bot(Level3Bot):
     """
     def __init__(self, conn, training_conf=None):
         super().__init__(conn, training_conf)
-        self.previous_health = {} # tag -> health
+        self.previous_health = {} # tag -> health (enemy)
+        self.previous_allied_health = {} # tag -> health (allied)
         
         # Resolve unit types from configuration
         allied_name = self.training_conf.get("unit_type", "MARINE").upper()
@@ -39,6 +40,7 @@ class Level7Bot(Level3Bot):
         self.previous_distances = {}
         self.current_assignments = {}
         self.previous_health = {}
+        self.previous_allied_health = {}
         
         # Cleanup
         tags_to_kill = []
@@ -141,6 +143,38 @@ class Level7Bot(Level3Bot):
              del self.previous_health[tag]
              
         return total_reward
+
+    def calculate_allied_attrition_penalty(self) -> float:
+        """
+        Calculates penalty based on allied damage taken and units killed.
+        """
+        rewards_conf = self.training_conf.get('rewards', {})
+        damage_penalty = rewards_conf.get('damage_penalty', -0.1)
+        kill_penalty = rewards_conf.get('kill_penalty', -10.0)
+        
+        total_penalty = 0.0
+        
+        allies = self.units(self.allied_unit_type)
+        current_allied_tags = {u.tag for u in allies}
+        
+        # 1. Track Allied Damage
+        for u in allies:
+            prev = self.previous_allied_health.get(u.tag, u.health_max + u.shield_max)
+            curr = u.health + u.shield
+            damage = max(0, prev - curr)
+            if damage > 0:
+                total_penalty += damage * damage_penalty
+            self.previous_allied_health[u.tag] = curr
+            
+        # 2. Track Allied Kills (Deaths)
+        tracked_tags = set(self.previous_allied_health.keys())
+        died_tags = tracked_tags - current_allied_tags
+        
+        for tag in died_tags:
+            total_penalty += kill_penalty
+            del self.previous_allied_health[tag]
+            
+        return total_penalty
 
     def get_assigned_distances_combat(self) -> Dict[int, float]:
         """
