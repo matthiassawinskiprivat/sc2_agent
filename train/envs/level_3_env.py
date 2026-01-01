@@ -53,6 +53,9 @@ class Level3Env(Level0Env):
             realtime=self.visualize,
         )
         await self._client.join_game(race=Race.Zerg)
+        # Enable full vision for unit cleanup and observation
+        await self._client.debug_show_map()
+        
         self._bot._generated_frame = -1
         game_info = await self._client.get_game_info()
         game_data = await self._client.get_game_data()

@@ -72,6 +72,9 @@ class Level7Env(Level3Env):
             realtime=self.visualize,
         )
         await self._client.join_game(race=allied_race)
+        # Enable full vision for unit cleanup and observation
+        await self._client.debug_show_map()
+        
         self._bot._generated_frame = -1
         game_info = await self._client.get_game_info()
         game_data = await self._client.get_game_data()
@@ -102,10 +105,6 @@ class Level7Env(Level3Env):
 
     def reset(self, seed=None, options=None):
         obs, info = super().reset(seed, options)
-        
-        # Disable Fog of War
-        if self._client:
-             self._loop.run_until_complete(self._client.debug_show_map())
         
         if self._bot:
              self.active_unit_tags = [u.tag for u in self._bot.get_active_units()]

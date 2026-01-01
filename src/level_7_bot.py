@@ -37,6 +37,9 @@ class Level7Bot(Level3Bot):
         """
         Spawns Allied and Enemy units based on configuration.
         """
+        # Ensure we can see everything to clean it up correctly
+        await self.client.debug_show_map()
+        
         self.previous_distances = {}
         self.current_assignments = {}
         self.previous_health = {}
