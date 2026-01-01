@@ -6,13 +6,13 @@
 - [x] Task: Integrate the proximity reward into the `Level7Env` step logic, ensuring it is summed with combat rewards. 47406cd
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Reward Refactoring and Config Update' (Protocol in workflow.md) 7a8c60c
 
-## Phase 2: Action Mask Optimization
-- [~] Task: Modify `Level7Bot.action_masks` to provide a full-True mask for the attack action segment (second half of the mask).
-- [ ] Task: Verify that the Move mask (first half) remains restricted by pathing.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Action Mask Optimization' (Protocol in workflow.md)
+## Phase 2: Action Mask Optimization [checkpoint: 52edf33]
+- [x] Task: Modify `Level7Bot.action_masks` to provide a full-True mask for the attack action segment (second half of the mask). cc18cd9
+- [x] Task: Verify that the Move mask (first half) remains restricted by pathing. cc18cd9
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Action Mask Optimization' (Protocol in workflow.md) 52edf33
 
 ## Phase 3: Verification and Testing
-- [ ] Task: Create `tests/test_level_7_proximity_reward.py` to verify the reward calculation logic with mock unit movements.
+- [~] Task: Create `tests/test_level_7_proximity_reward.py` to verify the reward calculation logic with mock unit movements.
 - [ ] Task: Create `tests/test_level_7_attack_mask.py` to verify the attack mask is indeed unmasked.
 - [ ] Task: Run a short debug training session using `debug_train_level_7.py` and monitor reward logs to ensure the agent approaches enemies.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Verification and Testing' (Protocol in workflow.md)
