@@ -246,6 +246,8 @@ class Level7Bot(Level3Bot):
         move_mask = super().action_masks()
         
         # For Level 7, we want 2 * GridSize^2
-        # We use the same move_mask for both Move and Attack for now,
-        # as pathing is the primary constraint.
-        return np.concatenate([move_mask, move_mask])
+        # Move mask (first half) is restricted by pathing.
+        # Attack mask (second half) is unmasked to allow Attack-Move to any location.
+        attack_mask = np.ones_like(move_mask, dtype=bool)
+        
+        return np.concatenate([move_mask, attack_mask])
