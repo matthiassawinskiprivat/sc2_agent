@@ -1,12 +1,12 @@
 # Plan: Level 7 Allied Damage and Kill Penalties
 
-## Phase 1: Configuration and Bot Logic
+## Phase 1: Configuration and Bot Logic [checkpoint: 08a0544]
 - [x] Task: Update `config/level_7.yaml` to include `damage_penalty: -0.5` and `kill_penalty: -10.0`. 7851e93
 - [x] Task: Implement `calculate_allied_attrition_penalty` in `Level7Bot` using a `previous_allied_health` dictionary. 543f5c7
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Configuration and Bot Logic' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Configuration and Bot Logic' (Protocol in workflow.md) 08a0544
 
 ## Phase 2: Environment Integration
-- [ ] Task: Update `Level7Env.step` (or `_async_step`) to fetch and apply the allied attrition penalty from the bot.
+- [~] Task: Update `Level7Env.step` (or `_async_step`) to fetch and apply the allied attrition penalty from the bot.
 - [ ] Task: Ensure the penalty is correctly summed with existing combat rewards and distance rewards.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Environment Integration' (Protocol in workflow.md)
 
