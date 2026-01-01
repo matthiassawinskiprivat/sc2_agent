@@ -41,7 +41,7 @@ async def test_level0_env_action_transmission():
             action = 123
             
             # Mock bot.do to append to actions
-            async def mock_do(cmd):
+            def mock_do(cmd):
                 mock_bot.actions.append(cmd)
             mock_bot.do = mock_do
             

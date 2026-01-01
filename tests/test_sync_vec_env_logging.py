@@ -1,7 +1,7 @@
 import pytest
-from unittest.mock import MagicMock, patch
 import numpy as np
 from train.sync_vec_env import SyncVecEnv
+from unittest.mock import MagicMock, patch
 
 class TestSyncVecEnvLogging:
     @patch("train.sync_vec_env.logger")
@@ -25,9 +25,10 @@ class TestSyncVecEnvLogging:
         venv.step_wait()
         
         # Verify step logging
-        log_calls = [call[0][0] for call in mock_logger.debug.call_args_list]
-        assert any("Stepping environment 0" in msg for msg in log_calls), "Should log stepping env 0"
-        assert any("Stepping environment 1" in msg for msg in log_calls), "Should log stepping env 1"
+        # We check if any call to debug contains our strings
+        all_messages = [call[0][0] for call in mock_logger.debug.call_args_list]
+        assert any("Stepping environment 0" in msg for msg in all_messages)
+        assert any("Stepping environment 1" in msg for msg in all_messages)
 
     @patch("train.sync_vec_env.logger")
     def test_reset_logging(self, mock_logger):
@@ -43,8 +44,8 @@ class TestSyncVecEnvLogging:
         venv.reset()
         
         # Verify reset logging
-        log_calls = [call[0][0] for call in mock_logger.debug.call_args_list]
-        assert any("Resetting environment 0" in msg for msg in log_calls), "Should log resetting env 0"
+        all_messages = [call[0][0] for call in mock_logger.debug.call_args_list]
+        assert any("Resetting environment 0" in msg for msg in all_messages)
 
     @patch("train.sync_vec_env.logger")
     def test_close_logging(self, mock_logger):
@@ -59,5 +60,5 @@ class TestSyncVecEnvLogging:
         venv.close()
         
         # Verify close logging
-        log_calls = [call[0][0] for call in mock_logger.debug.call_args_list]
-        assert any("Closing environment 0" in msg for msg in log_calls), "Should log closing env 0"
+        all_messages = [call[0][0] for call in mock_logger.debug.call_args_list]
+        assert any("Closing environment 0" in msg for msg in all_messages)

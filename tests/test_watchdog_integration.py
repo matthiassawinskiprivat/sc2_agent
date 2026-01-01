@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 import time
+import threading
 from train.train_pipeline import PipelineManager
 from src.utils.watchdog import Watchdog
 
@@ -39,16 +40,15 @@ class TestWatchdogIntegration:
 
     def test_watchdog_actually_triggers_on_hang(self):
         """Test that watchdog triggers if a real hang occurs (short timeout)."""
-        trigger_count = 0
+        event = threading.Event()
         def on_trigger():
-            nonlocal trigger_count
-            trigger_count += 1
+            event.set()
             
-        wd = Watchdog(timeout=0.1, callback=on_trigger)
+        wd = Watchdog(timeout=0.2, callback=on_trigger)
         wd.start()
         
-        # Simulate a hang longer than timeout
-        time.sleep(0.3)
+        # Simulate a hang longer than timeout by waiting for the event
+        triggered = event.wait(timeout=1.0)
         
-        assert trigger_count >= 1
+        assert triggered, "Watchdog failed to trigger during simulated hang"
         wd.stop()

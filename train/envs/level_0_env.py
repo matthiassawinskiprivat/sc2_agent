@@ -269,7 +269,7 @@ class Level0Env(gym.Env):
         if self._bot.zergling:
             cmd = self._bot.zergling.move(self._bot.last_target_pos)
             if cmd and not isinstance(cmd, bool):
-                await self._bot.do(cmd)
+                self._bot.do(cmd)
         
         # Send queued actions to the client before stepping
         # SC2Bot uses 'actions', but standard BotAI uses '_actions'

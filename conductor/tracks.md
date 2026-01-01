@@ -110,3 +110,27 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Smart Weight Transfer (32x32 -> 64x64)
 *Link: [./conductor/tracks/smart_weight_transfer_20251229/](./conductor/tracks/smart_weight_transfer_20251229/)*
+
+---
+
+## [x] Track: Level 3 Environment - Multi-Zergling Control
+*Link: [./conductor/tracks/level_3_env_20251230/](./conductor/tracks/level_3_env_20251230/)*
+
+---
+
+## [x] Track: Fix Level 3 Training Initialization and Execution Errors
+*Link: [./conductor/tracks/fix_level_3_training_20251231/](./conductor/tracks/fix_level_3_training_20251231/)*
+
+---
+
+## [x] Track: Fix Failing Tests and Level 3 Spawning
+---
+
+## [x] Track: Unified Observation
+*Link: [./conductor/tracks/unified_observation_20251231/](./conductor/tracks/unified_observation_20251231/)*
+
+## [x] Track: Fix Level 3 Agent Clumping
+*Link: [./conductor/tracks/fix_level_3_clumping_20251231/](./conductor/tracks/fix_level_3_clumping_20251231/)*
+
+## [x] Track: Dynamic Greedy Reward Optimization
+*Link: [./conductor/tracks/dynamic_greedy_reward_20251231/](./conductor/tracks/dynamic_greedy_reward_20251231/)*

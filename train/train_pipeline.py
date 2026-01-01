@@ -17,12 +17,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # The pipeline will now use the original, stable Level0Env
 from train.envs.level_0_env import Level0Env
+from train.envs.level_3_env import Level3Env
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
 from src.utils.watchdog import Watchdog
 from src.utils.sc2_cleanup import kill_switch_sc2
 from src.utils.model_utils import graft_model_weights
 
+# Environment Registry
+ENV_REGISTRY = {
+    "Level0Env": Level0Env,
+    "Level3Env": Level3Env
+}
 
 # Directories
 CONFIG_DIR = "config"
@@ -30,9 +36,10 @@ MODEL_DIR_BASE = "models"
 LOG_DIR_BASE = "logs"
 
 # Clean logs
-logger.remove()
-log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
-logger.add(sys.stderr, level=log_level, colorize=False)
+if __name__ == "__main__":
+    logger.remove()
+    log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
+    logger.add(sys.stderr, level=log_level, colorize=False)
 
 class MaskableSubprocVecEnv(SyncVecEnv):
     """
@@ -157,11 +164,27 @@ class PipelineManager:
         
         logger.info(f"Creating {num_envs} environment(s) for level '{level_name}' using {vec_env_cls.__name__}...")
 
+        # Resolve Environment Class
+        env_class_name = env_params.get("env_class", "Level0Env")
+        EnvClass = ENV_REGISTRY.get(env_class_name)
+        
+        if EnvClass is None:
+            # Attempt to dynamically import if not in registry (Optional, but good for extensibility)
+            # For now, just log and fallback or raise
+            logger.error(f"Environment class '{env_class_name}' not found in registry. Available: {list(ENV_REGISTRY.keys())}")
+            raise ValueError(f"Unknown environment class: {env_class_name}")
+
+        logger.info(f"Selected Environment Class: {EnvClass.__name__}")
+
+        # Combine training and env parameters for the environment's view
+        combined_conf = training_params.copy()
+        combined_conf.update(env_params)
+
         # For SubprocVecEnv, we need to pass a list of callables that return the env
         def make_env(rank):
             def _init():
                 return Monitor(
-                    Level0Env(
+                    EnvClass(
                         level_name=level_name,
                         visualize=not headless,
                         grid_size=env_params["grid_size"],
@@ -169,7 +192,7 @@ class PipelineManager:
                         num_workers=num_envs,
                         sc2_process_cls=self.sc2_process_cls,
                         client_cls=self.client_cls,
-                        training_conf=training_params,
+                        training_conf=combined_conf,
                         max_steps=env_params.get("max_steps", 300)
                     )
                 )

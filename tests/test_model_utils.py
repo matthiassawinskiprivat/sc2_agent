@@ -47,7 +47,8 @@ def test_graft_model_weights_no_change_needed():
     }
     
     new_state_dict = graft_model_weights(state_dict, new_in_channels=4)
-    assert new_state_dict is state_dict # Should return same object or identical copy
+    # Since graft_model_weights performs a deepcopy, 'is' will be false.
+    # We check that the weights are identical.
     assert torch.equal(new_state_dict["features_extractor.cnn.0.weight"], old_weight)
 
 def test_graft_model_weights_shrinks_channels():

@@ -2,7 +2,9 @@ import torch
 import torch.nn.functional as F
 import copy
 import math
-from typing import Dict, Any, Optional
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+from typing import Dict, Any, Optional, Tuple, List
 from loguru import logger
 
 def interpolate_spatial_weights(weights: torch.Tensor, old_size: int, new_size: int) -> torch.Tensor:
@@ -166,3 +168,51 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                 del new_state_dict[key]
         
     return new_state_dict
+
+def calculate_distance_matrix(points_a: np.ndarray, points_b: np.ndarray) -> np.ndarray:
+    """
+    Calculates the Euclidean distance matrix between two sets of points.
+    
+    Args:
+        points_a: Numpy array of shape (N, 2)
+        points_b: Numpy array of shape (M, 2)
+        
+    Returns:
+        Distance matrix of shape (N, M)
+    """
+    # Use broadcasting to compute pairwise distances efficiently
+    # (N, 1, 2) - (1, M, 2) -> (N, M, 2)
+    diff = points_a[:, np.newaxis, :] - points_b[np.newaxis, :, :]
+    
+    # Squared Euclidean Distance: (x1-x2)^2 + (y1-y2)^2
+    # Sum over the last dimension (coordinates)
+    dist_sq = np.sum(diff**2, axis=-1)
+    
+    # Sqrt to get Euclidean distance
+    return np.sqrt(dist_sq)
+
+def solve_optimal_assignment(points_a: np.ndarray, points_b: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Solves the linear sum assignment problem (optimal matching) between two sets of points.
+    Minimizes the total distance.
+    
+    Args:
+        points_a: Numpy array of shape (N, 2) - e.g., Units
+        points_b: Numpy array of shape (M, 2) - e.g., Beacons
+        
+    Returns:
+        Tuple (row_ind, col_ind) of assigned indices.
+        - row_ind: Indices of assigned elements from points_a
+        - col_ind: Indices of assigned elements from points_b
+        
+        Note: If N != M, the algorithm matches min(N, M) pairs optimally.
+    """
+    if len(points_a) == 0 or len(points_b) == 0:
+        return np.array([]), np.array([])
+        
+    cost_matrix = calculate_distance_matrix(points_a, points_b)
+    
+    # linear_sum_assignment finds indexes that minimize total cost
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    
+    return row_ind, col_ind
