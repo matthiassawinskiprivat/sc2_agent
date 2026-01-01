@@ -10,7 +10,7 @@
 - [x] Task: Ensure the penalty is correctly summed with existing combat rewards and distance rewards. 7290b84
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Environment Integration' (Protocol in workflow.md) 7a47e87
 
-## Phase 3: Verification and Testing
-- [~] Task: Create `tests/test_level_7_allied_penalties.py` to verify penalty calculation logic with mock allied unit damage/death.
-- [ ] Task: Run a short debug training session using `debug_train_level_7.py` and confirm negative rewards appear when allied units take damage.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Verification and Testing' (Protocol in workflow.md)
+## Phase 3: Verification and Testing [checkpoint: 8c73909]
+- [x] Task: Create `tests/test_level_7_allied_penalties.py` to verify penalty calculation logic with mock allied unit damage/death. 4879b36
+- [x] Task: Run a short debug training session using `debug_train_level_7.py` and confirm negative rewards appear when allied units take damage. 8c73909
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Verification and Testing' (Protocol in workflow.md) 8c73909
