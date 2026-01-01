@@ -1,0 +1,49 @@
+# Plan: Level 7 Environment (Combat Basics)
+
+**Goal:** Implement a new training environment "Level 7" that introduces basic combat mechanics. The agent controls a Marine (Terran) and must decide between moving and attacking an enemy Zergling (Zerg).
+
+**Core Requirements:**
+*   **Units:** Controlled Marine vs. Enemy Zergling.
+*   **Visibility:** No Fog of War (Perfect Information).
+*   **Action Space:** Flattened discrete space (`2 * GridSize`). Indices `0..N` for Move, `N..2N` for Attack.
+*   **Observation:** Include Allied/Enemy Health layers.
+*   **Rewards:** Damage dealt (small), Kill (large).
+*   **Weight Transfer:** Modify `graft_model_weights` to explicitly preserve "Move" weights in the first half of the new action head.
+
+## [~] Phase 1: Configuration
+- [x] Create `config/level_7.yaml`. e2ed44c
+    - [ ] Clone from `level_3.yaml`.
+    - [ ] Update `env` (Marine vs Zergling, rewards).
+    - [ ] Update `observation` (Active layers: allied/enemy health).
+    - [ ] Update `training` (Steps, larger_units).
+
+## [ ] Phase 2: Bot Logic (Level7Bot)
+- [ ] Create `src/level_7_bot.py`.
+    - [ ] Inherit from `Level3Bot` (reusing unit cycling/assignment).
+    - [ ] Update `reset_game_state` for Marine/Zergling spawning.
+    - [ ] Override `apply_action` to handle Move (0..N) vs Attack (N..2N).
+    - [ ] Implement `calculate_combat_reward` (tracking health deltas).
+
+## [ ] Phase 3: Environment Implementation
+- [ ] Create `train/envs/level_7_env.py`.
+    - [ ] Inherit from `Level3Env`.
+    - [ ] Disable fog of war in `reset` (`debug_show_map`).
+    - [ ] Integrate `Level7Bot`.
+    - [ ] Update reward calculation to include combat rewards.
+
+## [ ] Phase 4: Integration
+- [ ] Update `train/envs/__init__.py` to export `Level7Env`.
+- [ ] Update `train/train_pipeline.py` to register `Level7Env` in `ENV_REGISTRY`.
+- [ ] **Crucial:** Modify `src/utils/model_utils.py` -> `graft_model_weights`.
+    - [ ] Add logic: If `new_action_dim == 2 * old_action_dim`, copy old weights to `[:old_dim]` and initialize `[old_dim:]` randomly.
+
+## [ ] Phase 5: Testing
+- [ ] Create `tests/test_level_7_env.py`.
+    - [ ] Test 1: Initialization (Units spawned correct types).
+    - [ ] Test 2: Action parsing (Move vs Attack commands sent).
+    - [ ] Test 3: Reward generation (Damage gives reward).
+- [ ] Create `tests/test_level_7_grafting.py`.
+    - [ ] Verify that after grafting, the first half of the action head matches the old model's weights exactly (or interpolated equivalent).
+
+## [ ] Phase 6: Pipeline
+- [ ] Update `config/pipeline.yaml` to include `level_7`.
