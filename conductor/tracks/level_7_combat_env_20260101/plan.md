@@ -24,7 +24,7 @@
     - [x] Override `apply_action` to handle Move (0..N) vs Attack (N..2N).
     - [x] Implement `calculate_combat_reward` (tracking health deltas).
 
-## [x] Phase 3: Environment Implementation
+## [x] Phase 3: Environment Implementation [checkpoint: 22d6e2b]
 - [x] Create `train/envs/level_7_env.py`. cf4f1a6
     - [x] Inherit from `Level3Env`.
     - [x] Disable fog of war in `reset` (`debug_show_map`).
