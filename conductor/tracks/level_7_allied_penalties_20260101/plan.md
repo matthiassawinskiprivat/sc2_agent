@@ -2,7 +2,7 @@
 
 ## Phase 1: Configuration and Bot Logic
 - [x] Task: Update `config/level_7.yaml` to include `damage_penalty: -0.5` and `kill_penalty: -10.0`. 7851e93
-- [ ] Task: Implement `calculate_allied_attrition_penalty` in `Level7Bot` using a `previous_allied_health` dictionary.
+- [x] Task: Implement `calculate_allied_attrition_penalty` in `Level7Bot` using a `previous_allied_health` dictionary. 543f5c7
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Configuration and Bot Logic' (Protocol in workflow.md)
 
 ## Phase 2: Environment Integration
