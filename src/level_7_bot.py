@@ -37,55 +37,24 @@ class Level7Bot(Level3Bot):
         """
         Spawns Allied and Enemy units based on configuration with high reliability.
         """
+        # 1. Base Cleanup (Guarantees vision and empty map)
+        await super().reset_game_state()
+        
+        # Reset local state
         self.previous_distances = {}
         self.current_assignments = {}
         self.previous_health = {}
         self.previous_allied_health = {}
         
-        # 1. Robust Cleanup Loop
-        # We repeat cleanup up to 3 times to ensure everything is gone
-        for cleanup_attempt in range(3):
-            # Ensure we can see everything
-            await self.client.debug_show_map()
-            
-            tags_to_kill = [u.tag for u in self.all_units]
-            if not tags_to_kill:
-                break
-                
-            await self.client.debug_kill_unit(tags_to_kill)
-            await self.client.step()
-            
-            # Refresh observation to verify cleanup
-            # In unit tests, we can just check self.units directly if they are mocked
-            # In real game, we need to advance the engine
-            if not self.all_units:
-                break
-            
-            await self.client.step()
-            obs = await self.client.observation()
-            from sc2.game_state import GameState
-            from train.envs.level_0_env import ProtoWrapper
-            try:
-                self._prepare_step(GameState(obs.observation), ProtoWrapper(self.game_info._proto))
-            except Exception as e:
-                # Fallback for tests or if prepare_step fails
-                logger.debug(f"Refresh failed in reset: {e}")
-            
-            if not self.all_units:
-                break
-            logger.warning(f"Cleanup attempt {cleanup_attempt+1} failed to clear all units. Remaining: {self.all_units.amount}")
-
         # 2. Grid Sampling for Spawns
         grid = self.game_info.pathing_grid
         valid_spawn_points = []
-        # Safety check for grid bounds
         for x in range(4, grid.width - 4, 4):
             for y in range(4, grid.height - 4, 4):
                 if grid[(x, y)] != 0:
                     valid_spawn_points.append(Point2((x, y)))
         
         if len(valid_spawn_points) < self.targets_count * 2:
-             # Fallback
              w, h = self.game_info.map_size
              valid_spawn_points = [Point2((w/2, h/2)) for _ in range(self.targets_count * 2)]
 
@@ -113,29 +82,21 @@ class Level7Bot(Level3Bot):
 
             # Wait for engine to place units
             await self.client.step()
-            
-            # Refresh observation to verify counts
-            obs = await self.client.observation()
-            from sc2.game_state import GameState
-            from train.envs.level_0_env import ProtoWrapper
-            try:
-                self._prepare_step(GameState(obs.observation), ProtoWrapper(self.game_info._proto))
-            except Exception as e:
-                logger.debug(f"Refresh failed in spawn: {e}")
+            await self._refresh_state()
             
             actual_allied = self.units(self.allied_unit_type).amount
             actual_enemy = self.enemy_units(self.enemy_unit_type).amount
             
             if actual_allied == expected_allied and actual_enemy == expected_enemy:
-                # Success!
+                logger.info(f"Spawning successful: {actual_allied} allied, {actual_enemy} enemy.")
                 return
             
-            logger.warning(f"Spawning attempt {spawn_attempt+1} failed. Expected {expected_allied}/{expected_enemy}, got {actual_allied}/{actual_enemy}")
+            logger.warning(f"Spawning attempt {spawn_attempt+1} failed. Expected {expected_allied}/{expected_enemy}, got {actual_allied}/{actual_enemy}. Retrying cleanup.")
             
-            # If we have too many, it means accumulation. If too few, collision.
-            # Clean up and try again.
+            # Cleanup and retry
             await self.client.debug_kill_unit([u.tag for u in self.all_units])
             await self.client.step()
+            await self._refresh_state()
             
         logger.error(f"Failed to spawn correct unit counts after {max_spawn_retries} attempts.")
 

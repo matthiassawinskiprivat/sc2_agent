@@ -41,6 +41,12 @@ class SC2Bot(BotAI):
         # and bypassing sc2.main.run_game(), which normally calls self._initialize_variables()
         # and self._prepare_start() at the appropriate times.
         from sc2.units import Units
+        self.units = Units([], self)
+        self.structures = Units([], self)
+        self.enemy_units = Units([], self)
+        self.enemy_structures = Units([], self)
+        self.all_units = Units([], self)
+        
         self.unit_command_uses_self_do = False
         self.actions = []
         self.unit_tags_received_action = set()
@@ -88,33 +94,51 @@ class SC2Bot(BotAI):
             await self.client.leave()
 
     async def reset_game_state(self):
+        """
+        Base reset logic: Guarantees vision and clears all units from the map.
+        """
         self.previous_distance = None
-        zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None
-        beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first if self.units(UnitTypeId.BEACON_TERRANSMALL).exists else None
+        self.unit_tags_received_action.clear()
         
-        grid = self.game_info.pathing_grid
-        valid_spawn_points = []
-        for x in range(4, grid.width - 4, 4):
-            for y in range(4, grid.height - 4, 4):
-                if grid[(x, y)] != 0:
-                    valid_spawn_points.append(Point2((x, y)))
-        
-        if valid_spawn_points:
-            start = random.choice(valid_spawn_points)
-            end = random.choice(valid_spawn_points)
-        else:
-            w, h = self.game_info.map_size
-            start = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
-            end = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
+        # 1. Guarantee Vision
+        # We step after debug_show_map to ensure it's applied before we look for units to kill
+        await self.client.debug_show_map()
+        await self.client.step()
+        await self._refresh_state()
 
-        if zergling:
-            await self.client.debug_kill_unit([zergling.tag])
-        await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, start, self.player_id]])
-
-        if beacon:
-            await self.client.debug_kill_unit([beacon.tag])
-        await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, end, self.player_id]])
+        # 2. Robust Cleanup Loop
+        # We keep killing until the map is actually empty
+        max_cleanup_attempts = 5
+        for attempt in range(max_cleanup_attempts):
+            all_units = self.all_units
+            if not all_units:
+                break
+                
+            logger.info(f"Cleanup attempt {attempt+1}: Killing {all_units.amount} units.")
+            await self.client.debug_kill_unit([u.tag for u in all_units])
+            await self.client.step()
+            await self._refresh_state()
+            
+            if not self.all_units:
+                break
         
+        if self.all_units:
+            logger.error(f"Failed to clear map after {max_cleanup_attempts} cleanup attempts. Remaining: {self.all_units.amount}")
+
+    async def _refresh_state(self):
+        """Refreshes the bot's internal state from a new observation."""
+        obs = await self.client.observation()
+        from sc2.game_state import GameState
+        from train.envs.level_0_env import ProtoWrapper
+        # Use existing game_info._proto if possible
+        proto = getattr(self.game_info, "_proto", None)
+        if not proto:
+            # Fallback to fetching fresh game info if proto is missing
+            game_info = await self.client.get_game_info()
+            proto = game_info._proto
+            
+        self._prepare_step(GameState(obs.observation), ProtoWrapper(proto))
+
     def action_masks(self) -> np.ndarray:
         if self.agent_system and "agent_0" in self.agent_system.unit_agents:
             return self.agent_system.unit_agents["agent_0"].get_action_mask()
