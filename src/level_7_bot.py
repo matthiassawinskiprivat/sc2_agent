@@ -10,15 +10,31 @@ from typing import Tuple, Dict, List
 class Level7Bot(Level3Bot):
     """
     Level 7 Bot: Combat Basics (Move vs Attack).
-    Controls Marines against Zerglings.
+    Controls a specific unit type against an enemy unit type.
     """
     def __init__(self, conn, training_conf=None):
         super().__init__(conn, training_conf)
         self.previous_health = {} # tag -> health
+        
+        # Resolve unit types from configuration
+        allied_name = self.training_conf.get("unit_type", "MARINE").upper()
+        enemy_name = self.training_conf.get("enemy_type", "ZERGLING").upper()
+        
+        try:
+            self.allied_unit_type = getattr(UnitTypeId, allied_name)
+        except AttributeError:
+            logger.warning(f"Unknown allied unit type: {allied_name}, falling back to MARINE")
+            self.allied_unit_type = UnitTypeId.MARINE
+            
+        try:
+            self.enemy_unit_type = getattr(UnitTypeId, enemy_name)
+        except AttributeError:
+            logger.warning(f"Unknown enemy unit type: {enemy_name}, falling back to ZERGLING")
+            self.enemy_unit_type = UnitTypeId.ZERGLING
 
     async def reset_game_state(self):
         """
-        Spawns Marines (Ally) and Zerglings (Enemy).
+        Spawns Allied and Enemy units based on configuration.
         """
         self.previous_distances = {}
         self.current_assignments = {}
@@ -55,17 +71,16 @@ class Level7Bot(Level3Bot):
             start = locations[i]
             end = locations[self.targets_count + i]
             
-            # Ally: Marine (Player 1)
-            await self.client.debug_create_unit([[UnitTypeId.MARINE, 1, start, self.player_id]])
+            # Ally (Player 1)
+            await self.client.debug_create_unit([[self.allied_unit_type, 1, start, self.player_id]])
             
-            # Enemy: Zergling (Player 2)
-            # Note: Player 2 ID depends on how the game is set up. Usually 2.
-            await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, end, 2]])
+            # Enemy (Player 2)
+            await self.client.debug_create_unit([[self.enemy_unit_type, 1, end, 2]])
 
     def get_active_units(self):
-        """Returns active Marines."""
+        """Returns active allied units."""
         if not hasattr(self, "units"): return []
-        return sorted(self.units(UnitTypeId.MARINE), key=lambda u: u.tag)
+        return sorted(self.units(self.allied_unit_type), key=lambda u: u.tag)
 
     async def apply_action(self, unit_tag, action):
         """
@@ -105,7 +120,7 @@ class Level7Bot(Level3Bot):
         total_reward = 0.0
         
         # 1. Track Enemy Health (Damage Dealt)
-        enemies = self.enemy_units(UnitTypeId.ZERGLING)
+        enemies = self.enemy_units(self.enemy_unit_type)
         current_enemy_tags = {u.tag for u in enemies}
         
         # Check for damage on existing enemies
@@ -117,13 +132,8 @@ class Level7Bot(Level3Bot):
                 total_reward += damage * damage_reward
             self.previous_health[u.tag] = curr
             
-        # Check for Kills (Enemies present before but missing now)
-        # Note: This requires previous_health to track enemies across frames
-        # Since Level 7 has NO Fog of War, missing = dead.
-        
+        # Check for Kills
         tracked_tags = set(self.previous_health.keys())
-        
-        # Identify died tags (present in previous but not current)
         died_tags = tracked_tags - current_enemy_tags
         
         for tag in died_tags:
@@ -132,16 +142,52 @@ class Level7Bot(Level3Bot):
              
         return total_reward
 
+    def get_assigned_distances_combat(self) -> Dict[int, float]:
+        """
+        Calculates optimal assignment and returns distances to assigned enemy units.
+        """
+        self.current_assignments = self._calculate_optimal_assignment_combat()
+        distances = {}
+        for u_tag, e_tag in self.current_assignments.items():
+            unit = self.units.find_by_tag(u_tag)
+            enemy = self.enemy_units.find_by_tag(e_tag)
+            if unit and enemy:
+                distances[u_tag] = unit.distance_to(enemy)
+        return distances
+
+    def calculate_distance_reward(self) -> float:
+        """
+        Calculates the distance-based shaping reward using optimal combat assignments.
+        """
+        rewards_conf = self.training_conf.get('rewards', {})
+        step_penalty = rewards_conf.get('step_penalty', -0.05)
+        dist_multiplier = rewards_conf.get('distance_multiplier', 0.1)
+        
+        current_distances = self.get_assigned_distances_combat()
+        total_dist_change = 0.0
+        
+        for u_tag, dist in current_distances.items():
+            prev_dist = self.previous_distances.get(u_tag)
+            if prev_dist is not None:
+                total_dist_change += (prev_dist - dist)
+            
+            self.previous_distances[u_tag] = dist
+            
+        active_count = len(self.get_active_units())
+        avg_dist_reward = (total_dist_change * dist_multiplier) / max(1, active_count)
+        
+        return avg_dist_reward + step_penalty
+
     def get_observation_for_unit(self, unit_tag) -> Tuple[np.ndarray, Dict]:
-        # Override to use Marine/Zergling context
+        # Override to use dynamic context
         unit = self.units.find_by_tag(unit_tag)
         if not unit:
             return np.zeros((1, 1, 1)), {}
 
-        original_zergling = self.zergling
-        self.zergling = unit # 'zergling' property is just 'controlled unit' alias in base class
+        original_unit = self.zergling
+        self.zergling = unit # 'zergling' is the centering unit alias
         
-        # Update assignments (Marine -> Zergling)
+        # Update assignments
         assignments = self._calculate_optimal_assignment_combat()
         assigned_target_tag = assignments.get(unit.tag)
         
@@ -154,7 +200,7 @@ class Level7Bot(Level3Bot):
         raw_obs = {
             'units': self.units,
             'selected_units': [unit],
-            'enemy_units': self.enemy_units, # Pass actual enemies
+            'enemy_units': self.enemy_units,
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
@@ -167,30 +213,30 @@ class Level7Bot(Level3Bot):
         else:
              processed_obs = np.zeros((1, 64, 64))
              
-        self.zergling = original_zergling
+        self.zergling = original_unit
         return processed_obs, {}
 
     def _calculate_optimal_assignment_combat(self) -> Dict[int, int]:
         """
-        Marine -> Zergling assignment.
+        Allied -> Enemy assignment.
         """
-        marines = self.get_active_units()
-        zerglings = self.enemy_units(UnitTypeId.ZERGLING)
+        allies = self.get_active_units()
+        enemies = self.enemy_units(self.enemy_unit_type)
         
-        if not marines or not zerglings:
+        if not allies or not enemies:
             return {}
             
-        m_coords = np.array([[u.position.x, u.position.y] for u in marines])
-        z_coords = np.array([[u.position.x, u.position.y] for u in zerglings])
+        a_coords = np.array([[u.position.x, u.position.y] for u in allies])
+        e_coords = np.array([[u.position.x, u.position.y] for u in enemies])
         
-        # Reuse the solver from model_utils (imported in Level3Bot)
         from src.utils.model_utils import solve_optimal_assignment
-        m_idx, z_idx = solve_optimal_assignment(m_coords, z_coords)
+        a_idx, e_idx = solve_optimal_assignment(a_coords, e_coords)
         
         assignment = {}
-        for i, j in zip(m_idx, z_idx):
-             assignment[marines[i].tag] = zerglings[j].tag
+        for i, j in zip(a_idx, e_idx):
+             assignment[allies[i].tag] = enemies[j].tag
         return assignment
+
 
     def action_masks(self) -> np.ndarray:
         """
