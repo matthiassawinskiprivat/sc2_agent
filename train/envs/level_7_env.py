@@ -9,13 +9,27 @@ class Level7Env(Level3Env):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Ensure action space reflects Move + Attack (2 * GridSize^2)
-        # Level0Env init sets action_space to Discrete(GridSize^2)
-        # We need to update it.
-        # Note: We must import spaces inside or check if it's already set
         from gymnasium import spaces
         grid_area = self.grid_size * self.grid_size
         self.action_space = spaces.Discrete(2 * grid_area)
         
+        # Unit and Enemy types from config
+        self.unit_type = self.training_conf.get('env', {}).get('unit_type', 'MARINE').upper()
+        self.enemy_type = self.training_conf.get('env', {}).get('enemy_type', 'ZERGLING').upper()
+
+    def get_race_from_unit_type(self, unit_type_name: str) -> Race:
+        """Maps unit type names to SC2 Races."""
+        mapping = {
+            "MARINE": Race.Terran,
+            "MARAUDER": Race.Terran,
+            "ROACH": Race.Zerg,
+            "ZERGLING": Race.Zerg,
+            "HYDRALISK": Race.Zerg,
+            "STALKER": Race.Protoss,
+            "ZEALOT": Race.Protoss
+        }
+        return mapping.get(unit_type_name.upper(), Race.Terran)
+
     def _log(self, message):
         super()._log(f"[Level7Env] {message}")
 
@@ -26,12 +40,11 @@ class Level7Env(Level3Env):
         mask = super().action_masks()
         if mask.shape[0] != self.action_space.n:
             self._log(f"ERROR: Mask shape mismatch! Expected {self.action_space.n}, got {mask.shape[0]}")
-            # Fallback to all-True mask of CORRECT size to avoid crash, but log error
             return np.ones(self.action_space.n, dtype=bool)
         return mask
 
     async def _setup_game_session(self):
-        # Override to use Level7Bot and Terran Race for Player 1
+        # Override to use Level7Bot and dynamic Race
         try:
              await self._client.ping()
         except Exception as e:
@@ -49,14 +62,16 @@ class Level7Env(Level3Env):
             self._bot.distance_calculation_method = 2
             self._bot.grid_size = self.grid_size
 
-        self._log("Creating game (Terran vs Zerg)...")
-        # Player 1 = Terran (Marine), Player 2 = Zerg (Zergling)
+        allied_race = self.get_race_from_unit_type(self.unit_type)
+        enemy_race = self.get_race_from_unit_type(self.enemy_type)
+
+        self._log(f"Creating game ({allied_race.name} vs {enemy_race.name})...")
         await self._controller.create_game(
             game_map,
-            [Bot(Race.Terran, self._bot), Computer(Race.Zerg, Difficulty.Easy)],
+            [Bot(allied_race, self._bot), Computer(enemy_race, Difficulty.Easy)],
             realtime=self.visualize,
         )
-        await self._client.join_game(race=Race.Terran)
+        await self._client.join_game(race=allied_race)
         self._bot._generated_frame = -1
         game_info = await self._client.get_game_info()
         game_data = await self._client.get_game_data()
@@ -77,33 +92,21 @@ class Level7Env(Level3Env):
         from sc2.game_state import GameState
         state = GameState(initial_observation.observation)
         
-        # Standard wrapper (redefined locally or imported)
-        # We can assume ProtoWrapper is available from super() scope imports or re-import
         from train.envs.level_0_env import ProtoWrapper
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
 
-        # Initial Step
         try:
             await self._bot.on_step(0)
         except Exception:
             pass
 
     def reset(self, seed=None, options=None):
-        # Call super reset but we need to intercept to ensure Fog is disabled
-        # Level3Env.reset calls Level0Env.reset which calls _reset_bot_state -> reset_game_state
-        
-        # We need to ensure debug_show_map is called AFTER game start/reset
         obs, info = super().reset(seed, options)
         
         # Disable Fog of War
         if self._client:
              self._loop.run_until_complete(self._client.debug_show_map())
         
-        # Re-fetch obs after map reveal? Usually takes a step.
-        # But 'reset_game_state' in Bot likely already spawned units.
-        # Let's trust that the next step will show them.
-        
-        # Reset active tags logic for Marines
         if self._bot:
              self.active_unit_tags = [u.tag for u in self._bot.get_active_units()]
              self.current_unit_index = 0
@@ -114,14 +117,12 @@ class Level7Env(Level3Env):
 
     async def _async_step(self, action):
         """
-        Modified step logic for Level 7 (Marines vs Zerglings).
+        Modified step logic for Level 7 (Dynamic Units).
         """
-        # Ensure active tags are Marines
         if not hasattr(self, "active_unit_tags") or not self.active_unit_tags:
              self.active_unit_tags = [u.tag for u in self._bot.get_active_units()]
         
         if not self.active_unit_tags:
-             # All marines dead?
              return np.zeros(self.observation_space.shape), 0, True, False, {}
 
         current_tag = self.active_unit_tags[self.current_unit_index]
@@ -151,19 +152,19 @@ class Level7Env(Level3Env):
 
             # Rewards
             combat_reward = self._bot.calculate_combat_reward()
-            step_penalty = self.training_conf.get('rewards', {}).get('step_penalty', -0.01)
+            dist_reward = self._bot.calculate_distance_reward() # distance_reward includes step_penalty
             
-            total_reward = combat_reward + step_penalty
+            total_reward = combat_reward + dist_reward
             
             # Check Done
-            enemies = self._bot.enemy_units(UnitTypeId.ZERGLING).amount
-            marines = self._bot.units(UnitTypeId.MARINE).amount
+            allied_count = self._bot.units(self._bot.allied_unit_type).amount
+            enemy_count = self._bot.enemy_units(self._bot.enemy_unit_type).amount
             
             done = False
-            if enemies == 0:
+            if enemy_count == 0:
                 done = True
                 total_reward += self.training_conf.get('rewards', {}).get('win_reward', 50.0)
-            elif marines == 0:
+            elif allied_count == 0:
                 done = True
                 total_reward += self.training_conf.get('rewards', {}).get('loss_penalty', -10.0)
                 
@@ -177,3 +178,4 @@ class Level7Env(Level3Env):
                  obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
                  
             return obs, total_reward, done, False, {}
+
