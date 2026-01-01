@@ -51,6 +51,8 @@ class Level7Bot(Level3Bot):
              
         if tags_to_kill:
             await self.client.debug_kill_unit(tags_to_kill)
+            # Ensure engine processes the kills before we spawn new units
+            await self.client.step()
         
         # Grid Sampling for Spawns
         grid = self.game_info.pathing_grid
@@ -77,7 +79,10 @@ class Level7Bot(Level3Bot):
             await self.client.debug_create_unit([[self.allied_unit_type, 1, start, self.player_id]])
             
             # Enemy (Player 2)
-            await self.client.debug_create_unit([[self.enemy_unit_type, 1, end, 2]])
+            enemy_amount = 1
+            if self.enemy_unit_type == UnitTypeId.ZERGLING:
+                enemy_amount = 2
+            await self.client.debug_create_unit([[self.enemy_unit_type, enemy_amount, end, 2]])
 
     def get_active_units(self):
         """Returns active allied units."""
