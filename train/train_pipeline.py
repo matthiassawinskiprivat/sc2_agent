@@ -18,6 +18,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # The pipeline will now use the original, stable Level0Env
 from train.envs.level_0_env import Level0Env
 from train.envs.level_3_env import Level3Env
+from train.envs.level_7_env import Level7Env
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
 from src.utils.watchdog import Watchdog
@@ -27,7 +28,8 @@ from src.utils.model_utils import graft_model_weights
 # Environment Registry
 ENV_REGISTRY = {
     "Level0Env": Level0Env,
-    "Level3Env": Level3Env
+    "Level3Env": Level3Env,
+    "Level7Env": Level7Env
 }
 
 # Directories
