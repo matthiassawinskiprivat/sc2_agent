@@ -13,7 +13,7 @@ training:
 # Environment parameters
 env:
   env_class: "Level7Env"
-  unit_type: "MARINE"
+  unit_type: "ROACH"
   enemy_type: "ZERGLING"
   targets: 1 # Start with 1 pair
   grid_size: 128
@@ -21,11 +21,12 @@ env:
   max_steps: 600
   maps_dir: "train/maps/level_3" # Reuse existing maps
   rewards:
-    step_penalty: -0.01
-    damage_reward: 0.1
+    step_penalty: -0.1
+    damage_reward: 1
     kill_reward: 20.0
     win_reward: 50.0
-    loss_penalty: -10.0
+    loss_penalty: -0.3
+    distance_multiplier: 0.05
   active_layers:
     - "allied_g_dps_base"
     - "enemy_g_dps_base"
