@@ -2,7 +2,7 @@
 # Configuration for the first level of training.
 
 training:
-  training_steps: 1_000_000
+  training_steps: 100_000
   num_envs: 4
   n_steps: 1024
   batch_size: 128
@@ -24,6 +24,7 @@ env:
     - "enemy_unit_density"
     - "terrain_pathable"
     - "command_objective"
+    - "command_assignment"
 
 # Model parameters
 model:

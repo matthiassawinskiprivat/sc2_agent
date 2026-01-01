@@ -2,7 +2,7 @@
 # Configuration for the third level of training (curriculum learning).
 
 training:
-  training_steps: 2_000_000
+  training_steps: 150_000
   num_envs: 4
   n_steps: 2048
   batch_size: 512

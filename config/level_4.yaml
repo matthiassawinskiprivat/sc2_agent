@@ -2,7 +2,7 @@
 # Configuration for Level 3: Multi-Zergling Control
 
 training:
-  training_steps: 2_000_000
+  training_steps: 150_000
   num_envs: 4
   n_steps: 2048
   batch_size: 512
@@ -21,8 +21,6 @@ env:
     success: 50.0
     step_penalty: -0.1
     distance_multiplier: 0.5
-  active_layers:
-    - "command_assignment"
 
 # Model parameters
 model:
