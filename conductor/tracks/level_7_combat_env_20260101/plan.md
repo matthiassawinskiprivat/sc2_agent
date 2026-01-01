@@ -45,5 +45,5 @@
 - [x] Create `tests/test_level_7_grafting.py`. 73c9210
     - [x] Verify that after grafting, the first half of the action head matches the old model's weights exactly (or interpolated equivalent).
 
-## [x] Phase 6: Pipeline
+## [x] Phase 6: Pipeline [checkpoint: 64d07ed]
 - [x] Update `config/pipeline.yaml` to include `level_7`. baa649e
