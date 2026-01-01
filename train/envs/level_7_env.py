@@ -153,8 +153,9 @@ class Level7Env(Level3Env):
             # Rewards
             combat_reward = self._bot.calculate_combat_reward()
             dist_reward = self._bot.calculate_distance_reward() # distance_reward includes step_penalty
+            attrition_penalty = self._bot.calculate_allied_attrition_penalty()
             
-            total_reward = combat_reward + dist_reward
+            total_reward = combat_reward + dist_reward + attrition_penalty
             
             # Check Done
             allied_count = self._bot.units(self._bot.allied_unit_type).amount
