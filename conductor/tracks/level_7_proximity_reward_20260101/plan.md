@@ -1,13 +1,13 @@
 # Plan: Level 7 Proximity Reward and Attack Mask Optimization
 
-## Phase 1: Reward Refactoring and Config Update
+## Phase 1: Reward Refactoring and Config Update [checkpoint: 7a8c60c]
 - [x] Task: Update `config/level_7.yaml` to include the `distance_multiplier: 0.05` in the rewards section. b656612
-- [ ] Task: Implement `calculate_distance_reward` in `Level7Bot` using optimal assignment logic (porting from `Level3Bot`).
-- [ ] Task: Integrate the proximity reward into the `Level7Env` step logic, ensuring it is summed with combat rewards.
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Reward Refactoring and Config Update' (Protocol in workflow.md)
+- [x] Task: Implement `calculate_distance_reward` in `Level7Bot` using optimal assignment logic (porting from `Level3Bot`). 872c1cf
+- [x] Task: Integrate the proximity reward into the `Level7Env` step logic, ensuring it is summed with combat rewards. 47406cd
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Reward Refactoring and Config Update' (Protocol in workflow.md) 7a8c60c
 
 ## Phase 2: Action Mask Optimization
-- [ ] Task: Modify `Level7Bot.action_masks` to provide a full-True mask for the attack action segment (second half of the mask).
+- [~] Task: Modify `Level7Bot.action_masks` to provide a full-True mask for the attack action segment (second half of the mask).
 - [ ] Task: Verify that the Move mask (first half) remains restricted by pathing.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Action Mask Optimization' (Protocol in workflow.md)
 
