@@ -133,4 +133,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./conductor/tracks/fix_level_3_clumping_20251231/](./conductor/tracks/fix_level_3_clumping_20251231/)*
 
 ## [x] Track: Dynamic Greedy Reward Optimization
+
 *Link: [./conductor/tracks/dynamic_greedy_reward_20251231/](./conductor/tracks/dynamic_greedy_reward_20251231/)*
+
+
+
+## [~] Track: Level 7 Environment - Combat Basics
+
+*Link: [./conductor/tracks/level_7_combat_env_20260101/](./conductor/tracks/level_7_combat_env_20260101/)*

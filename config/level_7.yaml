@@ -2,13 +2,13 @@
 # Configuration for Level 7: Combat Basics (Move vs Attack)
 
 training:
-  training_steps: 200_000
+  training_steps: 150_000
   num_envs: 4
   n_steps: 2048
   batch_size: 512
   learning_rate: 0.0003
   render_beacon: False
-  larger_units: True
+  larger_units: False
 
 # Environment parameters
 env:
@@ -18,7 +18,7 @@ env:
   targets: 1 # Start with 1 pair
   grid_size: 128
   headless: True
-  max_steps: 400
+  max_steps: 600
   maps_dir: "train/maps/level_3" # Reuse existing maps
   rewards:
     step_penalty: -0.01
@@ -26,7 +26,11 @@ env:
     kill_reward: 20.0
     win_reward: 50.0
     loss_penalty: -10.0
-  active_layers: [] # Use all layers to preserve vision weights from Level 3
+  active_layers:
+    - "allied_g_dps_base"
+    - "enemy_g_dps_base"
+    - "allied_health"
+    - "enemy_health"
 
 # Model parameters
 model:
