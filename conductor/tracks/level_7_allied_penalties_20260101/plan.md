@@ -5,12 +5,12 @@
 - [x] Task: Implement `calculate_allied_attrition_penalty` in `Level7Bot` using a `previous_allied_health` dictionary. 543f5c7
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Configuration and Bot Logic' (Protocol in workflow.md) 08a0544
 
-## Phase 2: Environment Integration
+## Phase 2: Environment Integration [checkpoint: 7a47e87]
 - [x] Task: Update `Level7Env.step` (or `_async_step`) to fetch and apply the allied attrition penalty from the bot. 7290b84
 - [x] Task: Ensure the penalty is correctly summed with existing combat rewards and distance rewards. 7290b84
-- [~] Task: Conductor - User Manual Verification 'Phase 2: Environment Integration' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Environment Integration' (Protocol in workflow.md) 7a47e87
 
 ## Phase 3: Verification and Testing
-- [ ] Task: Create `tests/test_level_7_allied_penalties.py` to verify penalty calculation logic with mock allied unit damage/death.
+- [~] Task: Create `tests/test_level_7_allied_penalties.py` to verify penalty calculation logic with mock allied unit damage/death.
 - [ ] Task: Run a short debug training session using `debug_train_level_7.py` and confirm negative rewards appear when allied units take damage.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Verification and Testing' (Protocol in workflow.md)
