@@ -19,6 +19,17 @@ class Level7Env(Level3Env):
     def _log(self, message):
         super()._log(f"[Level7Env] {message}")
 
+    def action_masks(self):
+        """
+        Retrieves and validates the action mask shape.
+        """
+        mask = super().action_masks()
+        if mask.shape[0] != self.action_space.n:
+            self._log(f"ERROR: Mask shape mismatch! Expected {self.action_space.n}, got {mask.shape[0]}")
+            # Fallback to all-True mask of CORRECT size to avoid crash, but log error
+            return np.ones(self.action_space.n, dtype=bool)
+        return mask
+
     async def _setup_game_session(self):
         # Override to use Level7Bot and Terran Race for Player 1
         try:

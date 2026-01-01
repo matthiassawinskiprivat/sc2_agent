@@ -191,3 +191,15 @@ class Level7Bot(Level3Bot):
         for i, j in zip(m_idx, z_idx):
              assignment[marines[i].tag] = zerglings[j].tag
         return assignment
+
+    def action_masks(self) -> np.ndarray:
+        """
+        Returns a concatenated mask for Move (first half) and Attack (second half).
+        """
+        # Get the base move mask from the agent system
+        move_mask = super().action_masks()
+        
+        # For Level 7, we want 2 * GridSize^2
+        # We use the same move_mask for both Move and Attack for now,
+        # as pathing is the primary constraint.
+        return np.concatenate([move_mask, move_mask])
