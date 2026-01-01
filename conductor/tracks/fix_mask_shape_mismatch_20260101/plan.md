@@ -18,10 +18,10 @@ This plan addresses the `RuntimeError: shape '[4, 32768]' is invalid for input o
     - [x] Sub-task: Add a check in `_async_step` (or where the mask is processed) to verify the mask shape matches `self.action_space.n`.
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Core Logic Implementation' (Protocol in workflow.md)
 
-## Phase 3: Final Verification
-- [ ] Task: Run all Level 7 integration tests.
-    - [ ] Sub-task: `pytest tests/test_level_7_env.py`
-    - [ ] Sub-task: `pytest tests/test_level_7_mask_mismatch.py`
-- [ ] Task: Run a short local training session to verify SB3 compatibility.
-    - [ ] Sub-task: Execute `python debug_train.py --level level_7 --steps 100`.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Final Verification' (Protocol in workflow.md)
+## Phase 3: Final Verification [checkpoint: d5d50c8]
+- [x] Task: Run all Level 7 integration tests. d5d50c8
+    - [x] Sub-task: `pytest tests/test_level_7_env.py`
+    - [x] Sub-task: `pytest tests/test_level_7_mask_mismatch.py`
+- [x] Task: Run a short local training session to verify SB3 compatibility. d5d50c8
+    - [x] Sub-task: Execute `python debug_train.py --level level_7 --steps 100`. (Verified with `debug_train_level_7.py`)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Final Verification' (Protocol in workflow.md)
