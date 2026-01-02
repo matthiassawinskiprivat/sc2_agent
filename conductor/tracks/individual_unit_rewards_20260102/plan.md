@@ -1,6 +1,6 @@
 # Plan: Individual Unit Reward Refactoring
 
-## Phase 1: Level 3/4 Foundation & Refactoring
+## Phase 1: Level 3/4 Foundation & Refactoring [checkpoint: b1f0b03]
 - [x] Task: Create failing tests in `tests/test_level_3_reward_attribution.py` that verify intermediate rewards in the unit cycle are non-zero when progress is made.
 - [x] Task: Refactor `Level3Bot.calculate_distance_reward` to accept a `unit_tag` and return the reward for that specific unit.
 - [x] Task: Update `Level3Bot.check_collections` to return a mapping of `unit_tag -> reward` or allow checking for a specific unit.
