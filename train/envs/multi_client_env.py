@@ -15,12 +15,22 @@ class MultiClientEnv(gym.Env):
     Base environment for multi-client SC2 games.
     Manages two SC2 processes and synchronizes their steps.
     """
-    def __init__(self, map_name: str = "Simple64", visualize: bool = False, realtime: bool = False):
+    def __init__(self, map_name: str = "Simple64", visualize: bool = False, realtime: bool = False,
+                 level_name: str = "capture_the_flag", sc2_process_cls=None, client_cls=None,
+                 training_conf: Dict = None, **kwargs):
         self.map_name = map_name
         self.visualize = visualize
         self.realtime = realtime
+        self.level_name = level_name
+        self.training_conf = training_conf or {}
         
-        self._manager = MultiClientSC2Manager()
+        # Dependency Injection for testing
+        from sc2.sc2process import SC2Process
+        from sc2.client import Client
+        self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
+        self._client_cls = client_cls if client_cls else Client
+
+        self._manager = MultiClientSC2Manager(sc2_process_cls=self._sc2_process_cls, client_cls=self._client_cls)
         self._loop = asyncio.new_event_loop()
         
         # Placeholder spaces - should be defined by subclasses
