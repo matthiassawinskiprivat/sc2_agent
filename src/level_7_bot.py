@@ -37,15 +37,31 @@ class Level7Bot(Level3Bot):
         """
         Spawns Allied and Enemy units based on configuration with high reliability.
         """
-        # 1. Base Cleanup (Guarantees vision and empty map)
-        await super().reset_game_state()
-        
-        # Reset local state
         self.previous_distances = {}
         self.current_assignments = {}
         self.previous_health = {}
         self.previous_allied_health = {}
         
+        # 1. Guarantee Vision and Initial Cleanup
+        # We step after debug_show_map to ensure it's applied before we look for units to kill
+        await self.client.debug_show_map()
+        await self.client.step()
+        await self._refresh_state_local()
+
+        # Robust Cleanup Loop
+        for cleanup_attempt in range(3):
+            tags_to_kill = [u.tag for u in self.all_units]
+            if not tags_to_kill:
+                break
+                
+            await self.client.debug_kill_unit(tags_to_kill)
+            await self.client.step()
+            await self._refresh_state_local()
+            
+            if not self.all_units:
+                break
+            logger.warning(f"Cleanup attempt {cleanup_attempt+1} failed. Remaining: {self.all_units.amount}")
+
         # 2. Grid Sampling for Spawns
         grid = self.game_info.pathing_grid
         valid_spawn_points = []
@@ -82,7 +98,7 @@ class Level7Bot(Level3Bot):
 
             # Wait for engine to place units
             await self.client.step()
-            await self._refresh_state()
+            await self._refresh_state_local()
             
             actual_allied = self.units(self.allied_unit_type).amount
             actual_enemy = self.enemy_units(self.enemy_unit_type).amount
@@ -96,9 +112,19 @@ class Level7Bot(Level3Bot):
             # Cleanup and retry
             await self.client.debug_kill_unit([u.tag for u in self.all_units])
             await self.client.step()
-            await self._refresh_state()
+            await self._refresh_state_local()
             
         logger.error(f"Failed to spawn correct unit counts after {max_spawn_retries} attempts.")
+
+    async def _refresh_state_local(self):
+        """Local helper to refresh state without crashing if proto is missing."""
+        obs = await self.client.observation()
+        from sc2.game_state import GameState
+        from train.envs.level_0_env import ProtoWrapper
+        try:
+            self._prepare_step(GameState(obs.observation), ProtoWrapper(self.game_info._proto))
+        except Exception:
+            pass
 
     def get_active_units(self):
         """Returns active allied units."""
