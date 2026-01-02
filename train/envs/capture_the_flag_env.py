@@ -75,7 +75,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
         self.bot2 = CaptureTheFlagBot(player_id=2, training_conf=self.training_conf)
         
         players = [Bot(Race.Zerg, self.bot1), Bot(Race.Zerg, self.bot2)]
-        resolved_map = maps.get(self.map_name)
+        resolved_map = self._resolve_map(self.map_name)
         
         await self._manager.create_join_game(resolved_map, players, realtime=self.realtime)
         
@@ -84,6 +84,10 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         await self._spawn_initial_units()
         await self._refresh_unit_lists()
+
+    async def _synchronized_step(self):
+        """Steps both clients simultaneously to advance the game."""
+        await asyncio.gather(self.bot1.client.step(), self.bot2.client.step())
 
     async def _spawn_initial_units(self):
         from sc2.ids.unit_typeid import UnitTypeId
@@ -95,7 +99,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
         # Spawn Pylons
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
-        await self.bot1.client.step()
+        await self._synchronized_step()
         
         # Set reduced health for Pylons (10 HP + 10 Shield)
         p1_pylon = self.bot1.structures(UnitTypeId.PYLON).first
@@ -115,7 +119,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         await self.bot1.client.debug_create_unit(cmds1)
         await self.bot1.client.debug_create_unit(cmds2)
-        await self.bot1.client.step()
+        await self._synchronized_step()
 
     def _calculate_spawns(self, m, v):
         spawns = []
