@@ -230,13 +230,15 @@ class Level7Bot(Level3Bot):
         allies = self.get_active_units()
         enemies = self.enemy_units(self.enemy_unit_type)
         
-        if not allies or not enemies:
+        if not allies or not enemies.exists:
             return {}
             
         assignment = {}
         for ally in allies:
-            closest_enemy = enemies.closest_to(ally)
-            assignment[ally.tag] = closest_enemy.tag
+            # Defensive check: ensure enemies still exists before calling closest_to
+            if enemies.exists:
+                closest_enemy = enemies.closest_to(ally)
+                assignment[ally.tag] = closest_enemy.tag
             
         return assignment
 

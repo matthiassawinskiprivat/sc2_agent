@@ -93,7 +93,7 @@ class SC2Bot(BotAI):
         elif command == "close":
             await self.client.leave()
 
-    async def reset_game_state(self):
+    async def reset_game_state(self, verify: bool = True):
         """
         Base reset logic: Guarantees vision and clears all units from the map.
         """

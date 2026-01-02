@@ -156,12 +156,13 @@ class Level0Env(gym.Env):
                 break
             except Exception as e:
                 import traceback
-                self._log(f"Error during environment reset: {e}")
+                self._log(f"CRITICAL: Error during environment reset for level '{self.level_name}' (Worker {self.worker_index}): {e}")
+                self._log(f"Traceback:\n{traceback.format_exc()}")
                 self.close() # Ensure full cleanup
                 if attempt == max_retries - 1:
-                    self._log(f"Max retries reached. Raising error.\n{traceback.format_exc()}")
+                    self._log(f"Max retries reached for level '{self.level_name}'. Raising error to main process.")
                     raise e
-                time.sleep(1.0)
+                time.sleep(2.0) # Longer sleep between retries to allow system cleanup
 
         obs, _ = self._bot._get_observation()
         self._log("reset() complete.")

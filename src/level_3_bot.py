@@ -73,13 +73,15 @@ class Level3Bot(SC2Bot):
         units = self.get_active_zerglings()
         beacons = self.units(self.beacon_type)
         
-        if not units or not beacons:
+        if not units or not beacons.exists:
             return {}
             
         assignment = {}
         for unit in units:
-            closest_beacon = beacons.closest_to(unit)
-            assignment[unit.tag] = closest_beacon.tag
+            # Defensive check: ensure beacons still exists before calling closest_to
+            if beacons.exists:
+                closest_beacon = beacons.closest_to(unit)
+                assignment[unit.tag] = closest_beacon.tag
             
         return assignment
 
