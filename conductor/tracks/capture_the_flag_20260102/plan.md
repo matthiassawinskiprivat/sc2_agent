@@ -30,10 +30,10 @@ Implement the competitive reward structure and the self-play inference loop.
 - [x] Task: Write integration tests for the full CTF game loop and reward attribution.
 - [x] Task: Conductor - User Manual Verification 'Phase 3: Logic - Self-Play and Rewards' (Protocol in workflow.md) b337a5e
 
-## Phase 4: Integration and Verification
+## Phase 4: Integration and Verification [checkpoint: e1a283b]
 Finalize the training pipeline integration and perform end-to-end verification.
 
-- [ ] Task: Integrate `CaptureTheFlagEnv` into `train_pipeline.py`.
-- [ ] Task: Verify that `command_assignment` and `command_objective` layers are correctly highlighted during steps.
-- [ ] Task: Run a short training session (1000 steps) to ensure stability.
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Integration and Verification' (Protocol in workflow.md)
+- [x] Task: Integrate `CaptureTheFlagEnv` into `train_pipeline.py`.
+- [x] Task: Verify that `command_assignment` and `command_objective` layers are correctly highlighted during steps.
+- [x] Task: Run a short training session (1000 steps) to ensure stability.
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Integration and Verification' (Protocol in workflow.md) e1a283b
