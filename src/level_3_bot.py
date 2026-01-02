@@ -6,7 +6,7 @@ import random
 import numpy as np
 from loguru import logger
 from typing import Tuple, Dict, List
-from src.utils.model_utils import solve_optimal_assignment
+
 
 class Level3Bot(SC2Bot):
     """
