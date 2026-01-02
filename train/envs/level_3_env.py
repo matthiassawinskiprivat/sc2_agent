@@ -117,6 +117,15 @@ class Level3Env(Level0Env):
         # 1. Apply the agent's action to the current unit
         await self._bot.apply_action(current_tag, action)
         
+        # Send queued actions to the client before stepping
+        actions = getattr(self._bot, "_actions", None)
+        if actions is None:
+            actions = getattr(self._bot, "actions", None)
+        
+        if actions:
+            await self._client.actions(actions[:])
+            actions.clear()
+        
         # 2. Advance game physics immediately for this unit's action
         # This allows immediate individual reward calculation
         await self._client.step()
