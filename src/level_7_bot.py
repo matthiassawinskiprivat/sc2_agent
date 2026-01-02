@@ -223,11 +223,28 @@ class Level7Bot(Level3Bot):
             
         return total_penalty
 
+    def get_closest_targets_combat(self) -> Dict[int, int]:
+        """
+        Calculates the greedy allied-to-enemy assignment.
+        """
+        allies = self.get_active_units()
+        enemies = self.enemy_units(self.enemy_unit_type)
+        
+        if not allies or not enemies:
+            return {}
+            
+        assignment = {}
+        for ally in allies:
+            closest_enemy = enemies.closest_to(ally)
+            assignment[ally.tag] = closest_enemy.tag
+            
+        return assignment
+
     def get_assigned_distances_combat(self) -> Dict[int, float]:
         """
-        Calculates optimal assignment and returns distances to assigned enemy units.
+        Calculates greedy assignment and returns distances to closest enemy units.
         """
-        self.current_assignments = self._calculate_optimal_assignment_combat()
+        self.current_assignments = self.get_closest_targets_combat()
         distances = {}
         for u_tag, e_tag in self.current_assignments.items():
             unit = self.units.find_by_tag(u_tag)
@@ -236,9 +253,10 @@ class Level7Bot(Level3Bot):
                 distances[u_tag] = unit.distance_to(enemy)
         return distances
 
+
     def calculate_distance_reward(self) -> float:
         """
-        Calculates the distance-based shaping reward using optimal combat assignments.
+        Calculates the distance-based shaping reward using greedy combat assignments.
         """
         rewards_conf = self.training_conf.get('rewards', {})
         step_penalty = rewards_conf.get('step_penalty', -0.05)
@@ -269,7 +287,7 @@ class Level7Bot(Level3Bot):
         self.zergling = unit # 'zergling' is the centering unit alias
         
         # Update assignments
-        assignments = self._calculate_optimal_assignment_combat()
+        assignments = self.get_closest_targets_combat()
         assigned_target_tag = assignments.get(unit.tag)
         
         target_pos = None
@@ -296,28 +314,6 @@ class Level7Bot(Level3Bot):
              
         self.zergling = original_unit
         return processed_obs, {}
-
-    def _calculate_optimal_assignment_combat(self) -> Dict[int, int]:
-        """
-        Allied -> Enemy assignment.
-        """
-        allies = self.get_active_units()
-        enemies = self.enemy_units(self.enemy_unit_type)
-        
-        if not allies or not enemies:
-            return {}
-            
-        a_coords = np.array([[u.position.x, u.position.y] for u in allies])
-        e_coords = np.array([[u.position.x, u.position.y] for u in enemies])
-        
-        from src.utils.model_utils import solve_optimal_assignment
-        a_idx, e_idx = solve_optimal_assignment(a_coords, e_coords)
-        
-        assignment = {}
-        for i, j in zip(a_idx, e_idx):
-             assignment[allies[i].tag] = enemies[j].tag
-        return assignment
-
 
     def action_masks(self) -> np.ndarray:
         """

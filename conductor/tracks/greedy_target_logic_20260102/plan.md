@@ -8,10 +8,10 @@
 - [ ] Task: Conductor - User Manual Verification 'Level 3 Environment Refactor' (Protocol in workflow.md)
 
 ## Phase 2: Level 7 Environment Refactor (Combat)
-- [ ] Task: Create failing tests for Level 7 greedy logic. Focus on multiple allied units converging on the same closest enemy.
-- [ ] Task: Implement `get_closest_targets_combat` in `Level7Bot` to replace `_calculate_optimal_assignment_combat`.
-- [ ] Task: Update `get_observation_for_unit` in `Level7Bot` to use the closest enemy as the command target.
-- [ ] Task: Update `calculate_distance_reward` in `Level7Bot` to reflect average progress towards closest enemies.
+- [x] Task: Create failing tests for Level 7 greedy logic. Focus on multiple allied units converging on the same closest enemy.
+- [x] Task: Implement `get_closest_targets_combat` in `Level7Bot` to replace `_calculate_optimal_assignment_combat`.
+- [x] Task: Update `get_observation_for_unit` in `Level7Bot` to use the closest enemy as the command target.
+- [x] Task: Update `calculate_distance_reward` in `Level7Bot` to reflect average progress towards closest enemies.
 - [ ] Task: Conductor - User Manual Verification 'Level 7 Environment Refactor' (Protocol in workflow.md)
 
 ## Phase 3: Cleanup & Final Validation
