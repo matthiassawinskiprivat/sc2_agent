@@ -17,13 +17,23 @@ class MultiClientEnv(gym.Env):
     """
     def __init__(self, map_name: str = "Simple64", visualize: bool = False, realtime: bool = False,
                  level_name: str = "capture_the_flag", sc2_process_cls=None, client_cls=None,
-                 training_conf: Dict = None, **kwargs):
+                 training_conf: Dict = None, worker_index: int = 0, num_workers: int = 1, **kwargs):
         self.map_name = map_name
         self.visualize = visualize
         self.realtime = realtime
         self.level_name = level_name
         self.training_conf = training_conf or {}
+        self.worker_index = worker_index
+        self.num_workers = num_workers
         
+        # Logging setup
+        import random
+        import os
+        self.worker_id = f"{random.randint(1000, 9999)}"
+        os.makedirs("logs", exist_ok=True)
+        self.log_file = f"logs/worker_{self.worker_id}.log"
+        self._log(f"Initialized MultiClient Worker {self.worker_id} (Index: {self.worker_index}) with map {self.map_name}")
+
         # Dependency Injection for testing
         from sc2.sc2process import SC2Process
         from sc2.client import Client
@@ -32,6 +42,17 @@ class MultiClientEnv(gym.Env):
 
         self._manager = MultiClientSC2Manager(sc2_process_cls=self._sc2_process_cls, client_cls=self._client_cls)
         self._loop = asyncio.new_event_loop()
+
+    def _log(self, message):
+        # Print to stdout too so it gets captured by redirection
+        print(f"[Worker {self.worker_id}] {message}")
+        try:
+            with open(self.log_file, "a") as f:
+                import time
+                timestamp = time.strftime("%H:%M:%S")
+                f.write(f"[{timestamp}] {message}\n")
+        except:
+            pass
         
         # Placeholder spaces - should be defined by subclasses
         self.observation_space = None
@@ -41,22 +62,31 @@ class MultiClientEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self._log(f"reset() called (Level: {self.level_name})")
         
         # Ensure clean state
         if self._manager.clients:
+             self._log("Cleaning up previous session...")
              self.close()
              
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         
         try:
+            self._log("Launching SC2 processes...")
             self._loop.run_until_complete(self._launch_sc2_processes())
+            self._log("Setting up game session...")
             self._loop.run_until_complete(self._setup_game_session())
             
             # Initial observation
+            self._log("Getting initial observation...")
             obs = self._loop.run_until_complete(self._get_joint_observation())
+            self._log("reset() complete.")
             return obs, {}
         except Exception as e:
+            self._log(f"CRITICAL: Error during reset: {e}")
+            import traceback
+            self._log(traceback.format_exc())
             self.close()
             raise e
 
@@ -69,6 +99,9 @@ class MultiClientEnv(gym.Env):
             results = self._loop.run_until_complete(self._async_step(actions))
             return results
         except Exception as e:
+            self._log(f"CRITICAL: Error during step: {e}")
+            import traceback
+            self._log(traceback.format_exc())
             self.close()
             raise e
 

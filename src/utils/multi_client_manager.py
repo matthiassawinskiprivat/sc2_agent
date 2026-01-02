@@ -54,6 +54,10 @@ class MultiClientSC2Manager:
         if len(self.clients) < 2:
             raise RuntimeError("Need at least 2 clients launched.")
 
+        # Port configuration for multi-client communication
+        from sc2.portconfig import Portconfig
+        portconfig = Portconfig()
+
         # Host creates the game
         # Note: players list must match the number of slots
         await self.controllers[0].create_game(
@@ -63,14 +67,13 @@ class MultiClientSC2Manager:
         )
 
         # Both join
-        # For simplicity, assume race=Zerg for now, or extract from players list if possible
-        # Ideally, we should inspect the 'players' list to match races.
-        # But 'AbstractPlayer' doesn't always expose race easily if it's a Bot.
-        # We will assume Zerg for this specific CTF implementation as per specs.
-        
         join_tasks = []
-        for client in self.clients:
-            join_tasks.append(client.join_game(race=Race.Zerg))
+        for i, client in enumerate(self.clients):
+            # Pass portconfig to join_game
+            join_tasks.append(client.join_game(
+                race=Race.Zerg, 
+                portconfig=portconfig
+            ))
         
         await asyncio.gather(*join_tasks)
 
