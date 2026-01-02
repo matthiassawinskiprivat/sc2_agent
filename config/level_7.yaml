@@ -1,0 +1,54 @@
+# config/level_7.yaml
+# Configuration for Level 7: Combat Basics (Move vs Attack)
+
+training:
+  training_steps: 150_000
+  num_envs: 4
+  n_steps: 2048
+  batch_size: 512
+  learning_rate: 0.0003
+  render_beacon: False
+  larger_units: False
+
+# Environment parameters
+env:
+  env_class: "Level7Env"
+  unit_type: "ROACH"
+  enemy_type: "ZERGLING"
+  targets: 1 # Start with 1 pair
+  grid_size: 128
+  headless: True
+  max_steps: 600
+  maps_dir: "train/maps/level_3" # Reuse existing maps
+  rewards:
+    step_penalty: -0.01
+    damage_reward: 1
+    kill_reward: 10.0
+    win_reward: 20.0
+    loss_penalty: -0.5
+    distance_multiplier: 0.05
+    damage_penalty: -0.01
+    kill_penalty: -10.0
+  active_layers:
+    - "allied_g_dps_base"
+    - "enemy_g_dps_base"
+    - "allied_health"
+    - "enemy_health"
+
+# Model parameters
+model:
+  policy: "CnnPolicy"
+  policy_kwargs:
+    features_extractor_kwargs:
+      features_dim: 512
+  gamma: 0.995
+  ent_coef: 0.05
+  n_epochs: 4
+
+# Evaluation parameters
+evaluation:
+  stop_on_metric:
+    monitor: "rollout/ep_rew_mean"
+    threshold: 60.0
+    comparison: ">"
+    patience: 10

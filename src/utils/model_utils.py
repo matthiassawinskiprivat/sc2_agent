@@ -156,6 +156,26 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                 except Exception as e:
                     logger.error(f"Failed to interpolate '{key}': {e}. Deleting.")
                     del new_state_dict[key]
+            
+            elif new_action_dim == 2 * old_dim:
+                # Case: Action space expanded to Move + Attack (Level 7)
+                # Preserve existing 'Move' weights in the first half.
+                logger.info(f"Preserving move weights for '{key}': {old_dim} -> {new_action_dim} (2x expansion)")
+                
+                if len(old_weight.shape) == 2:
+                    # Weight: (N, features)
+                    old_dim_val, in_feat = old_weight.shape
+                    new_w = torch.randn(new_action_dim, in_feat) * 0.01
+                    new_w[:old_dim, :] = old_weight
+                    new_state_dict[key] = new_w
+                elif len(old_weight.shape) == 1:
+                    # Bias: (N,)
+                    new_b = torch.randn(new_action_dim) * 0.01
+                    new_b[:old_dim] = old_weight
+                    new_state_dict[key] = new_b
+                else:
+                    del new_state_dict[key]
+            
             else:
                 # Dimensions changed but not strictly square-to-square (or scalar value net)
                 # If it's a scalar value net (1, features), keep it!

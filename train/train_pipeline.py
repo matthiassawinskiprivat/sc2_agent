@@ -18,6 +18,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # The pipeline will now use the original, stable Level0Env
 from train.envs.level_0_env import Level0Env
 from train.envs.level_3_env import Level3Env
+from train.envs.level_7_env import Level7Env
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
 from src.utils.watchdog import Watchdog
@@ -27,7 +28,8 @@ from src.utils.model_utils import graft_model_weights
 # Environment Registry
 ENV_REGISTRY = {
     "Level0Env": Level0Env,
-    "Level3Env": Level3Env
+    "Level3Env": Level3Env,
+    "Level7Env": Level7Env
 }
 
 # Directories
@@ -71,9 +73,15 @@ class MaskableSubprocVecEnv(SubprocVecEnv):
 
     def reset(self) -> np.ndarray:
         logger.debug("MaskableSubprocVecEnv: reset() waiting for workers...")
-        results = super().reset()
-        logger.debug("MaskableSubprocVecEnv: reset() completed.")
-        return results
+        try:
+            results = super().reset()
+            logger.debug("MaskableSubprocVecEnv: reset() completed.")
+            return results
+        except (EOFError, BrokenPipeError) as e:
+            logger.error("MaskableSubprocVecEnv: Worker process died during reset().")
+            # We don't re-raise here if we want the higher level to handle it, 
+            # but usually it's better to re-raise with a better message.
+            raise e
 
 class PipelineManager:
     """
@@ -318,11 +326,20 @@ class PipelineManager:
                 )
                 callback_list.append(stop_callback)
 
-            model.learn(
-                total_timesteps=training_params["training_steps"],
-                callback=CallbackList(callback_list),
-                reset_num_timesteps=not bool(model_path_to_load)
-            )
+            try:
+                model.learn(
+                    total_timesteps=training_params["training_steps"],
+                    callback=CallbackList(callback_list),
+                    reset_num_timesteps=not bool(model_path_to_load)
+                )
+            except (EOFError, BrokenPipeError) as e:
+                logger.error(f"FATAL: Worker process crashed during training of level '{level_name}'.")
+                logger.error(f"Error detail: {e}")
+                logger.error("Please check the worker logs in 'logs/worker_*.log' for the root cause (e.g. SC2 crash, timeout, or Python error).")
+                raise e
+            except Exception as e:
+                logger.error(f"Unexpected error during training: {e}")
+                raise e
 
             # 5. Save Final Model
             logger.info("Training for this level complete. Saving final model.")

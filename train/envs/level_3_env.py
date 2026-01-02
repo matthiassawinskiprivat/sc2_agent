@@ -53,6 +53,9 @@ class Level3Env(Level0Env):
             realtime=self.visualize,
         )
         await self._client.join_game(race=Race.Zerg)
+        # Enable full vision for unit cleanup and observation
+        await self._client.debug_show_map()
+        
         self._bot._generated_frame = -1
         game_info = await self._client.get_game_info()
         game_data = await self._client.get_game_data()
@@ -97,13 +100,9 @@ class Level3Env(Level0Env):
 
     async def _async_step(self, action):
         """
-        The step function for Level 3 implements a 'unit-cycling' approach.
-        Instead of stepping the game physics every time the agent takes an action,
-        it cycles through all active Zerglings, giving each one an opportunity
-        to take an action based on its own local observation.
-        
-        The game simulation (client.step()) is only called once all units have 
-        submitted their actions for the current frame.
+        Modified step function for Level 3: Individual Unit Attribution.
+        Each unit action now triggers a game step and returns its own reward.
+        This ensures perfect credit assignment for each unit's behavior.
         """
         # Identify current active units if not already cached
         if not hasattr(self, "active_unit_tags") or not self.active_unit_tags:
@@ -115,76 +114,93 @@ class Level3Env(Level0Env):
              
         current_tag = self.active_unit_tags[self.current_unit_index]
         
-        # Apply the agent's action to the current unit in the cycle
+        # 1. Apply the agent's action to the current unit
         await self._bot.apply_action(current_tag, action)
         
-        # Advance the index to the next unit for the next 'step' call from the RL algorithm
-        self.current_unit_index += 1
+        # Send queued actions to the client before stepping
+        actions = getattr(self._bot, "_actions", None)
+        if actions is None:
+            actions = getattr(self._bot, "actions", None)
         
-        if self.current_unit_index < len(self.active_unit_tags):
-            # We are still in the middle of a frame. 
-            # Return the observation for the NEXT unit in the cycle.
-            # Reward is 0.0 for intermediate steps to avoid double-counting or confusing the agent.
-            next_tag = self.active_unit_tags[self.current_unit_index]
-            obs, _ = self._bot.get_observation_for_unit(next_tag)
-            return obs, 0.0, False, False, {}
-        else:
-            # All units have moved. Now we actually step the game physics.
-            
-            # Send batched actions (SC2Bot actions list is populated by apply_action via do())
-            # In standard python-sc2, actions are sent automatically in on_step,
-            # but since we are controlling the loop, we send them manually.
-            actions = getattr(self._bot, "actions", [])
-            if actions:
-                await self._client.actions(actions)
-                self._bot.actions.clear()
+        if actions:
+            await self._client.actions(actions[:])
+            actions.clear()
+        
+        # 2. Advance game physics immediately for this unit's action
+        # This allows immediate individual reward calculation
+        await self._client.step()
+        
+        # 3. Refresh bot state from the new observation
+        response = await self._client.observation()
+        from sc2.game_state import GameState
+        state = GameState(response.observation)
+        self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
 
-            # Advance game time by 1 step
-            await self._client.step()
+        # 4. Calculate Individual Reward for THIS unit
+        # Distance Shaping (Progress towards assigned beacon)
+        dist_reward = self._bot.calculate_distance_reward(current_tag)
+        
+        # Collection Reward (Did this unit reach a beacon?)
+        collection_rewards = await self._bot.check_collections()
+        success_reward = collection_rewards.get(current_tag, 0.0)
+        
+        # Step Penalty (Per action to encourage speed)
+        rewards_conf = self.training_conf.get('rewards', {})
+        step_penalty = rewards_conf.get('step_penalty', -0.05)
+        
+        total_reward = dist_reward + success_reward + step_penalty
+        
+        # 5. Handle Cycle Advancement and Unit Deaths
+        self.current_unit_index += 1
+        all_active_tags = [u.tag for u in self._bot.get_active_zerglings()]
+        
+        # Termination conditions
+        beacons_left = self._bot.units(UnitTypeId.BEACON_TERRANSMALL).amount
+        zerglings_left = len(all_active_tags)
+        
+        done = False
+        if beacons_left == 0:
+            done = True # All targets collected
+        elif zerglings_left == 0:
+            done = True # All units lost
             
-            # Prepare bot state for next step (update units, state, etc.)
-            response = await self._client.observation()
-            from sc2.game_state import GameState
-            state = GameState(response.observation)
-            # We must call _prepare_step to update the bot's internal unit lists and grids
-            self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
-
-            # Check if any Zerglings collected Beacons in this frame
-            collection_reward = await self._bot.check_collections()
-            
-            # Calculate reward based on how much closer the units got to their targets
-            dist_reward = self._calculate_avg_distance_reward()
-            
-            total_reward = collection_reward + dist_reward
-            
-            # Update active tags for next cycle (remove dead or collected ones)
-            self.active_unit_tags = [u.tag for u in self._bot.get_active_zerglings()]
-            
-            # Termination conditions
-            beacons_left = self._bot.units(UnitTypeId.BEACON_TERRANSMALL).amount
-            zerglings_left = self._bot.units(UnitTypeId.ZERGLING).amount
-            
-            done = False
-            if beacons_left == 0:
-                done = True # All targets collected - SUCCESS
-            elif zerglings_left == 0:
-                done = True # All units lost - FAILURE
-            
-            # Reset cycle index for the next frame
+        # Determine the next observation
+        if done:
+            obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
             self.current_unit_index = 0
-            # Prepare the first observation for the next frame (Unit 0)
+            self.active_unit_tags = all_active_tags
+        elif self.current_unit_index < len(self.active_unit_tags):
+            # Still in the middle of the original cycle. 
+            # Skip any units that might have died or been collected.
+            while self.current_unit_index < len(self.active_unit_tags):
+                next_tag = self.active_unit_tags[self.current_unit_index]
+                if next_tag in all_active_tags:
+                    break
+                self.current_unit_index += 1
+            
+            if self.current_unit_index < len(self.active_unit_tags):
+                next_tag = self.active_unit_tags[self.current_unit_index]
+                obs, _ = self._bot.get_observation_for_unit(next_tag)
+            else:
+                # All remaining units in cycle are gone, restart cycle
+                self.current_unit_index = 0
+                self.active_unit_tags = all_active_tags
+                if self.active_unit_tags:
+                    obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
+                else:
+                    obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
+                    done = True
+        else:
+            # End of cycle reached normally
+            self.current_unit_index = 0
+            self.active_unit_tags = all_active_tags
             if self.active_unit_tags:
                 obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
             else:
                 obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
-            
-            return obs, total_reward, done, False, {}
+                done = True
 
-    def _calculate_avg_distance_reward(self):
-        if not self._bot:
-            return 0.0
-            
-        # Delegate to bot's optimal assignment-based reward logic
-        return self._bot.calculate_distance_reward()
+        return obs, total_reward, done, False, {}
+
 
 

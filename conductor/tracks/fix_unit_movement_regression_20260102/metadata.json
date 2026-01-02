@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_unit_movement_regression_20260102",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-02T18:50:00Z",
+  "updated_at": "2026-01-02T18:50:00Z",
+  "description": "Analyze the root cause of the units not moving and fix the issue so that the agent can learn the game correctly."
+}

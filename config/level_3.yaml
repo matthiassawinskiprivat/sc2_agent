@@ -15,7 +15,7 @@ env:
   targets: 2
   grid_size: 128
   headless: True
-  max_steps: 600 # Increased for multi-target complexity
+  max_steps: 600
   maps_dir: "train/maps/level_3"
   rewards:
     success: 50.0
