@@ -23,11 +23,21 @@ class MultiClientSC2Manager:
         self.host_client: Optional[Client] = None
         self.join_client: Optional[Client] = None
 
-    async def launch_processes(self, count: int = 2, fullscreen: bool = False):
+    async def launch_processes(self, count: int = 2, visualize: bool = False, fullscreen: bool = False):
         """Launches the specified number of SC2 processes."""
         for i in range(count):
-            # Port configuration could be added here if needed, but SC2Process handles it mostly
-            process = self.sc2_process_cls(fullscreen=fullscreen)
+            # When visualizing, we prefer windowed mode with a specific resolution for multiple instances
+            resolution = (800, 600) if visualize else None
+            # Place windows side by side if visualizing
+            placement = (i * 810, 50) if visualize else None
+            
+            # Use 'render=True' if visualize is True to ensure the game world is drawn
+            process = self.sc2_process_cls(
+                fullscreen=fullscreen, 
+                render=visualize,
+                resolution=resolution,
+                placement=placement
+            )
             controller = await process.__aenter__()
             
             # Extract websocket connection

@@ -19,9 +19,11 @@ class MultiClientEnv(gym.Env):
     """
     def __init__(self, map_name: str = "Simple64", visualize: bool = False, realtime: bool = False,
                  level_name: str = "capture_the_flag", sc2_process_cls=None, client_cls=None,
-                 training_conf: Dict = None, worker_index: int = 0, num_workers: int = 1, **kwargs):
+                 training_conf: Dict = None, worker_index: int = 0, num_workers: int = 1, 
+                 fullscreen: bool = False, **kwargs):
         self.map_name = map_name
         self.visualize = visualize
+        self.fullscreen = fullscreen
         self.realtime = realtime
         self.level_name = level_name
         self.training_conf = training_conf or {}
@@ -143,7 +145,7 @@ class MultiClientEnv(gym.Env):
             raise e
 
     async def _launch_sc2_processes(self):
-        await self._manager.launch_processes(count=2, fullscreen=self.visualize)
+        await self._manager.launch_processes(count=2, visualize=self.visualize, fullscreen=self.fullscreen)
 
     async def _setup_game_session(self):
         # Must be implemented by subclass to define players/bots
