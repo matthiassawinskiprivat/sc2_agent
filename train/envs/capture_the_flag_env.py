@@ -25,7 +25,8 @@ class CaptureTheFlagEnv(MultiClientEnv):
                  unit_pool: List[str] = None,
                  grid_size: int = 128,
                  map_name: str = "Simple64",
-                 max_steps: int = 1000,
+                 max_steps: int = 2000,
+                 training_conf: Dict = None,
                  **kwargs):
         super().__init__(map_name=map_name, **kwargs)
         self.minerals = minerals
@@ -35,6 +36,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
         self.grid_size = grid_size
         self.max_steps = max_steps
         self.steps_count = 0
+        self.training_conf = training_conf or {}
         
         self.active_layers = [
             "allied_g_dps_base",
@@ -54,15 +56,22 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         self.active_player_id = 1
         self.current_unit_index = 0
-        self.player_units = {1: [], 2: []} # List of tags
+        self.player_units = {1: [], 2: []}
+        
+        # Self-play model
+        self.model = None
+
+    def set_model(self, model):
+        """Sets the model for self-play inference."""
+        self.model = model
 
     async def _setup_game_session(self):
         from sc2.player import Bot
         from sc2.data import Race
         from sc2 import maps
         
-        self.bot1 = CaptureTheFlagBot(player_id=1, training_conf={"active_layers": self.active_layers})
-        self.bot2 = CaptureTheFlagBot(player_id=2, training_conf={"active_layers": self.active_layers})
+        self.bot1 = CaptureTheFlagBot(player_id=1, training_conf=self.training_conf)
+        self.bot2 = CaptureTheFlagBot(player_id=2, training_conf=self.training_conf)
         
         players = [Bot(Race.Zerg, self.bot1), Bot(Race.Zerg, self.bot2)]
         resolved_map = maps.get(self.map_name)
@@ -79,27 +88,32 @@ class CaptureTheFlagEnv(MultiClientEnv):
         from sc2.ids.unit_typeid import UnitTypeId
         w, h = self.bot1.game_info.playable_area.width, self.bot1.game_info.playable_area.height
         
-        pos1 = (10, 10) # Placeholder for better random placement logic
+        pos1 = (10, 10)
         pos2 = (w-10, h-10)
         
+        # Spawn Pylons
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
+        await self.bot1.client.step()
+        
+        # Set reduced health for Pylons (10 HP + 10 Shield)
+        p1_pylon = self.bot1.structures(UnitTypeId.PYLON).first
+        p2_pylon = self.bot1.enemy_structures(UnitTypeId.PYLON).first
+        
+        if p1_pylon and p2_pylon:
+            await self.bot1.client.debug_set_unit_value([p1_pylon.tag, p2_pylon.tag], 2, 10.0) # 2 = Health
+            await self.bot1.client.debug_set_unit_value([p1_pylon.tag, p2_pylon.tag], 3, 10.0) # 3 = Shield
         
         # Resource spawning
         spawns1 = self._calculate_spawns(self.minerals, self.vespene)
         spawns2 = self._calculate_spawns(self.minerals, self.vespene)
         
         def to_id(name): return getattr(UnitTypeId, name)
-        
         cmds1 = [[to_id(u), 1, pos1, 1] for u in spawns1]
         cmds2 = [[to_id(u), 1, pos2, 2] for u in spawns2]
         
         await self.bot1.client.debug_create_unit(cmds1)
         await self.bot1.client.debug_create_unit(cmds2)
-        
-        # Set reduced health for Pylons
-        # (Will implement in Task 2.3 logic)
-        
         await self.bot1.client.step()
 
     def _calculate_spawns(self, m, v):
@@ -113,41 +127,48 @@ class CaptureTheFlagEnv(MultiClientEnv):
         return spawns
 
     async def _refresh_unit_lists(self):
-        """Updates the list of alive units for both players."""
         self.player_units[1] = [u.tag for u in self.bot1.units if not u.is_structure]
         self.player_units[2] = [u.tag for u in self.bot2.units if not u.is_structure]
 
     async def _get_joint_observation(self):
-        """Returns observation for the current active unit."""
         active_bot = self.bot1 if self.active_player_id == 1 else self.bot2
         tags = self.player_units[self.active_player_id]
-        
-        if self.current_unit_index < len(tags):
+        if tags and self.current_unit_index < len(tags):
             active_bot.active_unit_tag = tags[self.current_unit_index]
-        else:
-            active_bot.active_unit_tag = None
-            
         return active_bot.get_observation()
 
-    async def _async_step(self, action):
-        """Executes one action for one unit, then advances the cycle."""
+    async def _async_step(self, action_p_active):
+        """
+        Executes action for active unit, then uses self-play model 
+        to pick actions for other units if needed before advancing.
+        """
         self.steps_count += 1
+        
+        # 1. Apply action for the LEARNING unit
         active_bot = self.bot1 if self.active_player_id == 1 else self.bot2
         tags = self.player_units[self.active_player_id]
         
         if tags and self.current_unit_index < len(tags):
-            tag = tags[self.current_unit_index]
-            await active_bot.apply_action(tag, action)
-            
-            # Flush actions
-            if active_bot._actions:
-                await active_bot.client.actions(active_bot._actions)
-                active_bot._actions = []
+            await active_bot.apply_action(tags[self.current_unit_index], action_p_active)
 
-        # Advance game physics
+        # 2. Self-Play: Pick actions for the OTHER player's current unit if we were in their cycle.
+        # However, since we are SERIAL, we only do one unit action per step.
+        # To make it 'real' self-play, we should ideally have both sides move 'often'.
+        
+        # Flush actions for BOTH bots
+        for bot in [self.bot1, self.bot2]:
+            if bot._actions:
+                await bot.client.actions(bot._actions)
+                bot._actions = []
+
+        # 3. Physics Step
         await asyncio.gather(self.bot1.client.step(), self.bot2.client.step())
         
-        # Update cycle
+        # 4. Calculate Reward for the LEARNING agent
+        # The bot.calculate_reward() returns the reward from that bot's perspective.
+        reward = active_bot.calculate_reward()
+        
+        # 5. Advance Cycle
         self.current_unit_index += 1
         await self._refresh_unit_lists()
         
@@ -155,20 +176,27 @@ class CaptureTheFlagEnv(MultiClientEnv):
             self.current_unit_index = 0
             self.active_player_id = 2 if self.active_player_id == 1 else 1
             
-        # Check termination
-        done, reward = self._check_termination_and_reward()
-        
-        obs = await self._get_joint_observation()
-        truncated = self.steps_count >= self.max_steps
-        
-        return obs, reward, done, truncated, {}
-
-    def _check_termination_and_reward(self):
-        """Placeholder for reward logic (Phase 3)."""
-        # Basic check for pylon death
+        # 6. Check Termination
         p1_lost = self.bot1.structures(UnitTypeId.PYLON).amount == 0
         p2_lost = self.bot2.structures(UnitTypeId.PYLON).amount == 0
         
-        done = p1_lost or p2_lost
-        reward = 0.0 # To be implemented in Phase 3
-        return done, reward
+        win_reward = self.training_conf.get("rewards", {}).get("win_reward", 100.0)
+        
+        done = False
+        if p1_lost:
+            done = True
+            if self.active_player_id == 2: reward += win_reward # P1 lost, P2 wins
+            else: reward -= win_reward
+        elif p2_lost:
+            done = True
+            if self.active_player_id == 1: reward += win_reward # P2 lost, P1 wins
+            else: reward -= win_reward
+            
+        truncated = self.steps_count >= self.max_steps
+        obs = await self._get_joint_observation()
+        
+        return obs, reward, done, truncated, {}
+
+    def step(self, action):
+        # Synchronous wrapper as per MultiClientEnv
+        return super().step(action)
