@@ -79,8 +79,22 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         await self._manager.create_join_game(resolved_map, players, realtime=self.realtime)
         
-        await self.bot1.on_start()
-        await self.bot2.on_start()
+        # Wire bots to clients and prepare them
+        # BotAI._prepare_start(client, player_id, game_info, game_data, realtime)
+        # We need game_info and game_data from the client
+        async def prepare_bot(bot, client, player_id):
+            game_info = await client.get_game_info()
+            game_data = await client.get_game_data()
+            bot._prepare_start(client, player_id, game_info, game_data, self.realtime)
+            await bot.on_start()
+
+        await asyncio.gather(
+            prepare_bot(self.bot1, self._manager.clients[0], 1),
+            prepare_bot(self.bot2, self._manager.clients[1], 2)
+        )
+        
+        # Initial step to synchronize state
+        await self._synchronized_step()
         
         await self._spawn_initial_units()
         await self._refresh_unit_lists()

@@ -66,26 +66,48 @@ class MultiClientSC2Manager:
 
         # Port configuration for multi-client communication
         from sc2.portconfig import Portconfig
-        portconfig = Portconfig()
+        # Using contiguous ports might be more stable for multi-client
+        portconfig = Portconfig.contiguous_ports()
+        logger.info(f"Using Portconfig: {portconfig.as_json}")
 
         # Host creates the game
-        # Note: players list must match the number of slots
-        await self.controllers[0].create_game(
-            game_map,
-            players,
-            realtime=realtime
-        )
+        logger.info("Host is creating the game...")
+        try:
+            await self.controllers[0].create_game(
+                game_map,
+                players,
+                realtime=realtime
+            )
+            logger.info("Game created successfully.")
+        except Exception as e:
+            logger.error(f"Error during create_game: {e}")
+            raise e
 
-        # Both join
-        join_tasks = []
-        for i, client in enumerate(self.clients):
-            # Pass portconfig to join_game
-            join_tasks.append(client.join_game(
+        # Host joins first
+        logger.info("Host (Player 1) is joining...")
+        try:
+            await self.clients[0].join_game(
                 race=Race.Zerg, 
                 portconfig=portconfig
-            ))
+            )
+            logger.info("Host joined successfully.")
+        except Exception as e:
+            logger.error(f"Error during host join_game: {e}")
+            raise e
+
+        # Joiner joins second
+        logger.info("Joiner (Player 2) is joining...")
+        try:
+            await self.clients[1].join_game(
+                race=Race.Zerg, 
+                portconfig=portconfig
+            )
+            logger.info("Joiner joined successfully.")
+        except Exception as e:
+            logger.error(f"Error during joiner join_game: {e}")
+            raise e
         
-        await asyncio.gather(*join_tasks)
+        logger.info("Multi-client session established.")
 
     async def close(self):
         """Closes all connections and processes."""
