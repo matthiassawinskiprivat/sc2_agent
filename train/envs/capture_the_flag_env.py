@@ -77,16 +77,19 @@ class CaptureTheFlagEnv(MultiClientEnv):
         players = [Bot(Race.Zerg, self.bot1), Bot(Race.Zerg, self.bot2)]
         resolved_map = self._resolve_map(self.map_name)
         
+        self._log("Starting multi-client game session...")
         await self._manager.create_join_game(resolved_map, players, realtime=self.realtime)
+        self._log("Game session established. Preparing bots...")
         
         # Wire bots to clients and prepare them
         # BotAI._prepare_start(client, player_id, game_info, game_data, realtime)
-        # We need game_info and game_data from the client
         async def prepare_bot(bot, client, player_id):
+            self._log(f"Preparing Bot {player_id}...")
             game_info = await client.get_game_info()
             game_data = await client.get_game_data()
             bot._prepare_start(client, player_id, game_info, game_data, self.realtime)
             await bot.on_start()
+            self._log(f"Bot {player_id} ready.")
 
         await asyncio.gather(
             prepare_bot(self.bot1, self._manager.clients[0], 1),
@@ -94,10 +97,13 @@ class CaptureTheFlagEnv(MultiClientEnv):
         )
         
         # Initial step to synchronize state
+        self._log("Synchronizing initial state...")
         await self._synchronized_step()
         
+        self._log("Spawning units...")
         await self._spawn_initial_units()
         await self._refresh_unit_lists()
+        self._log("Setup complete.")
 
     async def _synchronized_step(self):
         """Steps both clients simultaneously to advance the game."""

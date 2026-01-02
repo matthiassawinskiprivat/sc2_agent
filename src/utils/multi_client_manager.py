@@ -66,49 +66,50 @@ class MultiClientSC2Manager:
 
         # Port configuration for multi-client communication
         from sc2.portconfig import Portconfig
-        portconfig = Portconfig()
+        # contiguous_ports is often more stable for local multi-client sessions
+        try:
+            portconfig = Portconfig.contiguous_ports()
+        except Exception:
+            portconfig = Portconfig()
+            
         logger.info(f"Using Portconfig: {portconfig.as_json}")
 
         # Host creates the game
         logger.info("Host is creating the game...")
         try:
+            # We use the controller of the first process to create the game
             await self.controllers[0].create_game(
                 game_map,
                 players,
                 realtime=realtime
             )
-            logger.info("Game created successfully.")
-            # Give the server a moment to start the listen socket
-            await asyncio.sleep(2)
+            logger.info("Game created successfully. Waiting for map to load...")
+            # Increased delay to ensure SC2 is ready to accept join requests
+            await asyncio.sleep(5)
         except Exception as e:
             logger.error(f"Error during create_game: {e}")
             raise e
 
-        # Host joins first
-        logger.info("Host (Player 1) is joining...")
+        # Both join in parallel - this is crucial for Portconfig handshake
+        logger.info("Both players are joining the game...")
         try:
-            await self.clients[0].join_game(
-                race=Race.Zerg, 
-                portconfig=portconfig
-            )
-            logger.info("Host joined successfully.")
+            join_tasks = [
+                self.clients[0].join_game(
+                    name="Player1",
+                    race=Race.Zerg, 
+                    portconfig=portconfig
+                ),
+                self.clients[1].join_game(
+                    name="Player2",
+                    race=Race.Zerg, 
+                    portconfig=portconfig
+                )
+            ]
+            await asyncio.gather(*join_tasks)
+            logger.info("Multi-client session established (both players joined).")
         except Exception as e:
-            logger.error(f"Error during host join_game: {e}")
+            logger.error(f"Error during parallel join_game: {e}")
             raise e
-
-        # Joiner joins second
-        logger.info("Joiner (Player 2) is joining...")
-        try:
-            await self.clients[1].join_game(
-                race=Race.Zerg, 
-                portconfig=portconfig
-            )
-            logger.info("Joiner joined successfully.")
-        except Exception as e:
-            logger.error(f"Error during joiner join_game: {e}")
-            raise e
-        
-        logger.info("Multi-client session established.")
 
     async def close(self):
         """Closes all connections and processes."""
