@@ -4,6 +4,8 @@ import numpy as np
 from typing import Tuple, List, Dict, Any, Optional
 import random
 import time
+import os
+from pathlib import Path
 
 from src.utils.multi_client_manager import MultiClientSC2Manager
 from sc2.player import Bot, Computer, AbstractPlayer
@@ -43,6 +45,47 @@ class MultiClientEnv(gym.Env):
         self._manager = MultiClientSC2Manager(sc2_process_cls=self._sc2_process_cls, client_cls=self._client_cls)
         self._loop = asyncio.new_event_loop()
 
+        # Map discovery
+        self.map_list = self._discover_maps()
+        if self.map_list:
+            self.map_name = self.map_list[self.worker_index % len(self.map_list)]
+        else:
+            # Fallback to map_name if discovery fails
+            self.map_list = [self.map_name]
+            
+        # Placeholder spaces - should be defined by subclasses
+        self.observation_space = None
+        self.action_space = None
+        self.players: List[AbstractPlayer] = []
+
+    def _discover_maps(self):
+        from pathlib import Path
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Try to find maps in train/maps/<level_name>
+        maps_dir = Path(current_dir).parent / "maps" / self.level_name
+        if not maps_dir.exists():
+            return []
+        map_files = [f.stem for f in maps_dir.glob("*.SC2Map")]
+        map_files.sort()
+        return map_files
+
+    def _resolve_map(self, map_name):
+        from pathlib import Path
+        from sc2.maps import Map
+        import sc2
+        
+        # Try library maps first
+        try:
+            return sc2.maps.get(map_name)
+        except KeyError:
+            # Try project maps
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            map_path = Path(current_dir).parent / "maps" / self.level_name / f"{map_name}.SC2Map"
+            if not map_path.exists():
+                raise FileNotFoundError(f"Map not found: {map_path}")
+            return Map(map_path)
+
     def _log(self, message):
         # Print to stdout too so it gets captured by redirection
         print(f"[Worker {self.worker_id}] {message}")
@@ -53,12 +96,6 @@ class MultiClientEnv(gym.Env):
                 f.write(f"[{timestamp}] {message}\n")
         except:
             pass
-        
-        # Placeholder spaces - should be defined by subclasses
-        self.observation_space = None
-        self.action_space = None
-        
-        self.players: List[AbstractPlayer] = []
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
