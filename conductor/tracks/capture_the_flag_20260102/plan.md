@@ -21,14 +21,14 @@ Implement the core CTF logic, resource spawning, and observation transformation.
 - [x] Task: Write tests for spawning logic and observation shapes.
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Environment - CaptureTheFlagEnv' (Protocol in workflow.md) f2382aa
 
-## Phase 3: Logic - Self-Play and Rewards
+## Phase 3: Logic - Self-Play and Rewards [checkpoint: b337a5e]
 Implement the competitive reward structure and the self-play inference loop.
 
-- [ ] Task: Implement `CaptureTheFlagBot` logic for calculating competitive rewards.
-- [ ] Task: Implement the self-play inference loop (Model predicts for both P1 and P2).
-- [ ] Task: Configure `config/capture_the_flag.yaml` with CTF parameters.
-- [ ] Task: Write integration tests for the full CTF game loop and reward attribution.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Logic - Self-Play and Rewards' (Protocol in workflow.md)
+- [x] Task: Implement `CaptureTheFlagBot` logic for calculating competitive rewards.
+- [x] Task: Implement the self-play inference loop (Model predicts for both P1 and P2).
+- [x] Task: Configure `config/capture_the_flag.yaml` with CTF parameters.
+- [x] Task: Write integration tests for the full CTF game loop and reward attribution.
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Logic - Self-Play and Rewards' (Protocol in workflow.md) b337a5e
 
 ## Phase 4: Integration and Verification
 Finalize the training pipeline integration and perform end-to-end verification.
