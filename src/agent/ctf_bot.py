@@ -58,7 +58,8 @@ class CaptureTheFlagBot(BotAI):
             'selected_units': selected_units
         }
         
-        processed = self.agent_system.process_observation(raw_obs)
+        # Process with agent system, passing player_id for perspective-aware transformation
+        processed = self.agent_system.process_observation(raw_obs, player_id=self.player_id)
         return processed["active_agent"]
 
     async def apply_action(self, unit_tag: int, action: int):

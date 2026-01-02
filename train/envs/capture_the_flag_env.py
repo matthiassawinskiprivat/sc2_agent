@@ -9,6 +9,7 @@ from loguru import logger
 from train.envs.multi_client_env import MultiClientEnv
 from src.utils.layer_constants import LayerConstants
 from src.agent.ctf_bot import CaptureTheFlagBot
+from sc2.ids.unit_typeid import UnitTypeId
 
 # Standard SC2 Unit Costs (Simplified)
 UNIT_COSTS = {
@@ -157,7 +158,10 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         # Flush actions for BOTH bots
         for bot in [self.bot1, self.bot2]:
-            if bot._actions:
+            if hasattr(bot, "actions") and bot.actions:
+                await bot.client.actions(bot.actions)
+                bot.actions = []
+            elif hasattr(bot, "_actions") and bot._actions:
                 await bot.client.actions(bot._actions)
                 bot._actions = []
 
@@ -172,9 +176,12 @@ class CaptureTheFlagEnv(MultiClientEnv):
         self.current_unit_index += 1
         await self._refresh_unit_lists()
         
+        # Check if we need to switch players
         if self.current_unit_index >= len(self.player_units[self.active_player_id]):
             self.current_unit_index = 0
             self.active_player_id = 2 if self.active_player_id == 1 else 1
+            # Refresh again for new player
+            await self._refresh_unit_lists()
             
         # 6. Check Termination
         p1_lost = self.bot1.structures(UnitTypeId.PYLON).amount == 0
@@ -196,6 +203,11 @@ class CaptureTheFlagEnv(MultiClientEnv):
         obs = await self._get_joint_observation()
         
         return obs, reward, done, truncated, {}
+
+    def action_masks(self):
+        """Returns valid actions for the active unit."""
+        # For now, all spatial actions are valid.
+        return np.ones(self.action_space.n, dtype=bool)
 
     def step(self, action):
         # Synchronous wrapper as per MultiClientEnv
