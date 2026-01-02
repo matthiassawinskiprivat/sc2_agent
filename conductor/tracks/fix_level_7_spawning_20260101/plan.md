@@ -8,8 +8,14 @@
 - [x] Task: Implement post-spawn verification and retry logic to ensure configured unit counts are strictly met. fbe7a45
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Robust Base Spawning' (Protocol in workflow.md) 626b23e
 
-## Phase 2: Verification and Cleanup
-- [~] Task: Update unit tests in `tests/test_level_7_spawning_reliability.py` to verify centralized logic and unit counts.
-- [ ] Task: Verify that the 2-to-1 Zergling ratio is correctly handled in the new logic.
-- [ ] Task: Run a short debug training session and monitor for "Spawning attempt... failed" logs to ensure loops are working.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Verification and Cleanup' (Protocol in workflow.md)
+## Phase 2: Verification and Cleanup [checkpoint: 3587004]
+
+- [x] Task: Update unit tests in `tests/test_level_7_spawning_reliability.py` to verify centralized logic and unit counts. e242699
+
+- [x] Task: Verify that the 2-to-1 Zergling ratio is correctly handled in the new logic. e242699
+
+- [x] Task: Run a short debug training session and monitor for "Spawning attempt... failed" logs to ensure loops are working. 626b23e
+
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Verification and Cleanup' (Protocol in workflow.md) 3587004
+
+
