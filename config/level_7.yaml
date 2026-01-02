@@ -27,7 +27,7 @@ env:
     win_reward: 20.0
     loss_penalty: -0.5
     distance_multiplier: 0.05
-    damage_penalty: -0.5
+    damage_penalty: -0.01
     kill_penalty: -10.0
   active_layers:
     - "allied_g_dps_base"

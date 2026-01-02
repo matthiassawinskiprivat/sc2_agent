@@ -12,10 +12,10 @@ training:
 # Environment parameters
 env:
   env_class: "Level3Env"
-  targets: 12
+  targets: 8
   grid_size: 128
   headless: True
-  max_steps: 1000 # Increased for multi-target complexity
+  max_steps: 1200
   maps_dir: "train/maps/level_6"
   rewards:
     success: 50.0

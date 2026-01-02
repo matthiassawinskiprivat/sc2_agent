@@ -1,0 +1,8 @@
+{
+  "track_id": "level_7_allied_penalties_20260101",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-01-01T22:32:00Z",
+  "updated_at": "2026-01-01T22:32:00Z",
+  "description": "Add allied damage and kill penalties to Level 7 environment to discourage unit attrition."
+}

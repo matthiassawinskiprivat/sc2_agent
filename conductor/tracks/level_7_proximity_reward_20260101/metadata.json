@@ -1,0 +1,8 @@
+{
+  "track_id": "level_7_proximity_reward_20260101",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-01-01T22:00:00Z",
+  "updated_at": "2026-01-01T22:00:00Z",
+  "description": "Extend level 7 reward function so that it additionally received a reward for beeing closer to the optimal enemy unit similar to level 3 environment"
+}

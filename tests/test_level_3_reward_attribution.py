@@ -49,7 +49,7 @@ async def test_level_3_intermediate_reward_attribution(mock_discover_maps, mock_
     mock_bot.get_active_zerglings.return_value = [unit1, unit2]
     
     # Mock observation generation
-    mock_bot.get_observation_for_unit.return_value = (np.zeros((1, 32, 32)), {})
+    mock_bot.get_observation_for_unit.return_value = (np.zeros((1, 32, 32)), dict())
     
     # Mock reward calculation
     mock_bot.calculate_distance_reward.side_effect = [5.0, 3.0] # Reward for unit 1 and unit 2
@@ -79,3 +79,53 @@ async def test_level_3_intermediate_reward_attribution(mock_discover_maps, mock_
         obs2, reward2, done2, truncated2, info2 = await env._async_step(action=1)
         
         assert reward2 == 3.0 + 10.0 - 0.1, f"Expected 12.9, got {reward2}"
+
+@pytest.mark.asyncio
+@patch("train.envs.level_0_env.ConfigManager")
+@patch("train.envs.level_0_env.Level0Env._discover_maps")
+async def test_level_3_unit_removal_mid_cycle(mock_discover_maps, mock_config_manager, mock_training_conf):
+    """
+    Verify that removing a unit mid-cycle doesn't crash the environment.
+    """
+    mock_discover_maps.return_value = ["map_01"]
+    mock_cm_instance = mock_config_manager.return_value
+    mock_cm_instance.get_level_config.return_value = {"env": {"targets": 2, "rewards": mock_training_conf["rewards"]}}
+    mock_cm_instance.get_cumulative_active_layers.return_value = []
+
+    env = Level3Env(level_name="level_3", training_conf=mock_training_conf)
+    mock_bot = MagicMock()
+    mock_bot.apply_action = AsyncMock()
+    env._bot = mock_bot
+    
+    # 2 units initially
+    unit1 = MockUnit(101)
+    unit2 = MockUnit(102)
+    mock_bot.get_active_zerglings.side_effect = [
+        [unit1, unit2], # Initial call in step
+        [unit2],        # After step 1 (Unit 1 removed/collected)
+        [unit2]         # Termination check
+    ]
+    
+    mock_bot.get_observation_for_unit.return_value = (np.zeros((1, 32, 32)), dict())
+    mock_bot.calculate_distance_reward.return_value = 1.0
+    mock_bot.check_collections = AsyncMock(return_value={101: 50.0})
+    
+    env._client = MagicMock()
+    env._client.step = AsyncMock()
+    env._client.observation = AsyncMock()
+    
+    with patch("sc2.game_state.GameState"), \
+         patch("train.envs.level_0_env.ProtoWrapper"):
+        env._bot._prepare_step = MagicMock()
+        env.active_unit_tags = [101, 102]
+        env.current_unit_index = 0
+        
+        # Unit 1 acts and is removed (e.g. collected beacon)
+        obs1, reward1, done1, truncated1, info1 = await env._async_step(action=1)
+        
+        assert reward1 == 1.0 + 50.0 - 0.1
+        assert env.current_unit_index == 1
+        
+        # Next unit in original list was 102. 
+        # Env should detect 102 is still alive and return its observation.
+        mock_bot.get_observation_for_unit.assert_called_with(102)
