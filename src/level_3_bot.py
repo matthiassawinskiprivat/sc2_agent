@@ -19,7 +19,9 @@ class Level3Bot(SC2Bot):
         self.targets_count = self.training_conf.get("targets", 1)
         
         # Dynamic unit types for Level 3
-        allied_name = self.training_conf.get("unit_type", "ZERGLING").upper()
+        # Look in training_conf root first, then in 'env' section
+        env_conf = self.training_conf.get("env", {})
+        allied_name = self.training_conf.get("unit_type", env_conf.get("unit_type", "ZERGLING")).upper()
         try:
             self.allied_unit_type = getattr(UnitTypeId, allied_name)
         except AttributeError:
@@ -64,6 +66,10 @@ class Level3Bot(SC2Bot):
                 end = locations[self.targets_count + i]
                 await self.client.debug_create_unit([[self.allied_unit_type, 1, start, self.player_id]])
                 await self.client.debug_create_unit([[self.beacon_type, 1, end, self.player_id]])
+
+        # Step game to actually spawn units and refresh state
+        await self.client.step()
+        await self._refresh_state()
 
     def get_closest_targets(self) -> Dict[int, int]:
         """

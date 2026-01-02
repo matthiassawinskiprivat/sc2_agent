@@ -18,8 +18,10 @@ class Level7Bot(Level3Bot):
         self.previous_allied_health = {} # tag -> health (allied)
         
         # Resolve unit types from configuration
-        allied_name = self.training_conf.get("unit_type", "MARINE").upper()
-        enemy_name = self.training_conf.get("enemy_type", "ZERGLING").upper()
+        # Look in training_conf root first, then in 'env' section
+        env_conf = self.training_conf.get("env", {})
+        allied_name = self.training_conf.get("unit_type", env_conf.get("unit_type", "MARINE")).upper()
+        enemy_name = self.training_conf.get("enemy_type", env_conf.get("enemy_type", "ZERGLING")).upper()
         
         try:
             self.allied_unit_type = getattr(UnitTypeId, allied_name)
