@@ -31,10 +31,10 @@ class MultiClientSC2Manager:
             # Place windows side by side if visualizing
             placement = (i * 810, 50) if visualize else None
             
-            # Use 'render=True' if visualize is True to ensure the game world is drawn
+            # Note: Do NOT use 'render=True' on Windows as it tries to load 'libEGL.so' (Linux only)
+            # Just setting fullscreen=False is enough to show the game window.
             process = self.sc2_process_cls(
                 fullscreen=fullscreen, 
-                render=visualize,
                 resolution=resolution,
                 placement=placement
             )
@@ -66,8 +66,7 @@ class MultiClientSC2Manager:
 
         # Port configuration for multi-client communication
         from sc2.portconfig import Portconfig
-        # Using contiguous ports might be more stable for multi-client
-        portconfig = Portconfig.contiguous_ports()
+        portconfig = Portconfig()
         logger.info(f"Using Portconfig: {portconfig.as_json}")
 
         # Host creates the game
@@ -79,6 +78,8 @@ class MultiClientSC2Manager:
                 realtime=realtime
             )
             logger.info("Game created successfully.")
+            # Give the server a moment to start the listen socket
+            await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"Error during create_game: {e}")
             raise e
