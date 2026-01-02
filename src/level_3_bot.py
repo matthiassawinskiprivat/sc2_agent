@@ -98,28 +98,37 @@ class Level3Bot(SC2Bot):
                 distances[u_tag] = unit.distance_to(beacon)
         return distances
 
-    def calculate_distance_reward(self) -> float:
+    def calculate_distance_reward(self, unit_tag: int = None) -> float:
         """
-        Calculates the distance-based shaping reward using optimal assignments.
+        Calculates the distance-based shaping reward for a specific unit or all units.
         """
         rewards_conf = self.training_conf.get('rewards', {})
-        step_penalty = rewards_conf.get('step_penalty', -0.05)
         dist_multiplier = rewards_conf.get('distance_multiplier', 0.1)
         
         current_distances = self.get_assigned_distances()
-        total_dist_change = 0.0
         
+        if unit_tag is not None:
+            dist = current_distances.get(unit_tag)
+            if dist is None:
+                return 0.0
+                
+            prev_dist = self.previous_distances.get(unit_tag)
+            reward = 0.0
+            if prev_dist is not None:
+                reward = (prev_dist - dist) * dist_multiplier
+            
+            self.previous_distances[unit_tag] = dist
+            return reward
+
+        # Fallback: calculate total change for all units
+        total_dist_change = 0.0
         for u_tag, dist in current_distances.items():
             prev_dist = self.previous_distances.get(u_tag)
             if prev_dist is not None:
                 total_dist_change += (prev_dist - dist)
-            
             self.previous_distances[u_tag] = dist
             
-        active_count = len(self.get_active_zerglings())
-        avg_dist_reward = (total_dist_change * dist_multiplier) / max(1, active_count)
-        
-        return avg_dist_reward + step_penalty
+        return total_dist_change * dist_multiplier
 
     def get_active_zerglings(self):
         """Returns sorted list of active units."""
@@ -189,17 +198,17 @@ class Level3Bot(SC2Bot):
     def _get_observation(self) -> Tuple[np.ndarray, Dict]:
         return super()._get_observation()
         
-    async def check_collections(self):
+    async def check_collections(self) -> Dict[int, float]:
         """
-        Checks for unit-beacon collisions.
+        Checks for unit-beacon collisions and returns rewards mapped to unit tags.
         """
-        reward = 0.0
+        unit_rewards = {}
         
         units = self.units(self.allied_unit_type)
         beacons = self.units(self.beacon_type)
         
         if not units.exists or not beacons.exists:
-            return 0.0
+            return {}
         
         rewards_conf = self.training_conf.get('rewards', {})
         success_reward_total = rewards_conf.get('success', 100.0)
@@ -223,10 +232,10 @@ class Level3Bot(SC2Bot):
                     tags_to_kill.append(b.tag)
                     collected_units.add(u.tag)
                     collected_beacons.add(b.tag)
-                    reward += success_reward_per_event
+                    unit_rewards[u.tag] = success_reward_per_event
                     break 
         
         if tags_to_kill:
             await self.client.debug_kill_unit(tags_to_kill)
             
-        return reward
+        return unit_rewards

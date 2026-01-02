@@ -12,17 +12,14 @@ class MockUnit:
     def distance_to(self, other):
         return self.position.distance_to(other.position)
 
-def test_level_4_optimal_assignment():
-    """Verify that the optimal assignment logic handles 4 units correctly."""
+def test_level_4_greedy_assignment():
+    """Verify that the greedy assignment logic handles 4 units correctly."""
     bot = Level3Bot(conn=MagicMock(), training_conf={"targets": 4})
     
     # 4 Units in a line
     units = [MockUnit(100 + i, Point2((0, i*10))) for i in range(4)]
     # 4 Beacons in a line, slightly offset
     beacons = [MockUnit(200 + i, Point2((2, i*10))) for i in range(4)]
-    
-    # Mix them up to ensure assignment isn't just accidental
-    # U0 is closest to B0, U1 to B1, etc.
     
     all_units_list = units + beacons
     
@@ -31,24 +28,21 @@ def test_level_4_optimal_assignment():
         m = MagicMock()
         m.__iter__.return_value = res
         m.exists = True
+        m.closest_to = lambda u: min(beacons, key=lambda b: u.distance_to(b))
         m.__getitem__.side_effect = lambda idx: res[idx]
         return m
 
     bot.units = MagicMock(side_effect=mock_units_filter)
     bot.units.find_by_tag.side_effect = lambda tag: next((u for u in all_units_list if u.tag == tag), None)
     
-    assignment = bot._calculate_optimal_assignment()
+    assignment = bot.get_closest_targets()
     
-    # Verify unique assignments
-    assigned_beacons = set(assignment.values())
-    assert len(assigned_beacons) == 4, "Each unit should have a unique beacon"
-    
-    # Verify obvious mapping
+    # In this specific setup, each unit is closest to its "aligned" beacon
     for i in range(4):
         assert assignment[100 + i] == 200 + i
 
 def test_level_4_reward_scaling():
-    """Verify reward scaling remains consistent with 4 units."""
+    """Verify reward scaling matches the new individual/summed logic."""
     training_conf = {
         "targets": 4,
         "rewards": {"distance_multiplier": 1.0, "step_penalty": 0.0}
@@ -59,8 +53,6 @@ def test_level_4_reward_scaling():
     beacons = [MockUnit(200 + i, Point2((2, i*10))) for i in range(4)]
     
     all_units_list = units + beacons
-    bot.units = MagicMock(side_effect=lambda t: [units, beacons][0 if t == UnitTypeId.ZERGLING else 1])
-    # Need to fix the mock above to work with get_active_zerglings and calculate_distance_reward
     
     def mock_units_filter(unit_type):
         res = units if unit_type == UnitTypeId.ZERGLING else beacons
@@ -69,6 +61,7 @@ def test_level_4_reward_scaling():
         m.__len__.return_value = len(res)
         m.exists = True
         m.amount = len(res)
+        m.closest_to = lambda u: min(beacons, key=lambda b: u.distance_to(b))
         m.__getitem__.side_effect = lambda idx: res[idx]
         return m
 
@@ -78,13 +71,14 @@ def test_level_4_reward_scaling():
     # Initialize
     bot.calculate_distance_reward()
     
-    # Move ALL 4 units 1.0 unit closer to their respective beacons
-    for u in units:
-        u.position = Point2((u.position.x + 1.0, u.position.y))
+    # Move Unit 0 exactly 1.0 unit closer to its beacon
+    units[0].position = Point2((units[0].position.x + 1.0, units[0].position.y))
         
-    reward = bot.calculate_distance_reward()
+    # Test individual reward for Unit 0
+    reward0 = bot.calculate_distance_reward(unit_tag=100)
+    assert reward0 == pytest.approx(1.0)
     
-    # Total change = 1.0 * 4 units = 4.0
-    # Avg change = 4.0 / 4 units = 1.0
-    # Reward = 1.0 * multiplier (1.0) = 1.0
-    assert reward == pytest.approx(1.0)
+    # Move Unit 1 exactly 2.0 units closer
+    units[1].position = Point2((units[1].position.x + 2.0, units[1].position.y))
+    reward1 = bot.calculate_distance_reward(unit_tag=101)
+    assert reward1 == pytest.approx(2.0)
