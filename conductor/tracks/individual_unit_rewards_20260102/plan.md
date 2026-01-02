@@ -7,7 +7,7 @@
 - [x] Task: Modify `Level3Env._async_step` to calculate and return rewards (dist_reward + success_reward + step_penalty) for every unit in the cycle.
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Level 3/4 Foundation & Refactoring' (Protocol in workflow.md)
 
-## Phase 2: Level 7 Combat Refactoring
+## Phase 2: Level 7 Combat Refactoring [checkpoint: 0b5d4bb]
 - [x] Task: Create failing tests in `tests/test_level_7_reward_attribution.py` verifying that individual units in Level 7 receive rewards for their specific movements and attacks.
 - [x] Task: Refactor `Level7Bot` combat reward functions (`calculate_combat_reward`, `calculate_allied_attrition_penalty`) to attribute rewards to the active unit.
 - [x] Task: Update `Level7Bot.calculate_distance_reward` to match the individual unit pattern from Phase 1.
