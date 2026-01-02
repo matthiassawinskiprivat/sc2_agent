@@ -10,16 +10,16 @@ Implement the capability to run two SC2 processes and connect two bots to the sa
 - [x] Task: Write tests for dual-process launch and synchronization.
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Infrastructure - Multi-Client Support' (Protocol in workflow.md) 0d3a2d8
 
-## Phase 2: Environment - CaptureTheFlagEnv
+## Phase 2: Environment - CaptureTheFlagEnv [checkpoint: f2382aa]
 Implement the core CTF logic, resource spawning, and observation transformation.
 
-- [ ] Task: Create `CaptureTheFlagEnv` inheriting from `MultiClientEnv`.
-- [ ] Task: Implement resource-based unit spawning logic (Minerals/Vespene).
-- [ ] Task: Implement Pylon (Flag) spawning with reduced HP and random placement.
-- [ ] Task: Update `SharedObservationTransformer` to support 7 layers and Pylon highlighting.
-- [ ] Task: Implement Serial Unit Control cycle for two players.
-- [ ] Task: Write tests for spawning logic and observation shapes.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Environment - CaptureTheFlagEnv' (Protocol in workflow.md)
+- [x] Task: Create `CaptureTheFlagEnv` inheriting from `MultiClientEnv`.
+- [x] Task: Implement resource-based unit spawning logic (Minerals/Vespene).
+- [x] Task: Implement Pylon (Flag) spawning with reduced HP and random placement.
+- [x] Task: Update `SharedObservationTransformer` to support 7 layers and Pylon highlighting.
+- [x] Task: Implement Serial Unit Control cycle for two players.
+- [x] Task: Write tests for spawning logic and observation shapes.
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Environment - CaptureTheFlagEnv' (Protocol in workflow.md) f2382aa
 
 ## Phase 3: Logic - Self-Play and Rewards
 Implement the competitive reward structure and the self-play inference loop.
