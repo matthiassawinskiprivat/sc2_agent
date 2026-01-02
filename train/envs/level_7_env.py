@@ -116,7 +116,8 @@ class Level7Env(Level3Env):
 
     async def _async_step(self, action):
         """
-        Modified step logic for Level 7 (Dynamic Units).
+        Modified step logic for Level 7: Individual Unit Attribution.
+        Each unit action triggers a game step to ensure precise combat reward attribution.
         """
         if not hasattr(self, "active_unit_tags") or not self.active_unit_tags:
              self.active_unit_tags = [u.tag for u in self._bot.get_active_units()]
@@ -125,57 +126,83 @@ class Level7Env(Level3Env):
              return np.zeros(self.observation_space.shape), 0, True, False, {}
 
         current_tag = self.active_unit_tags[self.current_unit_index]
+        
+        # 1. Apply the agent's action
         await self._bot.apply_action(current_tag, action)
         
-        self.current_unit_index += 1
+        # 2. Advance game physics immediately
+        await self._client.step()
         
-        if self.current_unit_index < len(self.active_unit_tags):
-            # Intermediate unit step
-            next_tag = self.active_unit_tags[self.current_unit_index]
-            obs, _ = self._bot.get_observation_for_unit(next_tag)
-            return obs, 0.0, False, False, {}
-        else:
-            # End of frame
-            actions = getattr(self._bot, "actions", [])
-            if actions:
-                await self._client.actions(actions)
-                self._bot.actions.clear()
+        # 3. Refresh bot state from new observation
+        response = await self._client.observation()
+        from sc2.game_state import GameState
+        state = GameState(response.observation)
+        from train.envs.level_0_env import ProtoWrapper
+        self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
 
-            await self._client.step()
+        # 4. Calculate Individual Reward for THIS unit
+        # Since we just stepped, combat results are directly attributable to this unit
+        combat_reward = self._bot.calculate_combat_reward()
+        dist_reward = self._bot.calculate_distance_reward(current_tag)
+        attrition_penalty = self._bot.calculate_allied_attrition_penalty()
+        
+        rewards_conf = self.training_conf.get('rewards', {})
+        step_penalty = rewards_conf.get('step_penalty', -0.05)
+        
+        total_reward = combat_reward + dist_reward + attrition_penalty + step_penalty
+        
+        # Check Win/Loss Conditions
+        allied_count = self._bot.units(self._bot.allied_unit_type).amount
+        enemy_count = self._bot.enemy_units(self._bot.enemy_unit_type).amount
+        
+        done = False
+        if enemy_count == 0:
+            done = True
+            total_reward += rewards_conf.get('win_reward', 50.0)
+        elif allied_count == 0:
+            done = True
+            total_reward += rewards_conf.get('loss_penalty', -10.0)
             
-            response = await self._client.observation()
-            from sc2.game_state import GameState
-            state = GameState(response.observation)
-            from train.envs.level_0_env import ProtoWrapper
-            self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
+        # 5. Handle Cycle Advancement and Unit Deaths
+        self.current_unit_index += 1
+        all_active_tags = [u.tag for u in self._bot.get_active_units()]
+        
+        if not all_active_tags:
+            done = True
 
-            # Rewards
-            combat_reward = self._bot.calculate_combat_reward()
-            dist_reward = self._bot.calculate_distance_reward() # distance_reward includes step_penalty
-            attrition_penalty = self._bot.calculate_allied_attrition_penalty()
-            
-            total_reward = combat_reward + dist_reward + attrition_penalty
-            
-            # Check Done
-            allied_count = self._bot.units(self._bot.allied_unit_type).amount
-            enemy_count = self._bot.enemy_units(self._bot.enemy_unit_type).amount
-            
-            done = False
-            if enemy_count == 0:
-                done = True
-                total_reward += self.training_conf.get('rewards', {}).get('win_reward', 50.0)
-            elif allied_count == 0:
-                done = True
-                total_reward += self.training_conf.get('rewards', {}).get('loss_penalty', -10.0)
-                
-            # Reset Cycle
-            self.active_unit_tags = [u.tag for u in self._bot.get_active_units()]
+        if done:
+            obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
             self.current_unit_index = 0
+            self.active_unit_tags = all_active_tags
+        elif self.current_unit_index < len(self.active_unit_tags):
+            # Skip any units that died in the last step
+            while self.current_unit_index < len(self.active_unit_tags):
+                next_tag = self.active_unit_tags[self.current_unit_index]
+                if next_tag in all_active_tags:
+                    break
+                self.current_unit_index += 1
             
-            if self.active_unit_tags:
-                 obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
+            if self.current_unit_index < len(self.active_unit_tags):
+                next_tag = self.active_unit_tags[self.current_unit_index]
+                obs, _ = self._bot.get_observation_for_unit(next_tag)
             else:
-                 obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
-                 
-            return obs, total_reward, done, False, {}
+                # End of cycle reached early due to deaths
+                self.current_unit_index = 0
+                self.active_unit_tags = all_active_tags
+                if self.active_unit_tags:
+                    obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
+                else:
+                    obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
+                    done = True
+        else:
+            # End of cycle reached normally
+            self.current_unit_index = 0
+            self.active_unit_tags = all_active_tags
+            if self.active_unit_tags:
+                obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
+            else:
+                obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
+                done = True
+
+        return obs, total_reward, done, False, {}
 

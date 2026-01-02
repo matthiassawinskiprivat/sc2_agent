@@ -256,28 +256,37 @@ class Level7Bot(Level3Bot):
         return distances
 
 
-    def calculate_distance_reward(self) -> float:
+    def calculate_distance_reward(self, unit_tag: int = None) -> float:
         """
-        Calculates the distance-based shaping reward using greedy combat assignments.
+        Calculates the distance-based shaping reward for a specific unit or all units.
         """
         rewards_conf = self.training_conf.get('rewards', {})
-        step_penalty = rewards_conf.get('step_penalty', -0.05)
         dist_multiplier = rewards_conf.get('distance_multiplier', 0.1)
         
         current_distances = self.get_assigned_distances_combat()
-        total_dist_change = 0.0
         
+        if unit_tag is not None:
+            dist = current_distances.get(unit_tag)
+            if dist is None:
+                return 0.0
+                
+            prev_dist = self.previous_distances.get(unit_tag)
+            reward = 0.0
+            if prev_dist is not None:
+                reward = (prev_dist - dist) * dist_multiplier
+            
+            self.previous_distances[unit_tag] = dist
+            return reward
+
+        # Fallback: calculate total change for all units
+        total_dist_change = 0.0
         for u_tag, dist in current_distances.items():
             prev_dist = self.previous_distances.get(u_tag)
             if prev_dist is not None:
                 total_dist_change += (prev_dist - dist)
-            
             self.previous_distances[u_tag] = dist
             
-        active_count = len(self.get_active_units())
-        avg_dist_reward = (total_dist_change * dist_multiplier) / max(1, active_count)
-        
-        return avg_dist_reward + step_penalty
+        return total_dist_change * dist_multiplier
 
     def get_observation_for_unit(self, unit_tag) -> Tuple[np.ndarray, Dict]:
         # Override to use dynamic context

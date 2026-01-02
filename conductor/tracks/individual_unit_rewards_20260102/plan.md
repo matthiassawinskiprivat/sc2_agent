@@ -8,9 +8,10 @@
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Level 3/4 Foundation & Refactoring' (Protocol in workflow.md)
 
 ## Phase 2: Level 7 Combat Refactoring
-- [ ] Task: Create failing tests in `tests/test_level_7_reward_attribution.py` verifying that individual units in Level 7 receive rewards for their specific movements and attacks.
-- [ ] Task: Refactor `Level7Bot` combat reward functions (`calculate_combat_reward`, `calculate_allied_attrition_penalty`) to attribute rewards to the active unit.
-- [ ] Task: Update `Level7Bot.calculate_distance_reward` to match the individual unit pattern from Phase 1.
+- [x] Task: Create failing tests in `tests/test_level_7_reward_attribution.py` verifying that individual units in Level 7 receive rewards for their specific movements and attacks.
+- [x] Task: Refactor `Level7Bot` combat reward functions (`calculate_combat_reward`, `calculate_allied_attrition_penalty`) to attribute rewards to the active unit.
+- [x] Task: Update `Level7Bot.calculate_distance_reward` to match the individual unit pattern from Phase 1.
+- [x] Task: Modify `Level7Env._async_step` to implement the Step-per-Unit individual attribution logic.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Level 7 Combat Refactoring' (Protocol in workflow.md)
 
 ## Phase 3: Integration & Quality Assurance
