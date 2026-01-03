@@ -7,14 +7,14 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Unit Data Extraction Tool Update' (Protocol in workflow.md)
 
 ## Phase 2: Budgeted Spawning Implementation
-- [~] Task: Create unit tests for the budgeted spawning logic (mocking unit costs and budgets).
-- [ ] Task: Update `CaptureTheFlagSingleEnv` configuration to support `mineral_budget` and `vespene_budget`.
-- [ ] Task: Refactor `_spawn_initial_units` in `CaptureTheFlagSingleEnv` to implement the budget-based loop.
-- [ ] Task: Ensure the `CaptureTheFlagBot` correctly identifies and handles the new unit types from the `unit_pool`.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Budgeted Spawning Implementation' (Protocol in workflow.md)
+- [x] Task: Create unit tests for the budgeted spawning logic (mocking unit costs and budgets). (608229b)
+- [x] Task: Update `CaptureTheFlagSingleEnv` configuration to support `mineral_budget` and `vespene_budget`. (9345c6d)
+- [x] Task: Refactor `_spawn_initial_units` in `CaptureTheFlagSingleEnv` to implement the budget-based loop. (29375ab)
+- [x] Task: Ensure the `CaptureTheFlagBot` correctly identifies and handles the new unit types from the `unit_pool`. (0c926fb)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Budgeted Spawning Implementation' (Protocol in workflow.md)
 
-## Phase 3: Integration and Validation
-- [ ] Task: Create integration tests to verify spawning composition across different budgets and unit pools.
+## Phase 3: Integration and Validation [checkpoint: 34f03c6]
+- [~] Task: Create integration tests to verify spawning composition across different budgets and unit pools.
 - [ ] Task: Verify that units like `REAPER`, `ZEALOT`, and `ROACH` are correctly controlled and interact in the environment.
 - [ ] Task: Run a stability check (10-20 resets) to ensure budget consistency and no spawning crashes.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration and Validation' (Protocol in workflow.md)
