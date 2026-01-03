@@ -13,8 +13,8 @@
 - [x] Task: Ensure the `CaptureTheFlagBot` correctly identifies and handles the new unit types from the `unit_pool`. (0c926fb)
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Budgeted Spawning Implementation' (Protocol in workflow.md)
 
-## Phase 3: Integration and Validation [checkpoint: 34f03c6]
-- [~] Task: Create integration tests to verify spawning composition across different budgets and unit pools.
-- [ ] Task: Verify that units like `REAPER`, `ZEALOT`, and `ROACH` are correctly controlled and interact in the environment.
-- [ ] Task: Run a stability check (10-20 resets) to ensure budget consistency and no spawning crashes.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration and Validation' (Protocol in workflow.md)
+## Phase 3: Integration and Validation [checkpoint: 0731e02]
+- [x] Task: Create integration tests to verify spawning composition across different budgets and unit pools. (b6c7ce1)
+- [x] Task: Verify that units like `REAPER`, `ZEALOT`, and `ROACH` are correctly controlled and interact in the environment. (b6c7ce1)
+- [x] Task: Run a stability check (10-20 resets) to ensure budget consistency and no spawning crashes. (b6c7ce1)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Integration and Validation' (Protocol in workflow.md)
