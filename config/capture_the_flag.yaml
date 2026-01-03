@@ -12,9 +12,9 @@ training:
 env:
   env_class: "CaptureTheFlagEnv"
   minerals: 500
-  vespene: 0
-  flag_distance_min: 30.0
-  unit_pool: ["ZERGLING", "ROACH", "MARINE"]
+  vespene: 250
+  flag_distance_min: 20.0
+  unit_pool: ["ZERGLING", "ROACH", "MARINE", "REAPER", "ZEALOT"]
   grid_size: 128
   headless: True
   max_steps: 2000
@@ -28,13 +28,20 @@ env:
     damage_penalty: 0.2
     step_penalty: -0.01
   active_layers:
-    - "allied_g_dps_base"
-    - "enemy_g_dps_base"
-    - "allied_health"
-    - "enemy_health"
-    - "command_assignment"
-    - "command_objective"
-    - "terrain_pathable"
+    - "allied_unit_biological"
+    - "allied_unit_mechanical"
+    - "allied_unit_armored"
+    - "allied_unit_massive"
+    - "enemy_unit_biological"
+    - "enemy_unit_mechanical"
+    - "enemy_unit_armored"
+    - "enemy_unit_massive"
+    - "allied_g_dps_light"
+    - "allied_g_dps_armor"
+    - "allied_g_dps_massive"
+    - "enemy_g_dps_light"
+    - "enemy_g_dps_armor"
+    - "enemy_g_dps_massive"
 
 # Model parameters
 model:

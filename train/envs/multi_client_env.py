@@ -44,7 +44,11 @@ class MultiClientEnv(gym.Env):
         self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
         self._client_cls = client_cls if client_cls else Client
 
-        self._manager = MultiClientSC2Manager(sc2_process_cls=self._sc2_process_cls, client_cls=self._client_cls)
+        self._manager = MultiClientSC2Manager(
+            sc2_process_cls=self._sc2_process_cls, 
+            client_cls=self._client_cls,
+            worker_index=self.worker_index
+        )
         self._loop = asyncio.new_event_loop()
 
         # Map discovery
@@ -135,7 +139,9 @@ class MultiClientEnv(gym.Env):
         actions: [action_p1, action_p2]
         """
         try:
+            self._log(f"step() called with actions: {actions}")
             results = self._loop.run_until_complete(self._async_step(actions))
+            self._log("step() complete.")
             return results
         except Exception as e:
             self._log(f"CRITICAL: Error during step: {e}")

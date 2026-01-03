@@ -18,12 +18,12 @@ env:
   max_steps: 1500
   maps_dir: "train/maps/level_3" # Reuse existing maps
   rewards:
-    step_penalty: -0.3
+    step_penalty: -0.01
     damage_reward: 1.05
     kill_reward: 5.5
     win_reward: 20.0
     loss_penalty: -30
-    distance_multiplier: 0
+    distance_multiplier: 0.05
     damage_penalty: -1
     kill_penalty: -10.0
   active_layers: []

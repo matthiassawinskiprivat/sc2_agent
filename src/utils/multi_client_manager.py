@@ -13,9 +13,10 @@ class MultiClientSC2Manager:
     """
     Manages multiple SC2 processes and clients for self-play or multi-agent scenarios.
     """
-    def __init__(self, sc2_process_cls: Type[SC2Process] = SC2Process, client_cls: Type[Client] = Client):
+    def __init__(self, sc2_process_cls: Type[SC2Process] = SC2Process, client_cls: Type[Client] = Client, worker_index: int = 0):
         self.sc2_process_cls = sc2_process_cls
         self.client_cls = client_cls
+        self.worker_index = worker_index
         self.processes: List[SC2Process] = []
         self.clients: List[Client] = []
         self.controllers = []
@@ -26,10 +27,10 @@ class MultiClientSC2Manager:
     async def launch_processes(self, count: int = 2, visualize: bool = False, fullscreen: bool = False):
         """Launches the specified number of SC2 processes."""
         for i in range(count):
-            # Explicitly use 127.0.0.1 and no extra window arguments for maximum compatibility
+            # Let burnysc2 handle host/port selection for maximum stability
             process = self.sc2_process_cls(
-                host="127.0.0.1",
-                fullscreen=fullscreen
+                fullscreen=fullscreen,
+                render=visualize
             )
             controller = await process.__aenter__()
             
@@ -49,7 +50,7 @@ class MultiClientSC2Manager:
         if len(self.clients) >= 2:
             self.join_client = self.clients[1]
 
-    async def create_join_game(self, game_map: Map, players: List[AbstractPlayer], realtime: bool = False):
+    async def create_join_game(self, game_map: Map, players: List[AbstractPlayer], realtime: bool = True):
         """
         Creates a game on the host and joins with all clients.
         Assumes 2 players for now.
@@ -59,42 +60,53 @@ class MultiClientSC2Manager:
 
         # Port configuration for multi-client communication
         from sc2.portconfig import Portconfig
-        # Contiguous ports are often more stable for local multi-client
-        try:
-            portconfig = Portconfig.contiguous_ports()
-            logger.info(f"Using Contiguous Portconfig: {portconfig.as_json}")
-        except:
-            portconfig = Portconfig()
-            logger.info(f"Using Standard Portconfig: {portconfig.as_json}")
+        # Use unique high ports based on worker_index to avoid conflicts
+        # Each worker needs 4 ports (2 server, 2 player)
+        base_port = 20000 + (self.worker_index * 10)
+        portconfig = Portconfig(
+            server_ports=[base_port, base_port + 1], 
+            player_ports=[[base_port + 2, base_port + 3]]
+        )
+        logger.info(f"Worker {self.worker_index} using Portconfig: {portconfig.as_json}")
 
         # Host creates the game
-        logger.info("Host is creating the game...")
+        logger.info(f"Host is creating the game on map: {game_map.name}...")
         try:
-            await self.controllers[0].create_game(
+            # We use realtime=True for better engine-level loading sync during debug
+            result = await self.controllers[0].create_game(
                 game_map,
                 players,
                 realtime=realtime
             )
-            logger.info("Game created successfully. Waiting 5s for engine stability...")
-            await asyncio.sleep(5)
+            if result.create_game.HasField("error"):
+                logger.error(f"Engine Error: {result.create_game.error}")
+                
+            logger.info("Game created. Waiting 20s for map loading...")
+            await asyncio.sleep(20)
         except Exception as e:
-            logger.error(f"Error during create_game: {e}")
+            logger.error(f"Exception during create_game: {e}")
             raise e
 
         # Both join in parallel - MANDATORY for Portconfig handshake stability
-        logger.info("Both players are joining the game...")
+        logger.info("Both players are joining the game (Parallel Handshake)...")
         try:
+            # We use name and race explicitly to ensure the engine assigns slots correctly
             join_tasks = [
                 self.clients[0].join_game(
+                    name="HostPlayer",
                     race=players[0].race, 
+                    observed_player_id=1,
                     portconfig=portconfig
                 ),
                 self.clients[1].join_game(
+                    name="JoinerPlayer",
                     race=players[1].race, 
+                    observed_player_id=2,
                     portconfig=portconfig
                 )
             ]
-            await asyncio.gather(*join_tasks)
+            results = await asyncio.gather(*join_tasks)
+            logger.info(f"Join results received: {results}")
             logger.info("Multi-client session established.")
         except Exception as e:
             logger.error(f"Error during parallel join_game: {e}")
@@ -116,8 +128,12 @@ class MultiClientSC2Manager:
         except:
             pass
         
+        # Wait for OS to reclaim ports and resources
+        await asyncio.sleep(2.0)
+        
         self.processes.clear()
         self.clients.clear()
         self.controllers.clear()
         self.host_client = None
         self.join_client = None
+
