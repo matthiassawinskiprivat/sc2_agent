@@ -17,11 +17,12 @@ env:
   unit_pool: ["ZERGLING", "ROACH", "MARINE", "REAPER", "ZEALOT"]
   grid_size: 128
   headless: True
-  max_steps: 2000
+  max_steps: 200000
   maps_dir: "train/maps/level_3" # Use large open maps
   rewards:
-    success: 100.0
     win_reward: 100.0
+    loss_penalty: -100.0
+    draw_penalty: -10.0
     pylon_damage_reward: 5.0
     pylon_damage_penalty: 5.0
     damage_reward: 0.2

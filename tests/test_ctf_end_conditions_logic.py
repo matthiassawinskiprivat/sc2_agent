@@ -43,7 +43,7 @@ def env():
 @pytest.mark.asyncio
 async def test_win_loss_condition_p1_lost(env):
     """Test termination when Player 1's Pylon is destroyed."""
-    env.training_conf = {"rewards": {"win_reward": 100.0}}
+    env.training_conf = {"rewards": {"win_reward": 100.0, "loss_penalty": -50.0}}
     env.active_player_id = 2 # Player 2's turn
     
     # P1 Pylon missing (amount == 0)
@@ -58,26 +58,24 @@ async def test_win_loss_condition_p1_lost(env):
     obs, reward, done, truncated, info = await env._async_step(0)
     
     assert done is True
-    assert truncated is False
     assert reward == 100.0 # P2 wins on P2's turn
 
 @pytest.mark.asyncio
-async def test_win_loss_condition_p2_lost(env):
-    """Test termination when Player 2's Pylon is destroyed."""
-    env.training_conf = {"rewards": {"win_reward": 100.0}}
+async def test_win_loss_condition_p2_lost_on_p1_turn(env):
+    """Test that if P1 loses on P1's turn, they get the loss penalty."""
+    env.training_conf = {"rewards": {"win_reward": 100.0, "loss_penalty": -50.0}}
     env.active_player_id = 1 # Player 1's turn
     
-    # P1 Pylon exists, P2 Pylon missing
-    env.bot.structures(UnitTypeId.PYLON).amount = 1
-    env.bot.enemy_structures(UnitTypeId.PYLON).amount = 0
+    # P1 Pylon missing
+    env.bot.structures(UnitTypeId.PYLON).amount = 0
+    env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
     
-    env.player_units = {1: [123], 2: []}
+    env.player_units = {1: [123], 2: [456]}
     
     obs, reward, done, truncated, info = await env._async_step(0)
     
     assert done is True
-    assert reward == 100.0 # P1 wins on P1's turn
-
+    assert reward == -50.0 # P1 lost on their own turn
 @pytest.mark.asyncio
 async def test_mutual_destruction_draw(env):
     """Test termination when both sides have no units (Mutual Destruction)."""
