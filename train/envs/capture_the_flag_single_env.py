@@ -26,10 +26,21 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                  **kwargs):
         super().__init__(map_name=map_name, **kwargs)
         self.training_conf = training_conf or {}
+        
+        # Robustly load parameters from training_conf (handling flattened vs nested)
         env_conf = self.training_conf.get("env", {})
-        self.mineral_budget = env_conf.get("mineral_budget", mineral_budget)
-        self.vespene_budget = env_conf.get("vespene_budget", vespene_budget)
-        self.unit_pool = unit_pool or env_conf.get("unit_pool", ["ZERGLING", "ROACH", "MARINE"])
+        
+        # 1. Minerals
+        self.mineral_budget = self.training_conf.get("mineral_budget", 
+                                 env_conf.get("mineral_budget", mineral_budget))
+        
+        # 2. Vespene
+        self.vespene_budget = self.training_conf.get("vespene_budget", 
+                                 env_conf.get("vespene_budget", vespene_budget))
+        
+        # 3. Unit Pool
+        self.unit_pool = self.training_conf.get("unit_pool", 
+                           env_conf.get("unit_pool", unit_pool or ["ZERGLING", "ROACH", "MARINE"]))
         
         # Load unit data for costs
         self.unit_data = self._load_unit_data()
