@@ -111,16 +111,52 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     async def _spawn_initial_units(self):
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
+        
+        # 1. Clear Map of all existing units and structures
+        if self.bot.all_units.exists:
+            await self.bot.client.debug_kill_unit(self.bot.all_units.tags)
+            await self.bot.client.step()
+            await self._refresh_bot_state()
+
         w, h = self.bot.game_info.playable_area.width, self.bot.game_info.playable_area.height
+        flag_dist_min = self.training_conf.get("env", {}).get("flag_distance_min", 20.0)
         
-        pos1 = Point2((10, 10))
-        pos2 = Point2((w-10, h-10))
+        # 2. Generate Random Positions
+        margin = 5.0 # Keep pylons away from map edges
         
-        # Spawn Pylons for P1 and P2
+        def get_rand_pos():
+            return Point2((
+                random.uniform(margin, w - margin),
+                random.uniform(margin, h - margin)
+            ))
+
+        pos1 = get_rand_pos()
+        pos2 = get_rand_pos()
+        
+        # Enforce minimum distance
+        attempts = 0
+        while pos1.distance_to(pos2) < flag_dist_min and attempts < 1000:
+            pos1 = get_rand_pos()
+            pos2 = get_rand_pos()
+            attempts += 1
+            
+        if attempts >= 1000:
+            self._log(f"Warning: Failed to find valid random positions after 1000 attempts. Using randomized fallback.")
+            # Randomized fallback: opposite corners
+            if random.random() > 0.5:
+                pos1 = Point2((margin, margin))
+                pos2 = Point2((w-margin, h-margin))
+            else:
+                pos1 = Point2((margin, h-margin))
+                pos2 = Point2((w-margin, margin))
+
+        self._log(f"Spawning Pylons at {pos1} and {pos2} (Distance: {pos1.distance_to(pos2):.2f})")
+
+        # 3. Spawn exactly one Pylon for P1 and P2
         await self.bot.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
         await self.bot.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
         
-        # Resource spawning
+        # Resource spawning (mobile units)
         spawns1 = self._calculate_spawns(self.minerals, self.vespene)
         spawns2 = self._calculate_spawns(self.minerals, self.vespene)
         
@@ -135,13 +171,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self._refresh_bot_state()
         
         # Set reduced health for Pylons
-        p1_pylon = self.bot.structures(UnitTypeId.PYLON).first
-        # In God-Mode, P2 units are in enemy_structures
-        p2_pylon = self.bot.enemy_structures(UnitTypeId.PYLON).first
+        p1_pylons = self.bot.structures(UnitTypeId.PYLON)
+        p2_pylons = self.bot.enemy_structures(UnitTypeId.PYLON)
         
-        if p1_pylon and p2_pylon:
-            await self.bot.client.debug_set_unit_value([p1_pylon.tag, p2_pylon.tag], 2, 10.0)
-            await self.bot.client.debug_set_unit_value([p1_pylon.tag, p2_pylon.tag], 3, 10.0)
+        if p1_pylons.exists and p2_pylons.exists:
+            p1_tag = p1_pylons.first.tag
+            p2_tag = p2_pylons.first.tag
+            await self.bot.client.debug_set_unit_value([p1_tag, p2_tag], 2, 10.0) # HP
+            await self.bot.client.debug_set_unit_value([p1_tag, p2_tag], 3, 10.0) # Shield
         
         await self.bot.client.step()
         await self._refresh_bot_state()
