@@ -6,15 +6,15 @@ Establish a robust testing suite to reproduce the premature termination and veri
 - [x] Task: Create reproduction test for premature termination and timeout logic.
 - [x] Task: Create unit tests for Pylon destruction (Win/Loss) outcomes.
 - [x] Task: Create unit tests for Mutual Destruction (Draw) outcomes.
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Test Foundations for End Conditions' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Test Foundations for End Conditions' (Protocol in workflow.md)
 
-## Phase 2: Refine Termination Logic
+## Phase 2: Refine Termination Logic [checkpoint: 6180048]
 Overhaul the logic in `CaptureTheFlagSingleEnv` to strictly follow the specification's end conditions.
 
-- [ ] Task: Update `CaptureTheFlagSingleEnv._async_step` to correctly evaluate pylon health and unit counts.
-- [ ] Task: Ensure `steps_count` is correctly handled and compared against `max_steps`.
-- [ ] Task: Implement clear logging for termination reasons (Win, Loss, Draw).
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Refine Termination Logic' (Protocol in workflow.md)
+- [x] Task: Update `CaptureTheFlagSingleEnv._async_step` to correctly evaluate pylon health and unit counts. (b3ddfc2)
+- [x] Task: Ensure `steps_count` is correctly handled and compared against `max_steps`. (b3ddfc2)
+- [x] Task: Implement clear logging for termination reasons (Win, Loss, Draw). (b3ddfc2)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Refine Termination Logic' (Protocol in workflow.md)
 
 ## Phase 3: Reward Attribution and Configuration
 Implement the configurable reward/penalty system and ensure correct terminal attribution.
