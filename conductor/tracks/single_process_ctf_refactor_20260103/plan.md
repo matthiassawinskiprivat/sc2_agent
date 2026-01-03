@@ -27,10 +27,10 @@ Implement the "Unit-Only Flip" for observations and the turn-based cycle logic.
 - [x] Task: Implement the turn-based cycle and reward attribution for the active player (4df8a2b)
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Perspective Flipping and Cycle Logic' (Protocol in workflow.md)
 
-## Phase 4: Integration and Stress Testing [checkpoint: c5409d0]
+## Phase 4: Integration and Stress Testing [checkpoint: b3ddfc2]
 Verify the full training pipeline and ensure system stability.
 
-- [x] Task: Run integration test for `num_envs` configuration (verify process count) (4df8a2b)
-- [x] Task: Perform a 100-cycle reset stress test to ensure zero process leaks or hangs (c5409d0)
-- [x] Task: Verify training performance (50k steps) with the new architecture (c5409d0)
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Integration and Stress Testing' (Protocol in workflow.md)
+- [x] Task: Run integration test for `num_envs` configuration (verify process count) (b3ddfc2)
+- [x] Task: Perform a 100-cycle reset stress test to ensure zero process leaks or hangs (b3ddfc2)
+- [x] Task: Verify training performance (50k steps) with the new architecture (b3ddfc2)
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Integration and Stress Testing' (Protocol in workflow.md)
