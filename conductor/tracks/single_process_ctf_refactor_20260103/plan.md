@@ -2,13 +2,13 @@
 
 Refactor the Capture the Flag environment to a single-process architecture using a "God-Mode" bot to manage both players.
 
-## Phase 1: Single-Client Environment Foundation
+## Phase 1: Single-Client Environment Foundation [checkpoint: 06caa59]
 Scaffold the new environment and migrate the basic setup logic from the multi-client version.
 
-- [~] Task: Create `SingleClientEnv` base class (or equivalent) to manage a single SC2 process
-- [ ] Task: Write unit tests to verify single process launch and basic connection stability
-- [ ] Task: Implement `CaptureTheFlagSingleEnv` with basic map loading and initialization
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Single-Client Environment Foundation' (Protocol in workflow.md)
+- [x] Task: Create `SingleClientEnv` base class (or equivalent) to manage a single SC2 process (06caa59)
+- [x] Task: Write unit tests to verify single process launch and basic connection stability (06caa59)
+- [x] Task: Implement `CaptureTheFlagSingleEnv` with basic map loading and initialization (06caa59)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Single-Client Environment Foundation' (Protocol in workflow.md)
 
 ## Phase 2: God-Mode Unit Management and Control
 Implement the logic to spawn and command units for both players through a single debug connection.
