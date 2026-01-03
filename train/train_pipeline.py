@@ -6,6 +6,7 @@ from loguru import logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from sb3_contrib import MaskablePPO
+from sb3_contrib.common.wrappers.action_masker import ActionMasker
 import torch
 
 # Disable distribution validation to avoid Simplex errors with MaskablePPO
@@ -84,6 +85,10 @@ class MaskableSubprocVecEnv(SubprocVecEnv):
             # We don't re-raise here if we want the higher level to handle it, 
             # but usually it's better to re-raise with a better message.
             raise e
+
+class MaskableSyncVecEnv(SyncVecEnv):
+    def get_action_masks(self) -> np.ndarray:
+        return np.stack(self.env_method("action_masks")).astype(bool)
 
 class PipelineManager:
     """
@@ -168,7 +173,7 @@ class PipelineManager:
         if not headless:
             logger.warning("Running in non-headless mode. Forcing num_envs=1.")
             num_envs = 1
-            vec_env_cls = SyncVecEnv
+            vec_env_cls = MaskableSyncVecEnv
         else:
             vec_env_cls = MaskableSubprocVecEnv
         
@@ -193,27 +198,26 @@ class PipelineManager:
         # For SubprocVecEnv, we need to pass a list of callables that return the env
         def make_env(rank):
             def _init():
-                return Monitor(
-                    EnvClass(
-                        level_name=level_name,
-                        visualize=not headless,
-                        grid_size=env_params["grid_size"],
-                        worker_index=rank,
-                        num_workers=num_envs,
-                        sc2_process_cls=self.sc2_process_cls,
-                        client_cls=self.client_cls,
-                        training_conf=combined_conf,
-                        max_steps=env_params.get("max_steps", 300)
-                    )
+                env = EnvClass(
+                    level_name=level_name,
+                    visualize=not headless,
+                    grid_size=env_params["grid_size"],
+                    worker_index=rank,
+                    num_workers=num_envs,
+                    sc2_process_cls=self.sc2_process_cls,
+                    client_cls=self.client_cls,
+                    training_conf=combined_conf,
+                    max_steps=env_params.get("max_steps", 300)
                 )
+                # Wrap with Monitor first, then ActionMasker
+                env = Monitor(env)
+                env = ActionMasker(env, lambda e: e.unwrapped.action_masks())
+                return env
             return _init
 
         env_fns = [make_env(i) for i in range(num_envs)]
         
-        if vec_env_cls == SyncVecEnv:
-             # SyncVecEnv expects list of lambdas that call Monitor(Env) directly, 
-             # but our make_env returns a function that returns the env. 
-             # SyncVecEnv usually calls fn() to get the env.
+        if vec_env_cls == MaskableSyncVecEnv:
              env = vec_env_cls(env_fns)
         else:
              # SubprocVecEnv also expects list of functions

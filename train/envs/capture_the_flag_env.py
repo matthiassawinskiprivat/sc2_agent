@@ -66,10 +66,27 @@ class CaptureTheFlagEnv(MultiClientEnv):
         """Sets the model for self-play inference."""
         self.model = model
 
+    async def _refresh_bot_states(self):
+        """Fetches latest observation and updates bot internal state."""
+        from sc2.game_state import GameState
+        
+        async def refresh(bot, client):
+            obs = await client.observation()
+            state = GameState(obs.observation)
+            # BotAIInternal._prepare_step(state, proto_game_info)
+            # bot._proto_game_info was stored during prepare_bot
+            bot._prepare_step(state, bot._proto_game_info)
+
+        await asyncio.gather(
+            refresh(self.bot1, self.bot1.client),
+            refresh(self.bot2, self.bot2.client)
+        )
+
     async def _setup_game_session(self):
         from sc2.player import Bot
         from sc2.data import Race
         from sc2 import maps
+        from s2clientprotocol import sc2api_pb2 as sc_pb
         
         self.bot1 = CaptureTheFlagBot(player_id=1, training_conf=self.training_conf)
         self.bot2 = CaptureTheFlagBot(player_id=2, training_conf=self.training_conf)
@@ -82,12 +99,16 @@ class CaptureTheFlagEnv(MultiClientEnv):
         self._log("Game session established. Preparing bots...")
         
         # Wire bots to clients and prepare them
-        # BotAI._prepare_start(client, player_id, game_info, game_data, realtime)
         async def prepare_bot(bot, client, player_id):
             self._log(f"Preparing Bot {player_id}...")
-            game_info = await client.get_game_info()
+            # We need both the wrapper and the raw proto
+            raw_game_info = await client._execute(game_info=sc_pb.RequestGameInfo())
+            from sc2.game_info import GameInfo
+            game_info = GameInfo(raw_game_info.game_info)
             game_data = await client.get_game_data()
+            
             bot._prepare_start(client, player_id, game_info, game_data, self.realtime)
+            bot._proto_game_info = raw_game_info # Store for _prepare_step
             await bot.on_start()
             self._log(f"Bot {player_id} ready.")
 
@@ -99,6 +120,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
         # Initial step to synchronize state
         self._log("Synchronizing initial state...")
         await self._synchronized_step()
+        await self._refresh_bot_states()
         
         self._log("Spawning units...")
         await self._spawn_initial_units()
@@ -111,15 +133,17 @@ class CaptureTheFlagEnv(MultiClientEnv):
 
     async def _spawn_initial_units(self):
         from sc2.ids.unit_typeid import UnitTypeId
+        from sc2.position import Point2
         w, h = self.bot1.game_info.playable_area.width, self.bot1.game_info.playable_area.height
         
-        pos1 = (10, 10)
-        pos2 = (w-10, h-10)
+        pos1 = Point2((10, 10))
+        pos2 = Point2((w-10, h-10))
         
         # Spawn Pylons
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
         await self._synchronized_step()
+        await self._refresh_bot_states()
         
         # Set reduced health for Pylons (10 HP + 10 Shield)
         p1_pylon = self.bot1.structures(UnitTypeId.PYLON).first
@@ -140,6 +164,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
         await self.bot1.client.debug_create_unit(cmds1)
         await self.bot1.client.debug_create_unit(cmds2)
         await self._synchronized_step()
+        await self._refresh_bot_states()
 
     def _calculate_spawns(self, m, v):
         spawns = []
@@ -191,6 +216,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
 
         # 3. Physics Step
         await asyncio.gather(self.bot1.client.step(), self.bot2.client.step())
+        await self._refresh_bot_states()
         
         # 4. Calculate Reward for the LEARNING agent
         # The bot.calculate_reward() returns the reward from that bot's perspective.

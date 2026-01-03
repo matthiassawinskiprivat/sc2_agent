@@ -59,8 +59,13 @@ class MultiClientSC2Manager:
 
         # Port configuration for multi-client communication
         from sc2.portconfig import Portconfig
-        portconfig = Portconfig()
-        logger.info(f"Using Portconfig: {portconfig.as_json}")
+        # Contiguous ports are often more stable for local multi-client
+        try:
+            portconfig = Portconfig.contiguous_ports()
+            logger.info(f"Using Contiguous Portconfig: {portconfig.as_json}")
+        except:
+            portconfig = Portconfig()
+            logger.info(f"Using Standard Portconfig: {portconfig.as_json}")
 
         # Host creates the game
         logger.info("Host is creating the game...")
@@ -70,14 +75,13 @@ class MultiClientSC2Manager:
                 players,
                 realtime=realtime
             )
-            logger.info("Game created successfully. Waiting 10s for map loading...")
-            # Increased delay significantly for map loading on slower machines/first runs
-            await asyncio.sleep(10)
+            logger.info("Game created successfully. Waiting 5s for engine stability...")
+            await asyncio.sleep(5)
         except Exception as e:
             logger.error(f"Error during create_game: {e}")
             raise e
 
-        # Both join in parallel - standard for Portconfig handshake
+        # Both join in parallel - MANDATORY for Portconfig handshake stability
         logger.info("Both players are joining the game...")
         try:
             join_tasks = [
@@ -91,24 +95,26 @@ class MultiClientSC2Manager:
                 )
             ]
             await asyncio.gather(*join_tasks)
-            logger.info("Multi-client session established (both players joined).")
+            logger.info("Multi-client session established.")
         except Exception as e:
             logger.error(f"Error during parallel join_game: {e}")
+            await self.close()
             raise e
 
     async def close(self):
-        """Closes all connections and processes."""
-        # Close clients first
-        # We don't explicit call client.leave() usually if we are just killing the process,
-        # but closing connection is good practice.
-        
-        # Kill processes
-        # Using aexit on the process controller/manager
+        """Closes all connections and aggressively kills SC2 processes."""
         for process in self.processes:
              try:
                  await process.__aexit__(None, None, None)
-             except Exception as e:
-                 logger.error(f"Error closing process: {e}")
+             except:
+                 pass
+        
+        # Aggressive cleanup for Windows to prevent zombie processes
+        try:
+            from src.utils.sc2_cleanup import kill_switch_sc2
+            kill_switch_sc2()
+        except:
+            pass
         
         self.processes.clear()
         self.clients.clear()
