@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from train.envs.level_0_env import Level0Env
 from train.envs.level_3_env import Level3Env
 from train.envs.level_7_env import Level7Env
-from train.envs.capture_the_flag_env import CaptureTheFlagEnv
+from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv as CaptureTheFlagEnv
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
 from src.utils.watchdog import Watchdog
@@ -168,10 +168,16 @@ class PipelineManager:
         # 2. Create Vectorized Environment
         num_envs = training_params["num_envs"]
         headless = env_params.get("headless", True)
+        
+        # Resolve Environment Class
+        env_class_name = env_params.get("env_class", "Level0Env")
 
         # Use MaskableSubprocVecEnv for parallel training if num_envs > 1 and headless
-        if not headless:
-            logger.warning("Running in non-headless mode. Forcing num_envs=1.")
+        if not headless or env_class_name == "CaptureTheFlagEnv":
+            if not headless:
+                logger.warning("Running in non-headless mode. Forcing num_envs=1.")
+            else:
+                logger.info("Using SyncVecEnv for Multi-Client stability.")
             num_envs = 1
             vec_env_cls = MaskableSyncVecEnv
         else:
@@ -179,8 +185,6 @@ class PipelineManager:
         
         logger.info(f"Creating {num_envs} environment(s) for level '{level_name}' using {vec_env_cls.__name__}...")
 
-        # Resolve Environment Class
-        env_class_name = env_params.get("env_class", "Level0Env")
         EnvClass = ENV_REGISTRY.get(env_class_name)
         
         if EnvClass is None:

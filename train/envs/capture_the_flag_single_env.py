@@ -6,6 +6,7 @@ from typing import Tuple, List, Dict, Any, Optional
 import random
 from gymnasium import spaces
 from loguru import logger
+import logging
 
 from train.envs.single_client_env import SingleClientEnv
 from src.agent.ctf_bot import CaptureTheFlagBot
@@ -36,6 +37,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.max_steps = max_steps
         self.steps_count = 0
         self.training_conf = training_conf or {}
+        self.client_count = 1 # God-Mode uses only 1 connection
         
         # Observation Layers
         self.base_layers = [
@@ -71,14 +73,15 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         from s2clientprotocol import sc2api_pb2 as sc_pb
         
         self.bot = CaptureTheFlagBot(player_id=1, training_conf=self.training_conf)
-        players = [Bot(Race.Zerg, self.bot), Bot(Race.Zerg, None)] # God-Mode: Second player is just a placeholder
+        # In single-process mode, we only join as the first player
+        players = [Bot(Race.Zerg, self.bot), Bot(Race.Zerg, None)]
         resolved_map = self._resolve_map(self.map_name)
         
-        self._log("Starting single-client game session...")
+        self._log("Starting single-process God-Mode game session...")
         await self._manager.create_join_game(resolved_map, players, realtime=self.realtime)
         
         # Prepare bot
-        client = self._manager.client
+        client = self._manager.clients[0]
         raw_game_info = await client._execute(game_info=sc_pb.RequestGameInfo())
         from sc2.game_info import GameInfo
         game_info = GameInfo(raw_game_info.game_info)
@@ -87,6 +90,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.bot._prepare_start(client, 1, game_info, game_data, self.realtime)
         self.bot._proto_game_info = raw_game_info
         await self.bot.on_start()
+        
+        # God-Mode: Enable full visibility and enemy control
+        await client.debug_show_map()
+        await client.debug_control_enemy()
         
         # Initial step and spawn
         await client.step()
@@ -129,7 +136,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         
         # Set reduced health for Pylons
         p1_pylon = self.bot.structures(UnitTypeId.PYLON).first
-        # In God-Mode, enemy_structures are P2 structures
+        # In God-Mode, P2 units are in enemy_structures
         p2_pylon = self.bot.enemy_structures(UnitTypeId.PYLON).first
         
         if p1_pylon and p2_pylon:
@@ -150,8 +157,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return spawns
 
     async def _refresh_unit_lists(self):
-        self.player_units[1] = [u.tag for u in self.bot.units if not u.is_structure]
-        self.player_units[2] = [u.tag for u in self.bot.enemy_units if not u.is_structure]
+        # Refresh all units from the bot's God-Mode perspective
+        all_units = self.bot.all_units
+        # Filter for alive and not structure
+        self.player_units[1] = [u.tag for u in all_units if u.owner_id == 1 and not u.is_structure]
+        self.player_units[2] = [u.tag for u in all_units if u.owner_id == 2 and not u.is_structure]
 
     async def _get_joint_observation(self):
         tags = self.player_units[self.active_player_id]
@@ -162,11 +172,21 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     async def _apply_action(self, action):
         tags = self.player_units[self.active_player_id]
         if tags and self.current_unit_index < len(tags):
-            # We need to ensure apply_action in bot can handle enemy unit tags if active_player_id == 2
+            # In God-Mode with debug_control_enemy(), we can command enemy tags
             await self.bot.apply_action(tags[self.current_unit_index], action)
+
+    def reset(self, seed=None, options=None):
+        self._log("Environment reset started...")
+        self.steps_count = 0
+        self.current_unit_index = 0
+        self.active_player_id = 1
+        return super().reset(seed=seed, options=options)
 
     async def _async_step(self, action_p_active):
         self.steps_count += 1
+        if self.steps_count % 10 == 0:
+            self._log(f"Step {self.steps_count} in progress...")
+        
         await self._apply_action(action_p_active)
         
         # Flush actions
@@ -181,6 +201,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         
         self.current_unit_index += 1
         await self._refresh_unit_lists()
+        
         if self.current_unit_index >= len(self.player_units[self.active_player_id]):
             self.current_unit_index = 0
             self.active_player_id = 2 if self.active_player_id == 1 else 1
@@ -203,3 +224,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         truncated = self.steps_count >= self.max_steps
         obs = await self._get_joint_observation()
         return obs, reward, done, truncated, {}
+
+    def action_masks(self) -> np.ndarray:
+        return np.ones(self.action_space.n, dtype=bool)

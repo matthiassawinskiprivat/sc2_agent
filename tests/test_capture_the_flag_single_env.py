@@ -2,6 +2,7 @@
 import pytest
 import asyncio
 import numpy as np
+from loguru import logger
 from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
 from unittest.mock import MagicMock, AsyncMock
 from sc2.ids.unit_typeid import UnitTypeId
@@ -32,19 +33,24 @@ def test_ctf_single_env_init():
     assert env.worker_index == 0
     assert env.observation_space.shape[0] == 23
 
-def test_ctf_single_env_reset(mock_sc2_process, mock_client):
-    env = CaptureTheFlagSingleEnv(
-        sc2_process_cls=lambda **kwargs: mock_sc2_process,
-        client_cls=lambda ws: mock_client
-    )
+def test_ctf_single_env_stress_resets():
+    """Stress test with 10 actual resets (not mocked)."""
+    env = CaptureTheFlagSingleEnv(visualize=False)
     
-    # Mock internal methods that interact with SC2
-    env._setup_game_session = AsyncMock()
-    env._get_joint_observation = AsyncMock(return_value=np.zeros((23, 128, 128)))
-    env._manager.launch_process = AsyncMock()
-    
-    obs, info = env.reset()
-    
-    assert obs is not None
-    assert obs.shape == (23, 128, 128)
-    env._setup_game_session.assert_called_once()
+    try:
+        for i in range(10):
+            logger.info(f"Stress Cycle {i+1}/10...")
+            obs, info = env.reset()
+            assert obs.shape == (23, 128, 128)
+            # Verify unit visibility
+            assert len(env.player_units[1]) > 0
+            assert len(env.player_units[2]) > 0
+            
+            # Step a few times
+            for _ in range(5):
+                action = env.action_space.sample()
+                env.step(action)
+                
+            logger.info(f"Cycle {i+1} successful.")
+    finally:
+        env.close()

@@ -102,7 +102,7 @@ class SingleClientEnv(gym.Env):
         super().reset(seed=seed)
         self._log(f"reset() called (Level: {self.level_name})")
         
-        if self._manager.client:
+        if self._manager.clients:
              self._log("Cleaning up previous session...")
              self.close()
              
@@ -110,8 +110,13 @@ class SingleClientEnv(gym.Env):
         asyncio.set_event_loop(self._loop)
         
         try:
-            self._log("Launching SC2 process...")
-            self._loop.run_until_complete(self._manager.launch_process(visualize=self.visualize, fullscreen=self.fullscreen))
+            client_count = getattr(self, "client_count", 1)
+            self._log(f"Launching SC2 process with {client_count} clients...")
+            self._loop.run_until_complete(self._manager.launch_process(
+                client_count=client_count, 
+                visualize=self.visualize, 
+                fullscreen=self.fullscreen
+            ))
             self._log("Setting up game session...")
             self._loop.run_until_complete(self._setup_game_session())
             
