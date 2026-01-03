@@ -11,13 +11,8 @@ import logging
 from train.envs.single_client_env import SingleClientEnv
 from src.agent.ctf_bot import CaptureTheFlagBot
 from sc2.ids.unit_typeid import UnitTypeId
-
-# Standard SC2 Unit Costs (Simplified)
-UNIT_COSTS = {
-    "ZERGLING": {"minerals": 25, "vespene": 0, "type_id": 105},
-    "ROACH": {"minerals": 75, "vespene": 25, "type_id": 110},
-    "MARINE": {"minerals": 50, "vespene": 0, "type_id": 48}
-}
+import json
+import os
 
 class CaptureTheFlagSingleEnv(SingleClientEnv):
     def __init__(self, 
@@ -35,6 +30,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.mineral_budget = env_conf.get("mineral_budget", mineral_budget)
         self.vespene_budget = env_conf.get("vespene_budget", vespene_budget)
         self.unit_pool = unit_pool or env_conf.get("unit_pool", ["ZERGLING", "ROACH", "MARINE"])
+        
+        # Load unit data for costs
+        self.unit_data = self._load_unit_data()
+        
         self.grid_size = grid_size
         self.max_steps = max_steps
         self.steps_count = 0
@@ -64,6 +63,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.current_unit_index = 0
         self.player_units = {1: [], 2: []}
         self.model = None
+
+    def _load_unit_data(self) -> Dict[str, Any]:
+        path = os.path.join(os.getcwd(), "data", "unit_data.json")
+        if not os.path.exists(path):
+            logger.warning(f"unit_data.json not found at {path}. Using empty dict.")
+            return {}
+        with open(path, "r") as f:
+            return json.load(f)
 
     def set_model(self, model):
         self.model = model
@@ -192,12 +199,25 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
     def _calculate_spawns(self, m, v):
         spawns = []
-        affordable = [u for u in self.unit_pool if UNIT_COSTS[u]["minerals"] <= m and UNIT_COSTS[u]["vespene"] <= v]
+        
+        def can_afford(u):
+            if u not in self.unit_data:
+                logger.error(f"Unit {u} not found in unit_data.json. Skipping.")
+                return False
+            cost = self.unit_data[u]["cost"]
+            return cost["minerals"] <= m and cost["vespene"] <= v
+
+        affordable = [u for u in self.unit_pool if can_afford(u)]
         while affordable:
             u = random.choice(affordable)
             spawns.append(u)
-            m -= UNIT_COSTS[u]["minerals"]; v -= UNIT_COSTS[u]["vespene"]
-            affordable = [u for u in self.unit_pool if UNIT_COSTS[u]["minerals"] <= m and UNIT_COSTS[u]["vespene"] <= v]
+            cost = self.unit_data[u]["cost"]
+            m -= cost["minerals"]
+            v -= cost["vespene"]
+            affordable = [u for u in self.unit_pool if can_afford(u)]
+        
+        if spawns:
+            self._log(f"Spawned army: {len(spawns)} units. Remaining budget: {m}m, {v}v")
         return spawns
 
     async def _refresh_unit_lists(self):
