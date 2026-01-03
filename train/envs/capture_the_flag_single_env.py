@@ -21,8 +21,8 @@ UNIT_COSTS = {
 
 class CaptureTheFlagSingleEnv(SingleClientEnv):
     def __init__(self, 
-                 minerals: int = 500, 
-                 vespene: int = 0, 
+                 mineral_budget: int = 500, 
+                 vespene_budget: int = 0, 
                  unit_pool: List[str] = None,
                  grid_size: int = 128,
                  map_name: str = "BotMicroArena_6",
@@ -30,13 +30,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                  training_conf: Dict = None,
                  **kwargs):
         super().__init__(map_name=map_name, **kwargs)
-        self.minerals = minerals
-        self.vespene = vespene
-        self.unit_pool = unit_pool or ["ZERGLING", "ROACH", "MARINE"]
+        self.training_conf = training_conf or {}
+        env_conf = self.training_conf.get("env", {})
+        self.mineral_budget = env_conf.get("mineral_budget", mineral_budget)
+        self.vespene_budget = env_conf.get("vespene_budget", vespene_budget)
+        self.unit_pool = unit_pool or env_conf.get("unit_pool", ["ZERGLING", "ROACH", "MARINE"])
         self.grid_size = grid_size
         self.max_steps = max_steps
         self.steps_count = 0
-        self.training_conf = training_conf or {}
         self.client_count = 1 # God-Mode uses only 1 connection
         
         # Observation Layers
@@ -124,21 +125,27 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         # 2. Generate Random Positions
         margin = 5.0 # Keep pylons away from map edges
         
+        # Enforce minimum distance (relaxed slightly for grid snapping and scaled for small maps)
+        max_possible_dist = (min(w, h) - 2 * margin) * 0.8
+        safe_dist = min(flag_dist_min, max_possible_dist)
+        self.last_relaxed_dist = max(0, safe_dist - 1.0)
+
         def get_rand_pos():
             return Point2((
-                random.uniform(margin, w - margin),
-                random.uniform(margin, h - margin)
+                round(random.uniform(margin, w - margin), 1),
+                round(random.uniform(margin, h - margin), 1)
             ))
 
         pos1 = get_rand_pos()
         pos2 = get_rand_pos()
         
-        # Enforce minimum distance
         attempts = 0
-        while pos1.distance_to(pos2) < flag_dist_min and attempts < 1000:
+        while pos1.distance_to(pos2) < self.last_relaxed_dist and attempts < 1000:
             pos1 = get_rand_pos()
             pos2 = get_rand_pos()
             attempts += 1
+        
+        
             
         if attempts >= 1000:
             self._log(f"Warning: Failed to find valid random positions after 1000 attempts. Using randomized fallback.")
@@ -157,8 +164,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self.bot.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
         
         # Resource spawning (mobile units)
-        spawns1 = self._calculate_spawns(self.minerals, self.vespene)
-        spawns2 = self._calculate_spawns(self.minerals, self.vespene)
+        spawns1 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
+        spawns2 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
         
         def to_id(name): return getattr(UnitTypeId, name)
         cmds1 = [[to_id(u), 1, pos1, 1] for u in spawns1]
