@@ -26,17 +26,10 @@ class MultiClientSC2Manager:
     async def launch_processes(self, count: int = 2, visualize: bool = False, fullscreen: bool = False):
         """Launches the specified number of SC2 processes."""
         for i in range(count):
-            # When visualizing, we prefer windowed mode with a specific resolution for multiple instances
-            resolution = (800, 600) if visualize else None
-            # Place windows side by side if visualizing
-            placement = (i * 810, 50) if visualize else None
-            
-            # Note: Do NOT use 'render=True' on Windows as it tries to load 'libEGL.so' (Linux only)
-            # Just setting fullscreen=False is enough to show the game window.
+            # Explicitly use 127.0.0.1 and no extra window arguments for maximum compatibility
             process = self.sc2_process_cls(
-                fullscreen=fullscreen, 
-                resolution=resolution,
-                placement=placement
+                host="127.0.0.1",
+                fullscreen=fullscreen
             )
             controller = await process.__aenter__()
             
@@ -49,7 +42,7 @@ class MultiClientSC2Manager:
             self.clients.append(client)
             
             # Give it a moment to stabilize
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
 
         if len(self.clients) >= 1:
             self.host_client = self.clients[0]
@@ -66,42 +59,34 @@ class MultiClientSC2Manager:
 
         # Port configuration for multi-client communication
         from sc2.portconfig import Portconfig
-        # contiguous_ports is often more stable for local multi-client sessions
-        try:
-            portconfig = Portconfig.contiguous_ports()
-        except Exception:
-            portconfig = Portconfig()
-            
+        portconfig = Portconfig()
         logger.info(f"Using Portconfig: {portconfig.as_json}")
 
         # Host creates the game
         logger.info("Host is creating the game...")
         try:
-            # We use the controller of the first process to create the game
             await self.controllers[0].create_game(
                 game_map,
                 players,
                 realtime=realtime
             )
-            logger.info("Game created successfully. Waiting for map to load...")
-            # Increased delay to ensure SC2 is ready to accept join requests
-            await asyncio.sleep(5)
+            logger.info("Game created successfully. Waiting 10s for map loading...")
+            # Increased delay significantly for map loading on slower machines/first runs
+            await asyncio.sleep(10)
         except Exception as e:
             logger.error(f"Error during create_game: {e}")
             raise e
 
-        # Both join in parallel - this is crucial for Portconfig handshake
+        # Both join in parallel - standard for Portconfig handshake
         logger.info("Both players are joining the game...")
         try:
             join_tasks = [
                 self.clients[0].join_game(
-                    name="Player1",
-                    race=Race.Zerg, 
+                    race=players[0].race, 
                     portconfig=portconfig
                 ),
                 self.clients[1].join_game(
-                    name="Player2",
-                    race=Race.Zerg, 
+                    race=players[1].race, 
                     portconfig=portconfig
                 )
             ]
