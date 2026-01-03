@@ -16,12 +16,13 @@ Overhaul the logic in `CaptureTheFlagSingleEnv` to strictly follow the specifica
 - [x] Task: Implement clear logging for termination reasons (Win, Loss, Draw). (b3ddfc2)
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Refine Termination Logic' (Protocol in workflow.md)
 
-## Phase 3: Reward Attribution and Configuration
+## Phase 3: Reward Attribution and Configuration [checkpoint: 8428dfb]
 Implement the configurable reward/penalty system and ensure correct terminal attribution.
 
-- [ ] Task: Update `CaptureTheFlagBot.calculate_reward` to accept terminal state and reward values from config.
-- [ ] Task: Implement `draw_penalty` and `loss_penalty` in the reward logic.
-- [ ] Task: Verify reward attribution in the final step of Win, Loss, and Draw scenarios.
+- [x] Task: Update `CaptureTheFlagBot.calculate_reward` (Confirmed: terminal rewards handled in Env for better control)
+- [x] Task: Implement `draw_penalty` and `loss_penalty` in the reward logic.
+- [x] Task: Verify reward attribution in the final step of Win, Loss, and Draw scenarios.
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Reward Attribution and Configuration' (Protocol in workflow.md)
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Reward Attribution and Configuration' (Protocol in workflow.md)
 
 ## Phase 4: Integration and Stability
