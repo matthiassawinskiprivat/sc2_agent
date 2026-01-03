@@ -6,22 +6,22 @@ from train.envs.capture_the_flag_env import CaptureTheFlagEnv
 def test_ctf_env_init():
     """Test CTF environment initialization."""
     env = CaptureTheFlagEnv(
-        minerals=500,
-        vespene=200,
+        mineral_budget=500,
+        vespene_budget=200,
         flag_distance_min=20.0,
         unit_pool=["ZERGLING", "ROACH"]
     )
-    assert env.minerals == 500
-    assert env.vespene == 200
+    assert env.mineral_budget == 500
+    assert env.vespene_budget == 200
     assert env.flag_distance_min == 20.0
     assert env.unit_pool == ["ZERGLING", "ROACH"]
-    # Observation space should be 7 layers
-    assert env.observation_space.shape == (7, 128, 128)
+    # Observation space should match active_layers
+    assert env.observation_space.shape == (len(env.active_layers), 128, 128)
 
 def test_ctf_env_spawning_logic():
     """Test the resource-based spawning logic."""
-    env = CaptureTheFlagEnv(minerals=100, vespene=0, unit_pool=["ZERGLING"])
-    spawn_list = env._calculate_spawns(env.minerals, env.vespene)
+    env = CaptureTheFlagEnv(mineral_budget=100, vespene_budget=0, unit_pool=["ZERGLING"])
+    spawn_list = env._calculate_spawns(env.mineral_budget, env.vespene_budget)
     assert len(spawn_list) == 4
     assert all(u == "ZERGLING" for u in spawn_list)
 
@@ -34,25 +34,24 @@ async def test_ctf_env_layer_highlighting():
     env.active_player_id = 1
     env.current_unit_index = 0
     
-    # Mock observation with 7 layers
-    # Layers: 0: Allied G, 1: Enemy G, 2: Allied H, 3: Enemy H, 4: Assignment, 5: Objective, 6: Pathable
-    # Wait, my config has:
-    # 0: allied_g_dps_base
-    # 1: enemy_g_dps_base
-    # 2: allied_health
-    # 3: enemy_health
-    # 4: command_assignment
-    # 5: command_objective
-    # 6: terrain_pathable
+    num_layers = len(env.active_layers)
+    obs = np.zeros((num_layers, 128, 128), dtype=np.uint8)
     
-    obs = np.zeros((7, 128, 128), dtype=np.uint8)
-    obs[4, 10, 10] = 255 # Assignment
-    obs[5, 20, 20] = 255 # Objective
+    # Identify indices for assignment and objective
+    try:
+        assign_idx = env.active_layers.index("command_assignment")
+        obj_idx = env.active_layers.index("command_objective")
+    except ValueError:
+        # Fallback to old hardcoded indices if layers were somehow different
+        assign_idx, obj_idx = 4, 5
+        
+    obs[assign_idx, 10, 10] = 255 # Assignment
+    obs[obj_idx, 20, 20] = 255 # Objective
     
     env.bot1.get_observation.return_value = obs
     
     joint_obs = await env._get_joint_observation()
     
-    assert joint_obs[4].max() == 255
-    assert joint_obs[5].max() == 255
+    assert joint_obs[assign_idx].max() == 255
+    assert joint_obs[obj_idx].max() == 255
     assert env.bot1.active_unit_tag == 111
