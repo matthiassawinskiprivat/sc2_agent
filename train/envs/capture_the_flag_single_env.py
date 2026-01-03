@@ -184,8 +184,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
     async def _async_step(self, action_p_active):
         self.steps_count += 1
-        if self.steps_count % 10 == 0:
+        if self.steps_count % 100 == 0:
             self._log(f"Step {self.steps_count} in progress...")
+        
+        # Save acting player ID for terminal reward attribution
+        acting_player_id = self.active_player_id
         
         await self._apply_action(action_p_active)
         
@@ -197,31 +200,55 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self.bot.client.step()
         await self._refresh_bot_state()
         
-        reward = self.bot.calculate_reward(perspective_player_id=self.active_player_id)
+        # 1. Calculate step reward for the acting player
+        reward = self.bot.calculate_reward(perspective_player_id=acting_player_id)
         
-        self.current_unit_index += 1
-        await self._refresh_unit_lists()
-        
-        if self.current_unit_index >= len(self.player_units[self.active_player_id]):
-            self.current_unit_index = 0
-            self.active_player_id = 2 if self.active_player_id == 1 else 1
-            await self._refresh_unit_lists()
-            
+        # 2. Check for Win/Loss (Terminal)
         p1_lost = self.bot.structures(UnitTypeId.PYLON).amount == 0
         p2_lost = self.bot.enemy_structures(UnitTypeId.PYLON).amount == 0
         
         done = False
-        win_reward = self.training_conf.get("rewards", {}).get("win_reward", 100.0)
+        truncated = False
+        r_conf = self.training_conf.get("rewards", {})
+        win_reward = r_conf.get("win_reward", 100.0)
+        loss_penalty = r_conf.get("loss_penalty", -100.0)
+        draw_penalty = r_conf.get("draw_penalty", -10.0)
+
         if p1_lost:
             done = True
-            if self.active_player_id == 2: reward += win_reward
-            else: reward -= win_reward
+            self._log(f"Termination: Player 1 Pylon destroyed. Winner: Player 2.")
+            if acting_player_id == 2: reward += win_reward
+            else: reward += loss_penalty
         elif p2_lost:
             done = True
-            if self.active_player_id == 1: reward += win_reward
-            else: reward -= win_reward
+            self._log(f"Termination: Player 2 Pylon destroyed. Winner: Player 1.")
+            if acting_player_id == 1: reward += win_reward
+            else: reward += loss_penalty
+        
+        # 3. Check for Draw (Mutual Destruction)
+        await self._refresh_unit_lists()
+        p1_units_count = len(self.player_units[1])
+        p2_units_count = len(self.player_units[2])
+        
+        if not done and p1_units_count == 0 and p2_units_count == 0:
+            done = True
+            reward += draw_penalty
+            self._log(f"Termination: Mutual Destruction (Draw).")
+
+        # 4. Check for Timeout
+        if not done and self.steps_count >= self.max_steps:
+            truncated = True
+            reward += draw_penalty
+            self._log(f"Termination: Timeout reached ({self.max_steps} steps). Draw.")
+
+        # 5. Handle Turn Cycling (only if game not done)
+        if not done and not truncated:
+            self.current_unit_index += 1
+            if self.current_unit_index >= len(self.player_units[self.active_player_id]):
+                self.current_unit_index = 0
+                self.active_player_id = 2 if self.active_player_id == 1 else 1
+                await self._refresh_unit_lists()
             
-        truncated = self.steps_count >= self.max_steps
         obs = await self._get_joint_observation()
         return obs, reward, done, truncated, {}
 
