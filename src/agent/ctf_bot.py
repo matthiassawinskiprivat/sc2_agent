@@ -49,6 +49,8 @@ class CaptureTheFlagBot(BotAI):
         self.prev_pylon_health = {1: 20.0, 2: 20.0} # Combined HP + Shield
         self.prev_enemy_units_health = 0.0
         self.prev_own_units_health = 0.0
+        
+        self.cached_observation: Optional[np.ndarray] = None
 
     async def on_start(self):
         self.agent_system = HierarchicalAgentSystem(
@@ -57,95 +59,199 @@ class CaptureTheFlagBot(BotAI):
         )
         self.agent_system.create_unit_agent("active_agent")
 
-    def get_observation(self) -> np.ndarray:
-        """Returns the processed observation from this bot's perspective."""
-        enemy_pylon = self.enemy_structures(UnitTypeId.PYLON).first if self.enemy_structures(UnitTypeId.PYLON).exists else None
+    def get_observation(self, perspective_player_id: Optional[int] = None) -> np.ndarray:
+        """Returns the processed observation from the given player's perspective."""
+        # Use provided perspective or default to bot's own player_id
+        p_id = perspective_player_id if perspective_player_id is not None else self.player_id
+        
+        # Defensive check for game info/state
+        if not hasattr(self, "game_info") or self.game_info is None:
+             logger.warning(f"Bot {self.player_id}: game_info is missing. Returning zero observation.")
+             return np.zeros((23, 128, 128), dtype=np.uint8)
+
+        # Flip units based on perspective
+        if p_id == self.player_id:
+            units = self.units
+            enemy_units = self.enemy_units
+            structures = self.structures
+            enemy_structures = self.enemy_structures
+        else:
+            # God-Mode: Flip perspectives
+            units = self.enemy_units
+            enemy_units = self.units
+            structures = self.enemy_structures
+            enemy_structures = self.structures
+
+        enemy_pylon = enemy_structures(UnitTypeId.PYLON).first if enemy_structures(UnitTypeId.PYLON).exists else None
         target_pos = enemy_pylon.position if enemy_pylon else self.command_target
         
         selected_units = []
         if self.active_unit_tag:
-            active_unit = self.units.find_by_tag(self.active_unit_tag)
-            if active_unit:
-                selected_units = [active_unit]
+            try:
+                # We search in ALL units for the active unit tag
+                active_unit = self.all_units.find_by_tag(self.active_unit_tag)
+                if active_unit:
+                    selected_units = [active_unit]
+            except Exception:
+                pass
 
         raw_obs = {
-            'units': self.units,
-            'enemy_units': self.enemy_units,
-            'enemy_structures': self.enemy_structures,
-            'structures': self.structures,
+            'units': units,
+            'enemy_units': enemy_units,
+            'enemy_structures': enemy_structures,
+            'structures': structures,
             'effects': getattr(self.state, "effects", []),
             'game_info': self.game_info,
             'game_data': self.game_data,
-            'creep': self.state.creep,
+            'creep': getattr(self.state, "creep", None),
             'command_target': target_pos,
             'selected_units': selected_units
         }
         
-        # Process with agent system, passing player_id for perspective-aware transformation
-        processed = self.agent_system.process_observation(raw_obs, player_id=self.player_id)
-        return processed["active_agent"]
+        # Process with agent system, passing p_id for perspective-aware transformation
+        try:
+            processed = self.agent_system.process_observation(raw_obs, player_id=p_id)
+            self.cached_observation = processed["active_agent"]
+        except Exception as e:
+            if self.cached_observation is not None:
+                logger.warning(f"Bot {self.player_id} (P_ID {p_id}): Observation processing failed ({e}). Returning cached observation.")
+                return self.cached_observation
+            else:
+                # Fallback to zeros if nothing cached
+                num_layers = self.training_conf.get("active_layers_count", 23)
+                return np.zeros((num_layers, 128, 128), dtype=np.uint8)
+
+        return self.cached_observation
 
     async def apply_action(self, unit_tag: int, action: int):
-        unit = self.units.find_by_tag(unit_tag)
+        unit = self.all_units.find_by_tag(unit_tag)
         if not unit: return
 
-        world_x, world_y = self.agent_system.unit_agents["active_agent"].convert_spatial_action_to_world(action)
+        # Restore dual-head logic parity with Level 7
+        grid_area = 128 * 128
+        is_attack = False
+        spatial_idx = action
+        
+        if action >= grid_area:
+            is_attack = True
+            spatial_idx = action - grid_area
+
+        world_x, world_y = self.agent_system.unit_agents["active_agent"].convert_spatial_action_to_world(spatial_idx)
         target = Point2((world_x, world_y))
         
-        # CTF uses Attack Move to engage enemies and Pylons
-        self.do(unit.attack(target))
+        if is_attack:
+            self.do(unit.attack(target))
+        else:
+            self.do(unit.move(target))
+            
         self.command_target = target
 
-    def calculate_reward(self) -> float:
-        """
-        Calculates CTF rewards:
-        - Damaging enemy Pylon: High reward
-        - Damage to own Pylon: Negative reward
-        - Damaging enemy units: Small reward
-        - Taking damage: Small penalty
-        - Win/Loss: Max reward/penalty
-        """
-        reward = 0.0
-        r_conf = self.training_conf.get("rewards", {})
-        
-        # 1. Pylon Health Delta
-        p1_pylon = self.structures(UnitTypeId.PYLON).first if self.player_id == 1 else self.enemy_structures(UnitTypeId.PYLON).first
-        p2_pylon = self.structures(UnitTypeId.PYLON).first if self.player_id == 2 else self.enemy_structures(UnitTypeId.PYLON).first
-        
-        def get_hp(pylon):
-            if not pylon: return 0.0
-            return pylon.health + pylon.shield
+        def calculate_reward(self, perspective_player_id: Optional[int] = None) -> float:
 
-        curr_p1_hp = get_hp(p1_pylon) if self.player_id == 1 else get_hp(p2_pylon)
-        curr_p2_hp = get_hp(p2_pylon) if self.player_id == 1 else get_hp(p1_pylon) # Enemy pylon from P1 perspective is P2
-        
-        # Damaging enemy pylon (Enemy is index 2 for P1)
-        enemy_idx = 2 if self.player_id == 1 else 1
-        own_idx = self.player_id
-        
-        enemy_pylon_hp = get_hp(self.enemy_structures(UnitTypeId.PYLON).first)
-        own_pylon_hp = get_hp(self.structures(UnitTypeId.PYLON).first)
-        
-        # Pylon Damage Rewards
-        if enemy_pylon_hp < self.prev_pylon_health[enemy_idx]:
-            reward += (self.prev_pylon_health[enemy_idx] - enemy_pylon_hp) * r_conf.get("pylon_damage_reward", 2.0)
+            """
+
+            Calculates CTF rewards from the given player's perspective.
+
+            """
+
+            p_id = perspective_player_id if perspective_player_id is not None else self.player_id
+
             
-        if own_pylon_hp < self.prev_pylon_health[own_idx]:
-            reward -= (self.prev_pylon_health[own_idx] - own_pylon_hp) * r_conf.get("pylon_damage_penalty", 2.0)
 
-        self.prev_pylon_health[own_idx] = own_pylon_hp
-        self.prev_pylon_health[enemy_idx] = enemy_pylon_hp
-        
-        # 2. Combat Rewards
-        curr_enemy_hp = sum(u.health + u.shield for u in self.enemy_units)
-        if curr_enemy_hp < self.prev_enemy_units_health:
-            reward += (self.prev_enemy_units_health - curr_enemy_hp) * r_conf.get("damage_reward", 0.1)
-        self.prev_enemy_units_health = curr_enemy_hp
-        
-        curr_own_hp = sum(u.health + u.shield for u in self.units if not u.is_structure)
-        if curr_own_hp < self.prev_own_units_health:
-            reward -= (self.prev_own_units_health - curr_own_hp) * r_conf.get("damage_penalty", 0.1)
-        self.prev_own_units_health = curr_own_hp
+            reward = 0.0
 
-        # 3. Win/Loss (Checked in Env, but can be added here as final bonus)
-        return reward
+            r_conf = self.training_conf.get("rewards", {})
+
+            
+
+            # In God-Mode (Single Client), self.player_id is always 1.
+
+            # structures = P1, enemy_structures = P2
+
+            
+
+            p1_pylon_units = self.structures(UnitTypeId.PYLON)
+
+            p2_pylon_units = self.enemy_structures(UnitTypeId.PYLON)
+
+            
+
+            def get_hp(pylon):
+
+                if not pylon: return 0.0
+
+                return pylon.health + pylon.shield
+
+    
+
+            p1_pylon_hp = get_hp(p1_pylon_units.first) if p1_pylon_units.exists else 0.0
+
+            p2_pylon_hp = get_hp(p2_pylon_units.first) if p2_pylon_units.exists else 0.0
+
+            
+
+            # Map indices to HP
+
+            curr_pylon_hp = {1: p1_pylon_hp, 2: p2_pylon_hp}
+
+            
+
+            own_idx = p_id
+
+            enemy_idx = 2 if p_id == 1 else 1
+
+            
+
+            # Pylon Damage Rewards
+
+            if curr_pylon_hp[enemy_idx] < self.prev_pylon_health[enemy_idx]:
+
+                reward += (self.prev_pylon_health[enemy_idx] - curr_pylon_hp[enemy_idx]) * r_conf.get("pylon_damage_reward", 2.0)
+
+                
+
+            if curr_pylon_hp[own_idx] < self.prev_pylon_health[own_idx]:
+
+                reward -= (self.prev_pylon_health[own_idx] - curr_pylon_hp[own_idx]) * r_conf.get("pylon_damage_penalty", 2.0)
+
+    
+
+            # Update previous HP
+
+            self.prev_pylon_health[1] = p1_pylon_hp
+
+            self.prev_pylon_health[2] = p2_pylon_hp
+
+            
+
+            # 2. Combat Rewards
+
+            own_units = self.units if p_id == 1 else self.enemy_units
+
+            enemy_units = self.enemy_units if p_id == 1 else self.units
+
+            
+
+            curr_enemy_hp = sum(u.health + u.shield for u in enemy_units if not u.is_structure)
+
+            if curr_enemy_hp < self.prev_enemy_units_health:
+
+                reward += (self.prev_enemy_units_health - curr_enemy_hp) * r_conf.get("damage_reward", 0.1)
+
+            self.prev_enemy_units_health = curr_enemy_hp
+
+            
+
+            curr_own_hp = sum(u.health + u.shield for u in own_units if not u.is_structure)
+
+            if curr_own_hp < self.prev_own_units_health:
+
+                reward -= (self.prev_own_units_health - curr_own_hp) * r_conf.get("damage_penalty", 0.1)
+
+            self.prev_own_units_health = curr_own_hp
+
+    
+
+            return reward
+
+    
