@@ -11,13 +11,13 @@ training:
 # Environment parameters
 env:
   env_class: "CaptureTheFlagEnv"
-  minerals: 500
-  vespene: 250
+  mineral_budget: 1000
+  vespene_budget: 250
   flag_distance_min: 20.0
   unit_pool: ["ZERGLING", "ROACH", "MARINE", "REAPER", "ZEALOT"]
   grid_size: 128
   headless: True
-  max_steps: 200000
+  max_steps: 1500
   maps_dir: "train/maps/level_3" # Use large open maps
   rewards:
     win_reward: 100.0
