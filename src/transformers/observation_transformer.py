@@ -82,8 +82,6 @@ class ObservationTransformer:
         enemy_structures = raw_obs.get('enemy_structures') or []
         effects = raw_obs.get('effects') or []
         
-        print(f"DEBUG: allied_units={len(allied_units)}, structures={len(allied_structures)}, enemy_units={len(enemy_units)}, enemy_structures={len(enemy_structures)}")
-        
         game_info = raw_obs.get('game_info')
         game_data = raw_obs.get('game_data')
 
@@ -164,12 +162,20 @@ class ObservationTransformer:
         self._draw_command_info(raw_obs, layers)
 
         # ------------------------------------------------------------------
-        # 6. Normalize
+        # 6. Normalize & Scale to uint8 [0, 255]
         # ------------------------------------------------------------------
         dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
+        
+        # Apply non-linear compression to intensities
         layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
         layers[0:dps_start] = np.log1p(layers[0:dps_start])
+        
+        # Centralized Scaling: Transform float32 [0, 1+] to uint8 [0, 255]
+        # We clip to [0, 1] for layers that should be normalized (like health, density)
+        # Note: log1p can exceed 1.0, so we clip at 1.0 before scaling to 255
+        # This ensures maximum intensity for any significant presence.
+        layers = np.clip(layers * 255.0, 0, 255.0).astype(np.uint8)
 
         if self.active_layers:
             # Extract indices for active layers
@@ -186,8 +192,6 @@ class ObservationTransformer:
 
         px = int(rel_x * self.scale + self.offset_x)
         py = int(self.feature_map_height - 1 - (rel_y * self.scale + self.offset_y))
-        
-        print(f"DEBUG: pos=({position.x}, {position.y}), crop=({self.crop_x}, {self.crop_y}), rel=({rel_x}, {rel_y}), scale={self.scale}, offset=({self.offset_x}, {self.offset_y}) -> px={px}, py={py}")
 
         if 0 <= px < self.feature_map_width and 0 <= py < self.feature_map_height:
             return px, py
