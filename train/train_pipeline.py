@@ -26,6 +26,13 @@ from train.sync_vec_env import SyncVecEnv
 from src.utils.watchdog import Watchdog
 from src.utils.sc2_cleanup import kill_switch_sc2
 from src.utils.model_utils import graft_model_weights
+from train.env_utils import EnvFactory, get_action_masks
+
+# Specialized Bots for Environment initialization
+from src.level_0_bot import Level0Bot
+from src.level_3_bot import Level3Bot
+from src.level_7_bot import Level7Bot
+from src.agent.ctf_bot import CaptureTheFlagBot
 
 # Environment Registry
 ENV_REGISTRY = {
@@ -33,6 +40,14 @@ ENV_REGISTRY = {
     "Level3Env": Level3Env,
     "Level7Env": Level7Env,
     "CaptureTheFlagEnv": CaptureTheFlagEnv
+}
+
+# Bot Registry for environments that instantiate their own bot (Level0, Level3, Level7)
+BOT_REGISTRY = {
+    "Level0Env": Level0Bot,
+    "Level3Env": Level3Bot,
+    "Level7Env": Level7Bot,
+    "CaptureTheFlagEnv": CaptureTheFlagBot
 }
 
 # Directories
@@ -200,26 +215,13 @@ class PipelineManager:
         combined_conf.update(env_params)
 
         # For SubprocVecEnv, we need to pass a list of callables that return the env
-        def make_env(rank):
-            def _init():
-                env = EnvClass(
-                    level_name=level_name,
-                    visualize=not headless,
-                    grid_size=env_params["grid_size"],
-                    worker_index=rank,
-                    num_workers=num_envs,
-                    sc2_process_cls=self.sc2_process_cls,
-                    client_cls=self.client_cls,
-                    training_conf=combined_conf,
-                    max_steps=env_params.get("max_steps", 300)
-                )
-                # Wrap with Monitor first, then ActionMasker
-                env = Monitor(env)
-                env = ActionMasker(env, lambda e: e.unwrapped.action_masks())
-                return env
-            return _init
-
-        env_fns = [make_env(i) for i in range(num_envs)]
+        env_fns = [
+            EnvFactory(
+                EnvClass, level_name, not headless, env_params["grid_size"], i, num_envs,
+                self.sc2_process_cls, self.client_cls, combined_conf, env_params.get("max_steps", 300)
+            )
+            for i in range(num_envs)
+        ]
         
         if vec_env_cls == MaskableSyncVecEnv:
              env = vec_env_cls(env_fns)

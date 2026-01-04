@@ -12,13 +12,23 @@ class Level3Env(Level0Env):
         # Level0Env initialized config_manager
         level_conf = self.config_manager.get_level_config(self.level_name)
         env_conf = level_conf.get("env", {})
-        self.targets = env_conf.get("targets", 1)
+        
+        # Priority: explicit training_conf['env'] > level_conf['env']
+        merged_env_conf = self.training_conf.get("env", {}).copy()
+        for k, v in env_conf.items():
+            if k not in merged_env_conf:
+                merged_env_conf[k] = v
+
+        self.targets = merged_env_conf.get("targets", 1)
         
         # Ensure targets and other env-level configs are propagated to training_conf 
         # so they reach the Level3Bot
         self.training_conf["targets"] = self.targets
-        if "rewards" in env_conf:
-            self.training_conf["rewards"] = env_conf["rewards"]
+        if "rewards" in merged_env_conf:
+            # Merge rewards too
+            r = self.training_conf.get("rewards", {}).copy()
+            r.update(merged_env_conf["rewards"])
+            self.training_conf["rewards"] = r
             
         self.current_unit_index = 0
         self.active_unit_tags = []
