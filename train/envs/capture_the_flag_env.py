@@ -187,13 +187,20 @@ class CaptureTheFlagEnv(MultiClientEnv):
             await self._refresh_bot_states()
 
         w, h = self.bot1.game_info.playable_area.width, self.bot1.game_info.playable_area.height
+        offset_x, offset_y = self.bot1.game_info.playable_area.x, self.bot1.game_info.playable_area.y
         
         # 2. Generate Randomized Positions
         requested_dist = self.training_conf.get("env", {}).get("flag_distance_min", self.flag_distance_min)
         safe_dist = SpawningUtils.calculate_safe_distance(w, h, requested_dist)
         
-        pos1, pos2 = SpawningUtils.get_random_pylon_positions(w, h, safe_dist)
-        self._log(f"Spawning Pylons at {pos1} and {pos2} (Distance: {pos1.distance_to(pos2):.2f}, SafeTarget: {safe_dist:.2f})")
+        # Use small margin (1.0) to maximize space usage
+        rel_pos1, rel_pos2 = SpawningUtils.get_random_pylon_positions(w, h, safe_dist, margin=1.0)
+        
+        # Apply offsets to convert relative coordinates to absolute map coordinates
+        pos1 = Point2((rel_pos1.x + offset_x, rel_pos1.y + offset_y))
+        pos2 = Point2((rel_pos2.x + offset_x, rel_pos2.y + offset_y))
+        
+        self._log(f"Spawning Pylons at {pos1} and {pos2} (Distance: {pos1.distance_to(pos2):.2f}, SafeTarget: {safe_dist:.2f}, Offset: {offset_x},{offset_y})")
         
         # 3. Spawn Pylons
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
