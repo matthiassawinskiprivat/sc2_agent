@@ -18,6 +18,6 @@ This plan focuses on implementing robust, consistent randomization for Pylon spa
 
 ## Phase 3: Verification
 
-- [ ] Task: Create a reproduction/verification script that resets the environments multiple times and asserts that Pylon positions vary significantly.
-- [ ] Task: Verify that the `flag_distance_min` constraint is strictly honored in both environments.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Verification' (Protocol in workflow.md)
+- [x] Task: Create a reproduction/verification script that resets the environments multiple times and asserts that Pylon positions vary significantly. (2f1536e)
+- [x] Task: Verify that the `flag_distance_min` constraint is strictly honored in both environments. (2f1536e)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Verification' (Protocol in workflow.md) (2f1536e)
