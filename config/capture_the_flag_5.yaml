@@ -3,7 +3,7 @@
 
 training:
   training_steps: 200_000
-  num_envs: 1 # Multi-client envs are heavy, start with 1
+  num_envs: 2
   n_steps: 2048
   batch_size: 512
   learning_rate: 0.0003
@@ -17,15 +17,15 @@ env:
   unit_pool: ["ZERGLING", "ROACH", "MARINE", "REAPER", "ZEALOT", "STALKER", "SENTRY", "HYDRALISK", "HELLIONTANK", "RAVAGER", "CYCLONE", "BANELING", "SIEGETANK",  "MARAUDER", "HELLION"]
   grid_size: 128
   headless: True
-  max_steps: 1500
+  max_steps: 2000
   maps_dir: "train/maps/level_3" # Use large open maps
   rewards:
     win_reward: 100.0
     loss_penalty: -100.0
-    draw_penalty: -10.0
-    pylon_damage_reward: 5.0
+    draw_penalty: -50.0
+    pylon_damage_reward: 5.5
     pylon_damage_penalty: 5.0
-    damage_reward: 0.2
+    damage_reward: 0.4
     damage_penalty: 0.2
     step_penalty: -0.01
   active_layers: []

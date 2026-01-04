@@ -1,0 +1,49 @@
+# config/capture_the_flag.yaml
+# Configuration for Level 11: Capture the Flag (Self-Play)
+
+training:
+  training_steps: 200_000
+  num_envs: 2
+  n_steps: 2048
+  batch_size: 512
+  learning_rate: 0.0003
+
+# Environment parameters
+env:
+  env_class: "CaptureTheFlagEnv"
+  mineral_budget: 1500
+  vespene_budget: 300
+  flag_distance_min: 20.0
+  unit_pool: ["ZERGLING", "ROACH", "MARINE", "REAPER", "ZEALOT", "STALKER", "SENTRY", "HYDRALISK", "ROACH", "ADEPT", "BANELING",  "MARAUDER", "HELLION"]
+  grid_size: 128
+  headless: True
+  max_steps: 2000
+  maps_dir: "train/maps/level_3" # Use large open maps
+  rewards:
+    win_reward: 100.0
+    loss_penalty: -100.0
+    draw_penalty: -50.0
+    pylon_damage_reward: 5.5
+    pylon_damage_penalty: 5.0
+    damage_reward: 0.4
+    damage_penalty: 0.2
+    step_penalty: -0.01
+  active_layers: []
+
+# Model parameters
+model:
+  policy: "CnnPolicy"
+  policy_kwargs:
+    features_extractor_kwargs:
+      features_dim: 512
+  gamma: 0.995
+  ent_coef: 0.05
+  n_epochs: 4
+
+# Evaluation parameters
+evaluation:
+  stop_on_metric:
+    monitor: "rollout/ep_rew_mean"
+    threshold: 150.0
+    comparison: ">"
+    patience: 10

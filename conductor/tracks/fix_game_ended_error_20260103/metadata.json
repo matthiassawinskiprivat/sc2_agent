@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_game_ended_error_20260103",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-03T16:12:00Z",
+  "updated_at": "2026-01-03T16:12:00Z",
+  "description": "Graceful handle 'Game has already ended' ProtocolError during termination by catching errors, Determining winner for final rewards, and return last valid observation."
+}

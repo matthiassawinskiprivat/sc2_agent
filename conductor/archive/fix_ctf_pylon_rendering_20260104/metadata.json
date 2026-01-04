@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_ctf_pylon_rendering_20260104",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-04T11:32:00Z",
+  "updated_at": "2026-01-04T11:32:00Z",
+  "description": "Fix pylon rendering issues in CTF environments, including visibility in Multi-Client mode and representation on unit-based observation layers."
+}

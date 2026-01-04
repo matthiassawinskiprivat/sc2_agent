@@ -43,7 +43,7 @@ class MultiClientSC2Manager:
             self.clients.append(client)
             
             # Give it a moment to stabilize
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.2)
 
         if len(self.clients) >= 1:
             self.host_client = self.clients[0]
@@ -81,8 +81,8 @@ class MultiClientSC2Manager:
             if result.create_game.HasField("error"):
                 logger.error(f"Engine Error: {result.create_game.error}")
                 
-            logger.info("Game created. Waiting 20s for map loading...")
-            await asyncio.sleep(20)
+            logger.info("Game created. Waiting 10s for map loading...")
+            await asyncio.sleep(10)
         except Exception as e:
             logger.error(f"Exception during create_game: {e}")
             raise e
@@ -129,7 +129,7 @@ class MultiClientSC2Manager:
             pass
         
         # Wait for OS to reclaim ports and resources
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(0.5)
         
         self.processes.clear()
         self.clients.clear()

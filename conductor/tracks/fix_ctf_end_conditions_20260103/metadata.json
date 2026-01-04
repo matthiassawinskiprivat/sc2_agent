@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_ctf_end_conditions_20260103",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-03T19:53:00Z",
+  "updated_at": "2026-01-03T19:53:00Z",
+  "description": "Fix premature environment termination and ensure end conditions are correctly evaluated."
+}

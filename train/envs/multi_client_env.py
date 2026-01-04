@@ -63,6 +63,10 @@ class MultiClientEnv(gym.Env):
         self.observation_space = None
         self.action_space = None
         self.players: List[AbstractPlayer] = []
+        
+        # State tracking for graceful termination
+        self._last_obs: Optional[np.ndarray] = None
+        self.game_ended: bool = False
 
     def _discover_maps(self):
         from pathlib import Path
@@ -124,7 +128,9 @@ class MultiClientEnv(gym.Env):
             # Initial observation
             self._log("Getting initial observation...")
             obs = self._loop.run_until_complete(self._get_joint_observation())
-            self._log("reset() complete.")
+            self._last_obs = obs
+            self.game_ended = False
+            self._log(f"reset() complete. Obs shape: {obs.shape if hasattr(obs, 'shape') else 'unknown'}")
             return obs, {}
         except Exception as e:
             self._log(f"CRITICAL: Error during reset: {e}")
@@ -138,11 +144,41 @@ class MultiClientEnv(gym.Env):
         Executes a synchronized step for both players.
         actions: [action_p1, action_p2]
         """
+        from sc2.protocol import ProtocolError
+        
+        if self.game_ended:
+             # Already ended, return terminal state with last known observation
+             return self._last_obs, 0.0, True, False, {"game_ended": True, "already_ended": True}
+
+        info = {}
         try:
             self._log(f"step() called with actions: {actions}")
             results = self._loop.run_until_complete(self._async_step(actions))
+            obs, reward, terminated, truncated, info = results
+            
+            # Cache observation
+            self._last_obs = obs
+            
+            if terminated or truncated:
+                self.game_ended = True
+                
             self._log("step() complete.")
             return results
+        except ProtocolError as e:
+            if "Game has already ended" in str(e):
+                self._log("ProtocolError: Game ended during step. Transitioning to terminal state.")
+                self.game_ended = True
+                
+                # Terminal hook for subclasses to inject rewards/info
+                reward, terminal_info = self._get_terminal_info(str(e))
+                info.update(terminal_info)
+                info["game_ended"] = True
+                
+                return self._last_obs, reward, True, False, info
+            
+            self._log(f"CRITICAL: ProtocolError during step: {e}")
+            self.close()
+            raise e
         except Exception as e:
             self._log(f"CRITICAL: Error during step: {e}")
             import traceback
@@ -178,13 +214,20 @@ class MultiClientEnv(gym.Env):
         pass
 
     async def _get_joint_observation(self):
-        # Override in subclass
-        return [None, None]
+        # Override in subclass to return the learning agent's observation
+        return None
 
     async def _get_step_results(self):
         # Override in subclass
         obs = await self._get_joint_observation()
-        return obs, [0, 0], [False, False], [False, False], {}
+        return obs, 0.0, False, False, {}
+
+    def _get_terminal_info(self, error_msg: str) -> Tuple[float, Dict]:
+        """
+        Subclasses should override this to determine final rewards/winner 
+        when the game ends unexpectedly (e.g. ProtocolError).
+        """
+        return 0.0, {"error": error_msg}
 
     def close(self):
         if self._loop and not self._loop.is_closed():

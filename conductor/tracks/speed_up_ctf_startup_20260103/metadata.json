@@ -1,0 +1,8 @@
+{
+  "track_id": "speed_up_ctf_startup_20260103",
+  "type": "chore",
+  "status": "new",
+  "created_at": "2026-01-03T16:56:00Z",
+  "updated_at": "2026-01-03T16:56:00Z",
+  "description": "The game start-up for the new 'capture the flag' environment is very slow. Try to speed it up as much as possible without losing stability."
+}

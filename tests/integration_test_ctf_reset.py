@@ -22,7 +22,7 @@ def test_ctf_real_reset():
     # We use a reduced max_steps and grid_size for faster testing
     env = CaptureTheFlagEnv(
         map_name="BotMicroArena_6",
-        headless=True,
+        headless=False,
         realtime=False
     )
     

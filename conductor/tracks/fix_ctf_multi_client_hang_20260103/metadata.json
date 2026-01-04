@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_ctf_multi_client_hang_20260103",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-03T00:48:00Z",
+  "updated_at": "2026-01-03T00:48:00Z",
+  "description": "Fix hang in CaptureTheFlagEnv during initial unit spawning caused by single-client stepping in a multi-client session."
+}
