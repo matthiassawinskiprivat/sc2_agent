@@ -154,6 +154,10 @@ class CaptureTheFlagEnv(MultiClientEnv):
             
             bot._prepare_start(client, player_id, game_info, game_data, self.realtime)
             bot._proto_game_info = raw_game_info # Store for _prepare_step
+            
+            # Enable full visibility for self-play fairness and Pylon objective tracking
+            await client.debug_show_map()
+            
             await bot.on_start()
             self._log(f"Bot {player_id} ready.")
 

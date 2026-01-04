@@ -78,6 +78,8 @@ class ObservationTransformer:
 
         allied_units = raw_obs.get('units', [])
         enemy_units = raw_obs.get('enemy_units', [])
+        allied_structures = raw_obs.get('structures', [])
+        enemy_structures = raw_obs.get('enemy_structures', [])
         effects = raw_obs.get('effects', [])
         game_info = raw_obs.get('game_info')
         game_data = raw_obs.get('game_data')
@@ -118,14 +120,15 @@ class ObservationTransformer:
         self._draw_terrain_creep(raw_obs, layers)
 
         # ------------------------------------------------------------------
-        # 3. Draw Units
+        # 3. Draw Units & Structures
         # ------------------------------------------------------------------
         self._liberator_positions = {'allied': [], 'enemy': []}
 
         lib_enum = getattr(UnitTypeId, 'LIBERATORAG', 154)
         lib_val = lib_enum.value if hasattr(lib_enum, "value") else 154
 
-        for unit in allied_units:
+        # Allied Units + Structures
+        for unit in list(allied_units) + list(allied_structures):
             u_name = getattr(unit.type_id, "name", None)
             if u_name and "MINERAL" in u_name.upper(): continue
 
@@ -135,7 +138,8 @@ class ObservationTransformer:
             if u_id == lib_val:
                 self._liberator_positions['allied'].append(unit.position)
 
-        for unit in enemy_units:
+        # Enemy Units + Structures
+        for unit in list(enemy_units) + list(enemy_structures):
             u_name = getattr(unit.type_id, "name", None)
             if u_name and "MINERAL" in u_name.upper(): continue
 
