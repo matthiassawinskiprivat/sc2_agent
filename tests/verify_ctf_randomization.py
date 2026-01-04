@@ -28,12 +28,16 @@ def setup_mock_env(env):
     mock_client = MockClient()
     env._manager.clients = [mock_client, MockClient()]
     
+    # Use realistic offsets from BotMicroArena_6 inspection
+    # x=2, y=2, w=68, h=52 -> Top Right is (70, 54)
     if hasattr(env, 'bot1'):
         env.bot1 = MagicMock()
         env.bot1.client = env._manager.clients[0]
         env.bot1.game_info = MagicMock()
-        env.bot1.game_info.playable_area.width = 100
-        env.bot1.game_info.playable_area.height = 100
+        env.bot1.game_info.playable_area.x = 2.0
+        env.bot1.game_info.playable_area.y = 2.0
+        env.bot1.game_info.playable_area.width = 68.0
+        env.bot1.game_info.playable_area.height = 52.0
         env.bot1.all_units = MagicMock()
         env.bot1.all_units.exists = False
         env.bot1.structures = MagicMock()
@@ -42,8 +46,10 @@ def setup_mock_env(env):
         env.bot = MagicMock()
         env.bot.client = env._manager.clients[0]
         env.bot.game_info = MagicMock()
-        env.bot.game_info.playable_area.width = 100
-        env.bot.game_info.playable_area.height = 100
+        env.bot.game_info.playable_area.x = 2.0
+        env.bot.game_info.playable_area.y = 2.0
+        env.bot.game_info.playable_area.width = 68.0
+        env.bot.game_info.playable_area.height = 52.0
         env.bot.all_units = MagicMock()
         env.bot.all_units.exists = False
         env.bot.structures = MagicMock()
@@ -60,7 +66,8 @@ async def test_multi_env_randomization():
     setup_mock_env(env)
     
     positions = []
-    for _ in range(10):
+    # Use more iterations to ensure coverage
+    for _ in range(50):
         env.bot1.client.debug_create_unit.reset_mock()
         await env._spawn_initial_units()
         
@@ -78,9 +85,20 @@ async def test_multi_env_randomization():
         positions.append((p1_pos, p2_pos))
         assert p1_pos.distance_to(p2_pos) >= env.flag_distance_min - 1.0
         
-    # Verify that not all positions are the same
-    assert len(set((p[0].x, p[0].y) for p in positions)) > 1
-    assert len(set((p[1].x, p[1].y) for p in positions)) > 1
+    # Verify coverage across map
+    all_p_coords = [p[0] for p in positions] + [p[1] for p in positions]
+    max_x = max(p.x for p in all_p_coords)
+    max_y = max(p.y for p in all_p_coords)
+    min_x = min(p.x for p in all_p_coords)
+    min_y = min(p.y for p in all_p_coords)
+    
+    # Offsets are 2.0, w=68, h=52 -> Full range is [2, 70] and [2, 54]
+    # With margin 1.0, range is [3, 69] and [3, 53]
+    # We should see points significantly above the old hardcoded limits (relative coords without offset)
+    assert max_x > 65.0, f"Spawning didn't reach top area (x={max_x})"
+    assert max_y > 50.0, f"Spawning didn't reach right area (y={max_y})"
+    assert min_x < 10.0
+    assert min_y < 10.0
 
 @pytest.mark.asyncio
 async def test_single_env_randomization():
@@ -88,7 +106,7 @@ async def test_single_env_randomization():
     setup_mock_env(env)
     
     positions = []
-    for _ in range(10):
+    for _ in range(50):
         env.bot.client.debug_create_unit.reset_mock()
         await env._spawn_initial_units()
         
@@ -105,5 +123,9 @@ async def test_single_env_randomization():
         positions.append((p1_pos, p2_pos))
         assert p1_pos.distance_to(p2_pos) >= 20.0 - 1.0 # Default in SingleEnv is 20.0
         
-    assert len(set((p[0].x, p[0].y) for p in positions)) > 1
-    assert len(set((p[1].x, p[1].y) for p in positions)) > 1
+    all_p_coords = [p[0] for p in positions] + [p[1] for p in positions]
+    max_x = max(p.x for p in all_p_coords)
+    max_y = max(p.y for p in all_p_coords)
+    
+    assert max_x > 65.0, f"Spawning didn't reach top area (x={max_x})"
+    assert max_y > 50.0, f"Spawning didn't reach right area (y={max_y})"
