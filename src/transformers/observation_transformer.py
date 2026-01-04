@@ -76,11 +76,14 @@ class ObservationTransformer:
         total_layers = LayerConstants.get_num_layers()
         layers = np.zeros((total_layers, self.feature_map_height, self.feature_map_width), dtype=np.float32)
 
-        allied_units = raw_obs.get('units', [])
-        enemy_units = raw_obs.get('enemy_units', [])
-        allied_structures = raw_obs.get('structures', [])
-        enemy_structures = raw_obs.get('enemy_structures', [])
-        effects = raw_obs.get('effects', [])
+        allied_units = raw_obs.get('units') or []
+        enemy_units = raw_obs.get('enemy_units') or []
+        allied_structures = raw_obs.get('structures') or []
+        enemy_structures = raw_obs.get('enemy_structures') or []
+        effects = raw_obs.get('effects') or []
+        
+        print(f"DEBUG: allied_units={len(allied_units)}, structures={len(allied_structures)}, enemy_units={len(enemy_units)}, enemy_structures={len(enemy_structures)}")
+        
         game_info = raw_obs.get('game_info')
         game_data = raw_obs.get('game_data')
 
@@ -183,6 +186,8 @@ class ObservationTransformer:
 
         px = int(rel_x * self.scale + self.offset_x)
         py = int(self.feature_map_height - 1 - (rel_y * self.scale + self.offset_y))
+        
+        print(f"DEBUG: pos=({position.x}, {position.y}), crop=({self.crop_x}, {self.crop_y}), rel=({rel_x}, {rel_y}), scale={self.scale}, offset=({self.offset_x}, {self.offset_y}) -> px={px}, py={py}")
 
         if 0 <= px < self.feature_map_width and 0 <= py < self.feature_map_height:
             return px, py
