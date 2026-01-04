@@ -9,6 +9,6 @@
 
 ## Phase 2: Verification
 
-- [ ] Task: Run `debug_ctf_visuals.py` and verify symmetric objective placement.
-- [ ] Task: Verify rewards are correctly calculated for both players (positive for moving towards enemy pylon).
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Verification' (Protocol in workflow.md)
+- [x] Task: Run `debug_ctf_visuals.py` and verify symmetric objective placement. (ab4dc1d)
+- [x] Task: Verify rewards are correctly calculated for both players (positive for moving towards enemy pylon). (ab4dc1d)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Verification' (Protocol in workflow.md) (ab4dc1d)
