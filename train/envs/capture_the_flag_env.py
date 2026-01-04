@@ -139,13 +139,10 @@ class CaptureTheFlagEnv(MultiClientEnv):
         players = [Bot(Race.Zerg, self.bot1), Bot(Race.Zerg, self.bot2)]
         resolved_map = self._resolve_map(self.map_name)
         
-        self._log("Starting multi-client game session...")
         await self._manager.create_join_game(resolved_map, players, realtime=self.realtime)
-        self._log("Game session established. Preparing bots...")
         
         # Wire bots to clients and prepare them
         async def prepare_bot(bot, client, player_id):
-            self._log(f"Preparing Bot {player_id}...")
             # We need both the wrapper and the raw proto
             raw_game_info = await client._execute(game_info=sc_pb.RequestGameInfo())
             from sc2.game_info import GameInfo
@@ -159,7 +156,6 @@ class CaptureTheFlagEnv(MultiClientEnv):
             await client.debug_show_map()
             
             await bot.on_start()
-            self._log(f"Bot {player_id} ready.")
 
         await asyncio.gather(
             prepare_bot(self.bot1, self._manager.clients[0], 1),
@@ -167,14 +163,11 @@ class CaptureTheFlagEnv(MultiClientEnv):
         )
         
         # Initial step to synchronize state
-        self._log("Synchronizing initial state...")
         await self._synchronized_step()
         await self._refresh_bot_states()
         
-        self._log("Spawning units...")
         await self._spawn_initial_units()
         await self._refresh_unit_lists()
-        self._log("Setup complete.")
 
     async def _synchronized_step(self):
         """Steps both clients simultaneously to advance the game."""
@@ -203,8 +196,6 @@ class CaptureTheFlagEnv(MultiClientEnv):
         # Apply offsets to convert relative coordinates to absolute map coordinates
         pos1 = Point2((rel_pos1.x + offset_x, rel_pos1.y + offset_y))
         pos2 = Point2((rel_pos2.x + offset_x, rel_pos2.y + offset_y))
-        
-        self._log(f"Spawning Pylons at {pos1} and {pos2} (Distance: {pos1.distance_to(pos2):.2f}, SafeTarget: {safe_dist:.2f}, Offset: {offset_x},{offset_y})")
         
         # 3. Spawn Pylons
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
@@ -256,8 +247,6 @@ class CaptureTheFlagEnv(MultiClientEnv):
             v -= cost["vespene"]
             affordable = [u for u in self.unit_pool if can_afford(u)]
             
-        if spawns:
-            self._log(f"Spawned army: {len(spawns)} units. Remaining budget: {m}m, {v}v")
         return spawns
 
     async def _refresh_unit_lists(self):
@@ -311,10 +300,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
             # Check if game ended
             p1_lost = self.bot1.structures(UnitTypeId.PYLON).amount == 0
             p2_lost = self.bot2.structures(UnitTypeId.PYLON).amount == 0
-            if p1_lost or p2_lost:
-                self._log("Game ended during step.")
-            else:
-                self._log(f"Error during synchronized step: {e}")
+            if not (p1_lost or p2_lost):
                 raise e
 
         await self._refresh_bot_states()
@@ -345,12 +331,10 @@ class CaptureTheFlagEnv(MultiClientEnv):
         done = False
         if p1_lost:
             done = True
-            self._log("Player 1 lost their Pylon.")
             if self.active_player_id == 2: reward += win_reward 
             else: reward -= win_reward
         elif p2_lost:
             done = True
-            self._log("Player 2 lost their Pylon.")
             if self.active_player_id == 1: reward += win_reward 
             else: reward -= win_reward
             

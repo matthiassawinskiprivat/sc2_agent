@@ -237,3 +237,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./conductor/tracks/fix_ctf_pylon_offsets_20260104/](./conductor/tracks/fix_ctf_pylon_offsets_20260104/)*
 
 
+
+---
+
+## [~] Track: Fix CTF Observation Data Type and Scaling
+*Link: [./conductor/tracks/fix_ctf_observation_dtype_20260104/](./fix_ctf_observation_dtype_20260104/)*

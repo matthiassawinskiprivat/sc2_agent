@@ -120,7 +120,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self._refresh_bot_state()
         await self._spawn_initial_units()
         await self._refresh_unit_lists()
-        self._log("Setup complete.")
 
     async def _refresh_bot_state(self):
         from sc2.game_state import GameState
@@ -152,8 +151,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         pos1 = Point2((rel_pos1.x + offset_x, rel_pos1.y + offset_y))
         pos2 = Point2((rel_pos2.x + offset_x, rel_pos2.y + offset_y))
         
-        self._log(f"Spawning Pylons at {pos1} and {pos2} (Distance: {pos1.distance_to(pos2):.2f}, SafeTarget: {safe_dist:.2f}, Offset: {offset_x},{offset_y})")
-
         # 3. Spawn exactly one Pylon for P1 and P2
         await self.bot.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
         await self.bot.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
@@ -204,8 +201,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             v -= cost["vespene"]
             affordable = [u for u in self.unit_pool if can_afford(u)]
         
-        if spawns:
-            self._log(f"Spawned army: {len(spawns)} units. Remaining budget: {m}m, {v}v")
         return spawns
 
     async def _refresh_unit_lists(self):
@@ -228,7 +223,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             await self.bot.apply_action(tags[self.current_unit_index], action)
 
     def reset(self, seed=None, options=None):
-        self._log("Environment reset started...")
         self.steps_count = 0
         self.current_unit_index = 0
         self.active_player_id = 1
@@ -236,8 +230,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
     async def _async_step(self, action_p_active):
         self.steps_count += 1
-        if self.steps_count % 100 == 0:
-            self._log(f"Step {self.steps_count} in progress...")
         
         # Save acting player ID for terminal reward attribution
         acting_player_id = self.active_player_id
@@ -268,12 +260,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         if p1_lost:
             done = True
-            self._log(f"Termination: Player 1 Pylon destroyed. Winner: Player 2.")
             if acting_player_id == 2: reward += win_reward
             else: reward += loss_penalty
         elif p2_lost:
             done = True
-            self._log(f"Termination: Player 2 Pylon destroyed. Winner: Player 1.")
             if acting_player_id == 1: reward += win_reward
             else: reward += loss_penalty
         
@@ -285,13 +275,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if not done and p1_units_count == 0 and p2_units_count == 0:
             done = True
             reward += draw_penalty
-            self._log(f"Termination: Mutual Destruction (Draw).")
 
         # 4. Check for Timeout
         if not done and self.steps_count >= self.max_steps:
             truncated = True
             reward += draw_penalty
-            self._log(f"Termination: Timeout reached ({self.max_steps} steps). Draw.")
 
         # 5. Handle Turn Cycling (only if game not done)
         if not done and not truncated:
