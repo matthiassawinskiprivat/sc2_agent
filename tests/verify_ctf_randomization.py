@@ -30,30 +30,36 @@ def setup_mock_env(env):
     
     # Use realistic offsets from BotMicroArena_6 inspection
     # x=2, y=2, w=68, h=52 -> Top Right is (70, 54)
+    def setup_bot_mock(bot):
+        bot.client = env._manager.clients[0]
+        bot.game_info = MagicMock()
+        bot.game_info.playable_area.x = 2.0
+        bot.game_info.playable_area.y = 2.0
+        bot.game_info.playable_area.width = 68.0
+        bot.game_info.playable_area.height = 52.0
+        bot.game_info.map_size.width = 100
+        bot.game_info.map_size.height = 100
+        
+        # Mock pathing_grid
+        bot.game_info.pathing_grid = MagicMock()
+        bot.game_info.pathing_grid.width = 100
+        bot.game_info.pathing_grid.height = 100
+        # __getitem__ returns 1 (pathable) for any coordinate
+        bot.game_info.pathing_grid.__getitem__.return_value = 1
+        
+        bot.all_units = MagicMock()
+        bot.all_units.exists = False
+        bot.structures = MagicMock()
+        bot.enemy_structures = MagicMock()
+
     if hasattr(env, 'bot1'):
         env.bot1 = MagicMock()
-        env.bot1.client = env._manager.clients[0]
-        env.bot1.game_info = MagicMock()
-        env.bot1.game_info.playable_area.x = 2.0
-        env.bot1.game_info.playable_area.y = 2.0
-        env.bot1.game_info.playable_area.width = 68.0
-        env.bot1.game_info.playable_area.height = 52.0
-        env.bot1.all_units = MagicMock()
-        env.bot1.all_units.exists = False
-        env.bot1.structures = MagicMock()
-        env.bot1.enemy_structures = MagicMock()
+        setup_bot_mock(env.bot1)
+        env.bot2 = MagicMock()
+        setup_bot_mock(env.bot2)
     else:
         env.bot = MagicMock()
-        env.bot.client = env._manager.clients[0]
-        env.bot.game_info = MagicMock()
-        env.bot.game_info.playable_area.x = 2.0
-        env.bot.game_info.playable_area.y = 2.0
-        env.bot.game_info.playable_area.width = 68.0
-        env.bot.game_info.playable_area.height = 52.0
-        env.bot.all_units = MagicMock()
-        env.bot.all_units.exists = False
-        env.bot.structures = MagicMock()
-        env.bot.enemy_structures = MagicMock()
+        setup_bot_mock(env.bot)
 
     env._refresh_bot_states = AsyncMock()
     env._refresh_bot_state = AsyncMock()

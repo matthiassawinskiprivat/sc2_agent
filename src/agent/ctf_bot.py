@@ -49,7 +49,9 @@ class CaptureTheFlagBot(BotAI):
         self.prev_pylon_health = {1: 20.0, 2: 20.0} # Combined HP + Shield
         self.prev_enemy_units_health = 0.0
         self.prev_own_units_health = 0.0
+        self.prev_dist_to_pylon = None
         
+        self.frame_count = 0
         self.cached_observation: Optional[np.ndarray] = None
 
     async def on_start(self):
@@ -198,5 +200,21 @@ class CaptureTheFlagBot(BotAI):
         if curr_own_hp < self.prev_own_units_health:
             reward -= (self.prev_own_units_health - curr_own_hp) * r_conf.get("damage_penalty", 0.1)
         self.prev_own_units_health = curr_own_hp
+
+        # 3. Progress Rewards (Distance to enemy pylon)
+        # We reward the ACTIVE unit for getting closer to its target
+        if self.active_unit_tag:
+            active_unit = self.all_units.find_by_tag(self.active_unit_tag)
+            enemy_pylon = self.enemy_structures(UnitTypeId.PYLON).first if self.enemy_structures(UnitTypeId.PYLON).exists else None
+            
+            if active_unit and enemy_pylon:
+                curr_dist = active_unit.distance_to(enemy_pylon)
+                if self.prev_dist_to_pylon is not None:
+                    # Reward for progress
+                    dist_change = self.prev_dist_to_pylon - curr_dist
+                    reward += dist_change * r_conf.get("distance_multiplier", 0.1)
+                self.prev_dist_to_pylon = curr_dist
+            else:
+                self.prev_dist_to_pylon = None
 
         return reward

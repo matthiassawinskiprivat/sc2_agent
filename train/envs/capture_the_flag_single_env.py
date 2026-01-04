@@ -93,7 +93,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         from s2clientprotocol import sc2api_pb2 as sc_pb
         
         self.bot = CaptureTheFlagBot(player_id=1, training_conf=self.training_conf)
-        # In single-process mode, we only join as the first player
+        # Revert to None for P2 to avoid Computer AI interference
         players = [Bot(Race.Zerg, self.bot), Bot(Race.Zerg, None)]
         resolved_map = self._resolve_map(self.map_name)
         
@@ -130,12 +130,32 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     async def _spawn_initial_units(self):
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
+        import math
         
         # 1. Clear Map of all existing units and structures
         if self.bot.all_units.exists:
             await self.bot.client.debug_kill_unit(self.bot.all_units.tags)
             await self.bot.client.step()
             await self._refresh_bot_state()
+
+        grid = self.bot.game_info.pathing_grid
+        
+        def is_pathable(pos: Point2):
+            # Convert world to grid index
+            gx, gy = int(pos.x), int(pos.y)
+            if 0 <= gx < grid.width and 0 <= gy < grid.height:
+                return grid[(gx, gy)] != 0
+            return False
+
+        def get_valid_pos(base_pos: Point2, max_dist=10.0):
+            """Finds the closest pathable point to base_pos."""
+            if is_pathable(base_pos): return base_pos
+            for d in range(1, int(max_dist)):
+                for angle in range(0, 360, 45):
+                    rad = math.radians(angle)
+                    p = Point2((base_pos.x + d * math.cos(rad), base_pos.y + d * math.sin(rad)))
+                    if is_pathable(p): return p
+            return base_pos
 
         w, h = self.bot.game_info.playable_area.width, self.bot.game_info.playable_area.height
         offset_x, offset_y = self.bot.game_info.playable_area.x, self.bot.game_info.playable_area.y
@@ -144,34 +164,43 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         requested_dist = self.training_conf.get("env", {}).get("flag_distance_min", 20.0)
         safe_dist = SpawningUtils.calculate_safe_distance(w, h, requested_dist)
         
-        # Use small margin (1.0) to maximize space usage
         rel_pos1, rel_pos2 = SpawningUtils.get_random_pylon_positions(w, h, safe_dist, margin=1.0)
         
-        # Apply offsets to convert relative coordinates to absolute map coordinates
-        pos1 = Point2((rel_pos1.x + offset_x, rel_pos1.y + offset_y))
-        pos2 = Point2((rel_pos2.x + offset_x, rel_pos2.y + offset_y))
+        # Convert to absolute and ensure pathable
+        pos1 = get_valid_pos(Point2((rel_pos1.x + offset_x, rel_pos1.y + offset_y)))
+        pos2 = get_valid_pos(Point2((rel_pos2.x + offset_x, rel_pos2.y + offset_y)))
         
-        # 3. Spawn exactly one Pylon for P1 and P2
-        await self.bot.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
-        await self.bot.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
+        # 3. Spawn Pylons
+        await self.bot.client.debug_create_unit([
+            [UnitTypeId.PYLON, 1, pos1, 1],
+            [UnitTypeId.PYLON, 1, pos2, 2]
+        ])
         
         # Resource spawning (mobile units)
         spawns1 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
         spawns2 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
         
         def to_id(name): return getattr(UnitTypeId, name)
-        cmds1 = [[to_id(u), 1, pos1, 1] for u in spawns1]
-        cmds2 = [[to_id(u), 1, pos2, 2] for u in spawns2]
         
-        await self.bot.client.debug_create_unit(cmds1)
-        await self.bot.client.debug_create_unit(cmds2)
+        def get_offset_pos(base_pos, index, total):
+            angle = (2 * math.pi * index) / max(total, 1)
+            dist = 3.0
+            p = Point2((base_pos.x + dist * math.cos(angle), base_pos.y + dist * math.sin(angle)))
+            return get_valid_pos(p)
+
+        cmds1 = [[to_id(u), 1, get_offset_pos(pos1, i, len(spawns1)), 1] for i, u in enumerate(spawns1)]
+        cmds2 = [[to_id(u), 1, get_offset_pos(pos2, i, len(spawns2)), 2] for i, u in enumerate(spawns2)]
         
-        await self.bot.client.step()
-        await self._refresh_bot_state()
+        await self.bot.client.debug_create_unit(cmds1 + cmds2)
+        
+        # Advance multiple steps to ensure all units materialise
+        for _ in range(3):
+            await self.bot.client.step()
+            await self._refresh_bot_state()
         
         # Set reduced health for Pylons
-        p1_pylons = self.bot.structures(UnitTypeId.PYLON)
-        p2_pylons = self.bot.enemy_structures(UnitTypeId.PYLON)
+        p1_pylons = self.bot.all_units(UnitTypeId.PYLON).filter(lambda u: u.owner_id == 1)
+        p2_pylons = self.bot.all_units(UnitTypeId.PYLON).filter(lambda u: u.owner_id == 2)
         
         if p1_pylons.exists and p2_pylons.exists:
             p1_tag = p1_pylons.first.tag

@@ -176,12 +176,30 @@ class CaptureTheFlagEnv(MultiClientEnv):
     async def _spawn_initial_units(self):
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
+        import math
         
         # 1. Clear Map (Optional for MultiClient if fresh session, but good for stability)
         if self.bot1.all_units.exists:
             await self.bot1.client.debug_kill_unit(self.bot1.all_units.tags)
             await self._synchronized_step()
             await self._refresh_bot_states()
+
+        grid = self.bot1.game_info.pathing_grid
+        
+        def is_pathable(pos: Point2):
+            gx, gy = int(pos.x), int(pos.y)
+            if 0 <= gx < grid.width and 0 <= gy < grid.height:
+                return grid[(gx, gy)] != 0
+            return False
+
+        def get_valid_pos(base_pos: Point2, max_dist=10.0):
+            if is_pathable(base_pos): return base_pos
+            for d in range(1, int(max_dist)):
+                for angle in range(0, 360, 45):
+                    rad = math.radians(angle)
+                    p = Point2((base_pos.x + d * math.cos(rad), base_pos.y + d * math.sin(rad)))
+                    if is_pathable(p): return p
+            return base_pos
 
         w, h = self.bot1.game_info.playable_area.width, self.bot1.game_info.playable_area.height
         offset_x, offset_y = self.bot1.game_info.playable_area.x, self.bot1.game_info.playable_area.y
@@ -190,39 +208,56 @@ class CaptureTheFlagEnv(MultiClientEnv):
         requested_dist = self.training_conf.get("env", {}).get("flag_distance_min", self.flag_distance_min)
         safe_dist = SpawningUtils.calculate_safe_distance(w, h, requested_dist)
         
-        # Use small margin (1.0) to maximize space usage
         rel_pos1, rel_pos2 = SpawningUtils.get_random_pylon_positions(w, h, safe_dist, margin=1.0)
         
-        # Apply offsets to convert relative coordinates to absolute map coordinates
-        pos1 = Point2((rel_pos1.x + offset_x, rel_pos1.y + offset_y))
-        pos2 = Point2((rel_pos2.x + offset_x, rel_pos2.y + offset_y))
+        # Convert to absolute and ensure pathable
+        pos1 = get_valid_pos(Point2((rel_pos1.x + offset_x, rel_pos1.y + offset_y)))
+        pos2 = get_valid_pos(Point2((rel_pos2.x + offset_x, rel_pos2.y + offset_y)))
         
         # 3. Spawn Pylons
-        await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
-        await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
+        await asyncio.gather(
+            self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]]),
+            self.bot2.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
+        )
         
         # 4. Resource spawning
         spawns1 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
         spawns2 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
         
         def to_id(name): return getattr(UnitTypeId, name)
-        cmds1 = [[to_id(u), 1, pos1, 1] for u in spawns1]
-        cmds2 = [[to_id(u), 1, pos2, 2] for u in spawns2]
         
-        await self.bot1.client.debug_create_unit(cmds1)
-        await self.bot1.client.debug_create_unit(cmds2)
+        def get_offset_pos(base_pos, index, total):
+            angle = (2 * math.pi * index) / max(total, 1)
+            dist = 3.0
+            p = Point2((base_pos.x + dist * math.cos(angle), base_pos.y + dist * math.sin(angle)))
+            return get_valid_pos(p)
+
+        cmds1 = [[to_id(u), 1, get_offset_pos(pos1, i, len(spawns1)), 1] for i, u in enumerate(spawns1)]
+        cmds2 = [[to_id(u), 1, get_offset_pos(pos2, i, len(spawns2)), 2] for i, u in enumerate(spawns2)]
         
-        # Advance physics to materialize units
-        await self._synchronized_step()
-        await self._refresh_bot_states()
+        await asyncio.gather(
+            self.bot1.client.debug_create_unit(cmds1),
+            self.bot2.client.debug_create_unit(cmds2)
+        )
+        
+        # Advance physics multiple steps to ensure all units materialize
+        for _ in range(3):
+            await self._synchronized_step()
+            await self._refresh_bot_states()
         
         # 5. Set reduced health for Pylons (10 HP + 10 Shield)
-        p1_pylon = self.bot1.structures(UnitTypeId.PYLON).first
-        p2_pylon = self.bot1.enemy_structures(UnitTypeId.PYLON).first
+        p1_pylons = self.bot1.structures(UnitTypeId.PYLON)
+        p2_pylons = self.bot2.structures(UnitTypeId.PYLON)
         
-        if p1_pylon and p2_pylon:
-            await self.bot1.client.debug_set_unit_value([p1_pylon.tag, p2_pylon.tag], 2, 10.0) # 2 = Health
-            await self.bot1.client.debug_set_unit_value([p1_pylon.tag, p2_pylon.tag], 3, 10.0) # 3 = Shield
+        if p1_pylons.exists and p2_pylons.exists:
+            # Sequential calls to avoid 'Concurrent call to receive()' in aiohttp
+            tags = [p1_pylons.first.tag, p2_pylons.first.tag]
+            await self.bot1.client.debug_set_unit_value(tags, 2, 10.0) # 2 = Health
+            await self.bot1.client.debug_set_unit_value(tags, 3, 10.0) # 3 = Shield
+            
+        # Final sync
+        await self._synchronized_step()
+        await self._refresh_bot_states()
             
         # Final sync
         await self._synchronized_step()
