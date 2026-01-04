@@ -11,6 +11,6 @@ This plan addresses the coordinate system mismatch where relative Pylon position
 
 ## Phase 2: Verification
 
-- [~] Task: Update `tests/verify_ctf_randomization.py` to assert that Pylon positions cover the full range of the `playable_area` (including values near the top-right limits).
-- [ ] Task: Run the updated verification script and confirm that spawning is now distributed across the entire map.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Verification' (Protocol in workflow.md)
+- [x] Task: Update `tests/verify_ctf_randomization.py` to assert that Pylon positions cover the full range of the `playable_area` (including values near the top-right limits). (e112b46)
+- [x] Task: Run the updated verification script and confirm that spawning is now distributed across the entire map. (e112b46)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Verification' (Protocol in workflow.md) (e112b46)
