@@ -11,10 +11,10 @@ This plan focuses on implementing robust, consistent randomization for Pylon spa
 
 ## Phase 2: Environment Implementation
 
-- [ ] Task: Update `train/envs/capture_the_flag_env.py` to replace hardcoded Pylon coordinates with the new randomization logic.
-- [ ] Task: Refine `train/envs/capture_the_flag_single_env.py` logic to use the same robust method and ensure its coordinate rounding doesn't cause grid snapping issues.
-- [ ] Task: Add detailed `loguru` logging to both environments to report Pylon positions and distances during every `_spawn_initial_units` call.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Environment Implementation' (Protocol in workflow.md)
+- [x] Task: Update `train/envs/capture_the_flag_env.py` to replace hardcoded Pylon coordinates with the new randomization logic. (df0af72)
+- [x] Task: Refine `train/envs/capture_the_flag_single_env.py` logic to use the same robust method and ensure its coordinate rounding doesn't cause grid snapping issues. (df0af72)
+- [x] Task: Add detailed `loguru` logging to both environments to report Pylon positions and distances during every `_spawn_initial_units` call. (df0af72)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Environment Implementation' (Protocol in workflow.md) (df0af72)
 
 ## Phase 3: Verification
 
