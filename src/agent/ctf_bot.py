@@ -20,7 +20,7 @@ class CaptureTheFlagBot(BotAI):
         self.agent_system: Optional[HierarchicalAgentSystem] = None
         
         self.active_unit_tag: Optional[int] = None
-        self.command_target: Optional[Point2] = None
+        self.command_targets: Dict[int, Optional[Point2]] = {1: None, 2: None}
         
         # Satisfaction for BotAI initialization
         self._initialize_variables()
@@ -47,9 +47,9 @@ class CaptureTheFlagBot(BotAI):
         
         # State tracking for rewards
         self.prev_pylon_health = {1: 20.0, 2: 20.0} # Combined HP + Shield
-        self.prev_enemy_units_health = 0.0
-        self.prev_own_units_health = 0.0
-        self.prev_dist_to_pylon = None
+        self.prev_enemy_units_health = {1: 0.0, 2: 0.0}
+        self.prev_own_units_health = {1: 0.0, 2: 0.0}
+        self.prev_dist_to_pylon = {1: None, 2: None}
         
         self.frame_count = 0
         self.cached_observation: Optional[np.ndarray] = None
@@ -85,7 +85,7 @@ class CaptureTheFlagBot(BotAI):
             enemy_structures = self.structures
 
         enemy_pylon = enemy_structures(UnitTypeId.PYLON).first if enemy_structures(UnitTypeId.PYLON).exists else None
-        target_pos = enemy_pylon.position if enemy_pylon else self.command_target
+        target_pos = enemy_pylon.position if enemy_pylon else self.command_targets[p_id]
         
         selected_units = []
         if self.active_unit_tag:
@@ -146,7 +146,7 @@ class CaptureTheFlagBot(BotAI):
         else:
             self.do(unit.move(target))
             
-        self.command_target = target
+        self.command_targets[unit.owner_id] = target
 
     def calculate_reward(self, perspective_player_id: Optional[int] = None) -> float:
         """
@@ -157,64 +157,76 @@ class CaptureTheFlagBot(BotAI):
         reward = 0.0
         r_conf = self.training_conf.get("rewards", {})
         
-        # In God-Mode (Single Client), self.player_id is always 1.
-        # structures = P1, enemy_structures = P2
+        # Determine Perspective-Correct unit/structure groups
+        if p_id == self.player_id:
+            own_structs = self.structures
+            enemy_structs = self.enemy_structures
+            own_units = self.units
+            enemy_units = self.enemy_units
+        else:
+            # God-Mode Perspective Flip
+            own_structs = self.enemy_structures
+            enemy_structs = self.structures
+            own_units = self.enemy_units
+            enemy_units = self.units
+
+        pylon_type = UnitTypeId.PYLON
         
-        p1_pylon_units = self.structures(UnitTypeId.PYLON)
-        p2_pylon_units = self.enemy_structures(UnitTypeId.PYLON)
-        
+        # 1. Pylon Damage Rewards (Terminal/Heavy signal)
         def get_hp(pylon):
             if not pylon: return 0.0
             return pylon.health + pylon.shield
 
-        p1_pylon_hp = get_hp(p1_pylon_units.first) if p1_pylon_units.exists else 0.0
-        p2_pylon_hp = get_hp(p2_pylon_units.first) if p2_pylon_units.exists else 0.0
+        own_pylon = own_structs(pylon_type).first if own_structs(pylon_type).exists else None
+        enemy_pylon = enemy_structs(pylon_type).first if enemy_structs(pylon_type).exists else None
         
-        # Map indices to HP
-        curr_pylon_hp = {1: p1_pylon_hp, 2: p2_pylon_hp}
+        own_pylon_hp = get_hp(own_pylon)
+        enemy_pylon_hp = get_hp(enemy_pylon)
         
-        own_idx = p_id
-        enemy_idx = 2 if p_id == 1 else 1
+        # Track global pylon health by persistent player ID (1 or 2)
+        p1_pylon_hp = own_pylon_hp if p_id == 1 else enemy_pylon_hp
+        p2_pylon_hp = enemy_pylon_hp if p_id == 1 else own_pylon_hp
         
-        # Pylon Damage Rewards
-        if curr_pylon_hp[enemy_idx] < self.prev_pylon_health[enemy_idx]:
-            reward += (self.prev_pylon_health[enemy_idx] - curr_pylon_hp[enemy_idx]) * r_conf.get("pylon_damage_reward", 2.0)
+        curr_pylon_hp_map = {1: p1_pylon_hp, 2: p2_pylon_hp}
+        
+        own_global_idx = p_id
+        enemy_global_idx = 2 if p_id == 1 else 1
+        
+        # Pylon Damage Rewards (Signal for acting player)
+        if curr_pylon_hp_map[enemy_global_idx] < self.prev_pylon_health[enemy_global_idx]:
+            reward += (self.prev_pylon_health[enemy_global_idx] - curr_pylon_hp_map[enemy_global_idx]) * r_conf.get("pylon_damage_reward", 2.0)
             
-        if curr_pylon_hp[own_idx] < self.prev_pylon_health[own_idx]:
-            reward -= (self.prev_pylon_health[own_idx] - curr_pylon_hp[own_idx]) * r_conf.get("pylon_damage_penalty", 2.0)
+        if curr_pylon_hp_map[own_global_idx] < self.prev_pylon_health[own_global_idx]:
+            reward -= (self.prev_pylon_health[own_global_idx] - curr_pylon_hp_map[own_global_idx]) * r_conf.get("pylon_damage_penalty", 2.0)
 
-        # Update previous HP
+        # Update global health tracking
         self.prev_pylon_health[1] = p1_pylon_hp
         self.prev_pylon_health[2] = p2_pylon_hp
         
-        # 2. Combat Rewards
-        own_units = self.units if p_id == 1 else self.enemy_units
-        enemy_units = self.enemy_units if p_id == 1 else self.units
-        
+        # 2. Combat Rewards (Mobile Units)
         curr_enemy_hp = sum(u.health + u.shield for u in enemy_units if not u.is_structure)
-        if curr_enemy_hp < self.prev_enemy_units_health:
-            reward += (self.prev_enemy_units_health - curr_enemy_hp) * r_conf.get("damage_reward", 0.1)
-        self.prev_enemy_units_health = curr_enemy_hp
+        if curr_enemy_hp < self.prev_enemy_units_health[p_id]:
+            reward += (self.prev_enemy_units_health[p_id] - curr_enemy_hp) * r_conf.get("damage_reward", 0.1)
+        self.prev_enemy_units_health[p_id] = curr_enemy_hp
         
         curr_own_hp = sum(u.health + u.shield for u in own_units if not u.is_structure)
-        if curr_own_hp < self.prev_own_units_health:
-            reward -= (self.prev_own_units_health - curr_own_hp) * r_conf.get("damage_penalty", 0.1)
-        self.prev_own_units_health = curr_own_hp
+        if curr_own_hp < self.prev_own_units_health[p_id]:
+            reward -= (self.prev_own_units_health[p_id] - curr_own_hp) * r_conf.get("damage_penalty", 0.1)
+        self.prev_own_units_health[p_id] = curr_own_hp
 
         # 3. Progress Rewards (Distance to enemy pylon)
-        # We reward the ACTIVE unit for getting closer to its target
+        # We reward the ACTIVE unit for getting closer to its perspective-correct target
         if self.active_unit_tag:
             active_unit = self.all_units.find_by_tag(self.active_unit_tag)
-            enemy_pylon = self.enemy_structures(UnitTypeId.PYLON).first if self.enemy_structures(UnitTypeId.PYLON).exists else None
             
             if active_unit and enemy_pylon:
                 curr_dist = active_unit.distance_to(enemy_pylon)
-                if self.prev_dist_to_pylon is not None:
+                if self.prev_dist_to_pylon[p_id] is not None:
                     # Reward for progress
-                    dist_change = self.prev_dist_to_pylon - curr_dist
+                    dist_change = self.prev_dist_to_pylon[p_id] - curr_dist
                     reward += dist_change * r_conf.get("distance_multiplier", 0.1)
-                self.prev_dist_to_pylon = curr_dist
+                self.prev_dist_to_pylon[p_id] = curr_dist
             else:
-                self.prev_dist_to_pylon = None
+                self.prev_dist_to_pylon[p_id] = None
 
         return reward
