@@ -10,7 +10,7 @@ This plan focuses on fixing the "blind agent" bug by correctly scaling and casti
 
 ## Phase 2: Verification
 
-- [~] Task: Update `diagnose_ctf_obs.py` to assert that the max value is 255 and the type is `uint8`.
-- [ ] Task: Run `diagnose_ctf_obs.py` and confirm the fix.
-- [ ] Task: Run existing environment and rendering tests to ensure the type change doesn't break assertions.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Verification' (Protocol in workflow.md)
+- [x] Task: Update `diagnose_ctf_obs.py` to assert that the max value is 255 and the type is `uint8`. (81d1a4d)
+- [x] Task: Run `diagnose_ctf_obs.py` and confirm the fix. (81d1a4d)
+- [x] Task: Run existing environment and rendering tests to ensure the type change doesn't break assertions. (81d1a4d)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Verification' (Protocol in workflow.md) (81d1a4d)
