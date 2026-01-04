@@ -12,6 +12,7 @@ from train.envs.multi_client_env import MultiClientEnv
 from src.utils.layer_constants import LayerConstants
 from src.agent.ctf_bot import CaptureTheFlagBot
 from sc2.ids.unit_typeid import UnitTypeId
+from src.utils.spawning_utils import SpawningUtils
 
 class CaptureTheFlagEnv(MultiClientEnv):
     def __init__(self, 
@@ -178,16 +179,27 @@ class CaptureTheFlagEnv(MultiClientEnv):
     async def _spawn_initial_units(self):
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
+        
+        # 1. Clear Map (Optional for MultiClient if fresh session, but good for stability)
+        if self.bot1.all_units.exists:
+            await self.bot1.client.debug_kill_unit(self.bot1.all_units.tags)
+            await self._synchronized_step()
+            await self._refresh_bot_states()
+
         w, h = self.bot1.game_info.playable_area.width, self.bot1.game_info.playable_area.height
         
-        pos1 = Point2((10, 10))
-        pos2 = Point2((w-10, h-10))
+        # 2. Generate Randomized Positions
+        requested_dist = self.training_conf.get("env", {}).get("flag_distance_min", self.flag_distance_min)
+        safe_dist = SpawningUtils.calculate_safe_distance(w, h, requested_dist)
         
-        # 1. Spawn Pylons
+        pos1, pos2 = SpawningUtils.get_random_pylon_positions(w, h, safe_dist)
+        self._log(f"Spawning Pylons at {pos1} and {pos2} (Distance: {pos1.distance_to(pos2):.2f}, SafeTarget: {safe_dist:.2f})")
+        
+        # 3. Spawn Pylons
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
         await self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
         
-        # 2. Resource spawning
+        # 4. Resource spawning
         spawns1 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
         spawns2 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
         
@@ -202,7 +214,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
         await self._synchronized_step()
         await self._refresh_bot_states()
         
-        # 3. Set reduced health for Pylons (10 HP + 10 Shield)
+        # 5. Set reduced health for Pylons (10 HP + 10 Shield)
         p1_pylon = self.bot1.structures(UnitTypeId.PYLON).first
         p2_pylon = self.bot1.enemy_structures(UnitTypeId.PYLON).first
         

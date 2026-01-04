@@ -11,6 +11,7 @@ import logging
 from train.envs.single_client_env import SingleClientEnv
 from src.agent.ctf_bot import CaptureTheFlagBot
 from sc2.ids.unit_typeid import UnitTypeId
+from src.utils.spawning_utils import SpawningUtils
 import json
 import os
 
@@ -138,44 +139,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             await self._refresh_bot_state()
 
         w, h = self.bot.game_info.playable_area.width, self.bot.game_info.playable_area.height
-        flag_dist_min = self.training_conf.get("env", {}).get("flag_distance_min", 20.0)
         
-        # 2. Generate Random Positions
-        margin = 5.0 # Keep pylons away from map edges
+        # 2. Generate Randomized Positions
+        requested_dist = self.training_conf.get("env", {}).get("flag_distance_min", 20.0)
+        safe_dist = SpawningUtils.calculate_safe_distance(w, h, requested_dist)
         
-        # Enforce minimum distance (relaxed slightly for grid snapping and scaled for small maps)
-        max_possible_dist = (min(w, h) - 2 * margin) * 0.8
-        safe_dist = min(flag_dist_min, max_possible_dist)
-        self.last_relaxed_dist = max(0, safe_dist - 1.0)
-
-        def get_rand_pos():
-            return Point2((
-                round(random.uniform(margin, w - margin), 1),
-                round(random.uniform(margin, h - margin), 1)
-            ))
-
-        pos1 = get_rand_pos()
-        pos2 = get_rand_pos()
-        
-        attempts = 0
-        while pos1.distance_to(pos2) < self.last_relaxed_dist and attempts < 1000:
-            pos1 = get_rand_pos()
-            pos2 = get_rand_pos()
-            attempts += 1
-        
-        
-            
-        if attempts >= 1000:
-            self._log(f"Warning: Failed to find valid random positions after 1000 attempts. Using randomized fallback.")
-            # Randomized fallback: opposite corners
-            if random.random() > 0.5:
-                pos1 = Point2((margin, margin))
-                pos2 = Point2((w-margin, h-margin))
-            else:
-                pos1 = Point2((margin, h-margin))
-                pos2 = Point2((w-margin, margin))
-
-        self._log(f"Spawning Pylons at {pos1} and {pos2} (Distance: {pos1.distance_to(pos2):.2f})")
+        pos1, pos2 = SpawningUtils.get_random_pylon_positions(w, h, safe_dist)
+        self._log(f"Spawning Pylons at {pos1} and {pos2} (Distance: {pos1.distance_to(pos2):.2f}, SafeTarget: {safe_dist:.2f})")
 
         # 3. Spawn exactly one Pylon for P1 and P2
         await self.bot.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]])
