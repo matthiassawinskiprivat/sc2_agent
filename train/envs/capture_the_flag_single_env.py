@@ -51,19 +51,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.steps_count = 0
         self.client_count = 1 # God-Mode uses only 1 connection
         
-        # Observation Layers
-        self.base_layers = [
-            "allied_unit_density", "enemy_unit_density", "terrain_pathable",
-            "command_objective", "command_assignment", "allied_g_dps_base",
-            "enemy_g_dps_base", "allied_health", "enemy_health"
-        ]
-        self.ctf_layers = self.training_conf.get("env", {}).get("active_layers", [
-            "allied_unit_biological", "allied_unit_mechanical", "allied_unit_armored", "allied_unit_massive",
-            "enemy_unit_biological", "enemy_unit_mechanical", "enemy_unit_armored", "enemy_unit_massive",
-            "allied_g_dps_light", "allied_g_dps_armor", "allied_g_dps_massive",
-            "enemy_g_dps_light", "enemy_g_dps_armor", "enemy_g_dps_massive"
-        ])
-        self.active_layers = self.base_layers + self.ctf_layers
+        # Dynamic Observation Layers from Curriculum
+        self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
         self.training_conf["active_layers"] = self.active_layers
         
         num_layers = len(self.active_layers)

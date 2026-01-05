@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from src.utils.single_client_manager import SingleClientSC2Manager
+from src.utils.config_manager import ConfigManager
 from sc2.player import Bot, Computer, AbstractPlayer
 from sc2.data import Race, Difficulty
 from sc2.maps import Map
@@ -30,6 +31,9 @@ class SingleClientEnv(gym.Env):
         self.training_conf = training_conf or {}
         self.worker_index = worker_index
         self.num_workers = num_workers
+        
+        # Load configuration manager
+        self.config_manager = ConfigManager("config")
         
         # Logging setup
         self.worker_id = f"{random.randint(1000, 9999)}"
