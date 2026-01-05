@@ -15,7 +15,7 @@
 - [x] Task: Verify `PerspectiveTransformer` with unit tests.
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Core Implementation (TDD)' (Protocol in workflow.md)
 
-## Phase 3: Integration
+## Phase 3: Integration [checkpoint: 5106830]
 - [x] Task: Create `tests/test_ctf_perspective_integration.py` to verify the full pipeline (Env -> Bot -> Transformer -> Env).
 - [x] Task: Integrate `PerspectiveTransformer` into `CaptureTheFlagEnv` (or `CaptureTheFlagBot` depending on analysis).
     -   Apply observation flipping for Player 2 before returning to agent.
