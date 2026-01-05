@@ -7,6 +7,7 @@ from sc2.data import Race
 from loguru import logger
 
 from src.hierarchical_agent import HierarchicalAgentSystem
+from src.utils.perspective_transformer import PerspectiveTransformer
 
 class CaptureTheFlagBot(BotAI):
     """
@@ -56,11 +57,11 @@ class CaptureTheFlagBot(BotAI):
 
     async def on_start(self):
         env_conf = self.training_conf.get("env", {})
-        grid_size = self.training_conf.get("grid_size", env_conf.get("grid_size", 128))
+        self.grid_size = self.training_conf.get("grid_size", env_conf.get("grid_size", 128))
 
         self.agent_system = HierarchicalAgentSystem(
             map_size=(128, 128),
-            grid_size=grid_size,
+            grid_size=self.grid_size,
             training_conf=self.training_conf
         )
         self.agent_system.create_unit_agent("active_agent")
@@ -117,7 +118,13 @@ class CaptureTheFlagBot(BotAI):
         # Process with agent system, passing p_id for perspective-aware transformation
         try:
             processed = self.agent_system.process_observation(raw_obs, player_id=p_id)
-            self.cached_observation = processed["active_agent"]
+            obs = processed["active_agent"]
+            
+            # Spatial Perspective Flip for Player 2
+            if p_id == 2:
+                obs = PerspectiveTransformer.flip_observation(obs)
+                
+            self.cached_observation = obs
         except Exception as e:
             if self.cached_observation is not None:
                 logger.warning(f"Bot {self.player_id} (P_ID {p_id}): Observation processing failed ({e}). Returning cached observation.")
@@ -146,14 +153,25 @@ class CaptureTheFlagBot(BotAI):
         # Attack mask is fully open (Attack-Move to any location allowed)
         attack_mask = np.ones_like(move_mask, dtype=bool)
         
-        return np.concatenate([move_mask, attack_mask])
+        mask = np.concatenate([move_mask, attack_mask])
+
+        # Spatial Perspective Flip for Player 2
+        if self.player_id == 2:
+            mask = PerspectiveTransformer.flip_mask(mask, self.grid_size)
+            
+        return mask
 
     async def apply_action(self, unit_tag: int, action: int):
         unit = self.all_units.find_by_tag(unit_tag)
         if not unit: return
 
+        # Spatial Perspective Flip for Player 2
+        # If we flipped the observation, we must flip the action back
+        if self.player_id == 2:
+            action = PerspectiveTransformer.flip_action_idx(action, self.grid_size)
+
         # Restore dual-head logic parity with Level 7
-        grid_area = 128 * 128
+        grid_area = self.grid_size * self.grid_size
         is_attack = False
         spatial_idx = action
         
