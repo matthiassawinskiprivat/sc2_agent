@@ -23,6 +23,6 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 3: Integration' (Protocol in workflow.md)
 
 ## Phase 4: Verification & Cleanup
-- [ ] Task: Run `train_pipeline.py` briefly (dry run) to ensure no crashes with the new logic.
-- [ ] Task: Manual verification: Watch a replay or debug run to confirm Player 2 moves "forward" (relative to itself) when the agent commands "forward".
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Verification & Cleanup' (Protocol in workflow.md)
+- [x] Task: Run `train_pipeline.py` briefly (dry run) to ensure no crashes with the new logic.
+- [x] Task: Manual verification: Watch a replay or debug run to confirm Player 2 moves "forward" (relative to itself) when the agent commands "forward".
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Verification & Cleanup' (Protocol in workflow.md)
