@@ -55,8 +55,12 @@ class CaptureTheFlagBot(BotAI):
         self.cached_observation: Optional[np.ndarray] = None
 
     async def on_start(self):
+        env_conf = self.training_conf.get("env", {})
+        grid_size = self.training_conf.get("grid_size", env_conf.get("grid_size", 128))
+
         self.agent_system = HierarchicalAgentSystem(
             map_size=(128, 128),
+            grid_size=grid_size,
             training_conf=self.training_conf
         )
         self.agent_system.create_unit_agent("active_agent")
@@ -124,6 +128,25 @@ class CaptureTheFlagBot(BotAI):
                 return np.zeros((num_layers, 128, 128), dtype=np.uint8)
 
         return self.cached_observation
+
+    def action_masks(self) -> np.ndarray:
+        """
+        Returns a concatenated mask for Move (first half) and Attack (second half).
+        """
+        if not self.agent_system or "active_agent" not in self.agent_system.unit_agents:
+            # Fallback if system not ready - return all True
+            env_conf = self.training_conf.get("env", {})
+            grid_size = self.training_conf.get("grid_size", env_conf.get("grid_size", 128))
+            grid_area = grid_size * grid_size
+            return np.ones(2 * grid_area, dtype=bool)
+
+        # Get pathing mask for movement
+        move_mask = self.agent_system.unit_agents["active_agent"].get_action_mask()
+        
+        # Attack mask is fully open (Attack-Move to any location allowed)
+        attack_mask = np.ones_like(move_mask, dtype=bool)
+        
+        return np.concatenate([move_mask, attack_mask])
 
     async def apply_action(self, unit_tag: int, action: int):
         unit = self.all_units.find_by_tag(unit_tag)

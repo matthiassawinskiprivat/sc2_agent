@@ -382,8 +382,11 @@ class CaptureTheFlagEnv(MultiClientEnv):
 
     def action_masks(self):
         """Returns valid actions for the active unit."""
-        # Restored parity with Level 7: Move (first half) and Attack (second half)
-        # All actions are currently valid for CTF.
+        active_bot = self.bot1 if self.active_player_id == 1 else self.bot2
+        if active_bot:
+            return active_bot.action_masks()
+        
+        # Fallback
         return np.ones(self.action_space.n, dtype=bool)
 
     def _determine_winner(self) -> Optional[int]:
