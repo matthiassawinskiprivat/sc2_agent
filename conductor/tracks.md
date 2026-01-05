@@ -246,3 +246,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Fix CTF Perspective Reward and Target Bugs
 *Link: [./conductor/tracks/fix_ctf_perspective_bugs_20260104/](./fix_ctf_perspective_bugs_20260104/)*
+
+---
+
+## [x] Track: Refactor CTF environment for dynamic layer accumulation
+*Link: [./conductor/archive/dynamic_ctf_layers_20260105/](./conductor/archive/dynamic_ctf_layers_20260105/)*
