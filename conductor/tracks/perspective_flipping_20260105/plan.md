@@ -16,11 +16,11 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Core Implementation (TDD)' (Protocol in workflow.md)
 
 ## Phase 3: Integration
-- [ ] Task: Create `tests/test_ctf_perspective_integration.py` to verify the full pipeline (Env -> Bot -> Transformer -> Env).
-- [ ] Task: Integrate `PerspectiveTransformer` into `CaptureTheFlagEnv` (or `CaptureTheFlagBot` depending on analysis).
+- [x] Task: Create `tests/test_ctf_perspective_integration.py` to verify the full pipeline (Env -> Bot -> Transformer -> Env).
+- [x] Task: Integrate `PerspectiveTransformer` into `CaptureTheFlagEnv` (or `CaptureTheFlagBot` depending on analysis).
     -   Apply observation flipping for Player 2 before returning to agent.
     -   Apply action flipping for Player 2 before executing in SC2.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Integration' (Protocol in workflow.md)
 
 ## Phase 4: Verification & Cleanup
 - [ ] Task: Run `train_pipeline.py` briefly (dry run) to ensure no crashes with the new logic.
