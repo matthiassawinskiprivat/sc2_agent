@@ -41,3 +41,13 @@ The project follows a curriculum starting from basic movement to complex combat:
 - **Level 7-10:** Advanced combat micro and tactical positioning.
 
 - **Capture the Flag:** Competitive self-play with resource-based army spawning and objective-based goals.
+
+## Core Mechanisms
+
+### Dynamic Layer Stack
+The project employs a curriculum-driven observation system where the fidelity of the agent's perception increases over time.
+
+- **Additive Accumulation:** Each training level defines a set of `active_layers` in its configuration. As the agent progresses through the curriculum (Level 0 → Level 10 → Capture the Flag), the `ConfigManager` dynamically accumulates all layers defined in previous levels.
+- **Persistence:** This ensures that skills learned in early levels (e.g., following beacons, respecting terrain) remain available as the agent learns more complex behaviors (e.g., combat micro, air unit management).
+- **Transparency:** Environments log the layer expansion during initialization (e.g., `Observation layers: (5) -> (23)`), providing clear feedback on the agent's current state space.
+
