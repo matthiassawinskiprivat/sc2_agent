@@ -40,6 +40,11 @@ class SingleClientEnv(gym.Env):
         os.makedirs("logs", exist_ok=True)
         self.log_file = f"logs/worker_{self.worker_id}.log"
         self._log(f"Initialized SingleClient Worker {self.worker_id} (Index: {self.worker_index}) with map {self.map_name}")
+        
+        # Base layers from Level 0 (for logging context)
+        base_layers = self.config_manager.get_cumulative_active_layers("level_0")
+        cumulative_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
+        self._log(f"Observation layers: ({len(base_layers)}) -> ({len(cumulative_layers)}) via ConfigManager")
 
         # Dependency Injection for testing
         from sc2.sc2process import SC2Process
