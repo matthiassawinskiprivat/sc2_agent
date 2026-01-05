@@ -37,6 +37,8 @@ class Level7Env(Level3Env):
         """
         Retrieves and validates the action mask shape.
         """
+        if self._bot:
+            self._bot.current_unit_index = self.current_unit_index
         mask = super().action_masks()
         if mask.shape[0] != self.action_space.n:
             self._log(f"ERROR: Mask shape mismatch! Expected {self.action_space.n}, got {mask.shape[0]}")

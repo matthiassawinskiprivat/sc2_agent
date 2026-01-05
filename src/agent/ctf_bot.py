@@ -150,6 +150,12 @@ class CaptureTheFlagBot(BotAI):
         # Get pathing mask for movement
         move_mask = self.agent_system.unit_agents["active_agent"].get_action_mask()
         
+        # AIR UNIT BYPASS: If unit is flying, it can move anywhere (ignore pathing)
+        if self.active_unit_tag is not None:
+            active_unit = self.all_units.find_by_tag(self.active_unit_tag)
+            if active_unit and active_unit.is_flying:
+                move_mask = np.ones_like(move_mask, dtype=bool)
+
         # Attack mask is fully open (Attack-Move to any location allowed)
         attack_mask = np.ones_like(move_mask, dtype=bool)
         

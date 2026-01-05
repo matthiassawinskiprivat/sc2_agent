@@ -51,3 +51,10 @@ The project employs a curriculum-driven observation system where the fidelity of
 - **Persistence:** This ensures that skills learned in early levels (e.g., following beacons, respecting terrain) remain available as the agent learns more complex behaviors (e.g., combat micro, air unit management).
 - **Transparency:** Environments log the layer expansion during initialization (e.g., `Observation layers: (5) -> (23)`), providing clear feedback on the agent's current state space.
 
+### Air Unit Mechanics
+Air units (e.g., Medivacs, Void Rays) are handled differently than ground units to respect their ability to cross any terrain.
+
+- **Unrestricted Movement:** Action masks for flying units are fully open (all `True`). This allows the agent to command air units to any grid coordinate, even those marked as unpathable in the `pathing_grid`.
+- **Combat Versatility:** Attack masks for air units are also unrestricted, enabling them to engage targets over cliffs or voids.
+- **Ground Parity:** Ground units continue to be constrained by the `pathing_grid` to ensure realistic movement behaviors.
+
