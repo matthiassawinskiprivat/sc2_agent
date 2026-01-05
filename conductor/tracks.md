@@ -246,5 +246,3 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Fix CTF Perspective Reward and Target Bugs
 *Link: [./conductor/tracks/fix_ctf_perspective_bugs_20260104/](./fix_ctf_perspective_bugs_20260104/)*
-
-
