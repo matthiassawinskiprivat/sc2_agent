@@ -6,7 +6,7 @@
 - [x] Task: Analyze `CaptureTheFlagBot.calculate_reward` to determine if reward logic needs explicit coordinate flipping or if it relies on relative entity distances (which might be safe).
 - [x] Task: Design the `PerspectiveTransformer` utility class interface (methods for `flip_observation`, `flip_action`, `flip_mask`).
 
-## Phase 2: Core Implementation (TDD)
+## Phase 2: Core Implementation (TDD) [checkpoint: 21b19f5]
 - [x] Task: Create `tests/test_perspective_transformer.py` with failure cases for flipping observations (numpy arrays) and actions (integer indices).
 - [x] Task: Implement `src/utils/perspective_transformer.py`. [8155bb2]
     -   Implement `flip_observation(obs, spatial_dim)`: Rotates/Flips the feature maps.
