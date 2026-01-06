@@ -282,21 +282,73 @@ class CaptureTheFlagEnv(MultiClientEnv):
 
     async def _async_step(self, action_p_active):
         """
-        Executes action for active unit, then uses self-play model 
-        to pick actions for other units if needed before advancing.
+        Executes action for active unit, then automatically handles 
+        any non-trainee units before returning.
         """
         self.steps_count += 1
+        total_reward = 0.0
         
-        # 1. Apply action for the LEARNING unit
+        # --- 1. LEARNING UNIT STEP ---
         active_bot = self.bot1 if self.active_player_id == 1 else self.bot2
-        tags = self.player_units[self.active_player_id]
         
+        # Safety check: if we somehow end up in _async_step with a non-trainee, 
+        # it means the loop logic below failed.
+        if not active_bot.is_trainee:
+            logger.warning(f"Asymmetric Step: _async_step called for non-trainee player {self.active_player_id}. Automating.")
+            action_p_active = active_bot.predict_action()
+
+        tags = self.player_units[self.active_player_id]
         if tags and self.current_unit_index < len(tags):
             await active_bot.apply_action(tags[self.current_unit_index], action_p_active)
 
-        # 2. Self-Play: Pick actions for the OTHER player's current unit if we were in their cycle.
+        # Flush actions and physics step
+        await self._flush_and_step_physics()
+        await self._refresh_bot_states()
         
-        # Flush actions for BOTH bots
+        # Collect reward for the trainee (always bot1 in our current config)
+        total_reward += self.bot1.calculate_reward()
+        
+        # Advance cycle
+        await self._advance_unit_cycle()
+        
+        # --- 2. AUTOMATED TURNS (Asymmetric Loop) ---
+        # Continue automating units until we reach a trainee OR the game ends
+        while True:
+            # Check Termination after the previous physics step
+            done, truncated, reward_delta = self._check_termination()
+            total_reward += reward_delta
+            if done or truncated:
+                obs = await self._get_joint_observation()
+                return obs, total_reward, done, truncated, {}
+
+            active_bot = self.bot1 if self.active_player_id == 1 else self.bot2
+            if active_bot.is_trainee:
+                # We reached a trainee unit, time to return control to the trainer
+                break
+                
+            # Automate non-trainee unit
+            tags = self.player_units[self.active_player_id]
+            if tags and self.current_unit_index < len(tags):
+                # Automated inference for opponent
+                auto_action = active_bot.predict_action()
+                await active_bot.apply_action(tags[self.current_unit_index], auto_action)
+                
+            # Physics step for the automated unit
+            await self._flush_and_step_physics()
+            await self._refresh_bot_states()
+            
+            # Collect reward for trainee
+            total_reward += self.bot1.calculate_reward()
+            
+            # Advance cycle
+            await self._advance_unit_cycle()
+
+        # Final observation for the trainee
+        obs = await self._get_joint_observation()
+        return obs, total_reward, False, False, {}
+
+    async def _flush_and_step_physics(self):
+        """Flushes bot actions and advances SC2 game state."""
         for bot in [self.bot1, self.bot2]:
             if hasattr(bot, "actions") and bot.actions:
                 await bot.client.actions(bot.actions)
@@ -305,9 +357,8 @@ class CaptureTheFlagEnv(MultiClientEnv):
                 await bot.client.actions(bot._actions)
                 bot._actions = []
 
-        # 3. Physics Step
         try:
-            await asyncio.gather(self.bot1.client.step(), self.bot2.client.step())
+            await self._synchronized_step()
         except Exception as e:
             # Check if game ended
             p1_lost = self.bot1.structures(UnitTypeId.PYLON).amount == 0
@@ -315,47 +366,49 @@ class CaptureTheFlagEnv(MultiClientEnv):
             if not (p1_lost or p2_lost):
                 raise e
 
-        await self._refresh_bot_states()
-        
-        # 4. Calculate Reward for the LEARNING agent
-        reward = active_bot.calculate_reward()
-        
-        # 5. Advance Cycle
+    async def _advance_unit_cycle(self):
+        """Moves to the next unit and switches players if necessary."""
         self.current_unit_index += 1
         await self._refresh_unit_lists()
         
-        # Check if we need to switch players
         if self.current_unit_index >= len(self.player_units[self.active_player_id]):
             self.current_unit_index = 0
             self.active_player_id = 2 if self.active_player_id == 1 else 1
             await self._refresh_unit_lists()
-            
-        # 6. Check Termination
-        # Refresh structures explicitly if possible
+
+    def _check_termination(self) -> Tuple[bool, bool, float]:
+        """Checks if the game should end and returns (done, truncated, reward_delta)."""
         p1_pylons = self.bot1.structures(UnitTypeId.PYLON)
         p2_pylons = self.bot2.structures(UnitTypeId.PYLON)
         
         p1_lost = p1_pylons.amount == 0
         p2_lost = p2_pylons.amount == 0
         
-        win_reward = self.training_conf.get("rewards", {}).get("win_reward", 100.0)
+        # ASYMMETRIC LOSS: If trainee has no mobile units left, terminate immediately
+        # (Assuming bot1 is always the trainee for now as per spec)
+        trainee_units = [u for u in self.bot1.units if not u.is_structure]
+        trainee_army_lost = len(trainee_units) == 0
         
+        win_reward = self.training_conf.get("rewards", {}).get("win_reward", 100.0)
+        loss_penalty = self.training_conf.get("rewards", {}).get("loss_penalty", -win_reward)
+        
+        reward_delta = 0.0
         done = False
+        
         if p1_lost:
             done = True
-            if self.active_player_id == 2: reward += win_reward 
-            else: reward -= win_reward
+            reward_delta -= win_reward
+        elif trainee_army_lost:
+            # Trainee lost all units -> Early termination
+            done = True
+            reward_delta += loss_penalty # Usually a negative value
         elif p2_lost:
             done = True
-            if self.active_player_id == 1: reward += win_reward 
-            else: reward -= win_reward
+            reward_delta += win_reward
             
         truncated = self.steps_count >= self.max_steps
-        
-        # IMPORTANT: Fetch observation AFTER state updates/player switches
-        obs = await self._get_joint_observation()
-        
-        return obs, reward, done, truncated, {}
+        return done, truncated, reward_delta
+
 
     def action_masks(self):
         """Returns valid actions for the active unit."""
