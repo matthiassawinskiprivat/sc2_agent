@@ -376,6 +376,21 @@ class CaptureTheFlagEnv(MultiClientEnv):
             self.active_player_id = 2 if self.active_player_id == 1 else 1
             await self._refresh_unit_lists()
 
+    def _has_combat_units(self, bot: CaptureTheFlagBot) -> bool:
+        """
+        Robustly checks if a bot has any combat-capable mobile units left.
+        Excludes structures, larvae, and eggs.
+        """
+        ignored_types = {UnitTypeId.LARVA, UnitTypeId.EGG}
+        
+        # Filter units: must not be a structure and must not be in ignored types
+        combat_units = [
+            u for u in bot.units 
+            if not u.is_structure and u.unit_type not in ignored_types
+        ]
+        
+        return len(combat_units) > 0
+
     def _check_termination(self) -> Tuple[bool, bool, float]:
         """Checks if the game should end and returns (done, truncated, reward_delta)."""
         p1_pylons = self.bot1.structures(UnitTypeId.PYLON)
@@ -386,8 +401,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         # ASYMMETRIC LOSS: If trainee has no mobile units left, terminate immediately
         # (Assuming bot1 is always the trainee for now as per spec)
-        trainee_units = [u for u in self.bot1.units if not u.is_structure]
-        trainee_army_lost = len(trainee_units) == 0
+        trainee_army_lost = not self._has_combat_units(self.bot1)
         
         win_reward = self.training_conf.get("rewards", {}).get("win_reward", 100.0)
         loss_penalty = self.training_conf.get("rewards", {}).get("loss_penalty", -win_reward)
@@ -400,6 +414,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
             reward_delta -= win_reward
         elif trainee_army_lost:
             # Trainee lost all units -> Early termination
+            # Only trigger if the game hasn't already ended via pylon loss
             done = True
             reward_delta += loss_penalty # Usually a negative value
         elif p2_lost:

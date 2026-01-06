@@ -1,70 +1,209 @@
-
 import pytest
+from unittest.mock import MagicMock, AsyncMock, patch
 import numpy as np
-from loguru import logger
-from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+from train.envs.capture_the_flag_env import CaptureTheFlagEnv
+from sc2.ids.unit_typeid import UnitTypeId
 
-def test_ctf_timeout_logic():
-    """Verify that the environment respects max_steps and truncates correctly."""
-    # Set a small max_steps for testing
-    MAX_STEPS = 20
-    env = CaptureTheFlagSingleEnv(visualize=False, max_steps=MAX_STEPS)
-    
-    try:
-        obs, info = env.reset()
-        assert env.steps_count == 0
-        
-        # Step up to MAX_STEPS - 1
-        for i in range(MAX_STEPS - 1):
-            action = env.action_space.sample()
-            obs, reward, terminated, truncated, info = env.step(action)
-            
-            # Should NOT end yet
-            if terminated or truncated:
-                logger.error(f"Premature termination at step {env.steps_count}. Terminated: {terminated}, Truncated: {truncated}")
-            
-            assert not terminated, f"Game terminated prematurely at step {env.steps_count}"
-            assert not truncated, f"Game truncated prematurely at step {env.steps_count}"
-            assert env.steps_count == i + 1
+class MockUnit:
+    def __init__(self, tag, unit_type=UnitTypeId.ZERGLING, is_structure=False, is_ready=True):
+        self.tag = tag
+        self.unit_type = unit_type
+        self.is_structure = is_structure
+        self.is_ready = is_ready
 
-        # Final step to trigger timeout
-        action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(action)
+def test_termination_with_empty_army():
+    """Reproduce: Trainee army is empty, should terminate."""
+    with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
+        env = CaptureTheFlagEnv()
+        env.bot1 = MagicMock()
+        env.bot2 = MagicMock()
         
-        assert env.steps_count == MAX_STEPS
-        assert truncated, "Game did not truncate at max_steps"
-        assert not terminated, "Game should be truncated, not terminated (unless pylon died by chance)"
+        # Pylons exist
+        env.bot1.structures.return_value = MagicMock(amount=1)
+        env.bot2.structures.return_value = MagicMock(amount=1)
         
-    finally:
-        env.close()
+        # Trainee units is empty
+        env.bot1.units = []
+        
+        done, truncated, reward = env._check_termination()
+        assert done is True, "Game should terminate when trainee units are empty"
 
-def test_ctf_premature_termination():
-    """Verify that the environment does NOT terminate early with high max_steps."""
-    # Set a higher max_steps
-    MAX_STEPS = 50
-    env = CaptureTheFlagSingleEnv(visualize=False, max_steps=MAX_STEPS)
-    
-    try:
-        obs, info = env.reset()
+def test_termination_with_larva_only():
+    """Reproduce: Trainee has only larva, should it terminate?"""
+    with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
+        env = CaptureTheFlagEnv()
+        env.bot1 = MagicMock()
+        env.bot2 = MagicMock()
         
-        # Step through
-        for _ in range(MAX_STEPS):
-            action = env.action_space.sample()
-            obs, reward, terminated, truncated, info = env.step(action)
-            
-            # We expect NO termination unless a Pylon dies (unlikely in 50 random steps but possible)
-            # However, we are specifically checking for "random" premature ends not caused by game mechanics
-            # So we check if terminated is True but NO pylon is dead (we'd need access to bot state for that)
-            
-            if terminated:
-                 # Check if a pylon is actually dead
-                 p1_pylon_count = env.bot.structures(env.bot.unit_type_id.PYLON).amount
-                 p2_pylon_count = env.bot.enemy_structures(env.bot.unit_type_id.PYLON).amount
-                 if p1_pylon_count > 0 and p2_pylon_count > 0:
-                     pytest.fail(f"Terminated is True but both pylons are alive! Step: {env.steps_count}")
-            
-            if truncated and env.steps_count < MAX_STEPS:
-                pytest.fail(f"Truncated is True before max_steps! Step: {env.steps_count}")
+        # Pylons exist
+        env.bot1.structures.return_value = MagicMock(amount=1)
+        env.bot2.structures.return_value = MagicMock(amount=1)
+        
+        # Trainee has a larva (which is not a structure)
+        larva = MockUnit(1)
+        larva.unit_type = UnitTypeId.LARVA
+        env.bot1.units = [larva]
+        
+        done, truncated, reward = env._check_termination()
+        assert done is True, "Game should terminate if only non-combat units (like Larvae) remain"
 
-    finally:
-        env.close()
+def test_termination_with_structures_only():
+    """Reproduce: Trainee has only structures, should terminate."""
+    with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
+        env = CaptureTheFlagEnv()
+        env.bot1 = MagicMock()
+        env.bot2 = MagicMock()
+        
+        # Pylons exist
+        env.bot1.structures.return_value = MagicMock(amount=1)
+        env.bot2.structures.return_value = MagicMock(amount=1)
+        
+        # Trainee has only structures
+        pylon = MockUnit(2, is_structure=True)
+        pylon.unit_type = UnitTypeId.PYLON
+        env.bot1.units = [pylon]
+        
+        done, truncated, reward = env._check_termination()
+        assert done is True, "Game should terminate when only structures remain"
+
+def test_termination_with_egg_only():
+    """Reproduce: Trainee has only eggs, should terminate."""
+    with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
+        env = CaptureTheFlagEnv()
+        env.bot1 = MagicMock()
+        env.bot2 = MagicMock()
+        
+        # Pylons exist
+        env.bot1.structures.return_value = MagicMock(amount=1)
+        env.bot2.structures.return_value = MagicMock(amount=1)
+        
+        # Trainee has an egg
+        egg = MockUnit(3)
+        egg.unit_type = UnitTypeId.EGG
+        env.bot1.units = [egg]
+        
+        done, truncated, reward = env._check_termination()
+        assert done is True, "Game should terminate if only non-combat units (like Eggs) remain"
+
+def test_continuation_with_opponent_army_lost():
+    """Verify that if ONLY the opponent army is lost, the game continues."""
+    with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
+        env = CaptureTheFlagEnv()
+        env.bot1 = MagicMock()
+        env.bot2 = MagicMock()
+        
+        # Pylons exist
+        env.bot1.structures.return_value = MagicMock(amount=1)
+        env.bot2.structures.return_value = MagicMock(amount=1)
+        
+        # Trainee has units
+        u1 = MockUnit(101)
+        u1.unit_type = UnitTypeId.ZERGLING
+        env.bot1.units = [u1]
+        
+        # Opponent has 0 units
+        env.bot2.units = []
+        
+        done, truncated, reward = env._check_termination()
+        assert done is False, "Game should NOT terminate when trainee still has units but opponent is dead"
+
+@pytest.mark.asyncio
+async def test_step_applies_loss_penalty():
+    """Verify that the loss_penalty from config is applied in the step result."""
+    with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
+        loss_val = -77.7
+        env = CaptureTheFlagEnv(training_conf={"rewards": {"loss_penalty": loss_val}})
+        env.bot1 = MagicMock()
+        env.bot2 = MagicMock()
+        env.bot1.is_trainee = True
+        
+        # Mock clients and sync methods
+        env.bot1.client = MagicMock()
+        env.bot1.client.actions = AsyncMock()
+        env.bot2.client = MagicMock()
+        env.bot2.client.actions = AsyncMock()
+        env._synchronized_step = AsyncMock()
+        env._refresh_bot_states = AsyncMock()
+        env._refresh_unit_lists = AsyncMock()
+        
+        # Scenario: Army is lost after step
+        env.bot1.units = [] 
+        env.bot1.structures.return_value = MagicMock(amount=1)
+        env.bot2.structures.return_value = MagicMock(amount=1)
+        env.bot1.calculate_reward.return_value = 0.0
+        env.bot1.get_observation.return_value = np.zeros((23, 128, 128))
+        
+        obs, reward, done, truncated, info = await env._async_step(0)
+        
+        assert done is True
+        assert reward == loss_val
+
+def test_termination_p1_pylon_lost():
+
+    """Verify that if P1 pylon is lost, game ends."""
+
+    with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
+
+        env = CaptureTheFlagEnv()
+
+        env.bot1 = MagicMock()
+
+        env.bot2 = MagicMock()
+
+        
+
+        # Trainee has units (so army_lost is False)
+
+        env.bot1.units = [MockUnit(101)]
+
+        
+
+        # P1 pylon dead, P2 pylon alive
+
+        env.bot1.structures.return_value = MagicMock(amount=0)
+
+        env.bot2.structures.return_value = MagicMock(amount=1)
+
+        
+
+        done, truncated, reward = env._check_termination()
+
+        assert done is True
+
+        assert reward < 0
+
+
+
+def test_termination_p2_pylon_lost():
+
+    """Verify that if P2 pylon is lost, game ends."""
+
+    with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
+
+        env = CaptureTheFlagEnv()
+
+        env.bot1 = MagicMock()
+
+        env.bot2 = MagicMock()
+
+        
+
+        # Trainee has units (so army_lost is False)
+
+        env.bot1.units = [MockUnit(101)]
+
+        
+
+        # P1 pylon alive, P2 pylon dead
+
+        env.bot1.structures.return_value = MagicMock(amount=1)
+
+        env.bot2.structures.return_value = MagicMock(amount=0)
+
+        
+
+        done, truncated, reward = env._check_termination()
+
+        assert done is True
+
+        assert reward > 0

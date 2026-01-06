@@ -61,6 +61,7 @@ async def test_integration_asymmetric_ctf_flow():
         # Mock units for bot1 and bot2
         u1 = MagicMock()
         u1.tag = 101
+        u1.unit_type = UnitTypeId.ZERGLING
         u1.is_structure = False
         u1.owner_id = 1
         u1.health = 10.0
@@ -68,6 +69,7 @@ async def test_integration_asymmetric_ctf_flow():
         
         u2 = MagicMock()
         u2.tag = 201
+        u2.unit_type = UnitTypeId.ZERGLING
         u2.is_structure = False
         u2.owner_id = 2
         u2.health = 10.0
@@ -132,3 +134,56 @@ async def test_integration_asymmetric_ctf_flow():
         env.bot1.client.actions.assert_called()
         # P2's unit
         env.bot2.client.actions.assert_called()
+
+@pytest.mark.asyncio
+async def test_integration_asymmetric_termination_on_army_loss():
+    """Verify that army loss triggers termination in a real step flow."""
+    with patch("train.envs.multi_client_env.MultiClientSC2Manager"), \
+         patch("src.agent.ctf_bot.CaptureTheFlagBot.on_start", new_callable=AsyncMock):
+        
+        env = CaptureTheFlagEnv(
+            training_conf={
+                "rewards": {
+                    "win_reward": 100.0,
+                    "loss_penalty": -50.0
+                }
+            }
+        )
+        
+        from src.agent.ctf_bot import CaptureTheFlagBot
+        env.bot1 = CaptureTheFlagBot(player_id=1, training_conf=env.training_conf)
+        env.bot2 = CaptureTheFlagBot(player_id=2, training_conf=env.training_conf)
+        env.bot1.is_trainee = True
+        
+        # Mock clients
+        env.bot1.client = MagicMock()
+        env.bot1.client.actions = AsyncMock()
+        env.bot2.client = MagicMock()
+        env.bot2.client.actions = AsyncMock()
+        env._synchronized_step = AsyncMock()
+        env._refresh_bot_states = AsyncMock()
+        
+        # Scenario: P1 has only a Larva (non-combat)
+        larva = MagicMock()
+        larva.tag = 101
+        larva.unit_type = UnitTypeId.LARVA
+        larva.is_structure = False
+        env.bot1.units = [larva]
+        
+        # Pylons are alive
+        mock_structs = MagicMock()
+        mock_structs.exists = True
+        mock_structs.amount = 1
+        env.bot1.structures = MagicMock(return_value=mock_structs)
+        env.bot2.structures = MagicMock(return_value=mock_structs)
+        
+        env.bot1.calculate_reward = MagicMock(return_value=0.0)
+        env.bot1.get_observation = MagicMock(return_value=np.zeros((23, 128, 128)))
+        env.bot1.apply_action = AsyncMock()
+        
+        # Initially P1 has no combat units
+        # Call step
+        obs, reward, done, truncated, info = await env._async_step(0)
+        
+        assert done is True
+        assert reward == -50.0 # loss_penalty
