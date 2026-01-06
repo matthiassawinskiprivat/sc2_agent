@@ -94,17 +94,31 @@ class SingleClientSC2Manager:
                 pass
 
         if self.process:
+             # Capture PID before exiting for targeted cleanup
+             # SC2Process typically has a ._process which is a subprocess.Popen
+             pid = getattr(self.process, "_process", None)
+             if pid and hasattr(pid, "pid"):
+                 pid = pid.pid
+             elif hasattr(self.process, "pid"):
+                 pid = self.process.pid
+             else:
+                 pid = None
+
              try:
                  await self.process.__aexit__(None, None, None)
              except:
                  pass
-        
-        # Aggressive cleanup for Windows
-        try:
-            from src.utils.sc2_cleanup import kill_switch_sc2
-            kill_switch_sc2()
-        except:
-            pass
+             
+             # Targeted cleanup if PID is known
+             if pid:
+                 import psutil
+                 try:
+                     proc = psutil.Process(pid)
+                     if proc.is_running():
+                         logger.info(f"Targeted kill of SC2 process PID: {pid}")
+                         proc.kill()
+                 except (psutil.NoSuchProcess, psutil.AccessDenied):
+                     pass
         
         await asyncio.sleep(0.5)
         
