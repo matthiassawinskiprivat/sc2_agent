@@ -32,27 +32,6 @@ class CaptureTheFlagBot(BotAI):
         self.model = None # Snapshot model for automated inference
         
         # Satisfaction for BotAI initialization
-        self._initialize_variables()
-        from sc2.units import Units
-        self.units: Units = Units([], self)
-        self.structures: Units = Units([], self)
-        self.enemy_units: Units = Units([], self)
-        self.enemy_structures: Units = Units([], self)
-        self.all_units: Units = Units([], self)
-        self.larva: Units = Units([], self)
-        self.workers: Units = Units([], self)
-        self.townhalls: Units = Units([], self)
-        self.gas_buildings: Units = Units([], self)
-        self.minerals: int = 0
-        self.vespene: int = 0
-        self.supply_army: int = 0
-        self.supply_workers: int = 0
-        self.supply_cap: int = 0
-        self.supply_used: int = 0
-        self.supply_left: int = 0
-        self.idle_worker_count: int = 0
-        self.army_count: int = 0
-        self.warp_gate_count: int = 0
         
         # State tracking for rewards
         self.prev_pylon_health = {1: 20.0, 2: 20.0} # Combined HP + Shield

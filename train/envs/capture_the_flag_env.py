@@ -262,8 +262,14 @@ class CaptureTheFlagEnv(MultiClientEnv):
         return spawns
 
     async def _refresh_unit_lists(self):
-        self.player_units[1] = [u.tag for u in self.bot1.units if not u.is_structure]
-        self.player_units[2] = [u.tag for u in self.bot2.units if not u.is_structure]
+        ignored_types = {UnitTypeId.LARVA, UnitTypeId.EGG, UnitTypeId.OVERLORD, UnitTypeId.PYLON}
+        
+        # We refresh the tags based on OWNED units for each bot
+        for p_id, bot in [(1, self.bot1), (2, self.bot2)]:
+            self.player_units[p_id] = [
+                u.tag for u in bot.units 
+                if not u.is_structure and u.unit_type not in ignored_types
+            ]
 
     @property
     def observation(self):
@@ -379,14 +385,29 @@ class CaptureTheFlagEnv(MultiClientEnv):
     def _has_combat_units(self, bot: CaptureTheFlagBot) -> bool:
         """
         Robustly checks if a bot has any combat-capable mobile units left.
-        Excludes structures, larvae, and eggs.
+        Uses all_units to avoid filtered lists and excludes structures and non-combat units.
         """
-        ignored_types = {UnitTypeId.LARVA, UnitTypeId.EGG}
+        if not hasattr(bot, "all_units") or not bot.all_units:
+            return False
+            
+        ignored_types = {
+            UnitTypeId.LARVA, 
+            UnitTypeId.EGG, 
+            UnitTypeId.OVERLORD, 
+            UnitTypeId.PYLON,
+            UnitTypeId.PROBE,
+            UnitTypeId.SCV,
+            UnitTypeId.DRONE
+        }
         
-        # Filter units: must not be a structure and must not be in ignored types
+        # Filter all_units: must not be a structure and must not be in ignored types
+        # Also ensure unit is still alive (health > 0) and owned by the bot
         combat_units = [
-            u for u in bot.units 
-            if not u.is_structure and u.unit_type not in ignored_types
+            u for u in bot.all_units
+            if u.owner_id == bot.player_id
+            and not u.is_structure 
+            and u.unit_type not in ignored_types
+            and u.health > 0
         ]
         
         return len(combat_units) > 0
@@ -396,12 +417,18 @@ class CaptureTheFlagEnv(MultiClientEnv):
         p1_pylons = self.bot1.structures(UnitTypeId.PYLON)
         p2_pylons = self.bot2.structures(UnitTypeId.PYLON)
         
-        p1_lost = p1_pylons.amount == 0
-        p2_lost = p2_pylons.amount == 0
+        p1_pylon_dead = p1_pylons.amount == 0
+        p2_pylon_dead = p2_pylons.amount == 0
         
-        # ASYMMETRIC LOSS: If trainee has no mobile units left, terminate immediately
-        # (Assuming bot1 is always the trainee for now as per spec)
-        trainee_army_lost = not self._has_combat_units(self.bot1)
+        # Identify trainee and opponent bots
+        trainee_bot = self.bot1 if self.bot1.is_trainee else self.bot2
+        opponent_bot = self.bot2 if self.bot1.is_trainee else self.bot1
+        
+        trainee_pylon_dead = p1_pylon_dead if self.bot1.is_trainee else p2_pylon_dead
+        opponent_pylon_dead = p2_pylon_dead if self.bot1.is_trainee else p1_pylon_dead
+        
+        # ASYMMETRIC LOSS: If trainee has no combat units left, terminate immediately
+        trainee_army_lost = not self._has_combat_units(trainee_bot)
         
         win_reward = self.training_conf.get("rewards", {}).get("win_reward", 100.0)
         loss_penalty = self.training_conf.get("rewards", {}).get("loss_penalty", -win_reward)
@@ -409,15 +436,14 @@ class CaptureTheFlagEnv(MultiClientEnv):
         reward_delta = 0.0
         done = False
         
-        if p1_lost:
+        if trainee_pylon_dead:
             done = True
             reward_delta -= win_reward
         elif trainee_army_lost:
-            # Trainee lost all units -> Early termination
-            # Only trigger if the game hasn't already ended via pylon loss
+            # Trainee lost all units -> Early termination (asymmetric)
             done = True
-            reward_delta += loss_penalty # Usually a negative value
-        elif p2_lost:
+            reward_delta += loss_penalty 
+        elif opponent_pylon_dead:
             done = True
             reward_delta += win_reward
             
