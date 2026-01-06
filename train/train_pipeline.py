@@ -188,15 +188,14 @@ class PipelineManager:
         env_class_name = env_params.get("env_class", "Level0Env")
 
         # Use MaskableSubprocVecEnv for parallel training if num_envs > 1 and headless
-        if not headless or env_class_name == "CaptureTheFlagEnv":
-            if not headless:
-                logger.warning("Running in non-headless mode. Forcing num_envs=1.")
-            else:
-                logger.info("Using SyncVecEnv for Multi-Client stability.")
+        if not headless:
+            logger.warning("Running in non-headless mode. Forcing num_envs=1.")
             num_envs = 1
             vec_env_cls = MaskableSyncVecEnv
-        else:
+        elif num_envs > 1:
             vec_env_cls = MaskableSubprocVecEnv
+        else:
+            vec_env_cls = MaskableSyncVecEnv
         
         logger.info(f"Creating {num_envs} environment(s) for level '{level_name}' using {vec_env_cls.__name__}...")
 
