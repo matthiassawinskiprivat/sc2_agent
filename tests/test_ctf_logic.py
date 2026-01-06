@@ -43,23 +43,50 @@ def test_ctf_reward_calculation():
 
 def test_ctf_unit_damage_reward():
     bot = CaptureTheFlagBot(player_id=1)
-    bot.training_conf = {"rewards": {"damage_reward": 1.0}}
+    bot.training_conf = {"rewards": {"damage_reward": 1.0, "pylon_damage_reward": 0.0, "pylon_damage_penalty": 0.0}}
     
-    bot.prev_enemy_units_health = 100.0
+    bot.prev_enemy_units_health = {1: 100.0, 2: 100.0}
     
     # Mock enemy units
-    u1 = MagicMock(); u1.health = 40.0; u1.shield = 0.0
-    u2 = MagicMock(); u2.health = 40.0; u2.shield = 0.0
+    u1 = MagicMock(); u1.health = 40.0; u1.shield = 0.0; u1.is_structure = False
+    u2 = MagicMock(); u2.health = 40.0; u2.shield = 0.0; u2.is_structure = False
     bot.enemy_units = [u1, u2] # Total 80.0
     
+
+    
     # Mock structures to avoid None errors
+    
     # We must ensure .first returns None or a valid object with numeric health
+    
+    mock_pylon = MagicMock()
+    
+    mock_pylon.health = 10.0
+    
+    mock_pylon.shield = 10.0
+    
+    
+    
     mock_list = MagicMock()
-    mock_list.exists = False
-    mock_list.first = None 
+    
+    mock_list.exists = True
+    
+    mock_list.first = mock_pylon
+    
+    
+    
     bot.enemy_structures = MagicMock(return_value=mock_list)
+    
     bot.structures = MagicMock(return_value=mock_list)
+    
     bot.units = []
+    
+    
+    
+    # Ensure prev matches current to avoid pylon rewards
+    
+    bot.prev_pylon_health = {1: 20.0, 2: 20.0}
+    
+
     
     reward = bot.calculate_reward()
     

@@ -24,8 +24,9 @@ class CaptureTheFlagEnv(MultiClientEnv):
                  map_name: str = "BotMicroArena_6",
                  max_steps: int = 2000,
                  training_conf: Dict = None,
+                 level_name: str = "capture_the_flag_0",
                  **kwargs):
-        super().__init__(map_name=map_name, **kwargs)
+        super().__init__(map_name=map_name, level_name=level_name, **kwargs)
         self.training_conf = training_conf or {}
         
         # Robustly load parameters from training_conf (handling flattened vs nested)

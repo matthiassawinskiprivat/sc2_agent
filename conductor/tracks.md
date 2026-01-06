@@ -4,6 +4,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+## [x] Track: Fix CTF Single Env Termination
+*Link: [./conductor/tracks/fix_ctf_single_env_termination_20260106/](./conductor/tracks/fix_ctf_single_env_termination_20260106/)*
+
+---
+
 ## [x] Track: Fix and Stabilize Multi-Processing Training Pipeline
 *Link: [./conductor/tracks/fix_mp_pipeline_20251220/](./conductor/tracks/fix_mp_pipeline_20251220/)*      
 
@@ -261,8 +266,3 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Enable parallel training (num_envs > 1) for Capture the Flag environments.
 *Link: [./conductor/tracks/enable_num_envs_ctf_20260106/](./conductor/tracks/enable_num_envs_ctf_20260106/)*
-
----
-
-## [x] Track: Fix Parallel Process Termination
-*Link: [./conductor/tracks/fix_parallel_process_termination_20260106/](./conductor/tracks/fix_parallel_process_termination_20260106/)*

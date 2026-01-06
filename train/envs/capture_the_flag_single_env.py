@@ -24,8 +24,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                  map_name: str = "BotMicroArena_6",
                  max_steps: int = 2000,
                  training_conf: Dict = None,
+                 level_name: str = "capture_the_flag_0",
                  **kwargs):
-        super().__init__(map_name=map_name, **kwargs)
+        super().__init__(map_name=map_name, level_name=level_name, **kwargs)
         self.training_conf = training_conf or {}
         
         # Robustly load parameters from training_conf (handling flattened vs nested)
@@ -77,13 +78,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.model = model
 
     async def _setup_game_session(self):
-        from sc2.player import Bot
-        from sc2.data import Race
+        from sc2.player import Bot, Computer
+        from sc2.data import Race, Difficulty
         from s2clientprotocol import sc2api_pb2 as sc_pb
         
         self.bot = CaptureTheFlagBot(player_id=1, training_conf=self.training_conf)
-        # Revert to None for P2 to avoid Computer AI interference
-        players = [Bot(Race.Zerg, self.bot), Bot(Race.Zerg, None)]
+        # Use Computer for P2 to ensure single-client setup works reliably
+        players = [Bot(Race.Zerg, self.bot), Computer(Race.Zerg, Difficulty.VeryEasy)]
         resolved_map = self._resolve_map(self.map_name)
         
         self._log("Starting single-process God-Mode game session...")
@@ -246,6 +247,28 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.active_player_id = 1
         return super().reset(seed=seed, options=options)
 
+    def _has_combat_units(self, owner_id: int) -> bool:
+        """
+        Robustly checks if a player has any combat-capable mobile units left.
+        """
+        if not hasattr(self.bot, "all_units") or not self.bot.all_units:
+            return False
+            
+        ignored_types = {
+            UnitTypeId.LARVA, 
+            UnitTypeId.EGG, 
+            UnitTypeId.OVERLORD, 
+            UnitTypeId.PROBE, 
+            UnitTypeId.SCV, 
+            UnitTypeId.DRONE,
+            UnitTypeId.PYLON
+        }
+        
+        # In SingleClientEnv (God Mode), self.bot.all_units contains ALL units on the map
+        combat_units = self.bot.all_units.filter(lambda u: u.owner_id == owner_id and not u.is_structure and u.type_id not in ignored_types and u.health > 0)
+        
+        return combat_units.amount > 0
+
     async def _async_step(self, action_p_active):
         self.steps_count += 1
         
@@ -269,6 +292,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         p1_lost = self.bot.structures(UnitTypeId.PYLON).amount == 0
         p2_lost = self.bot.enemy_structures(UnitTypeId.PYLON).amount == 0
         
+        # Asymmetric Termination: Check combat units for both
+        p1_army_lost = not self._has_combat_units(owner_id=1)
+        p2_army_lost = not self._has_combat_units(owner_id=2)
+        
         done = False
         truncated = False
         r_conf = self.training_conf.get("rewards", {})
@@ -284,6 +311,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             done = True
             if acting_player_id == 1: reward += win_reward
             else: reward += loss_penalty
+        elif p1_army_lost and p2_army_lost:
+            # Mutual Destruction of Armies -> Draw
+            done = True
+            reward += draw_penalty
+        elif p1_army_lost:
+             # Trainee lost all units -> Early termination (asymmetric)
+            done = True
+            if acting_player_id == 1:
+                reward += loss_penalty # Trainee realizes they lost
+            else:
+                reward += win_reward # Opponent won
         
         # 3. Check for Draw (Mutual Destruction)
         await self._refresh_unit_lists()

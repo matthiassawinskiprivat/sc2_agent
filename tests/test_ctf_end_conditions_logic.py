@@ -54,6 +54,17 @@ async def test_win_loss_condition_p1_lost(env):
     env.player_units = {1: [], 2: [123]} 
     env.current_unit_index = 0
     
+    # Mock alive units for P2, empty for P1?
+    # Logic: p1_lost is checked first.
+    # But if p1 army is also lost, does it matter?
+    # Currently checks Pylon loss first.
+    # But to be safe, let's mock units alive for everyone to isolate Pylon test
+    def mock_units_alive():
+        m = MagicMock()
+        m.filter.return_value.amount = 5
+        return m
+    env.bot.all_units = mock_units_alive()
+    
     # Execute step
     obs, reward, done, truncated, info = await env._async_step(0)
     
@@ -71,6 +82,13 @@ async def test_win_loss_condition_p2_lost_on_p1_turn(env):
     env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
     
     env.player_units = {1: [123], 2: [456]}
+    
+    # Mock units alive
+    def mock_units_alive():
+        m = MagicMock()
+        m.filter.return_value.amount = 5
+        return m
+    env.bot.all_units = mock_units_alive()
     
     obs, reward, done, truncated, info = await env._async_step(0)
     
@@ -90,14 +108,15 @@ async def test_mutual_destruction_draw(env):
     # Both unit lists empty
     env.player_units = {1: [], 2: []}
     
-    # Currently, the code DOES NOT implement this. Expecting failure or default behavior.
-    # The current implementation only checks Pylon count.
-    # This test serves as the "Red" phase test for the missing feature.
+    # Mock empty all_units filter for both players
+    def mock_units_empty():
+        m = MagicMock()
+        m.filter.return_value.amount = 0
+        return m
+    env.bot.all_units = mock_units_empty() # Has combat units returns False
     
     obs, reward, done, truncated, info = await env._async_step(0)
     
-    # We WANT this to be True, but currently it's False.
-    # Asserting True to confirm failure.
     assert done is True, "Should terminate on Mutual Destruction"
     assert reward == -10.0, "Should apply draw penalty"
 
@@ -112,6 +131,13 @@ async def test_timeout_draw(env):
     env.bot.structures(UnitTypeId.PYLON).amount = 1
     env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
     env.player_units = {1: [1], 2: [2]}
+    
+    # Mock alive units so we don't trigger army loss
+    def mock_units_alive():
+        m = MagicMock()
+        m.filter.return_value.amount = 5
+        return m
+    env.bot.all_units = mock_units_alive()
     
     obs, reward, done, truncated, info = await env._async_step(0)
     
