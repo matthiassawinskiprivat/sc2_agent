@@ -20,9 +20,9 @@ env:
   max_steps: 3000
   maps_dir: "train/maps/level_3" # Use large open maps
   rewards:
-    win_reward: 100.0
-    loss_penalty: -100.0
-    draw_penalty: -10.0
+    win_reward: 50.0
+    loss_penalty: -50.0
+    draw_penalty: -20.0
     pylon_damage_reward: 5.5
     pylon_damage_penalty: 5.0
     damage_reward: 0.4

@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_ctf_parallel_masking_20260106",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-06T17:20:00Z",
+  "updated_at": "2026-01-06T17:20:00Z",
+  "description": "Fix BrokenPipeError/EOFError when using num_envs > 1 for CTF by correctly handling action_masks in SubprocVecEnv."
+}
