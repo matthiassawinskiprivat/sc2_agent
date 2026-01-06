@@ -32,6 +32,14 @@ class CaptureTheFlagBot(BotAI):
         self.model = None # Snapshot model for automated inference
         
         # Satisfaction for BotAI initialization
+        self._initialize_variables()
+        
+        # Explicitly remove shadowing attributes if they were set in __dict__ 
+        # during _initialize_variables. This ensures we use the dynamic properties
+        # from BotAI/GameState.
+        for attr in ["units", "structures", "enemy_units", "enemy_structures", "all_units", "larva"]:
+            if attr in self.__dict__:
+                delattr(self, attr)
         
         # State tracking for rewards
         self.prev_pylon_health = {1: 20.0, 2: 20.0} # Combined HP + Shield

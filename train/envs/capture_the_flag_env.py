@@ -402,12 +402,14 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         # Filter all_units: must not be a structure and must not be in ignored types
         # Also ensure unit is still alive (health > 0) and owned by the bot
+        # and NOT a 'memory' unit (artifact from previous frames)
         combat_units = [
             u for u in bot.all_units
             if u.owner_id == bot.player_id
             and not u.is_structure 
-            and u.unit_type not in ignored_types
+            and u.type_id not in ignored_types
             and u.health > 0
+            and not getattr(u, "is_memory", False)
         ]
         
         return len(combat_units) > 0
@@ -499,6 +501,20 @@ class CaptureTheFlagEnv(MultiClientEnv):
                 final_reward = -win_reward
                 
         return final_reward, info
+
+    def reset(self, seed=None, options=None):
+        obs, info = super().reset(seed=seed, options=options)
+        
+        # --- PROPERTY SANITY CHECK ---
+        # Verify that bot.units is not shadowed by a static list
+        for bot_idx, bot in enumerate([self.bot1, self.bot2]):
+            if bot and "units" in bot.__dict__:
+                self._log(f"CRITICAL WARNING: Bot {bot_idx+1} units property is SHADOWED by an instance attribute.")
+            elif bot:
+                self._log(f"Bot {bot_idx+1} units property is verified dynamic.")
+        # -----------------------------
+        
+        return obs, info
 
     def step(self, action):
         """

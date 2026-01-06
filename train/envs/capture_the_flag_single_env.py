@@ -244,7 +244,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.steps_count = 0
         self.current_unit_index = 0
         self.active_player_id = 1
-        return super().reset(seed=seed, options=options)
+        obs, info = super().reset(seed=seed, options=options)
+        
+        # --- PROPERTY SANITY CHECK ---
+        # Verify that bot.units is not shadowed by a static list
+        if "units" in self.bot.__dict__:
+            self._log("CRITICAL WARNING: Bot units property is SHADOWED by an instance attribute.")
+        else:
+            self._log("Bot units property is verified dynamic.")
+        # -----------------------------
+        
+        return obs, info
 
     async def _async_step(self, action_p_active):
         self.steps_count += 1
