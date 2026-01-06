@@ -25,7 +25,7 @@ Implement the core logic to automate Player 2's turns and handle the new early t
 ## Phase 3: Integration & Verification
 Ensure the entire pipeline works together with the training configuration and perspective transformations.
 
-- [ ] Task: TDD - Verify perspective flipping for the automated opponent
-- [ ] Task: Ensure `PerspectiveTransformer` works correctly when Player 2 is automated
-- [ ] Task: Integration Test - Run a short training loop to verify reward distribution and step counts
+- [x] Task: TDD - Verify perspective flipping for the automated opponent 7c62819
+- [x] Task: Ensure `PerspectiveTransformer` works correctly when Player 2 is automated 7c62819
+- [x] Task: Integration Test - Run a short training loop to verify reward distribution and step counts 7c62819
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration & Verification' (Protocol in workflow.md)
