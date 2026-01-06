@@ -62,10 +62,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.bot: Optional[CaptureTheFlagBot] = None
         self.active_player_id = 1
         self.current_unit_index = 0
-        self.player_units = {1: [], 2: []}
-        self.model = None
+        self.player_units: Dict[int, List[int]] = {1: [], 2: []}
+        self.client_count = 1
+        
+        # SB3 MaskablePPO support: satisfy is_masking_supported() without pickling a method.
+        # env.get_attr('action_masks') will return this attribute instead of the bound method.
+        self.action_masks = None
 
-    def _load_unit_data(self) -> Dict[str, Any]:
+    def _load_unit_data(self):
         path = os.path.join(os.getcwd(), "data", "unit_data.json")
         if not os.path.exists(path):
             logger.warning(f"unit_data.json not found at {path}. Using empty dict.")
@@ -244,17 +248,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.steps_count = 0
         self.current_unit_index = 0
         self.active_player_id = 1
-        obs, info = super().reset(seed=seed, options=options)
-        
-        # --- PROPERTY SANITY CHECK ---
-        # Verify that bot.units is not shadowed by a static list
-        if "units" in self.bot.__dict__:
-            self._log("CRITICAL WARNING: Bot units property is SHADOWED by an instance attribute.")
-        else:
-            self._log("Bot units property is verified dynamic.")
-        # -----------------------------
-        
-        return obs, info
+        return super().reset(seed=seed, options=options)
 
     async def _async_step(self, action_p_active):
         self.steps_count += 1

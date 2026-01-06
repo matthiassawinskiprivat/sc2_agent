@@ -66,6 +66,9 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         # Self-play model
         self.model = None
+        
+        # SB3 MaskablePPO support
+        self.action_masks = None
 
     def _load_unit_data(self) -> Dict[str, Any]:
         path = os.path.join(os.getcwd(), "data", "unit_data.json")
@@ -494,18 +497,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
         return final_reward, info
 
     def reset(self, seed=None, options=None):
-        obs, info = super().reset(seed=seed, options=options)
-        
-        # --- PROPERTY SANITY CHECK ---
-        # Verify that bot.units is not shadowed by a static list
-        for bot_idx, bot in enumerate([self.bot1, self.bot2]):
-            if bot and "units" in bot.__dict__:
-                self._log(f"CRITICAL WARNING: Bot {bot_idx+1} units property is SHADOWED by an instance attribute.")
-            elif bot:
-                self._log(f"Bot {bot_idx+1} units property is verified dynamic.")
-        # -----------------------------
-        
-        return obs, info
+        return super().reset(seed=seed, options=options)
 
     def step(self, action):
         """
