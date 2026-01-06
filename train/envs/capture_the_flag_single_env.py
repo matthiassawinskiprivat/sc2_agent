@@ -64,10 +64,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.current_unit_index = 0
         self.player_units: Dict[int, List[int]] = {1: [], 2: []}
         self.client_count = 1
-        
-        # SB3 MaskablePPO support: satisfy is_masking_supported() without pickling a method.
-        # env.get_attr('action_masks') will return this attribute instead of the bound method.
-        self.action_masks = None
 
     def _load_unit_data(self):
         path = os.path.join(os.getcwd(), "data", "unit_data.json")

@@ -2,6 +2,7 @@ import sys
 import os
 import glob
 import yaml
+from typing import List, Any
 from loguru import logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
@@ -82,6 +83,20 @@ class MaskableSubprocVecEnv(SubprocVecEnv):
         masks = np.stack(self.env_method("action_masks")).astype(bool)
         logger.debug("MaskableSubprocVecEnv: get_action_masks() completed.")
         return masks
+
+    def get_attr(self, attr_name: str, indices = None) -> List[Any]:
+        """
+        Return attribute from vectorized environment.
+        Intersects 'action_masks' to avoid pickling bound methods from workers.
+        """
+        if attr_name == "action_masks":
+            # SB3's is_masking_supported() only checks if the attribute exists.
+            # We return a dummy picklable value directly from the main process.
+            # The actual logic remains in the action_masks() method called via env_method.
+            target_remotes = self._get_target_remotes(indices)
+            return [True for _ in target_remotes]
+            
+        return super().get_attr(attr_name, indices)
 
     def step_wait(self) -> VecEnvStepReturn:
         logger.debug("MaskableSubprocVecEnv: step_wait() waiting for workers...")

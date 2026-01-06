@@ -66,9 +66,6 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         # Self-play model
         self.model = None
-        
-        # SB3 MaskablePPO support
-        self.action_masks = None
 
     def _load_unit_data(self) -> Dict[str, Any]:
         path = os.path.join(os.getcwd(), "data", "unit_data.json")
