@@ -23,6 +23,10 @@ class CaptureTheFlagBot(BotAI):
         self.active_unit_tag: Optional[int] = None
         self.command_targets: Dict[int, Optional[Point2]] = {1: None, 2: None}
         
+        # Asymmetric Self-Play attributes
+        self.is_trainee = True # Default to trainee
+        self.model = None # Snapshot model for automated inference
+        
         # Satisfaction for BotAI initialization
         self._initialize_variables()
         from sc2.units import Units
@@ -135,6 +139,34 @@ class CaptureTheFlagBot(BotAI):
                 return np.zeros((num_layers, 128, 128), dtype=np.uint8)
 
         return self.cached_observation
+
+    def predict_action(self) -> int:
+        """
+        Uses the internal snapshot model to predict an action for the current state.
+        Only used if self.is_trainee is False.
+        """
+        if self.is_trainee:
+            raise RuntimeError("Trainee bot should not predict actions; it receives them from the external trainer.")
+        
+        if self.model is None:
+            logger.warning(f"Bot {self.player_id}: No model set for automated inference. Returning default action 0.")
+            return 0
+
+        obs = self.get_observation()
+        masks = self.action_masks()
+        
+        # SB3 models expect a batch dimension [1, ...]
+        obs_batch = np.expand_dims(obs, axis=0)
+        
+        # Inference (deterministic=True for stable opponent behavior)
+        action, _states = self.model.predict(obs_batch, action_masks=np.expand_dims(masks, axis=0), deterministic=True)
+        
+        # action is typically a numpy array [action_value]
+        if isinstance(action, np.ndarray):
+            if action.ndim > 0:
+                return int(action[0])
+            return int(action)
+        return int(action)
 
     def action_masks(self) -> np.ndarray:
         """
