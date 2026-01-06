@@ -14,12 +14,12 @@ Focus on updating the `CaptureTheFlagBot` and `CaptureTheFlagEnv` to support aut
 ## Phase 2: Asymmetric Step Logic & Termination
 Implement the core logic to automate Player 2's turns and handle the new early termination conditions.
 
-- [ ] Task: TDD - Update `CaptureTheFlagEnv._async_step` to automate Player 2 actions
-- [ ] Task: Implement automated opponent stepping in `_async_step` (skipping trainer input for P2)
-- [ ] Task: TDD - Add early termination logic for trainee unit loss
-- [ ] Task: Implement unit-count check and `loss_penalty` application in `_async_step`
-- [ ] Task: TDD - Verify persistent objective (P2 loss does not terminate P1's turn)
-- [ ] Task: Ensure environment continues for P1 after P2 units are destroyed
+- [x] Task: TDD - Update `CaptureTheFlagEnv._async_step` to automate Player 2 actions 5565552
+- [x] Task: Implement automated opponent stepping in `_async_step` (skipping trainer input for P2) 5565552
+- [x] Task: TDD - Add early termination logic for trainee unit loss 5565552
+- [x] Task: Implement unit-count check and `loss_penalty` application in `_async_step` 5565552
+- [x] Task: TDD - Verify persistent objective (P2 loss does not terminate P1's turn) 5565552
+- [x] Task: Ensure environment continues for P1 after P2 units are destroyed 5565552
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Asymmetric Step Logic & Termination' (Protocol in workflow.md)
 
 ## Phase 3: Integration & Verification
