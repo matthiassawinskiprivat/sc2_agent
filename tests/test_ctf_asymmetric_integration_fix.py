@@ -9,7 +9,7 @@ async def test_ctf_reset_no_attribute_error():
     Verify that env.reset() works without AttributeError.
     """
     with patch("train.envs.multi_client_env.MultiClientSC2Manager"), \
-         patch("train.envs.capture_the_flag_env.CaptureTheFlagBot.on_start", new_callable=AsyncMock):
+         patch("src.agent.ctf_bot.CaptureTheFlagBot.on_start", new_callable=AsyncMock):
         
         env = CaptureTheFlagEnv()
         
@@ -53,4 +53,4 @@ async def test_ctf_reset_no_attribute_error():
             
             # Verify attributes are present
             assert hasattr(env.bot1, "distance_calculation_method")
-            assert "units" not in env.bot1.__dict__
+            assert hasattr(env.bot1, "units")

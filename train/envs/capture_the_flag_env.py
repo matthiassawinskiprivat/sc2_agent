@@ -385,34 +385,25 @@ class CaptureTheFlagEnv(MultiClientEnv):
     def _has_combat_units(self, bot: CaptureTheFlagBot) -> bool:
         """
         Robustly checks if a bot has any combat-capable mobile units left.
-        Uses all_units to avoid filtered lists and excludes structures and non-combat units.
+        Uses library Units filtering for robustness.
         """
-        if not hasattr(bot, "all_units") or not bot.all_units:
+        if not hasattr(bot, "units") or not bot.units:
             return False
             
         ignored_types = {
             UnitTypeId.LARVA, 
             UnitTypeId.EGG, 
             UnitTypeId.OVERLORD, 
-            UnitTypeId.PYLON,
-            UnitTypeId.PROBE,
-            UnitTypeId.SCV,
+            UnitTypeId.PROBE, 
+            UnitTypeId.SCV, 
             UnitTypeId.DRONE
         }
         
-        # Filter all_units: must not be a structure and must not be in ignored types
-        # Also ensure unit is still alive (health > 0) and owned by the bot
-        # and NOT a 'memory' unit (artifact from previous frames)
-        combat_units = [
-            u for u in bot.all_units
-            if u.owner_id == bot.player_id
-            and not u.is_structure 
-            and u.type_id not in ignored_types
-            and u.health > 0
-            and not getattr(u, "is_memory", False)
-        ]
+        # bot.units already filters for owned units and excludes structures
+        # We further exclude non-combat units and ensure they are alive
+        combat_units = bot.units.filter(lambda u: not u.is_structure and u.type_id not in ignored_types and u.health > 0 and not getattr(u, "is_memory", False))
         
-        return len(combat_units) > 0
+        return combat_units.amount > 0
 
     def _check_termination(self) -> Tuple[bool, bool, float]:
         """Checks if the game should end and returns (done, truncated, reward_delta)."""
