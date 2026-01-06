@@ -104,6 +104,15 @@ class CaptureTheFlagEnv(MultiClientEnv):
         self.bot1 = CaptureTheFlagBot(player_id=1, training_conf=self.training_conf)
         self.bot2 = CaptureTheFlagBot(player_id=2, training_conf=self.training_conf)
         
+        # Asymmetric Self-Play Configuration
+        # Player 1 is ALWAYS the trainee
+        self.bot1.is_trainee = True
+        self.bot1.model = None
+        
+        # Player 2 is ALWAYS the automated opponent
+        self.bot2.is_trainee = False
+        self.bot2.model = self.model # Snapshot for the current episode
+        
         players = [Bot(Race.Zerg, self.bot1), Bot(Race.Zerg, self.bot2)]
         resolved_map = self._resolve_map(self.map_name)
         
