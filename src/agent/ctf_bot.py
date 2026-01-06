@@ -18,6 +18,10 @@ class CaptureTheFlagBot(BotAI):
         super().__init__()
         self.player_id = player_id
         self.training_conf = training_conf or {}
+        
+        env_conf = self.training_conf.get("env", {})
+        self.grid_size = self.training_conf.get("grid_size", env_conf.get("grid_size", 128))
+        
         self.agent_system: Optional[HierarchicalAgentSystem] = None
         
         self.active_unit_tag: Optional[int] = None
