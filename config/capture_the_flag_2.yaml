@@ -2,8 +2,8 @@
 # Configuration for Level 11: Capture the Flag (Self-Play)
 
 training:
-  training_steps: 200_000
-  num_envs: 2 # Multi-client envs are heavy, start with 1
+  training_steps: 150_000
+  num_envs: 2
   n_steps: 2048
   batch_size: 512
   learning_rate: 0.0003

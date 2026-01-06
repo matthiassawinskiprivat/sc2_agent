@@ -2,7 +2,7 @@
 # Configuration for Level 11: Capture the Flag (Self-Play)
 
 training:
-  training_steps: 200_000
+  training_steps: 150_000
   num_envs: 2
   n_steps: 2048
   batch_size: 512
