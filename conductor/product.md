@@ -26,25 +26,20 @@ It aims to evolve from its current high-fidelity unit micro-management capabilit
 
 - Curriculum learning through progressively complex training levels.
 
-- Competitive self-play in specialized environments like Capture the Flag, utilizing perspective flipping for symmetric agent training.
-
-
+- Competitive self-play in specialized environments like Capture the Flag, utilizing perspective flipping and asymmetric training modes.
 
 ## Training Levels
-
-The project follows a curriculum starting from basic movement to complex combat:
-
-- **Level 0-2:** Basic movement and single-unit navigation.
-
-- **Level 3-6:** Multi-unit coordination and target collection.
-
-- **Level 7-10:** Advanced combat micro and tactical positioning.
-
-- **Capture the Flag:** Competitive self-play with resource-based army spawning and objective-based goals.
+...
+- **Capture the Flag:** Competitive asymmetric self-play with resource-based army spawning and objective-based goals.
 
 ## Core Mechanisms
+...
+### Asymmetric Self-Play
+To maximize training efficiency and minimize data noise, the project supports asymmetric self-play.
 
-### Dynamic Layer Stack
+- **Automated Opponent:** During training, one player acts as the trainee while the opponent is controlled by a snapshot of the current model.
+- **Trainee-Centric Termination:** Episodes terminate immediately if the trainee loses all units, providing a clear and rapid penalty signal.
+- **Persistence:** If the opponent army is defeated, the game continues, allowing the trainee to learn secondary objectives (like destroying enemy structures) without noise from the "dead" opponent.
 The project employs a curriculum-driven observation system where the fidelity of the agent's perception increases over time.
 
 - **Additive Accumulation:** Each training level defines a set of `active_layers` in its configuration. As the agent progresses through the curriculum (Level 0 → Level 10 → Capture the Flag), the `ConfigManager` dynamically accumulates all layers defined in previous levels.

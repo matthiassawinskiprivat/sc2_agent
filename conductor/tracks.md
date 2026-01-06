@@ -251,3 +251,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Refactor CTF environment for dynamic layer accumulation
 *Link: [./conductor/archive/dynamic_ctf_layers_20260105/](./conductor/archive/dynamic_ctf_layers_20260105/)*
+
+---
+
+## [x] Track: Air Unit Unrestricted Movement and Attack
+*Link: [./conductor/archive/air_unit_unrestricted_movement_20260105/](./conductor/archive/air_unit_unrestricted_movement_20260105/)*

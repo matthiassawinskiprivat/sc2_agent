@@ -44,6 +44,6 @@ model:
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_rew_mean"
-    threshold: 150.0
+    threshold: 1000.0
     comparison: ">"
     patience: 10
