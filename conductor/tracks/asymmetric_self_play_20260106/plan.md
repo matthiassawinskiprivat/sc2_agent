@@ -7,8 +7,8 @@ Focus on updating the `CaptureTheFlagBot` and `CaptureTheFlagEnv` to support aut
 
 - [x] Task: TDD - Add `is_trainee` flag and automated action support to `CaptureTheFlagBot` e30f16d
 - [x] Task: Implement `is_trainee` logic and `set_model` integration in `CaptureTheFlagBot` e30f16d
-- [ ] Task: TDD - Update `CaptureTheFlagEnv.reset` to snapshot the model for the opponent
-- [ ] Task: Implement model snapshotting and opponent initialization in `CaptureTheFlagEnv.reset`
+- [x] Task: TDD - Update `CaptureTheFlagEnv.reset` to snapshot the model for the opponent 083a1dd
+- [x] Task: Implement model snapshotting and opponent initialization in `CaptureTheFlagEnv.reset` 083a1dd
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Environment & Bot Preparation' (Protocol in workflow.md)
 
 ## Phase 2: Asymmetric Step Logic & Termination
