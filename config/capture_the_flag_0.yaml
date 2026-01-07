@@ -32,7 +32,7 @@ env:
     - "allied_unit_biological"
     - "allied_unit_mechanical"
     - "allied_unit_armored"
-    - "allied_unit_massive"
+    - "allied_unit_mas/sive"
     - "enemy_unit_biological"
     - "enemy_unit_mechanical"
     - "enemy_unit_armored"

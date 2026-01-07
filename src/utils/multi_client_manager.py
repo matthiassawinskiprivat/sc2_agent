@@ -27,23 +27,30 @@ class MultiClientSC2Manager:
     async def launch_processes(self, count: int = 2, visualize: bool = False, fullscreen: bool = False):
         """Launches the specified number of SC2 processes."""
         for i in range(count):
-            # Let burnysc2 handle host/port selection for maximum stability
+            logger.info(f"Launching SC2 Process {i+1}/{count}...")
             process = self.sc2_process_cls(
                 fullscreen=fullscreen,
                 render=visualize
             )
             controller = await process.__aenter__()
             
-            # Extract websocket connection
+            # Verify controller is responsive
+            ping = await controller.ping()
+            logger.info(f"Process {i+1} responsive. Ping: {ping}")
+            
+            # Robustly extract websocket connection
             ws = getattr(process, "_ws", getattr(process, "ws", None))
+            if ws is None:
+                ws = getattr(controller, "_ws", getattr(controller, "ws", None))
+            
             client = self.client_cls(ws)
             
             self.processes.append(process)
             self.controllers.append(controller)
             self.clients.append(client)
             
-            # Give it a moment to stabilize
-            await asyncio.sleep(0.2)
+            # Give each process significant time to open its listening port
+            await asyncio.sleep(5.0)
 
         if len(self.clients) >= 1:
             self.host_client = self.clients[0]
@@ -61,28 +68,48 @@ class MultiClientSC2Manager:
         # Port configuration for multi-client communication
         from sc2.portconfig import Portconfig
         # Use unique high ports based on worker_index to avoid conflicts
-        # Each worker needs 4 ports (2 server, 2 player)
-        base_port = 20000 + (self.worker_index * 10)
+        # Each worker needs:
+        # 2 Server Ports (one for each SC2 process to listen for setup)
+        # 2 Ports per Player for game traffic (GamePort, BasePort) * 2 Players = 4
+        # Total 6 ports.
+        base_port = 30000 + (self.worker_index * 100) # Higher base port
+        
+        # Server Ports: [P1_Server, P2_Server]
+        server_ports = [base_port + 0, base_port + 1]
+        
+        # Player Ports: [[P1_Game, P1_Base], [P2_Game, P2_Base]]
+        player_ports = [
+            [base_port + 2, base_port + 3], # Player 1
+            [base_port + 4, base_port + 5]  # Player 2
+        ]
+        
         portconfig = Portconfig(
-            server_ports=[base_port, base_port + 1], 
-            player_ports=[[base_port + 2, base_port + 3]]
+            server_ports=server_ports, 
+            player_ports=player_ports
         )
         logger.info(f"Worker {self.worker_index} using Portconfig: {portconfig.as_json}")
 
         # Host creates the game
         logger.info(f"Host is creating the game on map: {game_map.name}...")
         try:
-            # We use realtime=True for better engine-level loading sync during debug
-            result = await self.controllers[0].create_game(
+            # We use realtime=False for maximum compatibility during handshake
+            # Add a timeout to prevent infinite hang
+            create_task = self.controllers[0].create_game(
                 game_map,
                 players,
                 realtime=realtime
             )
+            result = await asyncio.wait_for(create_task, timeout=60.0)
+            
+            logger.info(f"create_game Request sent successfully. Result: {result.create_game.HasField('error')}")
             if result.create_game.HasField("error"):
                 logger.error(f"Engine Error: {result.create_game.error}")
                 
-            logger.info("Game created. Waiting 10s for map loading...")
-            await asyncio.sleep(10)
+            logger.info("Waiting 15s for map loading and engine stability...")
+            await asyncio.sleep(15)
+        except asyncio.TimeoutError:
+            logger.error("Timeout during create_game!")
+            raise
         except Exception as e:
             logger.error(f"Exception during create_game: {e}")
             raise e
@@ -91,19 +118,20 @@ class MultiClientSC2Manager:
         logger.info("Both players are joining the game (Parallel Handshake)...")
         try:
             # We use name and race explicitly to ensure the engine assigns slots correctly
-            join_tasks = [
-                self.clients[0].join_game(
-                    name="HostPlayer",
-                    race=players[0].race, 
-                    observed_player_id=1,
-                    portconfig=portconfig
-                ),
-                self.clients[1].join_game(
-                    name="JoinerPlayer",
-                    race=players[1].race, 
-                    observed_player_id=2,
-                    portconfig=portconfig
+            async def join_with_log(client, name, player_id, p_config):
+                logger.info(f"Client {player_id} ({name}) initiating join_game...")
+                res = await client.join_game(
+                    name=name,
+                    race=players[player_id-1].race, 
+                    observed_player_id=player_id,
+                    portconfig=p_config
                 )
+                logger.info(f"Client {player_id} ({name}) join_game SUCCESS.")
+                return res
+
+            join_tasks = [
+                join_with_log(self.clients[0], "HostPlayer", 1, portconfig),
+                join_with_log(self.clients[1], "JoinerPlayer", 2, portconfig)
             ]
             results = await asyncio.gather(*join_tasks)
             logger.info(f"Join results received: {results}")
