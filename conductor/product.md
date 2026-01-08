@@ -6,11 +6,13 @@ The **StarCraft 2 Unit Control Agent** (expanding into a full-scale AI) is a sop
 
 It aims to evolve from its current high-fidelity unit micro-management capabilities into a complete competitive bot. This evolution includes a strategic Master Agent for high-level coordination, robust Macro-Management systems for economic growth, and advanced multi-agent tactical execution.
 
+(See `conductor/tech-stack.md` for the detailed "Long Term Plan / Final Architecture" specification).
+
 ## Core Objectives
-*   **Hierarchical Learning:** Implement a multi-layered RL architecture where strategic decisions (Master Agent) delegate tasks to tactical specialists (Unit Control Agents).
+*   **Hierarchical Learning:** Implement a multi-layered RL architecture where strategic decisions (Manager Agent) delegate tasks to specialized sub-agents (Build Agent, Unit Control Agent).
 *   **Complete Strategic Play:** Expand beyond micro-management to include base building, resource optimization, and tech-tree progression.
 *   **Multi-Front Coordination:** Enable the agent to handle large-scale engagements across multiple locations simultaneously.
-*   **Algorithmic Mastery:** Serve as a primary environment for implementing, testing, and understanding state-of-the-art RL algorithms (e.g., PPO, DQN) in complex, high-dimensional spaces.
+*   **Algorithmic Mastery:** Serve as a primary environment for implementing, testing, and understanding state-of-the-art RL algorithms (e.g., PPO, DQN, Pointer Networks, Recurrent Reasoning Models) in complex, high-dimensional spaces.
 
 ## Target Experience
 *   **Educational Depth:** The codebase and architecture are balanced to provide both competitive performance and clear, modular implementations that facilitate learning and experimentation.
@@ -52,4 +54,3 @@ Air units (e.g., Medivacs, Void Rays) are handled differently than ground units 
 - **Unrestricted Movement:** Action masks for flying units are fully open (all `True`). This allows the agent to command air units to any grid coordinate, even those marked as unpathable in the `pathing_grid`.
 - **Combat Versatility:** Attack masks for air units are also unrestricted, enabling them to engage targets over cliffs or voids.
 - **Ground Parity:** Ground units continue to be constrained by the `pathing_grid` to ensure realistic movement behaviors.
-
