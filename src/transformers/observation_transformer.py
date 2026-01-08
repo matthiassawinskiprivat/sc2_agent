@@ -160,6 +160,11 @@ class ObservationTransformer:
         # 5. Draw Command/State
         # ------------------------------------------------------------------
         self._draw_command_info(raw_obs, layers)
+        
+        # ------------------------------------------------------------------
+        # 5.5 Draw Transport Info
+        # ------------------------------------------------------------------
+        self._draw_transport_info(raw_obs, layers)
 
         # ------------------------------------------------------------------
         # 6. Normalize & Scale to uint8 [0, 255]
@@ -645,6 +650,63 @@ class ObservationTransformer:
                     self._draw_circle_vectorized(layers, idx, px, py, radius, None, dps, True)
                     if idx_air is not None:
                         self._draw_circle_vectorized(layers, idx_air, px, py, radius, None, dps, True)
+
+    def _draw_transport_info(self, raw_obs, layers):
+        """
+        Draws Transport Slots and Passenger Density.
+        Transport Slots: 0.5 = Available, 1.0 = Full.
+        Passenger Density: Count of passengers at transport location.
+        """
+        units = raw_obs.get('units')
+        if not units: return
+
+        idx_slots = LayerConstants.LAYERS.get(LayerConstants.TRANSPORT_SLOTS)
+        idx_pass = LayerConstants.LAYERS.get(LayerConstants.PASSENGER_DENSITY)
+
+        if idx_slots is None and idx_pass is None:
+            return
+
+        # Transport Type IDs
+        transport_ids = {
+            UnitTypeId.MEDIVAC.value, UnitTypeId.MEDIVAC.value, # Handle both enum/int
+            UnitTypeId.OVERLORDTRANSPORT.value,
+            UnitTypeId.WARPPRISM.value, UnitTypeId.WARPPRISMPHASING.value,
+            UnitTypeId.BUNKER.value # Bunkers are technically transports
+        }
+        
+        # Add standard Overlord just in case, though it needs upgrade to transport
+        transport_ids.add(UnitTypeId.OVERLORD.value)
+
+        for unit in units:
+            u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
+            
+            if u_id not in transport_ids:
+                continue
+                
+            px, py = self._get_pixel_coords(unit.position)
+            if px is None: continue
+
+            # Check cargo
+            cargo_used = getattr(unit, "cargo_used", 0)
+            cargo_max = getattr(unit, "cargo_max", 0)
+            
+            if cargo_max > 0:
+                # Draw Slot Status
+                if idx_slots is not None:
+                    val = 0.5 # Available
+                    if cargo_used >= cargo_max:
+                        val = 1.0 # Full
+                    
+                    # Radius slightly larger than unit to be visible
+                    r = int(unit.radius * self.scale) + 1
+                    self._draw_circle_vectorized(layers, idx_slots, px, py, 0, r, val, False)
+
+                # Draw Passenger Density
+                if idx_pass is not None and cargo_used > 0:
+                    # Normalize by 8 (standard max cargo) to fit 0-1 range
+                    # 1 marine = 1/8 = 0.125
+                    norm_val = min(float(cargo_used) / 8.0, 1.0)
+                    self._draw_circle_vectorized(layers, idx_pass, px, py, 0, r, norm_val, True)
 
     def _draw_circle_vectorized(self, layers, layer_idx, cx, cy, radius_game, radius_px_override=None, value=1.0,
                                 accumulate=False):

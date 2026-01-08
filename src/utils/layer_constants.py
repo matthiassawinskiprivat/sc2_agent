@@ -121,6 +121,12 @@ class LayerConstants:
 
     COMMAND_ASSIGNMENT = "command_assignment"
     COMMAND_OBJECTIVE  = "command_objective"
+    
+    # ==============================================================================
+    # GROUP 9: TRANSPORT (Layers 42-43)
+    # ==============================================================================
+    TRANSPORT_SLOTS    = "transport_slots"
+    PASSENGER_DENSITY  = "passenger_density"
 
     # --- INDEX MAPPING ---
     LAYERS = {
@@ -148,9 +154,11 @@ class LayerConstants:
         ALLIED_DETECTION: 36, ENEMY_DETECTION: 37,
         TERRAIN_PATHABLE: 38, TERRAIN_CREEP: 39,
 
-        COMMAND_ASSIGNMENT: 40, COMMAND_OBJECTIVE: 41
+        COMMAND_ASSIGNMENT: 40, COMMAND_OBJECTIVE: 41,
+        
+        TRANSPORT_SLOTS: 42, PASSENGER_DENSITY: 43
     }
 
     @classmethod
     def get_num_layers(cls) -> int:
-        return 42
+        return 44

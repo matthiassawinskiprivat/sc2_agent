@@ -52,14 +52,18 @@ def interpolate_spatial_weights(weights: torch.Tensor, old_size: int, new_size: 
     
     return new_weights
 
-def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_action_dim: Optional[int] = None) -> Dict[str, Any]:
+def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_action_dim: Optional[int] = None, action_handling_mode: str = "auto") -> Dict[str, Any]:
     """
     Adjusts the model weights to match new input channels and/or new action space dimensions.
     
     Args:
         state_dict: The model's state dictionary.
         new_in_channels: The target number of input channels for CNN.
-        new_action_dim: (Optional) The target number of output actions (e.g., grid_size * grid_size).
+        new_action_dim: (Optional) The target number of output actions.
+        action_handling_mode: Strategy for action dimension change.
+            - "auto": Tries interpolation first (if square), then 2x expansion.
+            - "expand": Forces block repetition/randomization (e.g., 1 Head -> 4 Heads).
+            - "interpolate": Forces spatial interpolation.
         
     Returns:
         A new state dictionary with grafted weights.
@@ -67,6 +71,7 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
     new_state_dict = copy.deepcopy(state_dict)
     
     # --- 1. Handle Input Channels (CNN) ---
+    # ... (Same as before) ...
     # Identify input layer keys
     input_keys = [k for k in state_dict.keys() if k.endswith("features_extractor.cnn.0.weight")]
     
@@ -75,101 +80,76 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
     else:
         for key in input_keys:
             old_weight = state_dict[key]
-            
-            # Check shape: (out_channels, in_channels, kernel_h, kernel_w)
-            if len(old_weight.shape) != 4:
-                 logger.warning(f"Skipping key '{key}': Expected 4D weight tensor, got {old_weight.shape}")
-                 continue
-                 
+            if len(old_weight.shape) != 4: continue
             old_in_channels = old_weight.shape[1]
-            
-            if old_in_channels == new_in_channels:
-                continue
+            if old_in_channels == new_in_channels: continue
             
             logger.info(f"Grafting input weights for '{key}': {old_in_channels} -> {new_in_channels} channels")
-                
             if new_in_channels < old_in_channels:
-                # Shrinking: Slice the weights
-                new_weight = old_weight[:, :new_in_channels, :, :]
-                new_state_dict[key] = new_weight
-                
+                new_state_dict[key] = old_weight[:, :new_in_channels, :, :]
             else:
-                # Expanding
                 out_channels, _, k_h, k_w = old_weight.shape
-                
-                # Initialize new tensor with small random noise
-                # Using 0.01 scale to avoid destabilizing the network
                 new_weight = torch.randn(out_channels, new_in_channels, k_h, k_w) * 0.01
-                
-                # Copy old weights
                 new_weight[:, :old_in_channels, :, :] = old_weight
-                
                 new_state_dict[key] = new_weight
 
     # --- 2. Handle Action/Value Heads ---
     if new_action_dim is not None:
-        # PPO Action/Value heads usually contain "action_net" or "value_net"
-        # We only interpolate if they look like spatial maps (square sizes)
         head_keys = [k for k in state_dict.keys() if "action_net" in k or "value_net" in k]
         
         for key in head_keys:
             old_weight = state_dict[key]
             old_dim = old_weight.shape[0]
             
-            # If dimensions match, nothing to do
-            if old_dim == new_action_dim:
-                continue
-            
-            # Skip scalar heads (e.g., value_net with output dim 1)
-            if old_dim == 1:
-                continue
+            if old_dim == new_action_dim: continue
+            if old_dim == 1: continue # Skip scalar heads
 
-            # Check if this looks like a spatial layer
-            # Is old_dim a perfect square?
+            # Check for block expansion (multiples)
+            is_expansion = (new_action_dim > old_dim) and (new_action_dim % old_dim == 0)
+            
+            # Check for square spatial
             old_grid_float = math.sqrt(old_dim)
-            is_square_old = old_grid_float.is_integer()
-            
-            # Is new_dim a perfect square?
             new_grid_float = math.sqrt(new_action_dim)
-            is_square_new = new_grid_float.is_integer()
+            is_square_scaling = old_grid_float.is_integer() and new_grid_float.is_integer()
+
+            # Decision Logic
+            use_interpolation = False
+            use_expansion = False
             
-            if is_square_old and is_square_new:
-                old_grid = int(old_grid_float)
-                new_grid = int(new_grid_float)
-                logger.info(f"Interpolating spatial weights for '{key}': {old_grid}x{old_grid} -> {new_grid}x{new_grid}")
-                
+            if action_handling_mode == "interpolate":
+                use_interpolation = True
+            elif action_handling_mode == "expand":
+                use_expansion = True
+            else: # auto
+                if is_square_scaling and not is_expansion:
+                    use_interpolation = True
+                elif is_expansion:
+                    use_expansion = True # Prefer expansion for clean multiples like 2x, 4x
+                elif is_square_scaling:
+                    use_interpolation = True
+            
+            # Execute
+            if use_interpolation and is_square_scaling:
+                logger.info(f"Interpolating spatial weights for '{key}': {old_dim} -> {new_action_dim}")
                 try:
-                    # Handle Weights: (N, features)
                     if len(old_weight.shape) == 2:
-                        new_state_dict[key] = interpolate_spatial_weights(old_weight, old_grid, new_grid)
-                        
-                    # Handle Bias: (N,) -> Reshape to (N, 1) -> Interpolate -> Flatten
+                        new_state_dict[key] = interpolate_spatial_weights(old_weight, int(old_grid_float), int(new_grid_float))
                     elif len(old_weight.shape) == 1:
                         w_reshaped = old_weight.view(-1, 1)
-                        w_interp = interpolate_spatial_weights(w_reshaped, old_grid, new_grid)
+                        w_interp = interpolate_spatial_weights(w_reshaped, int(old_grid_float), int(new_grid_float))
                         new_state_dict[key] = w_interp.view(-1)
-                        
-                    else:
-                        logger.warning(f"Unknown shape for head layer '{key}': {old_weight.shape}. Deleting to avoid mismatch.")
-                        del new_state_dict[key]
-                        
                 except Exception as e:
-                    logger.error(f"Failed to interpolate '{key}': {e}. Deleting.")
+                    logger.error(f"Interpolation failed: {e}")
                     del new_state_dict[key]
-            
-            elif new_action_dim == 2 * old_dim:
-                # Case: Action space expanded to Move + Attack (Level 7)
-                # Preserve existing 'Move' weights in the first half.
-                logger.info(f"Preserving move weights for '{key}': {old_dim} -> {new_action_dim} (2x expansion)")
-                
+                    
+            elif use_expansion and is_expansion:
+                logger.info(f"Expanding action blocks for '{key}': {old_dim} -> {new_action_dim}")
                 if len(old_weight.shape) == 2:
-                    # Weight: (N, features)
-                    old_dim_val, in_feat = old_weight.shape
+                    _, in_feat = old_weight.shape
                     new_w = torch.randn(new_action_dim, in_feat) * 0.01
-                    new_w[:old_dim, :] = old_weight
+                    new_w[:old_dim, :] = old_weight # Copy first block
                     new_state_dict[key] = new_w
                 elif len(old_weight.shape) == 1:
-                    # Bias: (N,)
                     new_b = torch.randn(new_action_dim) * 0.01
                     new_b[:old_dim] = old_weight
                     new_state_dict[key] = new_b
@@ -177,14 +157,7 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                     del new_state_dict[key]
             
             else:
-                # Dimensions changed but not strictly square-to-square (or scalar value net)
-                # If it's a scalar value net (1, features), keep it!
-                # If it's something else that mismatches, delete it.
-                if old_dim == 1: 
-                    # Probably value net scalar, keep it.
-                    continue 
-                
-                logger.info(f"Dropping incompatible layer '{key}': {old_dim} -> {new_action_dim} (Not spatial squares)")
+                logger.info(f"Dropping incompatible layer '{key}'")
                 del new_state_dict[key]
         
     return new_state_dict

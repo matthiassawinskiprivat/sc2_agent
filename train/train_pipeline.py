@@ -21,6 +21,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from train.envs.level_0_env import Level0Env
 from train.envs.level_3_env import Level3Env
 from train.envs.level_7_env import Level7Env
+from train.envs.level_drop_env import LevelDropEnv
 from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv as CaptureTheFlagEnv
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
@@ -29,10 +30,14 @@ from src.utils.sc2_cleanup import kill_switch_sc2
 from src.utils.model_utils import graft_model_weights
 from train.env_utils import EnvFactory, get_action_masks
 
+# Import Custom Network
+from src.agent.models.unit_control_network import UnitControlNetwork
+
 # Specialized Bots for Environment initialization
 from src.level_0_bot import Level0Bot
 from src.level_3_bot import Level3Bot
 from src.level_7_bot import Level7Bot
+from src.level_drop_bot import LevelDropBot
 from src.agent.ctf_bot import CaptureTheFlagBot
 
 # Environment Registry
@@ -40,7 +45,17 @@ ENV_REGISTRY = {
     "Level0Env": Level0Env,
     "Level3Env": Level3Env,
     "Level7Env": Level7Env,
+    "LevelDropEnv": LevelDropEnv,
     "CaptureTheFlagEnv": CaptureTheFlagEnv
+}
+
+# Bot Registry for environments that instantiate their own bot (Level0, Level3, Level7)
+BOT_REGISTRY = {
+    "Level0Env": Level0Bot,
+    "Level3Env": Level3Bot,
+    "Level7Env": Level7Bot,
+    "LevelDropEnv": LevelDropBot,
+    "CaptureTheFlagEnv": CaptureTheFlagBot
 }
 
 # Bot Registry for environments that instantiate their own bot (Level0, Level3, Level7)
@@ -199,6 +214,17 @@ class PipelineManager:
         num_envs = training_params["num_envs"]
         headless = env_params.get("headless", True)
         
+        # Resolve Policy Kwargs strings to classes
+        if "policy_kwargs" in model_params:
+            pk = model_params["policy_kwargs"]
+            if "features_extractor_class" in pk and isinstance(pk["features_extractor_class"], str):
+                class_path = pk["features_extractor_class"]
+                if class_path == "src.agent.models.unit_control_network.UnitControlNetwork":
+                    pk["features_extractor_class"] = UnitControlNetwork
+                else:
+                    # Generic resolver could be added here
+                    pass
+
         # Resolve Environment Class
         env_class_name = env_params.get("env_class", "Level0Env")
 
