@@ -1,0 +1,7 @@
+{
+  "id": "air_unit_unrestricted_movement_20260105",
+  "title": "Air Unit Unrestricted Movement and Attack",
+  "description": "Remove action masks for air units to allow movement and combat over unpathable terrain.",
+  "created_at": "2026-01-05",
+  "status": "in_progress"
+}

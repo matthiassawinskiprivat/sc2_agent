@@ -68,7 +68,7 @@ DETECTOR_RANGES = {
 
 class DataExtractorBot(BotAI):
     async def on_step(self, iteration):
-        client = getattr(self, "client", getattr(self, "_client", None))
+        client = self.client
         if not client: sys.exit(1)
 
         if iteration == 0: return
@@ -86,7 +86,7 @@ class DataExtractorBot(BotAI):
         if iteration == 10:
             print("Extracting COMPLETE Game Data...")
             game_data = await client.get_game_data()
-            radius_map = {u.type_id.value: u.radius for u in self.state.units}
+            radius_map = {u.type_id.value: u.radius for u in self.all_units}
             unit_db = {}
 
             WHITELIST = [

@@ -1,0 +1,8 @@
+{
+  "track_id": "capture_the_flag_20260102",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-01-02T23:05:00Z",
+  "updated_at": "2026-01-02T23:05:00Z",
+  "description": "Implementation of a Capture the Flag environment with self-play, resource-based spawning, and competitive rewards."
+}

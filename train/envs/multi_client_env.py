@@ -1,0 +1,244 @@
+import gymnasium as gym
+import asyncio
+import numpy as np
+from typing import Tuple, List, Dict, Any, Optional
+import random
+import time
+import os
+from pathlib import Path
+
+from src.utils.multi_client_manager import MultiClientSC2Manager
+from src.utils.config_manager import ConfigManager
+from sc2.player import Bot, Computer, AbstractPlayer
+from sc2.data import Race, Difficulty
+from sc2.maps import Map
+
+class MultiClientEnv(gym.Env):
+    """
+    Base environment for multi-client SC2 games.
+    Manages two SC2 processes and synchronizes their steps.
+    """
+    def __init__(self, map_name: str = "Simple64", visualize: bool = False, realtime: bool = False,
+                 level_name: str = "capture_the_flag", sc2_process_cls=None, client_cls=None,
+                 training_conf: Dict = None, worker_index: int = 0, num_workers: int = 1, 
+                 fullscreen: bool = False, **kwargs):
+        self.map_name = map_name
+        self.visualize = visualize
+        self.fullscreen = fullscreen
+        self.realtime = realtime
+        self.level_name = level_name
+        self.training_conf = training_conf or {}
+        self.worker_index = worker_index
+        self.num_workers = num_workers
+
+        # Load configuration manager
+        self.config_manager = ConfigManager("config")
+        
+        # Logging setup
+        import random
+        import os
+        self.worker_id = f"{random.randint(1000, 9999)}"
+        os.makedirs("logs", exist_ok=True)
+        self.log_file = f"logs/worker_{self.worker_id}.log"
+        self._log(f"Initialized MultiClient Worker {self.worker_id} (Index: {self.worker_index}) with map {self.map_name}")
+        
+        # Base layers from Level 0 (for logging context)
+        base_layers = self.config_manager.get_cumulative_active_layers("level_0")
+        cumulative_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
+        self._log(f"Observation layers: ({len(base_layers)}) -> ({len(cumulative_layers)}) via ConfigManager")
+
+        # Dependency Injection for testing
+        from sc2.sc2process import SC2Process
+        from sc2.client import Client
+        self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
+        self._client_cls = client_cls if client_cls else Client
+
+        self._manager = MultiClientSC2Manager(
+            sc2_process_cls=self._sc2_process_cls, 
+            client_cls=self._client_cls,
+            worker_index=self.worker_index
+        )
+        self._loop = asyncio.new_event_loop()
+
+        # Map discovery
+        self.map_list = self._discover_maps()
+        if self.map_list:
+            self.map_name = self.map_list[self.worker_index % len(self.map_list)]
+        else:
+            # Fallback to map_name if discovery fails
+            self.map_list = [self.map_name]
+            
+        # Placeholder spaces - should be defined by subclasses
+        self.observation_space = None
+        self.action_space = None
+        self.players: List[AbstractPlayer] = []
+        
+        # State tracking for graceful termination
+        self._last_obs: Optional[np.ndarray] = None
+        self.game_ended: bool = False
+
+    def _discover_maps(self):
+        from pathlib import Path
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Try to find maps in train/maps/<level_name>
+        maps_dir = Path(current_dir).parent / "maps" / self.level_name
+        if not maps_dir.exists():
+            return []
+        map_files = [f.stem for f in maps_dir.glob("*.SC2Map")]
+        map_files.sort()
+        return map_files
+
+    def _resolve_map(self, map_name):
+        from pathlib import Path
+        from sc2.maps import Map
+        import sc2
+        
+        # Try library maps first
+        try:
+            return sc2.maps.get(map_name)
+        except KeyError:
+            # Try project maps
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            map_path = Path(current_dir).parent / "maps" / self.level_name / f"{map_name}.SC2Map"
+            if not map_path.exists():
+                raise FileNotFoundError(f"Map not found: {map_path}")
+            return Map(map_path)
+
+    def _log(self, message):
+        # Print to stdout too so it gets captured by redirection
+        print(f"[Worker {self.worker_id}] {message}")
+        try:
+            with open(self.log_file, "a") as f:
+                import time
+                timestamp = time.strftime("%H:%M:%S")
+                f.write(f"[{timestamp}] {message}\n")
+        except:
+            pass
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self._log(f"reset() called (Level: {self.level_name})")
+        
+        # Ensure clean state
+        if self._manager.clients:
+             self._log("Cleaning up previous session...")
+             self.close()
+             
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        
+        try:
+            self._log("Launching SC2 processes...")
+            self._loop.run_until_complete(self._launch_sc2_processes())
+            self._log("Setting up game session...")
+            self._loop.run_until_complete(self._setup_game_session())
+            
+            # Initial observation
+            self._log("Getting initial observation...")
+            obs = self._loop.run_until_complete(self._get_joint_observation())
+            self._last_obs = obs
+            self.game_ended = False
+            self._log(f"reset() complete. Obs shape: {obs.shape if hasattr(obs, 'shape') else 'unknown'}")
+            return obs, {}
+        except Exception as e:
+            self._log(f"CRITICAL: Error during reset: {e}")
+            import traceback
+            self._log(traceback.format_exc())
+            self.close()
+            raise e
+
+    def step(self, actions: List[Any]):
+        """
+        Executes a synchronized step for both players.
+        actions: [action_p1, action_p2]
+        """
+        from sc2.protocol import ProtocolError
+        
+        if self.game_ended:
+             # Already ended, return terminal state with last known observation
+             return self._last_obs, 0.0, True, False, {"game_ended": True, "already_ended": True}
+
+        info = {}
+        try:
+            self._log(f"step() called with actions: {actions}")
+            results = self._loop.run_until_complete(self._async_step(actions))
+            obs, reward, terminated, truncated, info = results
+            
+            # Cache observation
+            self._last_obs = obs
+            
+            if terminated or truncated:
+                self.game_ended = True
+                
+            self._log("step() complete.")
+            return results
+        except ProtocolError as e:
+            if "Game has already ended" in str(e):
+                self._log("ProtocolError: Game ended during step. Transitioning to terminal state.")
+                self.game_ended = True
+                
+                # Terminal hook for subclasses to inject rewards/info
+                reward, terminal_info = self._get_terminal_info(str(e))
+                info.update(terminal_info)
+                info["game_ended"] = True
+                
+                return self._last_obs, reward, True, False, info
+            
+            self._log(f"CRITICAL: ProtocolError during step: {e}")
+            self.close()
+            raise e
+        except Exception as e:
+            self._log(f"CRITICAL: Error during step: {e}")
+            import traceback
+            self._log(traceback.format_exc())
+            self.close()
+            raise e
+
+    async def _launch_sc2_processes(self):
+        await self._manager.launch_processes(count=2, visualize=self.visualize, fullscreen=self.fullscreen)
+
+    async def _setup_game_session(self):
+        # Must be implemented by subclass to define players/bots
+        pass
+
+    async def _async_step(self, actions: List[Any]):
+        # 1. Distribute actions
+        if len(actions) != 2:
+            raise ValueError("Expected 2 actions for 2 players")
+            
+        await self._apply_actions(actions)
+        
+        # 2. Step physics
+        await asyncio.gather(
+            self._manager.host_client.step(),
+            self._manager.join_client.step()
+        )
+        
+        # 3. Get results
+        return await self._get_step_results()
+
+    async def _apply_actions(self, actions):
+        # Override in subclass
+        pass
+
+    async def _get_joint_observation(self):
+        # Override in subclass to return the learning agent's observation
+        return None
+
+    async def _get_step_results(self):
+        # Override in subclass
+        obs = await self._get_joint_observation()
+        return obs, 0.0, False, False, {}
+
+    def _get_terminal_info(self, error_msg: str) -> Tuple[float, Dict]:
+        """
+        Subclasses should override this to determine final rewards/winner 
+        when the game ends unexpectedly (e.g. ProtocolError).
+        """
+        return 0.0, {"error": error_msg}
+
+    def close(self):
+        if self._loop and not self._loop.is_closed():
+            self._loop.run_until_complete(self._manager.close())
+            self._loop.close()

@@ -41,7 +41,7 @@ class SharedObservationTransformer:
             observation_id: Unique identifier for the observation (for caching)
             
         Returns:
-            Transformed observation [6×H×W] for all 6 core layers
+            Transformed observation [NxHxW] for configured layers
         """
         # Check if this is a new observation
         if observation_id is not None and observation_id == self.last_observation_id:
@@ -55,13 +55,15 @@ class SharedObservationTransformer:
         return self.transformed_observation
 
     def get_full_layer_stack(self) -> Optional[np.ndarray]:
-        """Get the full stack of all 6 layers"""
+        """Get the full stack of all configured layers"""
         return self.transformed_observation
 
     def get_layer_by_index(self, index: int) -> Optional[np.ndarray]:
-        """Get a specific layer by index (0-5)"""
-        if self.transformed_observation is not None and 0 <= index < 6:
-            return self.transformed_observation[index]
+        """Get a specific layer by index"""
+        if self.transformed_observation is not None:
+            num_layers = self.transformed_observation.shape[0]
+            if 0 <= index < num_layers:
+                return self.transformed_observation[index]
         return None
 
     def get_multiple_layers(self, indices: List[int]) -> Optional[np.ndarray]:
@@ -69,7 +71,8 @@ class SharedObservationTransformer:
         if self.transformed_observation is None:
             return None
 
-        valid_indices = [idx for idx in indices if 0 <= idx < 6]
+        num_layers = self.transformed_observation.shape[0]
+        valid_indices = [idx for idx in indices if 0 <= idx < num_layers]
         if not valid_indices:
             return None
 

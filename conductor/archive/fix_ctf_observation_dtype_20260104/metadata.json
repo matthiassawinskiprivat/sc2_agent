@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_ctf_observation_dtype_20260104",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-04T12:31:00Z",
+  "updated_at": "2026-01-04T12:31:00Z",
+  "description": "Fix bug where observations are returned as float32 [0, 1] instead of uint8 [0, 255], effectively blinding the agent."
+}

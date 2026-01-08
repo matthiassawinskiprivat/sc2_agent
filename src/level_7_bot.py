@@ -335,8 +335,22 @@ class Level7Bot(Level3Bot):
         # Get the base move mask from the agent system
         move_mask = super().action_masks()
         
+        # AIR UNIT BYPASS: If unit is flying, it can move anywhere (ignore pathing)
+        # We need to find which unit is currently being 'asked' for an action.
+        # In Level 7, this is driven by self.current_unit_index in the Env.
+        # However, the bot can check its own state if we provide a hint.
+        # For now, let's check if the first active unit is flying (as a heuristic for single-type levels)
+        # OR if we have a current_unit_tag hint (to be added to envs).
+        active_units = self.get_active_units()
+        
+        # If the environment has a current_unit_index, use it
+        idx = getattr(self, "current_unit_index", 0)
+        if 0 <= idx < len(active_units):
+            if active_units[idx].is_flying:
+                move_mask = np.ones_like(move_mask, dtype=bool)
+
         # For Level 7, we want 2 * GridSize^2
-        # Move mask (first half) is restricted by pathing.
+        # Move mask (first half) is restricted by pathing (unless flying).
         # Attack mask (second half) is unmasked to allow Attack-Move to any location.
         attack_mask = np.ones_like(move_mask, dtype=bool)
         

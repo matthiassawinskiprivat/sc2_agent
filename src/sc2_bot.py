@@ -151,7 +151,19 @@ class SC2Bot(BotAI):
 
     def _get_observation(self) -> Tuple[np.ndarray, Dict]:
         self.zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None
-        self.beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first if self.units(UnitTypeId.BEACON_TERRANSMALL).exists else None
+        
+        # Flexibly find beacon
+        self.beacon = None
+        if self.units(UnitTypeId.BEACON_TERRANSMALL).exists:
+            self.beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first
+        elif self.structures(UnitTypeId.BEACON_TERRANSMALL).exists:
+            self.beacon = self.structures(UnitTypeId.BEACON_TERRANSMALL).first
+        elif self.enemy_units(UnitTypeId.BEACON_TERRANSMALL).exists:
+            self.beacon = self.enemy_units(UnitTypeId.BEACON_TERRANSMALL).first
+        elif self.enemy_structures(UnitTypeId.PYLON).exists:
+            self.beacon = self.enemy_structures(UnitTypeId.PYLON).first
+        elif self.structures(UnitTypeId.PYLON).exists:
+             self.beacon = self.structures(UnitTypeId.PYLON).first
 
         # Initialize previous_distance on first observation if zergling and beacon are present
         if self.previous_distance is None and self.zergling and self.beacon:

@@ -20,7 +20,7 @@ from sc2.player import Bot, Computer
 from sc2.protocol import ConnectionAlreadyClosed, ProtocolError, Protocol
 from sc2.sc2process import SC2Process
 
-from src.sc2_bot import SC2Bot
+from src.level_0_bot import Level0Bot
 from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.config_manager import ConfigManager
 from src.utils.layer_constants import LayerConstants
@@ -206,11 +206,11 @@ class Level0Env(gym.Env):
 
         game_map = self._resolve_map(self.map_name)
         if self._bot is None:
-            self._log("Creating SC2Bot...")
+            self._log("Creating Level0Bot...")
             class DummyConn:
                 def send(self, data): pass
                 def recv(self): return "continue", None
-            self._bot = SC2Bot(conn=DummyConn(), training_conf=self.training_conf)
+            self._bot = Level0Bot(conn=DummyConn(), training_conf=self.training_conf)
             self._bot.distance_calculation_method = 2
             self._bot.grid_size = self.grid_size
 

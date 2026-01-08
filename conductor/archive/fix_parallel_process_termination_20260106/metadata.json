@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_parallel_process_termination_20260106",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-06T18:47:00Z",
+  "updated_at": "2026-01-06T18:47:00Z",
+  "description": "Prevent system-wide SC2 process termination during per-episode environment resets, allowing parallel training to continue across episode boundaries."
+}

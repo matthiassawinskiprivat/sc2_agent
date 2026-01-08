@@ -1,0 +1,8 @@
+{
+  "track_id": "enable_num_envs_ctf_20260106",
+  "type": "feat",
+  "status": "new",
+  "created_at": "2026-01-06T17:07:00Z",
+  "updated_at": "2026-01-06T17:07:00Z",
+  "description": "Enable parallel training (num_envs > 1) for Capture the Flag environments."
+}

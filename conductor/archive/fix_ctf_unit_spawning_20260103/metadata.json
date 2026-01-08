@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_ctf_unit_spawning_20260103",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-03T23:10:00Z",
+  "updated_at": "2026-01-03T23:10:00Z",
+  "description": "Fix bug in CTF unit spawning where only a subset of configured units appear due to config key mismatches and incomplete unit cost data."
+}

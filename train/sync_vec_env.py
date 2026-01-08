@@ -71,4 +71,4 @@ class SyncVecEnv(VecEnv):
         return [isinstance(env_i, wrapper_class) for env_i in target_envs]
     
     def get_action_masks(self) -> np.ndarray:
-        return np.stack([env.action_masks() for env in self.envs])
+        return np.stack([env.action_masks() for env in self.envs]).astype(bool)

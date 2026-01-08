@@ -2,10 +2,12 @@ import sys
 import os
 import glob
 import yaml
+from typing import List, Any
 from loguru import logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from sb3_contrib import MaskablePPO
+from sb3_contrib.common.wrappers.action_masker import ActionMasker
 import torch
 
 # Disable distribution validation to avoid Simplex errors with MaskablePPO
@@ -19,17 +21,34 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from train.envs.level_0_env import Level0Env
 from train.envs.level_3_env import Level3Env
 from train.envs.level_7_env import Level7Env
+from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv as CaptureTheFlagEnv
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
 from src.utils.watchdog import Watchdog
 from src.utils.sc2_cleanup import kill_switch_sc2
 from src.utils.model_utils import graft_model_weights
+from train.env_utils import EnvFactory, get_action_masks
+
+# Specialized Bots for Environment initialization
+from src.level_0_bot import Level0Bot
+from src.level_3_bot import Level3Bot
+from src.level_7_bot import Level7Bot
+from src.agent.ctf_bot import CaptureTheFlagBot
 
 # Environment Registry
 ENV_REGISTRY = {
     "Level0Env": Level0Env,
     "Level3Env": Level3Env,
-    "Level7Env": Level7Env
+    "Level7Env": Level7Env,
+    "CaptureTheFlagEnv": CaptureTheFlagEnv
+}
+
+# Bot Registry for environments that instantiate their own bot (Level0, Level3, Level7)
+BOT_REGISTRY = {
+    "Level0Env": Level0Bot,
+    "Level3Env": Level3Bot,
+    "Level7Env": Level7Bot,
+    "CaptureTheFlagEnv": CaptureTheFlagBot
 }
 
 # Directories
@@ -65,6 +84,20 @@ class MaskableSubprocVecEnv(SubprocVecEnv):
         logger.debug("MaskableSubprocVecEnv: get_action_masks() completed.")
         return masks
 
+    def get_attr(self, attr_name: str, indices = None) -> List[Any]:
+        """
+        Return attribute from vectorized environment.
+        Intersects 'action_masks' to avoid pickling bound methods from workers.
+        """
+        if attr_name == "action_masks":
+            # SB3's is_masking_supported() only checks if the attribute exists.
+            # We return a dummy picklable value directly from the main process.
+            # The actual logic remains in the action_masks() method called via env_method.
+            target_remotes = self._get_target_remotes(indices)
+            return [True for _ in target_remotes]
+            
+        return super().get_attr(attr_name, indices)
+
     def step_wait(self) -> VecEnvStepReturn:
         logger.debug("MaskableSubprocVecEnv: step_wait() waiting for workers...")
         results = super().step_wait()
@@ -82,6 +115,10 @@ class MaskableSubprocVecEnv(SubprocVecEnv):
             # We don't re-raise here if we want the higher level to handle it, 
             # but usually it's better to re-raise with a better message.
             raise e
+
+class MaskableSyncVecEnv(SyncVecEnv):
+    def get_action_masks(self) -> np.ndarray:
+        return np.stack(self.env_method("action_masks")).astype(bool)
 
 class PipelineManager:
     """
@@ -161,19 +198,22 @@ class PipelineManager:
         # 2. Create Vectorized Environment
         num_envs = training_params["num_envs"]
         headless = env_params.get("headless", True)
+        
+        # Resolve Environment Class
+        env_class_name = env_params.get("env_class", "Level0Env")
 
         # Use MaskableSubprocVecEnv for parallel training if num_envs > 1 and headless
         if not headless:
             logger.warning("Running in non-headless mode. Forcing num_envs=1.")
             num_envs = 1
-            vec_env_cls = SyncVecEnv
-        else:
+            vec_env_cls = MaskableSyncVecEnv
+        elif num_envs > 1:
             vec_env_cls = MaskableSubprocVecEnv
+        else:
+            vec_env_cls = MaskableSyncVecEnv
         
         logger.info(f"Creating {num_envs} environment(s) for level '{level_name}' using {vec_env_cls.__name__}...")
 
-        # Resolve Environment Class
-        env_class_name = env_params.get("env_class", "Level0Env")
         EnvClass = ENV_REGISTRY.get(env_class_name)
         
         if EnvClass is None:
@@ -189,29 +229,15 @@ class PipelineManager:
         combined_conf.update(env_params)
 
         # For SubprocVecEnv, we need to pass a list of callables that return the env
-        def make_env(rank):
-            def _init():
-                return Monitor(
-                    EnvClass(
-                        level_name=level_name,
-                        visualize=not headless,
-                        grid_size=env_params["grid_size"],
-                        worker_index=rank,
-                        num_workers=num_envs,
-                        sc2_process_cls=self.sc2_process_cls,
-                        client_cls=self.client_cls,
-                        training_conf=combined_conf,
-                        max_steps=env_params.get("max_steps", 300)
-                    )
-                )
-            return _init
-
-        env_fns = [make_env(i) for i in range(num_envs)]
+        env_fns = [
+            EnvFactory(
+                EnvClass, level_name, not headless, env_params["grid_size"], i, num_envs,
+                self.sc2_process_cls, self.client_cls, combined_conf, env_params.get("max_steps", 300)
+            )
+            for i in range(num_envs)
+        ]
         
-        if vec_env_cls == SyncVecEnv:
-             # SyncVecEnv expects list of lambdas that call Monitor(Env) directly, 
-             # but our make_env returns a function that returns the env. 
-             # SyncVecEnv usually calls fn() to get the env.
+        if vec_env_cls == MaskableSyncVecEnv:
              env = vec_env_cls(env_fns)
         else:
              # SubprocVecEnv also expects list of functions

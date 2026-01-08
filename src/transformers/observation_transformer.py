@@ -76,9 +76,12 @@ class ObservationTransformer:
         total_layers = LayerConstants.get_num_layers()
         layers = np.zeros((total_layers, self.feature_map_height, self.feature_map_width), dtype=np.float32)
 
-        allied_units = raw_obs.get('units', [])
-        enemy_units = raw_obs.get('enemy_units', [])
-        effects = raw_obs.get('effects', [])
+        allied_units = raw_obs.get('units') or []
+        enemy_units = raw_obs.get('enemy_units') or []
+        allied_structures = raw_obs.get('structures') or []
+        enemy_structures = raw_obs.get('enemy_structures') or []
+        effects = raw_obs.get('effects') or []
+        
         game_info = raw_obs.get('game_info')
         game_data = raw_obs.get('game_data')
 
@@ -118,14 +121,15 @@ class ObservationTransformer:
         self._draw_terrain_creep(raw_obs, layers)
 
         # ------------------------------------------------------------------
-        # 3. Draw Units
+        # 3. Draw Units & Structures
         # ------------------------------------------------------------------
         self._liberator_positions = {'allied': [], 'enemy': []}
 
         lib_enum = getattr(UnitTypeId, 'LIBERATORAG', 154)
         lib_val = lib_enum.value if hasattr(lib_enum, "value") else 154
 
-        for unit in allied_units:
+        # Allied Units + Structures
+        for unit in list(allied_units) + list(allied_structures):
             u_name = getattr(unit.type_id, "name", None)
             if u_name and "MINERAL" in u_name.upper(): continue
 
@@ -135,7 +139,8 @@ class ObservationTransformer:
             if u_id == lib_val:
                 self._liberator_positions['allied'].append(unit.position)
 
-        for unit in enemy_units:
+        # Enemy Units + Structures
+        for unit in list(enemy_units) + list(enemy_structures):
             u_name = getattr(unit.type_id, "name", None)
             if u_name and "MINERAL" in u_name.upper(): continue
 
@@ -157,12 +162,20 @@ class ObservationTransformer:
         self._draw_command_info(raw_obs, layers)
 
         # ------------------------------------------------------------------
-        # 6. Normalize
+        # 6. Normalize & Scale to uint8 [0, 255]
         # ------------------------------------------------------------------
         dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
+        
+        # Apply non-linear compression to intensities
         layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
         layers[0:dps_start] = np.log1p(layers[0:dps_start])
+        
+        # Centralized Scaling: Transform float32 [0, 1+] to uint8 [0, 255]
+        # We clip to [0, 1] for layers that should be normalized (like health, density)
+        # Note: log1p can exceed 1.0, so we clip at 1.0 before scaling to 255
+        # This ensures maximum intensity for any significant presence.
+        layers = np.clip(layers * 255.0, 0, 255.0).astype(np.uint8)
 
         if self.active_layers:
             # Extract indices for active layers

@@ -1,0 +1,8 @@
+{
+  "track_id": "single_process_ctf_refactor_20260103",
+  "type": "refactor",
+  "status": "new",
+  "created_at": "2026-01-03T17:35:00Z",
+  "updated_at": "2026-01-03T17:35:00Z",
+  "description": "Refactor the 'capture the flag' environment to a single-process architecture to fix num_envs scaling and improve stability."
+}
