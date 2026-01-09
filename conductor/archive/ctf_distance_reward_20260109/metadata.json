@@ -1,0 +1,8 @@
+{
+  "track_id": "ctf_distance_reward_20260109",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-01-09T20:51:00Z",
+  "updated_at": "2026-01-09T20:51:00Z",
+  "description": "Add a distance reward to the capture the flag environment. The reward should be positive going closer to the enemy pylon and negative when going away from it. It should also have a configuration parameter. It should work similar to level 0 environment, but with the pylon instead of beacon. The distance reward is added to the other rewards."
+}

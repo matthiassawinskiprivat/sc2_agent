@@ -25,7 +25,7 @@ class CaptureTheFlagBot(BotAI):
         self.agent_system: Optional[HierarchicalAgentSystem] = None
         
         self.active_unit_tag: Optional[int] = None
-        self.command_targets: Dict[int, Optional[Point2]] = {1: None, 2: None}
+        self.enemy_pylon_pos: Dict[int, Optional[Point2]] = {1: None, 2: None}
         
         # Asymmetric Self-Play attributes
         self.is_trainee = True # Default to trainee
@@ -79,7 +79,12 @@ class CaptureTheFlagBot(BotAI):
             enemy_structures = self.structures
 
         enemy_pylon = enemy_structures(UnitTypeId.PYLON).first if enemy_structures(UnitTypeId.PYLON).exists else None
-        target_pos = enemy_pylon.position if enemy_pylon else self.command_targets[p_id]
+        
+        # Persistent Pylon tracking: update last known position if visible
+        if enemy_pylon:
+            self.enemy_pylon_pos[p_id] = enemy_pylon.position
+            
+        target_pos = self.enemy_pylon_pos[p_id]
         
         selected_units = []
         if self.active_unit_tag:
@@ -209,8 +214,6 @@ class CaptureTheFlagBot(BotAI):
             self.do(unit.attack(target))
         else:
             self.do(unit.move(target))
-            
-        self.command_targets[unit.owner_id] = target
 
     def calculate_reward(self, perspective_player_id: Optional[int] = None) -> float:
         """
