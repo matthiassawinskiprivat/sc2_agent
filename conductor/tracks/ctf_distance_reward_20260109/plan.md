@@ -21,7 +21,7 @@ This plan implements a distance-based reward signal for units in the Capture the
 - [x] Task: Verify that all tests in `tests/test_ctf_distance_reward.py` now pass (Green Phase). 82bcccd
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Core Implementation' (Protocol in workflow.md) b372285
 
-## Phase 3: Integration & Quality Assurance
-- [ ] Task: Run existing CTF integration tests (e.g., `tests/test_capture_the_flag_env.py`) to ensure no regressions.
-- [ ] Task: Perform a final code review to ensure comments and documentation (especially for RL learning purposes) are clear.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration & Quality Assurance' (Protocol in workflow.md)
+## Phase 3: Integration & Quality Assurance [checkpoint: 2d225f4]
+- [x] Task: Run existing CTF integration tests (e.g., `tests/test_capture_the_flag_env.py`) to ensure no regressions. 82bcccd (Verified that existing failures in `test_capture_the_flag_env_flow.py` were pre-existing)
+- [x] Task: Perform a final code review to ensure comments and documentation (especially for RL learning purposes) are clear. 82bcccd
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Integration & Quality Assurance' (Protocol in workflow.md) 2d225f4
