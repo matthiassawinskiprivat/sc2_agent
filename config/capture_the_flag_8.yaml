@@ -20,6 +20,7 @@ env:
   max_steps: 3000
   maps_dir: "train/maps/level_3" # Use large open maps
   rewards:
+    distance_multiplier: 0.25
     win_reward: 50.0
     loss_penalty: -50.0
     draw_penalty: -20.0
