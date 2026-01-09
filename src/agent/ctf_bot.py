@@ -39,6 +39,7 @@ class CaptureTheFlagBot(BotAI):
         self.prev_enemy_units_health = {1: 0.0, 2: 0.0}
         self.prev_own_units_health = {1: 0.0, 2: 0.0}
         self.prev_dist_to_pylon = {1: None, 2: None}
+        self.prev_dist_per_unit: Dict[int, Optional[float]] = {}
         
         self.frame_count = 0
         self.cached_observation: Optional[np.ndarray] = None
@@ -278,18 +279,30 @@ class CaptureTheFlagBot(BotAI):
         self.prev_own_units_health[p_id] = curr_own_hp
 
         # 3. Progress Rewards (Distance to enemy pylon)
-        # We reward the ACTIVE unit for getting closer to its perspective-correct target
+        # We reward the ACTIVE unit for getting closer to its perspective-correct target.
+        # This provides a 'dense' reward signal that guides the agent toward the objective
+        # even when it's not currently damaging the pylon.
         if self.active_unit_tag:
             active_unit = self.all_units.find_by_tag(self.active_unit_tag)
             
             if active_unit and enemy_pylon:
                 curr_dist = active_unit.distance_to(enemy_pylon)
-                if self.prev_dist_to_pylon[p_id] is not None:
-                    # Reward for progress
-                    dist_change = self.prev_dist_to_pylon[p_id] - curr_dist
+                
+                # Check if we have a previous distance for THIS SPECIFIC unit
+                prev_dist = self.prev_dist_per_unit.get(self.active_unit_tag)
+                
+                if prev_dist is not None:
+                    # Reward for progress: positive if distance decreased, negative if it increased.
+                    # This is a classic 'potential-based' or 'shaping' reward in RL.
+                    dist_change = prev_dist - curr_dist
                     reward += dist_change * r_conf.get("distance_multiplier", 0.1)
-                self.prev_dist_to_pylon[p_id] = curr_dist
+                
+                # Update the persistent distance baseline for this unit
+                self.prev_dist_per_unit[self.active_unit_tag] = curr_dist
             else:
-                self.prev_dist_to_pylon[p_id] = None
+                # If unit or target is lost, clear the baseline to avoid massive 
+                # erratic rewards when the unit/pylon respawns or is re-targeted.
+                if self.active_unit_tag in self.prev_dist_per_unit:
+                    del self.prev_dist_per_unit[self.active_unit_tag]
 
         return reward
