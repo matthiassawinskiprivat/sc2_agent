@@ -12,14 +12,14 @@ This plan implements a distance-based reward signal for units in the Capture the
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Test Foundations' (Protocol in workflow.md) c1e0186
 
 ## Phase 2: Core Implementation
-- [ ] Task: Update `CaptureTheFlagBot.__init__` in `src/agent/ctf_bot.py` to initialize a `prev_dist_per_unit` dictionary for tracking.
-- [ ] Task: Modify `CaptureTheFlagBot.calculate_reward` to:
+- [x] Task: Update `CaptureTheFlagBot.__init__` in `src/agent/ctf_bot.py` to initialize a `prev_dist_per_unit` dictionary for tracking. 82bcccd
+- [x] Task: Modify `CaptureTheFlagBot.calculate_reward` to: 82bcccd
     - Retrieve the active unit's distance to the enemy pylon.
     - Calculate reward based on `distance_multiplier` and distance delta.
     - Persist the new distance for that specific unit tag.
-- [ ] Task: Update `config/capture_the_flag_0.yaml` (and other CTF configs if applicable) to include `distance_multiplier: 0.1` in the `rewards` section.
-- [ ] Task: Verify that all tests in `tests/test_ctf_distance_reward.py` now pass (Green Phase).
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Core Implementation' (Protocol in workflow.md)
+- [x] Task: Update `config/capture_the_flag_0.yaml` (and other CTF configs if applicable) to include `distance_multiplier: 0.1` in the `rewards` section. 82bcccd
+- [x] Task: Verify that all tests in `tests/test_ctf_distance_reward.py` now pass (Green Phase). 82bcccd
+- [~] Task: Conductor - User Manual Verification 'Phase 2: Core Implementation' (Protocol in workflow.md)
 
 ## Phase 3: Integration & Quality Assurance
 - [ ] Task: Run existing CTF integration tests (e.g., `tests/test_capture_the_flag_env.py`) to ensure no regressions.
