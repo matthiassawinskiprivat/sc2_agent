@@ -2,14 +2,14 @@
 
 This plan implements a distance-based reward signal for units in the Capture the Flag environment, encouraging them to approach the enemy pylon.
 
-## Phase 1: Test Foundations (TDD)
+## Phase 1: Test Foundations (TDD) [checkpoint: c1e0186]
 - [x] Task: Create unit tests in `tests/test_ctf_distance_reward.py` to validate reward logic: 1b367ea
     - Test forward progress (positive reward).
     - Test retreating (negative reward).
     - Test multi-unit isolation (Unit A's movement shouldn't affect Unit B's baseline).
     - Test configuration scaling via `distance_multiplier`.
 - [x] Task: Run the new tests and confirm they fail (Red Phase). 1b367ea
-- [~] Task: Conductor - User Manual Verification 'Phase 1: Test Foundations' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Test Foundations' (Protocol in workflow.md) c1e0186
 
 ## Phase 2: Core Implementation
 - [ ] Task: Update `CaptureTheFlagBot.__init__` in `src/agent/ctf_bot.py` to initialize a `prev_dist_per_unit` dictionary for tracking.
