@@ -8,7 +8,7 @@ This plan removes the early termination condition when the trainee (Player 1) lo
 - [x] Task: Run updated tests and confirm they fail against current implementation. 1ec6c63
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Test Updates' (Protocol in workflow.md) 50b0fff
 
-## Phase 2: Implementation
+## Phase 2: Implementation [checkpoint: 73be9a9]
 - [x] Task: Modify `CaptureTheFlagEnv._check_termination` in `train/envs/capture_the_flag_env.py`. 4a5dec8
 - [x] Task: Modify `CaptureTheFlagSingleEnv._async_step` in `train/envs/capture_the_flag_single_env.py`. 4a5dec8
 - [x] Task: Modify `CaptureTheFlagSelfPlayEnv._calculate_final_p1_reward` in `train/envs/capture_the_flag_self_play_env.py`. 4a5dec8
