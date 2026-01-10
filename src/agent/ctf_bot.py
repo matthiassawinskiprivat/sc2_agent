@@ -239,25 +239,47 @@ class CaptureTheFlagBot(BotAI):
 
         pylon_type = UnitTypeId.PYLON
         
-        # 1. Pylon Damage Rewards (Terminal/Heavy signal)
-        def get_hp(pylon):
-            if not pylon: return 0.0
-            return pylon.health + pylon.shield
-
-        own_pylon = own_structs(pylon_type).first if own_structs(pylon_type).exists else None
+        # Resolve Enemy Pylon State
         enemy_pylon = enemy_structs(pylon_type).first if enemy_structs(pylon_type).exists else None
         
-        own_pylon_hp = get_hp(own_pylon)
-        enemy_pylon_hp = get_hp(enemy_pylon)
+        # Update persistent position if currently visible
+        if enemy_pylon:
+            self.enemy_pylon_pos[p_id] = enemy_pylon.position
+            
+        target_pos = self.enemy_pylon_pos.get(p_id)
+
+        # 1. Pylon Damage Rewards (Terminal/Heavy signal)
+        def get_enemy_hp_safe(pylon_unit, last_hp, target_position):
+            if pylon_unit:
+                return pylon_unit.health + pylon_unit.shield
+            
+            # If unit is missing, check visibility of its position
+            if target_position and self.is_visible(target_position):
+                # We see the position, but no unit -> IT IS DEAD
+                return 0.0
+            
+            # Not visible -> Assume unchanged (Fog of War)
+            return last_hp
+
+        def get_own_hp(pylon_unit):
+            # We always have info on our own units
+            if not pylon_unit: return 0.0
+            return pylon_unit.health + pylon_unit.shield
+
+        own_pylon = own_structs(pylon_type).first if own_structs(pylon_type).exists else None
+        
+        own_pylon_hp = get_own_hp(own_pylon)
+        
+        own_global_idx = p_id
+        enemy_global_idx = 2 if p_id == 1 else 1
+        
+        enemy_pylon_hp = get_enemy_hp_safe(enemy_pylon, self.prev_pylon_health[enemy_global_idx], target_pos)
         
         # Track global pylon health by persistent player ID (1 or 2)
         p1_pylon_hp = own_pylon_hp if p_id == 1 else enemy_pylon_hp
         p2_pylon_hp = enemy_pylon_hp if p_id == 1 else own_pylon_hp
         
         curr_pylon_hp_map = {1: p1_pylon_hp, 2: p2_pylon_hp}
-        
-        own_global_idx = p_id
-        enemy_global_idx = 2 if p_id == 1 else 1
         
         # Pylon Damage Rewards (Signal for acting player)
         if curr_pylon_hp_map[enemy_global_idx] < self.prev_pylon_health[enemy_global_idx]:
@@ -288,8 +310,9 @@ class CaptureTheFlagBot(BotAI):
         if self.active_unit_tag:
             active_unit = self.all_units.find_by_tag(self.active_unit_tag)
             
-            if active_unit and enemy_pylon:
-                curr_dist = active_unit.distance_to(enemy_pylon)
+            # Use persistent target_pos to guide agent even if Pylon is in Fog of War
+            if active_unit and target_pos:
+                curr_dist = active_unit.distance_to(target_pos)
                 
                 # Check if we have a previous distance for THIS SPECIFIC unit
                 prev_dist = self.prev_dist_per_unit.get(self.active_unit_tag)
