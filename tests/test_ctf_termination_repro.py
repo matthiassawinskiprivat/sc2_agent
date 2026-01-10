@@ -32,7 +32,7 @@ def test_termination_with_empty_army():
         env.bot1.all_units = env.bot1.units
         
         done, truncated, reward = env._check_termination()
-        assert done is True, "Game should terminate when trainee units are empty"
+        assert done is False, "Game should NOT terminate when trainee units are empty"
 
 def test_termination_with_larva_only():
     """Reproduce: Trainee has only larva, should it terminate?"""
@@ -54,7 +54,7 @@ def test_termination_with_larva_only():
         env.bot1.player_id = 1
         
         done, truncated, reward = env._check_termination()
-        assert done is True, "Game should terminate if only non-combat units (like Larvae) remain"
+        assert done is False, "Game should NOT terminate if only non-combat units (like Larvae) remain"
 
 def test_termination_with_structures_only():
     """Reproduce: Trainee has only structures, should terminate."""
@@ -76,7 +76,7 @@ def test_termination_with_structures_only():
         env.bot1.player_id = 1
         
         done, truncated, reward = env._check_termination()
-        assert done is True, "Game should terminate when only structures remain"
+        assert done is False, "Game should NOT terminate when only structures remain"
 
 def test_termination_with_egg_only():
     """Reproduce: Trainee has only eggs, should terminate."""
@@ -98,7 +98,7 @@ def test_termination_with_egg_only():
         env.bot1.player_id = 1
         
         done, truncated, reward = env._check_termination()
-        assert done is True, "Game should terminate if only non-combat units (like Eggs) remain"
+        assert done is False, "Game should NOT terminate if only non-combat units (like Eggs) remain"
 
 def test_continuation_with_opponent_army_lost():
     """Verify that if ONLY the opponent army is lost, the game continues."""
@@ -158,8 +158,8 @@ async def test_step_applies_loss_penalty():
         
         obs, reward, done, truncated, info = await env._async_step(0)
         
-        assert done is True
-        assert reward == loss_val
+        assert done is False, "Should NOT terminate on army loss"
+        assert reward == 0.0, "Should NOT apply loss penalty on army loss"
 
 def test_termination_p1_pylon_lost():
     """Verify that if P1 pylon is lost, game ends."""
