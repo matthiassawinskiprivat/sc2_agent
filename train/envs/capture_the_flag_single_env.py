@@ -315,13 +315,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             # Mutual Destruction of Armies -> Draw
             done = True
             reward += draw_penalty
-        elif p1_army_lost:
-             # Trainee lost all units -> Early termination (asymmetric)
-            done = True
-            if acting_player_id == 1:
-                reward += loss_penalty # Trainee realizes they lost
-            else:
-                reward += win_reward # Opponent won
         
         # 3. Check for Draw (Mutual Destruction)
         await self._refresh_unit_lists()

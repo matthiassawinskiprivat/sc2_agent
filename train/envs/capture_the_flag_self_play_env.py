@@ -93,8 +93,6 @@ class CaptureTheFlagSelfPlayEnv(CaptureTheFlagSingleEnv):
         if p1_lost: return loss_penalty
         if p2_lost: return win_reward
         if p1_army_lost and p2_army_lost: return draw_penalty
-        if p1_army_lost: return loss_penalty
-        if p2_army_lost: return win_reward
         if truncated: return draw_penalty
         
         return 0.0

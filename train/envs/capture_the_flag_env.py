@@ -421,11 +421,12 @@ class CaptureTheFlagEnv(MultiClientEnv):
         trainee_pylon_dead = p1_pylon_dead if self.bot1.is_trainee else p2_pylon_dead
         opponent_pylon_dead = p2_pylon_dead if self.bot1.is_trainee else p1_pylon_dead
         
-        # ASYMMETRIC LOSS: If trainee has no combat units left, terminate immediately
+        # ARMY LOSS: Check if both armies are gone (Mutual Destruction -> Draw)
         trainee_army_lost = not self._has_combat_units(trainee_bot)
+        opponent_army_lost = not self._has_combat_units(opponent_bot)
         
         win_reward = self.training_conf.get("rewards", {}).get("win_reward", 100.0)
-        loss_penalty = self.training_conf.get("rewards", {}).get("loss_penalty", -win_reward)
+        draw_penalty = self.training_conf.get("rewards", {}).get("draw_penalty", -win_reward * 0.1) # Default -10
         
         reward_delta = 0.0
         done = False
@@ -433,15 +434,18 @@ class CaptureTheFlagEnv(MultiClientEnv):
         if trainee_pylon_dead:
             done = True
             reward_delta -= win_reward
-        elif trainee_army_lost:
-            # Trainee lost all units -> Early termination (asymmetric)
-            done = True
-            reward_delta += loss_penalty 
         elif opponent_pylon_dead:
             done = True
             reward_delta += win_reward
+        elif trainee_army_lost and opponent_army_lost:
+            # Mutual destruction of both armies -> Game ends in a Draw
+            done = True
+            reward_delta += draw_penalty
             
         truncated = self.steps_count >= self.max_steps
+        if truncated and not done:
+            reward_delta += draw_penalty
+            
         return done, truncated, reward_delta
 
 

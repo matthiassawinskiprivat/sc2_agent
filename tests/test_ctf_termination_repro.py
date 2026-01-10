@@ -14,8 +14,13 @@ class RealMockUnit:
         self.health = health
         self.is_memory = False
 
+def mock_bot_with_units(bot, units_list):
+    bot.units = Units(units_list, bot)
+    bot.all_units = bot.units
+    return bot
+
 def test_termination_with_empty_army():
-    """Reproduce: Trainee army is empty, should terminate."""
+    """Reproduce: Trainee army is empty, should NOT terminate."""
     with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
         env = CaptureTheFlagEnv()
         env.bot1 = MagicMock()
@@ -28,14 +33,16 @@ def test_termination_with_empty_army():
         env.bot2.structures.return_value = MagicMock(amount=1)
         
         # Trainee units is empty
-        env.bot1.units = Units([], env.bot1)
-        env.bot1.all_units = env.bot1.units
+        mock_bot_with_units(env.bot1, [])
+        # Opponent has units
+        u2 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=2)
+        mock_bot_with_units(env.bot2, [u2])
         
         done, truncated, reward = env._check_termination()
         assert done is False, "Game should NOT terminate when trainee units are empty"
 
 def test_termination_with_larva_only():
-    """Reproduce: Trainee has only larva, should it terminate?"""
+    """Reproduce: Trainee has only larva, should NOT terminate."""
     with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
         env = CaptureTheFlagEnv()
         env.bot1 = MagicMock()
@@ -49,15 +56,18 @@ def test_termination_with_larva_only():
         
         # Trainee has a larva
         larva = RealMockUnit(UnitTypeId.LARVA, owner_id=1)
-        env.bot1.units = Units([larva], env.bot1)
-        env.bot1.all_units = env.bot1.units
+        mock_bot_with_units(env.bot1, [larva])
         env.bot1.player_id = 1
+        
+        # Opponent has units
+        u2 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=2)
+        mock_bot_with_units(env.bot2, [u2])
         
         done, truncated, reward = env._check_termination()
         assert done is False, "Game should NOT terminate if only non-combat units (like Larvae) remain"
 
 def test_termination_with_structures_only():
-    """Reproduce: Trainee has only structures, should terminate."""
+    """Reproduce: Trainee has only structures, should NOT terminate."""
     with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
         env = CaptureTheFlagEnv()
         env.bot1 = MagicMock()
@@ -71,15 +81,18 @@ def test_termination_with_structures_only():
         
         # Trainee has only structures
         pylon = RealMockUnit(UnitTypeId.PYLON, is_structure=True, owner_id=1)
-        env.bot1.units = Units([pylon], env.bot1)
-        env.bot1.all_units = env.bot1.units
+        mock_bot_with_units(env.bot1, [pylon])
         env.bot1.player_id = 1
+        
+        # Opponent has units
+        u2 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=2)
+        mock_bot_with_units(env.bot2, [u2])
         
         done, truncated, reward = env._check_termination()
         assert done is False, "Game should NOT terminate when only structures remain"
 
 def test_termination_with_egg_only():
-    """Reproduce: Trainee has only eggs, should terminate."""
+    """Reproduce: Trainee has only eggs, should NOT terminate."""
     with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
         env = CaptureTheFlagEnv()
         env.bot1 = MagicMock()
@@ -93,9 +106,12 @@ def test_termination_with_egg_only():
         
         # Trainee has an egg
         egg = RealMockUnit(UnitTypeId.EGG, owner_id=1)
-        env.bot1.units = Units([egg], env.bot1)
-        env.bot1.all_units = env.bot1.units
+        mock_bot_with_units(env.bot1, [egg])
         env.bot1.player_id = 1
+        
+        # Opponent has units
+        u2 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=2)
+        mock_bot_with_units(env.bot2, [u2])
         
         done, truncated, reward = env._check_termination()
         assert done is False, "Game should NOT terminate if only non-combat units (like Eggs) remain"
@@ -115,13 +131,11 @@ def test_continuation_with_opponent_army_lost():
         
         # Trainee has units
         u1 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=1)
-        env.bot1.units = Units([u1], env.bot1)
-        env.bot1.all_units = env.bot1.units
+        mock_bot_with_units(env.bot1, [u1])
         env.bot1.player_id = 1
         
         # Opponent has 0 units
-        env.bot2.units = Units([], env.bot2)
-        env.bot2.all_units = env.bot2.units
+        mock_bot_with_units(env.bot2, [])
         env.bot2.player_id = 2
         
         done, truncated, reward = env._check_termination()
@@ -129,7 +143,7 @@ def test_continuation_with_opponent_army_lost():
 
 @pytest.mark.asyncio
 async def test_step_applies_loss_penalty():
-    """Verify that the loss_penalty from config is applied in the step result."""
+    """Verify that the loss_penalty is NO LONGER applied immediately on army loss."""
     with patch("train.envs.multi_client_env.MultiClientSC2Manager"):
         loss_val = -77.7
         env = CaptureTheFlagEnv(training_conf={"rewards": {"loss_penalty": loss_val}})
@@ -148,8 +162,11 @@ async def test_step_applies_loss_penalty():
         env._refresh_unit_lists = AsyncMock()
         
         # Scenario: Army is lost after step
-        env.bot1.units = Units([], env.bot1) 
-        env.bot1.all_units = env.bot1.units
+        mock_bot_with_units(env.bot1, [])
+        # Opponent has units
+        u2 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=2)
+        mock_bot_with_units(env.bot2, [u2])
+        
         env.bot1.player_id = 1
         env.bot1.structures.return_value = MagicMock(amount=1)
         env.bot2.structures.return_value = MagicMock(amount=1)
@@ -172,9 +189,12 @@ def test_termination_p1_pylon_lost():
         
         # Trainee has units (so army_lost is False)
         u1 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=1)
-        env.bot1.units = Units([u1], env.bot1)
-        env.bot1.all_units = env.bot1.units
+        mock_bot_with_units(env.bot1, [u1])
         env.bot1.player_id = 1
+        
+        # Opponent has units
+        u2 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=2)
+        mock_bot_with_units(env.bot2, [u2])
         
         # P1 pylon dead, P2 pylon alive
         env.bot1.structures.return_value = MagicMock(amount=0)
@@ -195,9 +215,12 @@ def test_termination_p2_pylon_lost():
         
         # Trainee has units (so army_lost is False)
         u1 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=1)
-        env.bot1.units = Units([u1], env.bot1)
-        env.bot1.all_units = env.bot1.units
+        mock_bot_with_units(env.bot1, [u1])
         env.bot1.player_id = 1
+        
+        # Opponent has units
+        u2 = RealMockUnit(UnitTypeId.ZERGLING, owner_id=2)
+        mock_bot_with_units(env.bot2, [u2])
         
         # P1 pylon alive, P2 pylon dead
         env.bot1.structures.return_value = MagicMock(amount=1)
