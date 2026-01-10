@@ -15,6 +15,6 @@ This plan removes the early termination condition when the trainee (Player 1) lo
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Implementation' (Protocol in workflow.md) 4a5dec8
 
 ## Phase 3: Verification (TDD Green)
-- [ ] Task: Run updated tests `tests/test_ctf_termination_repro.py` and `tests/test_ctf_end_conditions_logic.py` and confirm they pass.
-- [ ] Task: Run all CTF integration tests to ensure no regressions.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Verification' (Protocol in workflow.md)
+- [x] Task: Run updated tests `tests/test_ctf_termination_repro.py` and `tests/test_ctf_end_conditions_logic.py` and confirm they pass. 4a5dec8
+- [x] Task: Run all CTF integration tests to ensure no regressions. 4a5dec8
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Verification' (Protocol in workflow.md) 4a5dec8
