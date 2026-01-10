@@ -9,10 +9,10 @@ This plan removes the early termination condition when the trainee (Player 1) lo
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Test Updates' (Protocol in workflow.md) 50b0fff
 
 ## Phase 2: Implementation
-- [ ] Task: Modify `CaptureTheFlagEnv._check_termination` in `train/envs/capture_the_flag_env.py`.
-- [ ] Task: Modify `CaptureTheFlagSingleEnv._async_step` in `train/envs/capture_the_flag_single_env.py`.
-- [ ] Task: Modify `CaptureTheFlagSelfPlayEnv._calculate_final_p1_reward` in `train/envs/capture_the_flag_self_play_env.py`.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Implementation' (Protocol in workflow.md)
+- [x] Task: Modify `CaptureTheFlagEnv._check_termination` in `train/envs/capture_the_flag_env.py`. 4a5dec8
+- [x] Task: Modify `CaptureTheFlagSingleEnv._async_step` in `train/envs/capture_the_flag_single_env.py`. 4a5dec8
+- [x] Task: Modify `CaptureTheFlagSelfPlayEnv._calculate_final_p1_reward` in `train/envs/capture_the_flag_self_play_env.py`. 4a5dec8
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Implementation' (Protocol in workflow.md) 4a5dec8
 
 ## Phase 3: Verification (TDD Green)
 - [ ] Task: Run updated tests `tests/test_ctf_termination_repro.py` and `tests/test_ctf_end_conditions_logic.py` and confirm they pass.
