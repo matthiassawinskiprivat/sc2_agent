@@ -28,9 +28,17 @@ class SingleClientSC2Manager:
 
     async def launch_process(self, client_count: int = 1, visualize: bool = False, fullscreen: bool = False):
         """Launches a single SC2 process and connects clients."""
+        
+        # Deterministic port allocation to prevent race conditions in parallel environments
+        # Base port 12000 leaves plenty of room above standard 5000+ ports
+        port = 12000 + (self.worker_index * 1000)
+        logger.info(f"Worker {self.worker_index} launching SC2 on port {port}")
+        
         self.process = self.sc2_process_cls(
             fullscreen=fullscreen,
-            render=visualize
+            render=visualize,
+            port=port,
+            host="127.0.0.1"
         )
         self.controller = await self.process.__aenter__()
         
@@ -63,7 +71,7 @@ class SingleClientSC2Manager:
             if result.create_game.HasField("error"):
                 logger.error(f"Engine Error: {result.create_game.error}")
             
-            await asyncio.sleep(10)
+            await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"Exception during create_game: {e}")
             raise e

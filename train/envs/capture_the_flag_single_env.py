@@ -54,6 +54,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         
         # Dynamic Observation Layers from Curriculum
         self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
+        
+        # Fallback for testing/repro if ConfigManager returns empty
+        if not self.active_layers:
+            env_conf = self.training_conf.get("env", {})
+            self.active_layers = env_conf.get("active_layers", [])
+            
         self.training_conf["active_layers"] = self.active_layers
         
         num_layers = len(self.active_layers)

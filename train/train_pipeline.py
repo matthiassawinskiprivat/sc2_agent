@@ -202,6 +202,11 @@ class PipelineManager:
         # Resolve Environment Class
         env_class_name = env_params.get("env_class", "Level0Env")
 
+        # FIX: Force num_envs=1 for CaptureTheFlagEnv on Windows due to instability
+        if env_class_name in ["CaptureTheFlagEnv", "CaptureTheFlagSingleEnv"] and sys.platform == "win32" and num_envs > 1:
+            logger.warning(f"Parallel training for {env_class_name} on Windows is unstable. Forcing num_envs=1.")
+            num_envs = 1
+
         # Use MaskableSubprocVecEnv for parallel training if num_envs > 1 and headless
         if not headless:
             logger.warning("Running in non-headless mode. Forcing num_envs=1.")
