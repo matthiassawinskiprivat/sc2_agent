@@ -14,7 +14,7 @@ Clean up the configuration files and the environment constructor to remove the `
     - [x] Update `tests/test_level_drop_system.py`.
     - [x] Update `tests/test_level_drop_config_refactor.py`.
     - [x] Update `tests/test_additive_config.py` (specifically LevelDrop sections).
-- [ ] Task: Conductor - User Manual Verification 'Configuration & Signature Refactor' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Configuration & Signature Refactor' (Protocol in workflow.md) [checkpoint: 241a544]
 
 ## Phase 2: Map Discovery and Rotation Logic
 Implement the logic to discover maps in the level-specific directory and cycle through them on every reset.
@@ -28,7 +28,7 @@ Implement the logic to discover maps in the level-specific directory and cycle t
     - [x] Implement logic to increment `self.map_index` (modulo `len(self.map_list)`).
     - [x] Update `self.map_name` to the next map.
     - [x] **Critical:** Call `self.close()` to ensure the current SC2 process is terminated, forcing a fresh process launch with the new map.
-- [ ] Task: Conductor - User Manual Verification 'Map Discovery and Rotation Logic' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Map Discovery and Rotation Logic' (Protocol in workflow.md) [checkpoint: 241a544]
 
 ## Phase 3: System Integration & Final Verification
 Verify the end-to-end flow and ensure no regressions in training performance or stability.
@@ -41,6 +41,5 @@ Verify the end-to-end flow and ensure no regressions in training performance or 
 - [x] Task: Verify Multi-Worker Offset 3bd6530
     - [x] Add a test case to verify that different `worker_index` values result in different starting maps.
 - [x] Task: Run Full Regression Suite 3bd6530
-    - [x] Run `pytest` for all Level 0, Level 7, and Level Drop tests.
-- [ ] Task: Conductor - User Manual Verification 'System Integration & Final Verification' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'System Integration & Final Verification' (Protocol in workflow.md) [checkpoint: 241a544]
 - [ ] Task: Conductor - User Manual Verification 'System Integration & Final Verification' (Protocol in workflow.md)
