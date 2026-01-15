@@ -31,6 +31,35 @@ class LevelDropEnv(Level7Env):
         
         return super().reset(seed=seed, options=options)
 
+    def _parse_races_from_map_name(self, map_name: str) -> tuple[Race, Race]:
+        """
+        Parses agent and enemy races from map name (e.g., ...Terran_vs_Zerg).
+        Returns (agent_race, enemy_race).
+        """
+        # Default fallback
+        agent_race = Race.Terran
+        enemy_race = Race.Terran
+
+        if "_vs_" in map_name:
+            try:
+                # 01_32x32_Lower_Left_Terran_vs_Terran -> ['...Lower_Left_Terran', 'Terran']
+                parts = map_name.split("_vs_")
+                agent_part = parts[0].split("_")[-1] # Take the last word before _vs_
+                enemy_part = parts[1].split("_")[0] # Take the first word after _vs_
+
+                mapping = {
+                    "Terran": Race.Terran,
+                    "Zerg": Race.Zerg,
+                    "Protoss": Race.Protoss
+                }
+
+                agent_race = mapping.get(agent_part, Race.Terran)
+                enemy_race = mapping.get(enemy_part, Race.Terran)
+            except Exception as e:
+                self._log(f"Error parsing races from map name {map_name}: {e}")
+
+        return agent_race, enemy_race
+
     async def _setup_game_session(self):
         # Verify connection
         try:
