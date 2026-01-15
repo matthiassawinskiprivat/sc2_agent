@@ -10,7 +10,6 @@ class MockConfigManager:
         return {
             "env": {
                 "name": "LevelDrop",
-                "map_name": "DropOperations",
                 "env_class": "LevelDropEnv",
                 "grid_size": 128,
                 "unit_type": "MARINE",
