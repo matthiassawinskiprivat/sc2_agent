@@ -9,12 +9,12 @@
     - [x] Test 1: Verify `LevelDropEnv` loads config correctly from the new structure.
     - [x] Test 2: Verify `LevelDropBot` action space size matches `len(action_heads)`.
     - [x] Test 3: Verify `LevelDropBot.action_masks` shape matches the dynamic config.
-- [ ] Task: Refactor `LevelDropEnv`
-    - [ ] Update `__init__` to read `action_heads` from `env` config.
-    - [ ] Update `action_space` initialization to use `len(action_heads)`.
-- [ ] Task: Refactor `LevelDropBot`
-    - [ ] Update `__init__` to parse `action_heads`.
-    - [ ] Update `apply_action` to map head indices to action strings dynamically.
-    - [ ] Update `action_masks` to construct masks dynamically based on the list.
-    - [ ] Update `calculate_drop_reward` to read from the nested `env.rewards` path.
+- [x] Task: Refactor `LevelDropEnv` [318691a]
+    - [x] Update `__init__` to read `action_heads` from `env` config.
+    - [x] Update `action_space` initialization to use `len(action_heads)`.
+- [x] Task: Refactor `LevelDropBot` [318691a]
+    - [x] Update `__init__` to parse `action_heads`.
+    - [x] Update `apply_action` to map head indices to action strings dynamically.
+    - [x] Update `action_masks` to construct masks dynamically based on the list.
+    - [x] Update `calculate_drop_reward` to read from the nested `env.rewards` path.
 - [ ] Task: Conductor - User Manual Verification 'Configuration & Logic Refactoring' (Protocol in workflow.md)
