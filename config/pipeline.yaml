@@ -36,3 +36,6 @@ levels:
   - "capture_the_flag_both_7"
   - "capture_the_flag_both_8"
   - "capture_the_flag_both_9"
+  - "capture_the_flag_terran"
+  - "capture_the_flag_protoss"
+  - "capture_the_flag_zerg"

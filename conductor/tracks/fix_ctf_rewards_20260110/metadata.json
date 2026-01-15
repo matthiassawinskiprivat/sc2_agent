@@ -1,0 +1,5 @@
+{
+  "track_id": "fix_ctf_rewards_20260110",
+  "name": "Fix CTF Distance and HP Rewards",
+  "description": "Fixes bugs where Fog of War causes missed distance rewards and false positive Pylon destruction rewards."
+}
