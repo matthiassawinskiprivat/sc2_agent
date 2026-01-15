@@ -52,11 +52,17 @@ class CaptureTheFlagEnv(MultiClientEnv):
         # Inject combined layers into training_conf for the bots/agent system
         self.training_conf["active_layers"] = self.active_layers
         
+        # Dynamic Action Heads from Curriculum
+        self.action_heads = self.config_manager.get_cumulative_action_heads(self.level_name)
+        if not self.action_heads:
+            self.action_heads = env_conf.get("action_heads", ["move", "attack"])
+        self.training_conf["action_heads"] = self.action_heads
+
         num_layers = len(self.active_layers)
         self.observation_space = spaces.Box(low=0, high=255, shape=(num_layers, 128, 128), dtype=np.uint8)
         
-        # Action Space Restoration (Move + Attack grids)
-        self.action_space = spaces.Discrete(2 * grid_size * grid_size)
+        # Action Space Restoration (Dynamic heads)
+        self.action_space = spaces.Discrete(len(self.action_heads) * grid_size * grid_size)
         
         self.bot1: Optional[CaptureTheFlagBot] = None
         self.bot2: Optional[CaptureTheFlagBot] = None
@@ -426,21 +432,26 @@ class CaptureTheFlagEnv(MultiClientEnv):
         opponent_army_lost = not self._has_combat_units(opponent_bot)
         
         win_reward = self.training_conf.get("rewards", {}).get("win_reward", 100.0)
-        draw_penalty = self.training_conf.get("rewards", {}).get("draw_penalty", -win_reward * 0.1) # Default -10
+        loss_penalty = self.training_conf.get("rewards", {}).get("loss_penalty", -100.0)
+        draw_penalty = self.training_conf.get("rewards", {}).get("draw_penalty", -10.0)
         
         reward_delta = 0.0
         done = False
         
         if trainee_pylon_dead:
             done = True
-            reward_delta -= win_reward
+            reward_delta += loss_penalty
         elif opponent_pylon_dead:
             done = True
             reward_delta += win_reward
-        elif trainee_army_lost and opponent_army_lost:
-            # Mutual destruction of both armies -> Game ends in a Draw
+        elif trainee_army_lost:
+            # Episodes terminate immediately if the trainee loses all units
             done = True
-            reward_delta += draw_penalty
+            reward_delta += loss_penalty
+        elif opponent_army_lost:
+            # Persistence: If only opponent loses army, game continues to allow 
+            # trainee to learn secondary objectives (pylon destruction).
+            pass
             
         truncated = self.steps_count >= self.max_steps
         if truncated and not done:

@@ -52,8 +52,13 @@ async def test_ctf_env_asymmetric_step_loop():
         u2.tag = 201
         u2.is_structure = False
         
-        bot1.units = [u1]
-        bot2.units = [u2]
+        bot1.units = MagicMock()
+        bot1.units.__iter__.return_value = [u1]
+        bot1.units.filter.return_value = MagicMock(amount=1)
+        
+        bot2.units = MagicMock()
+        bot2.units.__iter__.return_value = [u2]
+        bot2.units.filter.return_value = MagicMock(amount=1)
         
         # Manually refresh unit lists to populate player_units
         await env._refresh_unit_lists()
@@ -124,8 +129,13 @@ async def test_ctf_env_asymmetric_early_termination():
         env._refresh_bot_states = AsyncMock()
         
         # P1 has 0 units, P2 has 1 unit
-        bot1.units = []
-        bot2.units = [MagicMock()]
+        bot1.units = MagicMock()
+        bot1.units.__iter__.return_value = []
+        bot1.units.filter.return_value = MagicMock(amount=0)
+        
+        bot2.units = MagicMock()
+        bot2.units.__iter__.return_value = [MagicMock()]
+        bot2.units.filter.return_value = MagicMock(amount=1)
         await env._refresh_unit_lists()
         
         # Mock Pylons (still alive)
@@ -177,8 +187,13 @@ async def test_ctf_env_asymmetric_persistent_objective():
         u1 = MagicMock()
         u1.tag = 101
         u1.is_structure = False
-        bot1.units = [u1]
-        bot2.units = []
+        bot1.units = MagicMock()
+        bot1.units.__iter__.return_value = [u1]
+        bot1.units.filter.return_value = MagicMock(amount=1)
+        
+        bot2.units = MagicMock()
+        bot2.units.__iter__.return_value = []
+        bot2.units.filter.return_value = MagicMock(amount=0)
         await env._refresh_unit_lists()
         
         # Mock Pylons (still alive)
