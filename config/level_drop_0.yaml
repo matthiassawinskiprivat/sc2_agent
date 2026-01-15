@@ -1,11 +1,8 @@
 env:
   name: "LevelDrop"
-  map_name: "DropOperations" # User provided map
-  env_class: "LevelDropEnv"  # New Class
-  grid_size: 128
-  unit_type: "MARINE"
-  enemy_type: "ZERGLING" # Dummy, map defines enemies
-  max_steps: 1000
+  # level_drop maps are discovered automatically in train/maps/level_drop_0/
+  grid_size: 10
+  max_steps: 300
   rewards:
     load_reward: 0.5
     unload_reward: 2.0
