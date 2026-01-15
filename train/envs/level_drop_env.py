@@ -6,9 +6,14 @@ import numpy as np
 class LevelDropEnv(Level7Env):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # 4 Heads: Move, Attack, Load, Unload
+        
+        # Resolve Action Heads from Config
+        env_conf = self.training_conf.get("env", {})
+        self.action_heads = env_conf.get("action_heads", ["move", "attack", "load", "unload"])
+        
+        # Dynamic Action Space
         grid_area = self.grid_size * self.grid_size
-        self.action_space = spaces.Discrete(4 * grid_area)
+        self.action_space = spaces.Discrete(len(self.action_heads) * grid_area)
         
         # Override map name if provided, else default
         if not self.map_name:

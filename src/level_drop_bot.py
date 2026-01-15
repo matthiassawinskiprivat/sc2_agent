@@ -14,6 +14,10 @@ class LevelDropBot(Level7Bot):
         self.previous_cargo_sum = 0
         self.previous_units_in_zone = set()
         self.command_center_tag = None
+        
+        # Load Action Heads
+        env_conf = self.training_conf.get("env", {})
+        self.action_heads = env_conf.get("action_heads", ["move", "attack", "load", "unload"])
 
     async def reset_game_state(self):
         """
@@ -37,13 +41,19 @@ class LevelDropBot(Level7Bot):
 
     async def apply_action(self, unit_tag, action):
         """
-        Handles Move (0..N), Attack (N..2N), Load (2N..3N), Unload (3N..4N).
+        Handles dynamic actions based on configured heads.
         """
         if not self.agent_system: return
         
         grid_area = self.grid_size * self.grid_size
         spatial_idx = action % grid_area
-        action_type = action // grid_area # 0=Move, 1=Attack, 2=Load, 3=Unload
+        head_idx = action // grid_area
+        
+        if head_idx >= len(self.action_heads):
+            logger.error(f"Action index {head_idx} out of bounds for heads {self.action_heads}")
+            return
+            
+        action_name = self.action_heads[head_idx]
         
         # Resolve target
         # We need agent_0 to convert spatial to world
@@ -54,11 +64,11 @@ class LevelDropBot(Level7Bot):
         if not unit: return
 
         cmd = None
-        if action_type == 0: # Move
+        if action_name == "move":
             cmd = unit.move(target_pos)
-        elif action_type == 1: # Attack
+        elif action_name == "attack":
             cmd = unit.attack(target_pos)
-        elif action_type == 2: # Load (Smart on Unit)
+        elif action_name == "load": # Smart on Unit
             # Find transport at target_pos
             # We search for ANY unit close to target_pos (radius 2.0)
             # Prefer Transports
@@ -71,7 +81,7 @@ class LevelDropBot(Level7Bot):
                 # If no transport, just move there (fallback)
                 cmd = unit.move(target_pos)
                 
-        elif action_type == 3: # Unload
+        elif action_name == "unload":
             # Only valid if unit is a transport
             if unit.cargo_used > 0:
                 cmd = unit.unload_all_at(target_pos)
@@ -81,7 +91,12 @@ class LevelDropBot(Level7Bot):
 
     def calculate_drop_reward(self) -> float:
         total_reward = 0.0
-        rewards_conf = self.training_conf.get('rewards', {})
+        # Read from env.rewards first, fallback to root rewards (legacy), then default
+        env_conf = self.training_conf.get('env', {})
+        rewards_conf = env_conf.get('rewards')
+        if not rewards_conf:
+             rewards_conf = self.training_conf.get('rewards', {})
+             
         load_reward = rewards_conf.get('load_reward', 0.1)
         unload_reward = rewards_conf.get('unload_reward', 1.0)
         
@@ -114,41 +129,40 @@ class LevelDropBot(Level7Bot):
         return total_reward
 
     def action_masks(self) -> np.ndarray:
-        # Override to support 4 Heads (Move, Attack, Load, Unload)
-        # Base mask (Move)
-        move_mask = super().action_masks() 
-        # Level7Bot returns [Move, Attack]. We need to see if that's what we get.
-        # Actually Level7Bot.action_masks returns concatenated [Move, Attack].
+        """
+        Dynamically constructs masks based on action_heads configuration.
+        """
+        # Get base masks from Level7Bot (which currently returns concatenated [Move, Attack])
+        # We need to deconstruct this to get the underlying 'pathing' mask vs 'unrestricted' mask.
         
-        # For Drop, we want [Move, Attack, Load, Unload]
-        # We can construct it by repeating/modifying.
-        
-        # Get base single-head mask (just pathing)
-        # Since Level7Bot combines them, we need to be careful.
-        # Let's call Level3Bot (Grandparent) mask? 
-        # No, Level3Bot mask is just Move.
-        
-        # Let's assume Level7Bot gives us [Move, Attack].
-        # We will assume Load/Unload are spatially unconstrained (can try to click anywhere).
-        # Optimization: Only allow clicking on valid targets? 
-        # No, let the neural net learn.
-        
-        # We need grid_area
         grid_area = self.grid_size * self.grid_size
+        level7_mask = super().action_masks()
         
-        # Check what super returns
-        # If Level7Bot returns 2 * grid, we take the first half as "Move".
-        combined_mask = super().action_masks()
-        base_move = combined_mask[:grid_area]
+        # Assumption: Level7Bot returns [Move (Masked), Attack (Unmasked)]
+        # We assume the first grid_area is the "Move/Pathing" mask.
+        if level7_mask.shape[0] >= grid_area:
+            pathing_mask = level7_mask[:grid_area]
+        else:
+            # Fallback if something is wrong
+            pathing_mask = np.ones(grid_area, dtype=bool)
+            
+        unrestricted_mask = np.ones(grid_area, dtype=bool)
         
-        # Load Mask: Valid everywhere? Or restricted?
-        # Let's make it Valid Everywhere (True) for now.
-        load_mask = np.ones(grid_area, dtype=bool)
-        
-        # Unload Mask: Valid Everywhere
-        unload_mask = np.ones(grid_area, dtype=bool)
-        
-        # Attack Mask (From Level 7)
-        attack_mask = combined_mask[grid_area:]
-        
-        return np.concatenate([base_move, attack_mask, load_mask, unload_mask])
+        final_masks = []
+        for head in self.action_heads:
+            if head == "move":
+                final_masks.append(pathing_mask)
+            elif head == "attack":
+                # Attack is usually unrestricted (Attack-Move)
+                final_masks.append(unrestricted_mask) 
+            elif head == "load":
+                # Load is unrestricted (smart command)
+                final_masks.append(unrestricted_mask)
+            elif head == "unload":
+                # Unload is unrestricted
+                final_masks.append(unrestricted_mask)
+            else:
+                logger.warning(f"Unknown action head '{head}', using unrestricted mask.")
+                final_masks.append(unrestricted_mask)
+                
+        return np.concatenate(final_masks)
