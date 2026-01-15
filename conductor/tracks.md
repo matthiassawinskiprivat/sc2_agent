@@ -269,8 +269,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [x] Track: Drop Operations Prototype
-*Link: [./conductor/tracks/drop_operations_prototype_20260107/](./conductor/tracks/drop_operations_prototype_20260107/)*---
 
-## [x] Track: Fix model dimension and action space mismatch when resuming LevelDrop training from CaptureTheFlag.
-*Link: [./conductor/tracks/fix_level_drop_mismatch_20260115/](./conductor/tracks/fix_level_drop_mismatch_20260115/)*
+
+## [x] Track: Drop Operations Prototype
+
+*Link: [./conductor/tracks/drop_operations_prototype_20260107/](./conductor/tracks/drop_operations_prototype_20260107/)*
+
+
