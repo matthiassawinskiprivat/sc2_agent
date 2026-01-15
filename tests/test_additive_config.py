@@ -40,6 +40,44 @@ def test_cumulative_active_layers_duplicates(tmp_path):
     
     assert manager.get_cumulative_active_layers('lvl1') == ['A', 'B', 'C']
 
+def test_cumulative_action_heads(tmp_path):
+    # Setup mock config files
+    pipeline_conf = {'levels': ['lvl0', 'lvl1', 'lvl2']}
+    
+    lvl0_conf = {'env': {'action_heads': ['move']}}
+    lvl1_conf = {'env': {'action_heads': ['attack']}} # Should become [move, attack]
+    lvl2_conf = {'env': {'action_heads': ['patrol']}} # Should become [move, attack, patrol]
+    
+    (tmp_path / "pipeline.yaml").write_text(yaml.dump(pipeline_conf))
+    (tmp_path / "lvl0.yaml").write_text(yaml.dump(lvl0_conf))
+    (tmp_path / "lvl1.yaml").write_text(yaml.dump(lvl1_conf))
+    (tmp_path / "lvl2.yaml").write_text(yaml.dump(lvl2_conf))
+    
+    manager = ConfigManager(str(tmp_path))
+    
+    assert manager.get_cumulative_action_heads('lvl0') == ['move']
+    assert manager.get_cumulative_action_heads('lvl1') == ['move', 'attack']
+    assert manager.get_cumulative_action_heads('lvl2') == ['move', 'attack', 'patrol']
+
+def test_cumulative_action_heads_off_pipeline(tmp_path):
+    # Setup mock config files
+    pipeline_conf = {'levels': ['lvl0', 'lvl1']}
+    
+    lvl0_conf = {'env': {'action_heads': ['move']}}
+    lvl1_conf = {'env': {'action_heads': ['attack']}}
+    lvl_drop_conf = {'env': {'action_heads': ['load', 'unload']}} # Off-pipeline, should inherit all + self
+    
+    (tmp_path / "pipeline.yaml").write_text(yaml.dump(pipeline_conf))
+    (tmp_path / "lvl0.yaml").write_text(yaml.dump(lvl0_conf))
+    (tmp_path / "lvl1.yaml").write_text(yaml.dump(lvl1_conf))
+    (tmp_path / "lvl_drop.yaml").write_text(yaml.dump(lvl_drop_conf))
+    
+    manager = ConfigManager(str(tmp_path))
+    
+    # Should contain everything from pipeline (move, attack) plus its own (load, unload)
+    expected = ['move', 'attack', 'load', 'unload']
+    assert manager.get_cumulative_action_heads('lvl_drop') == expected
+
 @patch('train.envs.level_0_env.ConfigManager')
 @patch('train.envs.level_0_env.SC2Process')
 @patch('train.envs.level_0_env.Client')
