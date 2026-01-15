@@ -1,7 +1,7 @@
 env:
   name: "LevelDrop"
   grid_size: 128
-  max_steps: 300
+  max_steps: 1000
   rewards:
     load_reward: 0.5
     unload_reward: 2.0
@@ -13,6 +13,9 @@ env:
   active_layers:
     - "transport_slots"
     - "passenger_density"
+  action_heads:
+    - "load"
+    - "unload"
 
 training:
   learning_rate: 0.0003
