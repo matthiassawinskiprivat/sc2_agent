@@ -276,3 +276,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./conductor/tracks/drop_operations_prototype_20260107/](./conductor/tracks/drop_operations_prototype_20260107/)*
 
 
+---
+
+## [x] Track: Restore SC2 game creation lifecycle in LevelDropEnv and implement dynamic race detection from map names.
+*Link: [./conductor/tracks/fix_level_drop_protocol_error_20260116/](./conductor/tracks/fix_level_drop_protocol_error_20260116/)*
