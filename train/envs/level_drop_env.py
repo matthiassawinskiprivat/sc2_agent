@@ -14,10 +14,6 @@ class LevelDropEnv(Level7Env):
         # Dynamic Action Space
         grid_area = self.grid_size * self.grid_size
         self.action_space = spaces.Discrete(len(self.action_heads) * grid_area)
-        
-        # Override map name if provided, else default
-        if not self.map_name:
-            self.map_name = "DropOperations" 
 
     def _setup_game_session(self):
         # We need to inject LevelDropBot instead of Level7Bot
