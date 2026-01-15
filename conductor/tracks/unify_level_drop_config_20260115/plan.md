@@ -17,4 +17,4 @@
     - [x] Update `apply_action` to map head indices to action strings dynamically.
     - [x] Update `action_masks` to construct masks dynamically based on the list.
     - [x] Update `calculate_drop_reward` to read from the nested `env.rewards` path.
-- [ ] Task: Conductor - User Manual Verification 'Configuration & Logic Refactoring' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Configuration & Logic Refactoring' (Protocol in workflow.md) [checkpoint: fee1c98]
