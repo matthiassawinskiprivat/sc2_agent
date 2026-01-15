@@ -7,14 +7,6 @@ class LevelDropEnv(Level7Env):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
-        # Resolve Action Heads from Config
-        env_conf = self.training_conf.get("env", {})
-        self.action_heads = env_conf.get("action_heads", ["move", "attack", "load", "unload"])
-        
-        # Dynamic Action Space
-        grid_area = self.grid_size * self.grid_size
-        self.action_space = spaces.Discrete(len(self.action_heads) * grid_area)
-        
         # Initialize map_index based on worker_index to ensure initial diversity
         if hasattr(self, 'map_list') and self.map_list:
             self.map_index = self.worker_index % len(self.map_list)
