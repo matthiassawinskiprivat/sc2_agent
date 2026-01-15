@@ -25,7 +25,7 @@ class CaptureTheFlagBot(BotAI):
         self.agent_system: Optional[HierarchicalAgentSystem] = None
         
         self.active_unit_tag: Optional[int] = None
-        self.command_targets: Dict[int, Optional[Point2]] = {1: None, 2: None}
+        self.enemy_pylon_pos: Dict[int, Optional[Point2]] = {1: None, 2: None}
         
         # Asymmetric Self-Play attributes
         self.is_trainee = True # Default to trainee
@@ -39,6 +39,7 @@ class CaptureTheFlagBot(BotAI):
         self.prev_enemy_units_health = {1: 0.0, 2: 0.0}
         self.prev_own_units_health = {1: 0.0, 2: 0.0}
         self.prev_dist_to_pylon = {1: None, 2: None}
+        self.prev_dist_per_unit: Dict[int, Optional[float]] = {}
         
         self.frame_count = 0
         self.cached_observation: Optional[np.ndarray] = None
@@ -78,7 +79,12 @@ class CaptureTheFlagBot(BotAI):
             enemy_structures = self.structures
 
         enemy_pylon = enemy_structures(UnitTypeId.PYLON).first if enemy_structures(UnitTypeId.PYLON).exists else None
-        target_pos = enemy_pylon.position if enemy_pylon else self.command_targets[p_id]
+        
+        # Persistent Pylon tracking: update last known position if visible
+        if enemy_pylon:
+            self.enemy_pylon_pos[p_id] = enemy_pylon.position
+            
+        target_pos = self.enemy_pylon_pos[p_id]
         
         selected_units = []
         if self.active_unit_tag:
@@ -208,8 +214,6 @@ class CaptureTheFlagBot(BotAI):
             self.do(unit.attack(target))
         else:
             self.do(unit.move(target))
-            
-        self.command_targets[unit.owner_id] = target
 
     def calculate_reward(self, perspective_player_id: Optional[int] = None) -> float:
         """
@@ -235,25 +239,47 @@ class CaptureTheFlagBot(BotAI):
 
         pylon_type = UnitTypeId.PYLON
         
-        # 1. Pylon Damage Rewards (Terminal/Heavy signal)
-        def get_hp(pylon):
-            if not pylon: return 0.0
-            return pylon.health + pylon.shield
-
-        own_pylon = own_structs(pylon_type).first if own_structs(pylon_type).exists else None
+        # Resolve Enemy Pylon State
         enemy_pylon = enemy_structs(pylon_type).first if enemy_structs(pylon_type).exists else None
         
-        own_pylon_hp = get_hp(own_pylon)
-        enemy_pylon_hp = get_hp(enemy_pylon)
+        # Update persistent position if currently visible
+        if enemy_pylon:
+            self.enemy_pylon_pos[p_id] = enemy_pylon.position
+            
+        target_pos = self.enemy_pylon_pos.get(p_id)
+
+        # 1. Pylon Damage Rewards (Terminal/Heavy signal)
+        def get_enemy_hp_safe(pylon_unit, last_hp, target_position):
+            if pylon_unit:
+                return pylon_unit.health + pylon_unit.shield
+            
+            # If unit is missing, check visibility of its position
+            if target_position and self.is_visible(target_position):
+                # We see the position, but no unit -> IT IS DEAD
+                return 0.0
+            
+            # Not visible -> Assume unchanged (Fog of War)
+            return last_hp
+
+        def get_own_hp(pylon_unit):
+            # We always have info on our own units
+            if not pylon_unit: return 0.0
+            return pylon_unit.health + pylon_unit.shield
+
+        own_pylon = own_structs(pylon_type).first if own_structs(pylon_type).exists else None
+        
+        own_pylon_hp = get_own_hp(own_pylon)
+        
+        own_global_idx = p_id
+        enemy_global_idx = 2 if p_id == 1 else 1
+        
+        enemy_pylon_hp = get_enemy_hp_safe(enemy_pylon, self.prev_pylon_health[enemy_global_idx], target_pos)
         
         # Track global pylon health by persistent player ID (1 or 2)
         p1_pylon_hp = own_pylon_hp if p_id == 1 else enemy_pylon_hp
         p2_pylon_hp = enemy_pylon_hp if p_id == 1 else own_pylon_hp
         
         curr_pylon_hp_map = {1: p1_pylon_hp, 2: p2_pylon_hp}
-        
-        own_global_idx = p_id
-        enemy_global_idx = 2 if p_id == 1 else 1
         
         # Pylon Damage Rewards (Signal for acting player)
         if curr_pylon_hp_map[enemy_global_idx] < self.prev_pylon_health[enemy_global_idx]:
@@ -278,18 +304,31 @@ class CaptureTheFlagBot(BotAI):
         self.prev_own_units_health[p_id] = curr_own_hp
 
         # 3. Progress Rewards (Distance to enemy pylon)
-        # We reward the ACTIVE unit for getting closer to its perspective-correct target
+        # We reward the ACTIVE unit for getting closer to its perspective-correct target.
+        # This provides a 'dense' reward signal that guides the agent toward the objective
+        # even when it's not currently damaging the pylon.
         if self.active_unit_tag:
             active_unit = self.all_units.find_by_tag(self.active_unit_tag)
             
-            if active_unit and enemy_pylon:
-                curr_dist = active_unit.distance_to(enemy_pylon)
-                if self.prev_dist_to_pylon[p_id] is not None:
-                    # Reward for progress
-                    dist_change = self.prev_dist_to_pylon[p_id] - curr_dist
+            # Use persistent target_pos to guide agent even if Pylon is in Fog of War
+            if active_unit and target_pos:
+                curr_dist = active_unit.distance_to(target_pos)
+                
+                # Check if we have a previous distance for THIS SPECIFIC unit
+                prev_dist = self.prev_dist_per_unit.get(self.active_unit_tag)
+                
+                if prev_dist is not None:
+                    # Reward for progress: positive if distance decreased, negative if it increased.
+                    # This is a classic 'potential-based' or 'shaping' reward in RL.
+                    dist_change = prev_dist - curr_dist
                     reward += dist_change * r_conf.get("distance_multiplier", 0.1)
-                self.prev_dist_to_pylon[p_id] = curr_dist
+                
+                # Update the persistent distance baseline for this unit
+                self.prev_dist_per_unit[self.active_unit_tag] = curr_dist
             else:
-                self.prev_dist_to_pylon[p_id] = None
+                # If unit or target is lost, clear the baseline to avoid massive 
+                # erratic rewards when the unit/pylon respawns or is re-targeted.
+                if self.active_unit_tag in self.prev_dist_per_unit:
+                    del self.prev_dist_per_unit[self.active_unit_tag]
 
         return reward

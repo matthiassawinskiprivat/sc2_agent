@@ -72,28 +72,43 @@ async def test_win_loss_condition_p1_lost(env):
     assert reward == 100.0 # P2 wins on P2's turn
 
 @pytest.mark.asyncio
-async def test_win_loss_condition_p2_lost_on_p1_turn(env):
-    """Test that if P1 loses on P1's turn, they get the loss penalty."""
+async def test_continuation_on_p1_army_loss(env):
+    """Test that if P1 loses army, the game continues."""
     env.training_conf = {"rewards": {"win_reward": 100.0, "loss_penalty": -50.0}}
     env.active_player_id = 1 # Player 1's turn
     
-    # P1 Pylon missing
-    env.bot.structures(UnitTypeId.PYLON).amount = 0
+    # P1 Pylon ALIVE (ensure continuation)
+    env.bot.structures(UnitTypeId.PYLON).amount = 1
     env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
     
-    env.player_units = {1: [123], 2: [456]}
+    # P1 army lost
+    env.player_units = {1: [], 2: [456]}
     
-    # Mock units alive
+    # Mock units alive (P2 only)
     def mock_units_alive():
         m = MagicMock()
-        m.filter.return_value.amount = 5
+        # Assume filter is used to check army count
+        # Logic is: filter(owner_id=1) -> amount 0
+        m.filter.return_value.amount = 0 
         return m
     env.bot.all_units = mock_units_alive()
     
+    # We need to ensure _has_combat_units returns False for P1
+    # CaptureTheFlagSingleEnv uses self.bot.all_units.filter(...)
+    # If we mock it properly:
+    
+    # Actually, let's just mock _has_combat_units to be sure, or rely on proper mocking of all_units
+    # If we look at the implementation:
+    # combat_units = self.bot.all_units.filter(...)
+    # If we want to simulate P1 army loss, filter(owner_id=1) should return empty.
+    
+    # Let's override _has_combat_units on the instance for simplicity in this logic test
+    env._has_combat_units = MagicMock(side_effect=lambda owner_id: False if owner_id == 1 else True)
+
     obs, reward, done, truncated, info = await env._async_step(0)
     
-    assert done is True
-    assert reward == -50.0 # P1 lost on their own turn
+    assert done is False, "Should continue even if P1 army is lost"
+    assert reward == 0.0 # No penalty
 @pytest.mark.asyncio
 async def test_mutual_destruction_draw(env):
     """Test termination when both sides have no units (Mutual Destruction)."""
