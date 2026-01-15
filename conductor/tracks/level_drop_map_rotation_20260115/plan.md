@@ -10,10 +10,10 @@ Clean up the configuration files and the environment constructor to remove the `
 - [x] Task: Refactor `LevelDropEnv` constructor dd16781
     - [x] Remove `map_name` from the `__init__` signature in `train/envs/level_drop_env.py`.
     - [x] Ensure `super().__init__` is called correctly without the explicit map name.
-- [ ] Task: Update existing tests for signature changes
-    - [ ] Update `tests/test_level_drop_system.py`.
-    - [ ] Update `tests/test_level_drop_config_refactor.py`.
-    - [ ] Update `tests/test_additive_config.py` (specifically LevelDrop sections).
+- [x] Task: Update existing tests for signature changes e822b2a
+    - [x] Update `tests/test_level_drop_system.py`.
+    - [x] Update `tests/test_level_drop_config_refactor.py`.
+    - [x] Update `tests/test_additive_config.py` (specifically LevelDrop sections).
 - [ ] Task: Conductor - User Manual Verification 'Configuration & Signature Refactor' (Protocol in workflow.md)
 
 ## Phase 2: Map Discovery and Rotation Logic
