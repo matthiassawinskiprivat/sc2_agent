@@ -1,7 +1,6 @@
 env:
   name: "LevelDrop"
-  # level_drop maps are discovered automatically in train/maps/level_drop_0/
-  grid_size: 10
+  grid_size: 128
   max_steps: 300
   rewards:
     load_reward: 0.5
@@ -14,9 +13,6 @@ env:
   active_layers:
     - "transport_slots"
     - "passenger_density"
-  action_heads:
-    - "load"
-    - "unload"
 
 training:
   learning_rate: 0.0003
@@ -38,3 +34,4 @@ model:
     features_extractor_kwargs:
       features_dim: 512
       thinking_steps: 3
+    net_arch: []
