@@ -19,15 +19,15 @@ Clean up the configuration files and the environment constructor to remove the `
 ## Phase 2: Map Discovery and Rotation Logic
 Implement the logic to discover maps in the level-specific directory and cycle through them on every reset.
 
-- [ ] Task: Implement Map Discovery in `LevelDropEnv`
-    - [ ] In `__init__`, ensure `self.map_list` is populated via `self._discover_maps()`.
-    - [ ] Initialize `self.map_index` using `self.worker_index % len(self.map_list)`.
-    - [ ] Set initial `self.map_name` using the calculated `self.map_index`.
-- [ ] Task: Override `reset()` for Per-Reset Rotation
-    - [ ] Override the `reset` method in `LevelDropEnv`.
-    - [ ] Implement logic to increment `self.map_index` (modulo `len(self.map_list)`).
-    - [ ] Update `self.map_name` to the next map.
-    - [ ] **Critical:** Call `self.close()` to ensure the current SC2 process is terminated, forcing a fresh process launch with the new map.
+- [x] Task: Implement Map Discovery in `LevelDropEnv` 5424169
+    - [x] In `__init__`, ensure `self.map_list` is populated via `self._discover_maps()`.
+    - [x] Initialize `self.map_index` using `self.worker_index % len(self.map_list)`.
+    - [x] Set initial `self.map_name` using the calculated `self.map_index`.
+- [x] Task: Override `reset()` for Per-Reset Rotation 5424169
+    - [x] Override the `reset` method in `LevelDropEnv`.
+    - [x] Implement logic to increment `self.map_index` (modulo `len(self.map_list)`).
+    - [x] Update `self.map_name` to the next map.
+    - [x] **Critical:** Call `self.close()` to ensure the current SC2 process is terminated, forcing a fresh process launch with the new map.
 - [ ] Task: Conductor - User Manual Verification 'Map Discovery and Rotation Logic' (Protocol in workflow.md)
 
 ## Phase 3: System Integration & Final Verification
