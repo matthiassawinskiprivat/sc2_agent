@@ -3,15 +3,15 @@ from src.level_7_bot import Level7Bot
 from sc2.player import Bot, Computer
 from sc2.data import Race, Difficulty
 from sc2.ids.unit_typeid import UnitTypeId
+from gymnasium import spaces
 import numpy as np
 
 class Level7Env(Level3Env):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Ensure action space reflects Move + Attack (2 * GridSize^2)
-        from gymnasium import spaces
+        # Dynamic Action Space based on accumulated heads
         grid_area = self.grid_size * self.grid_size
-        self.action_space = spaces.Discrete(2 * grid_area)
+        self.action_space = spaces.Discrete(len(self.action_heads) * grid_area)
         
         # Unit and Enemy types from config
         self.unit_type = self.training_conf.get('env', {}).get('unit_type', 'MARINE').upper()

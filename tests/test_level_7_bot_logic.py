@@ -18,6 +18,7 @@ class TestLevel7Bot:
         # Mock configuration
         training_conf = {
             "targets": 1,
+            "env": {"action_heads": ["move", "attack"]},
             "rewards": {
                 "damage_reward": 0.1,
                 "kill_reward": 10.0
