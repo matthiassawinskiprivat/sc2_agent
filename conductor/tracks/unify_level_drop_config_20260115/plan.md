@@ -4,11 +4,11 @@
 
 - [x] Task: Update `config/level_drop.yaml` [9804cee]
     - Move `rewards`, `active_layers`, and `action_heads` into the `env` section.
-- [ ] Task: Create Refactoring Test Case
-    - [ ] Create `tests/test_level_drop_config_refactor.py`
-    - [ ] Test 1: Verify `LevelDropEnv` loads config correctly from the new structure.
-    - [ ] Test 2: Verify `LevelDropBot` action space size matches `len(action_heads)`.
-    - [ ] Test 3: Verify `LevelDropBot.action_masks` shape matches the dynamic config.
+- [x] Task: Create Refactoring Test Case [9c938e6]
+    - [x] Create `tests/test_level_drop_config_refactor.py`
+    - [x] Test 1: Verify `LevelDropEnv` loads config correctly from the new structure.
+    - [x] Test 2: Verify `LevelDropBot` action space size matches `len(action_heads)`.
+    - [x] Test 3: Verify `LevelDropBot.action_masks` shape matches the dynamic config.
 - [ ] Task: Refactor `LevelDropEnv`
     - [ ] Update `__init__` to read `action_heads` from `env` config.
     - [ ] Update `action_space` initialization to use `len(action_heads)`.
