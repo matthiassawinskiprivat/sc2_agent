@@ -17,9 +17,9 @@
 - [x] Task: Conductor - User Manual Verification 'Objective Tracking & Multi-Unit Control' (Protocol in workflow.md) [checkpoint: 0b85e08]
 
 ## Phase 3: System Integration & Final Verification
-- [ ] Task: Create comprehensive integration test `tests/test_level_drop_system.py`.
-    - [ ] Verify the environment cycles through multiple unit types correctly.
-    - [ ] Verify the `command_objective` layer contains the correct target coordinates.
-- [ ] Task: Run the `train_pipeline` for a few steps to visually/logically confirm Marines and Medivacs are controlled sequentially.
-- [ ] Task: Conductor - User Manual Verification 'System Integration & Final Verification' (Protocol in workflow.md)
+- [x] Task: Create comprehensive integration test `tests/test_level_drop_system.py`. [1b5924e]
+    - [x] Verify the environment cycles through multiple unit types correctly.
+    - [x] Verify the `command_objective` layer contains the correct target coordinates.
+- [x] Task: Run the `train_pipeline` for a few steps to visually/logically confirm Marines and Medivacs are controlled sequentially. [1b5924e]
+- [x] Task: Conductor - User Manual Verification 'System Integration & Final Verification' (Protocol in workflow.md) [checkpoint: 1b5924e]
 
