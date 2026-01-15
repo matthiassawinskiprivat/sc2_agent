@@ -31,21 +31,14 @@ class SC2Bot(BotAI):
         self.previous_distance = None
         self.last_target_pos: Optional[Point2] = None
         
+        # Load Action Heads
+        env_conf = self.training_conf.get("env", {})
+        self.action_heads = env_conf.get("action_heads", self.training_conf.get("action_heads", ["move"]))
+
         # enemy_race must be set to avoid AttributeError in BotAIInternal._prepare_step
         # when it checks for Race.Random to update it from observations.
         self.enemy_race = Race.Random
         self._enemy_race = Race.Random
-        
-        # Manual initialization of BotAI attributes.
-        # This is necessary because we are running the game session manually in Level0Env
-        # and bypassing sc2.main.run_game(), which normally calls self._initialize_variables()
-        # and self._prepare_start() at the appropriate times.
-        from sc2.units import Units
-        self.units = Units([], self)
-        self.structures = Units([], self)
-        self.enemy_units = Units([], self)
-        self.enemy_structures = Units([], self)
-        self.all_units = Units([], self)
         
         self.unit_command_uses_self_do = False
         self.actions = []
@@ -74,13 +67,9 @@ class SC2Bot(BotAI):
         command, data = self.conn.recv()
         if command == "step":
             action = data
-            world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(action)
-            self.last_target_pos = Point2((world_x, world_y))
-
+            # Use zergling as default unit for legacy on_step loop
             if self.zergling:
-                cmd = self.zergling.move(self.last_target_pos)
-                if cmd and not isinstance(cmd, bool):
-                    self.do(cmd)
+                await self.apply_action(self.zergling.tag, action)
             
             obs, reward, done, truncated, info = self._get_step_results()
             self.conn.send((obs, reward, done, truncated, info))
@@ -92,6 +81,49 @@ class SC2Bot(BotAI):
 
         elif command == "close":
             await self.client.leave()
+
+    async def apply_action(self, unit_tag, action):
+        """
+        Handles dynamic actions based on configured heads.
+        """
+        if not self.agent_system: return
+        
+        grid_area = self.grid_size * self.grid_size
+        head_idx = action // grid_area
+        spatial_idx = action % grid_area
+        
+        if head_idx >= len(self.action_heads):
+            logger.error(f"Action index {head_idx} out of bounds for heads {self.action_heads}")
+            return
+            
+        action_name = self.action_heads[head_idx]
+        
+        # Resolve target
+        world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(spatial_idx)
+        target_pos = Point2((world_x, world_y))
+        self.last_target_pos = target_pos 
+        
+        unit = self.units.find_by_tag(unit_tag)
+        if not unit: return
+
+        cmd = None
+        if action_name == "move":
+            cmd = unit.move(target_pos)
+        elif action_name == "attack":
+            cmd = unit.attack(target_pos)
+        elif action_name == "load": # Smart on Unit
+            candidates = self.units.filter(lambda u: u.distance_to(target_pos) < 3.0)
+            transport = next((u for u in candidates if u.cargo_max > 0), None)
+            if transport:
+                cmd = unit.smart(transport)
+            else:
+                cmd = unit.move(target_pos)
+        elif action_name == "unload":
+            if unit.cargo_used > 0:
+                cmd = unit.unload_all_at(target_pos)
+        
+        if cmd:
+            self.do(cmd)
 
     async def reset_game_state(self, verify: bool = True):
         """
@@ -125,6 +157,12 @@ class SC2Bot(BotAI):
         if self.all_units:
             logger.error(f"Failed to clear map after {max_cleanup_attempts} cleanup attempts. Remaining: {self.all_units.amount}")
 
+    def get_active_units(self):
+        """Returns active allied units. Default implementation for single-unit bots."""
+        if self.zergling:
+            return [self.zergling]
+        return []
+
     async def _refresh_state(self):
         """Refreshes the bot's internal state from a new observation."""
         obs = await self.client.observation()
@@ -140,14 +178,35 @@ class SC2Bot(BotAI):
         self._prepare_step(GameState(obs.observation), ProtoWrapper(proto))
 
     def action_masks(self) -> np.ndarray:
-        if self.agent_system and "agent_0" in self.agent_system.unit_agents:
-            return self.agent_system.unit_agents["agent_0"].get_action_mask()
+        if not self.agent_system or "agent_0" not in self.agent_system.unit_agents:
+             # Determine fallback grid_size
+             gs = 128
+             if hasattr(self, "grid_size"):
+                 gs = self.grid_size
+             elif self.agent_system:
+                 gs = self.agent_system.grid_size
+             return np.ones(gs * gs, dtype=bool)
+
+        move_mask = self.agent_system.unit_agents["agent_0"].get_action_mask()
         
-        # Determine fallback grid_size
-        gs = 128
-        if self.agent_system:
-            gs = self.agent_system.grid_size
-        return np.ones(gs * gs, dtype=bool)
+        # AIR UNIT BYPASS: If unit is flying, it can move anywhere (ignore pathing)
+        active_units = self.get_active_units()
+        idx = getattr(self, "current_unit_index", 0)
+        if 0 <= idx < len(active_units):
+            if active_units[idx].is_flying:
+                move_mask = np.ones_like(move_mask, dtype=bool)
+
+        unrestricted_mask = np.ones_like(move_mask, dtype=bool)
+        
+        final_masks = []
+        for head in self.action_heads:
+            if head == "move":
+                final_masks.append(move_mask)
+            else:
+                # Most other heads are unrestricted spatially
+                final_masks.append(unrestricted_mask)
+                
+        return np.concatenate(final_masks)
 
     def _get_observation(self) -> Tuple[np.ndarray, Dict]:
         self.zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None

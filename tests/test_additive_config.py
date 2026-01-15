@@ -85,6 +85,7 @@ def test_level0_env_dynamic_observation_space(mock_client, mock_sc2, mock_config
     # Mock ConfigManager instance
     mock_instance = MagicMock()
     mock_instance.get_cumulative_active_layers.return_value = ['A', 'B', 'C']
+    mock_instance.get_cumulative_action_heads.return_value = ['move']
     mock_config_manager_cls.return_value = mock_instance
     
     # Initialize env
@@ -95,3 +96,23 @@ def test_level0_env_dynamic_observation_space(mock_client, mock_sc2, mock_config
     # Check if observation space shape matches 3 layers
     assert env.observation_space.shape == (3, 128, 128)
     assert env.training_conf['active_layers'] == ['A', 'B', 'C']
+
+@patch('train.envs.level_0_env.ConfigManager')
+@patch('train.envs.level_0_env.SC2Process')
+@patch('train.envs.level_0_env.Client')
+def test_level0_env_dynamic_action_space(mock_client, mock_sc2, mock_config_manager_cls):
+    # Mock ConfigManager instance
+    mock_instance = MagicMock()
+    mock_instance.get_cumulative_active_layers.return_value = ['layer1']
+    # Simulate 2 action heads
+    mock_instance.get_cumulative_action_heads.return_value = ['move', 'extra']
+    mock_config_manager_cls.return_value = mock_instance
+    
+    # Initialize env
+    with patch.object(Level0Env, '_discover_maps', return_value=['map1']):
+        # Grid size 32 -> grid_area 1024
+        env = Level0Env(level_name="test_level", visualize=False, grid_size=32)
+    
+    # Action space should be heads * area = 2 * 1024 = 2048
+    assert env.action_space.n == 2048
+    assert env.action_heads == ['move', 'extra']

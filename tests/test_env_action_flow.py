@@ -17,6 +17,7 @@ async def test_level0_env_action_transmission():
         
         # Setup mock bot
         mock_bot = MockBotClass.return_value
+        mock_bot.apply_action = AsyncMock()
         mock_bot._actions = None # Force fallback to 'actions'
         mock_bot.actions = []
         mock_bot.zergling = MagicMock()
@@ -25,10 +26,10 @@ async def test_level0_env_action_transmission():
         }
         mock_bot.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world.return_value = (10, 20)
         mock_bot.game_info._proto = MagicMock()
-        
+
         # Setup mock client
         mock_client = AsyncMock()
-        
+
         # Mock GameState to avoid sc2 library internal errors
         with patch('sc2.game_state.GameState'):
             # Initialize env
@@ -36,21 +37,21 @@ async def test_level0_env_action_transmission():
             env._bot = mock_bot
             env._client = mock_client
             env._loop = asyncio.get_event_loop()
-            
+
             # Define a mock action
             action = 123
-            
-            # Mock bot.do to append to actions
-            def mock_do(cmd):
-                mock_bot.actions.append(cmd)
-            mock_bot.do = mock_do
-            
-            # Mock zergling.move
             mock_cmd = "move_command"
-            mock_bot.zergling.move.return_value = mock_cmd
-            
+
+            # Mock apply_action to simulate real behavior for this test
+            async def mock_apply_action(tag, act):
+                mock_bot.actions.append(mock_cmd)
+            mock_bot.apply_action.side_effect = mock_apply_action
+
             # Execute _async_step
             await env._async_step(action)
+
+            # Verify apply_action called
+            mock_bot.apply_action.assert_called_once_with(mock_bot.zergling.tag, action)
             
             # VERIFY: client.actions should have been called with the actions list
             mock_client.actions.assert_called_once()

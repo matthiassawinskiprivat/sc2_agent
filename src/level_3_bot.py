@@ -141,21 +141,6 @@ class Level3Bot(SC2Bot):
         if not hasattr(self, "units"): return []
         return sorted(self.units(self.allied_unit_type), key=lambda u: u.tag)
 
-    async def apply_action(self, unit_tag, action):
-        """
-        Translates spatial action to world-space move command.
-        """
-        if not self.agent_system: return
-        
-        world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(action)
-        target_pos = Point2((world_x, world_y))
-        
-        unit = self.units.find_by_tag(unit_tag)
-        if unit:
-            cmd = unit.move(target_pos)
-            if cmd:
-                self.do(cmd)
-
     def get_observation_for_unit(self, unit_tag) -> Tuple[np.ndarray, Dict]:
         """
         Generates centered observation for specific unit.

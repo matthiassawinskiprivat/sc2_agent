@@ -33,6 +33,9 @@ class CaptureTheFlagBot(BotAI):
         
         # Satisfaction for BotAI initialization
         self._initialize_variables()
+        # Ensure 'units' is not shadowing the property (for some burnysc2 versions)
+        if "units" in self.__dict__:
+            del self.units
         
         # State tracking for rewards
         self.prev_pylon_health = {1: 20.0, 2: 20.0} # Combined HP + Shield

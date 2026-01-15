@@ -25,6 +25,8 @@ env:
     - "terrain_pathable"
     - "command_objective"
     - "command_assignment"
+  action_heads:
+    - "move"
 
 # Model parameters
 model:
