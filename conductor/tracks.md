@@ -271,8 +271,3 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Drop Operations Prototype
 *Link: [./conductor/tracks/drop_operations_prototype_20260107/](./conductor/tracks/drop_operations_prototype_20260107/)*
-
----
-
-## [x] Track: Unify LevelDrop Configuration
-*Link: [./conductor/tracks/unify_level_drop_config_20260115/](./conductor/tracks/unify_level_drop_config_20260115/)*
