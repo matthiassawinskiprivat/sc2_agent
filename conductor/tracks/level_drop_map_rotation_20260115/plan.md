@@ -7,9 +7,9 @@ Clean up the configuration files and the environment constructor to remove the `
 
 - [x] Task: Remove `map_name` from configuration cbe9898
     - [x] Update `config/level_drop_0.yaml` to remove the `map_name` key.
-- [ ] Task: Refactor `LevelDropEnv` constructor
-    - [ ] Remove `map_name` from the `__init__` signature in `train/envs/level_drop_env.py`.
-    - [ ] Ensure `super().__init__` is called correctly without the explicit map name.
+- [x] Task: Refactor `LevelDropEnv` constructor dd16781
+    - [x] Remove `map_name` from the `__init__` signature in `train/envs/level_drop_env.py`.
+    - [x] Ensure `super().__init__` is called correctly without the explicit map name.
 - [ ] Task: Update existing tests for signature changes
     - [ ] Update `tests/test_level_drop_system.py`.
     - [ ] Update `tests/test_level_drop_config_refactor.py`.
