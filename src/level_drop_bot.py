@@ -2,6 +2,7 @@ from src.level_7_bot import Level7Bot
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from loguru import logger
+from typing import Tuple, Dict, List
 import numpy as np
 
 class LevelDropBot(Level7Bot):
@@ -26,14 +27,80 @@ class LevelDropBot(Level7Bot):
         self.current_assignments = {}
         self.previous_health = {}
         
-        # Identify Command Center (Objective)
-        ccs = self.structures(UnitTypeId.COMMANDCENTER)
-        if ccs:
-            self.command_center_tag = ccs.first.tag
-            logger.info(f"Objective identified: CC at {ccs.first.position}")
+        # Identify Enemy Main Structure (Objective)
+        main_structures = self.enemy_structures.filter(lambda s: s.type_id in {
+            UnitTypeId.COMMANDCENTER, UnitTypeId.HATCHERY, UnitTypeId.NEXUS,
+            UnitTypeId.ORBITALCOMMAND, UnitTypeId.PLANETARYFORTRESS, UnitTypeId.LAIR, UnitTypeId.HIVE
+        })
+        
+        if main_structures:
+            # We use the first one found as the primary objective
+            target = main_structures.first
+            self.command_center_tag = target.tag
+            self._objective_pos = target.position
+            logger.info(f"Objective identified: {target.type_id} at {target.position}")
         else:
-            logger.warning("No Command Center found! Reward logic will be broken.")
+            logger.warning("No enemy main structure found! Reward logic will be broken.")
             self.command_center_tag = None
+            self._objective_pos = None
+
+    def get_active_units(self):
+        """
+        Returns active allied units (Marines and Medivacs).
+        """
+        if not hasattr(self, "units"): return []
+        
+        # We control both Marines and Medivacs for the drop sequence
+        controlled_units = self.units.filter(lambda u: u.type_id in {UnitTypeId.MARINE, UnitTypeId.MEDIVAC})
+        return sorted(controlled_units, key=lambda u: u.tag)
+
+    def get_observation_for_unit(self, unit_tag) -> Tuple[np.ndarray, Dict]:
+        # Override to use dynamic context and persistent objective
+        unit = self.units.find_by_tag(unit_tag)
+        if not unit:
+            return np.zeros((1, 1, 1)), {}
+
+        original_unit = self.zergling
+        self.zergling = unit # 'zergling' is the centering unit alias
+        
+        # 1. Persistent Objective: Try to find the structure by tag (persistent across FoW if tag known)
+        target_pos = None
+        if self.command_center_tag:
+            # We first check if the structure is visible
+            target = self.enemy_structures.find_by_tag(self.command_center_tag)
+            if target:
+                target_pos = target.position
+            else:
+                # If NOT visible, we use the LAST KNOWN position if we have it
+                # Or we can look into the full raw structure list if provided by engine?
+                # Actually, SC2 persistent objects are usually stored in 'self.structures' 
+                # but FoW removes them unless we manually track them.
+                
+                # For this level, we use 'Intelligence' (A choice in spec):
+                # We can iterate over the entire known structure list from the client if needed,
+                # but standard BotAI only shows visible ones.
+                
+                # Better: Cache the position during reset_game_state and reuse it here.
+                target_pos = getattr(self, "_objective_pos", None)
+
+        raw_obs = {
+            'units': self.units,
+            'selected_units': [unit],
+            'enemy_units': self.enemy_units,
+            'effects': getattr(self.state, "effects", []),
+            'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
+            'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
+            'creep': getattr(self.state, "creep", None),
+            'command_target': target_pos
+        }
+        
+        if self.agent_system:
+             processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+        else:
+             processed_obs = np.zeros((1, 64, 64))
+             
+        self.zergling = original_unit
+        return processed_obs, {}
 
     def calculate_drop_reward(self) -> float:
         total_reward = 0.0

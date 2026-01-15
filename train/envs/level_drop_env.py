@@ -1,6 +1,7 @@
 from train.envs.level_7_env import Level7Env
 from src.level_drop_bot import LevelDropBot
 from gymnasium import spaces
+from sc2.data import Race
 import numpy as np
 
 class LevelDropEnv(Level7Env):
@@ -30,8 +31,15 @@ class LevelDropEnv(Level7Env):
         
         return super().reset(seed=seed, options=options)
 
-    def _setup_game_session(self):
-        # We need to inject LevelDropBot instead of Level7Bot
+    async def _setup_game_session(self):
+        # Verify connection
+        try:
+             await self._client.ping()
+        except Exception as e:
+             self._log(f"Initial ping failed: {e}")
+             raise e
+
+        # 1. Create Bot instance if not exists
         if self._bot is None:
             self._log("Creating LevelDropBot...")
             class DummyConn:
@@ -41,13 +49,44 @@ class LevelDropEnv(Level7Env):
             self._bot = LevelDropBot(conn=DummyConn(), training_conf=self.training_conf)
             self._bot.distance_calculation_method = 2
             self._bot.grid_size = self.grid_size
-            
-        # Call grandparent setup to avoid Level7Env creating Level7Bot
-        # But Level7Env._setup_game_session is monolithic.
-        # We must rely on self._bot being set BEFORE calling super().
-        # Level7Env check: "if self._bot is None:" -> We are safe.
+
+        # 2. Join the existing game instead of creating a new one
+        # This preserves the pre-placed units on the map
+        self._log(f"Joining existing game on {self.map_name}...")
+        # Since maps are pre-configured with players, we just join.
+        # We assume Player 1 is the agent.
+        await self._client.join_game(race=Race.Terran)
         
-        return super()._setup_game_session()
+        # 3. Setup Bot internal state
+        await self._client.debug_show_map()
+        
+        self._bot._generated_frame = -1
+        game_info = await self._client.get_game_info()
+        game_data = await self._client.get_game_data()
+
+        try:
+            from sc2.unit import UnitGameData
+            UnitGameData._game_data = game_data
+            UnitGameData._bot_object = self._bot
+            self._bot.client = self._client
+            self._bot._game_info = game_info
+            self._bot._game_data = game_data
+        except ImportError:
+            pass
+        
+        self._bot._prepare_start(client=self._client, player_id=1, game_info=game_info, game_data=game_data)
+        initial_observation = await self._client.observation()
+        
+        from sc2.game_state import GameState
+        state = GameState(initial_observation.observation)
+        
+        from train.envs.level_0_env import ProtoWrapper
+        self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
+
+        try:
+            await self._bot.on_step(0)
+        except Exception:
+            pass
 
     async def _async_step(self, action):
         # We need to intercept the reward calculation
