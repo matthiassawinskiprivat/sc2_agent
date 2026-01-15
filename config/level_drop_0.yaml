@@ -1,5 +1,5 @@
 env:
-  name: "LevelDrop"
+  env_class: "LevelDropEnv"
   grid_size: 128
   max_steps: 1000
   rewards:
