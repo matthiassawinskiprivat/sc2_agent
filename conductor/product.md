@@ -44,7 +44,7 @@ To maximize training efficiency and minimize data noise, the project supports as
 - **Persistence:** If the opponent army is defeated, the game continues, allowing the trainee to learn secondary objectives (like destroying enemy structures) without noise from the "dead" opponent.
 The project employs a curriculum-driven observation system where the fidelity of the agent's perception increases over time.
 
-- **Additive Accumulation:** Each training level defines a set of `active_layers` in its configuration. As the agent progresses through the curriculum (Level 0 → Level 10 → Capture the Flag), the `ConfigManager` dynamically accumulates all layers defined in previous levels.
+- **Additive Accumulation:** Each training level defines a set of `active_layers` and `action_heads` in its configuration. As the agent progresses through the curriculum (Level 0 → Level 10 → Capture the Flag → Level Drop), the `ConfigManager` dynamically accumulates all layers and action capabilities defined in previous levels.
 - **Persistence:** This ensures that skills learned in early levels (e.g., following beacons, respecting terrain) remain available as the agent learns more complex behaviors (e.g., combat micro, air unit management).
 - **Transparency:** Environments log the layer expansion during initialization (e.g., `Observation layers: (5) -> (23)`), providing clear feedback on the agent's current state space.
 

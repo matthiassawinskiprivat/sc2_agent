@@ -34,6 +34,8 @@
 
 - **Perspective-Aware Transformers:** Ensures symmetric observations and actions for adversarial agents in self-play.
 
+- **Dynamic Configuration Manager:** Orchestrates additive accumulation of observation layers and action heads across the training curriculum.
+
 ---
 
 # Long Term Plan / Final Architecture
