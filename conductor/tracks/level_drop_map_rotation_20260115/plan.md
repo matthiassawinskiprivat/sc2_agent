@@ -33,13 +33,14 @@ Implement the logic to discover maps in the level-specific directory and cycle t
 ## Phase 3: System Integration & Final Verification
 Verify the end-to-end flow and ensure no regressions in training performance or stability.
 
-- [ ] Task: Write Integration Test for Map Rotation
-    - [ ] Create `tests/test_level_drop_map_rotation.py`.
-    - [ ] Mock the map directory to contain multiple fake `.SC2Map` files.
-    - [ ] Instantiate `LevelDropEnv` and call `reset()` multiple times.
-    - [ ] Assert that `self.map_name` changes correctly on each reset.
-- [ ] Task: Verify Multi-Worker Offset
-    - [ ] Add a test case to verify that different `worker_index` values result in different starting maps.
-- [ ] Task: Run Full Regression Suite
-    - [ ] Run `pytest` for all Level 0, Level 7, and Level Drop tests.
+- [x] Task: Write Integration Test for Map Rotation 3bd6530
+    - [x] Create `tests/test_level_drop_map_rotation.py`.
+    - [x] Mock the map directory to contain multiple fake `.SC2Map` files.
+    - [x] Instantiate `LevelDropEnv` and call `reset()` multiple times.
+    - [x] Assert that `self.map_name` changes correctly on each reset.
+- [x] Task: Verify Multi-Worker Offset 3bd6530
+    - [x] Add a test case to verify that different `worker_index` values result in different starting maps.
+- [x] Task: Run Full Regression Suite 3bd6530
+    - [x] Run `pytest` for all Level 0, Level 7, and Level Drop tests.
+- [ ] Task: Conductor - User Manual Verification 'System Integration & Final Verification' (Protocol in workflow.md)
 - [ ] Task: Conductor - User Manual Verification 'System Integration & Final Verification' (Protocol in workflow.md)
