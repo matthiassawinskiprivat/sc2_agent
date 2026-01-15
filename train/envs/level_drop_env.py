@@ -1,7 +1,8 @@
 from train.envs.level_7_env import Level7Env
 from src.level_drop_bot import LevelDropBot
 from gymnasium import spaces
-from sc2.data import Race
+from sc2.data import Race, Difficulty
+from sc2.player import Bot, Computer
 import numpy as np
 
 class LevelDropEnv(Level7Env):
@@ -79,12 +80,20 @@ class LevelDropEnv(Level7Env):
             self._bot.distance_calculation_method = 2
             self._bot.grid_size = self.grid_size
 
-        # 2. Join the existing game instead of creating a new one
-        # This preserves the pre-placed units on the map
-        self._log(f"Joining existing game on {self.map_name}...")
-        # Since maps are pre-configured with players, we just join.
-        # We assume Player 1 is the agent.
-        await self._client.join_game(race=Race.Terran)
+        # 2. Parse Races and Create/Join Game
+        # This preserves the pre-placed units on the map by using LevelDropBot's skip-cleanup logic
+        agent_race, enemy_race = self._parse_races_from_map_name(self.map_name)
+        game_map = self._resolve_map(self.map_name)
+
+        self._log(f"Creating game on {self.map_name} ({agent_race.name} vs {enemy_race.name})...")
+        await self._controller.create_game(
+            game_map,
+            [Bot(agent_race, self._bot), Computer(enemy_race, Difficulty.Easy)],
+            realtime=self.visualize,
+        )
+
+        self._log(f"Joining game as {agent_race.name}...")
+        await self._client.join_game(race=agent_race)
         
         # 3. Setup Bot internal state
         await self._client.debug_show_map()
