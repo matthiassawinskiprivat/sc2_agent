@@ -14,6 +14,29 @@ class LevelDropEnv(Level7Env):
         # Dynamic Action Space
         grid_area = self.grid_size * self.grid_size
         self.action_space = spaces.Discrete(len(self.action_heads) * grid_area)
+        
+        # Initialize map_index based on worker_index to ensure initial diversity
+        if hasattr(self, 'map_list') and self.map_list:
+            self.map_index = self.worker_index % len(self.map_list)
+            self.map_name = self.map_list[self.map_index]
+        else:
+            self.map_index = 0
+
+    def reset(self, seed=None, options=None):
+        """
+        Overridden reset to rotate maps on EVERY reset call.
+        """
+        # If this is NOT the very first reset, rotate the map
+        if self.episode_counter > 0:
+            if hasattr(self, 'map_list') and self.map_list:
+                self.map_index = (self.map_index + 1) % len(self.map_list)
+                self.map_name = self.map_list[self.map_index]
+                self._log(f"Rotating to next map: {self.map_name} (Index: {self.map_index})")
+                
+                # Force a hard reset to load the new map
+                self.close()
+        
+        return super().reset(seed=seed, options=options)
 
     def _setup_game_session(self):
         # We need to inject LevelDropBot instead of Level7Bot
