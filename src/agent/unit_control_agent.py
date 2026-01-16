@@ -95,6 +95,103 @@ class UnitControlAgent:
         return (resized_mask.flatten() > 0).astype(bool)
 
 
+    def get_transport_mask(self, units: list, game_info: Any) -> np.ndarray:
+        """
+        Generates a mask for the load action, highlighting transport units.
+        """
+        if not game_info:
+            return np.ones(self.grid_size * self.grid_size, dtype=bool)
+
+        # 1. Geometry Setup (Same as get_action_mask)
+        grid = game_info.pathing_grid
+        crop_x, crop_y = 0, 0
+        mw, mh = grid.width, grid.height
+
+        if hasattr(game_info, 'playable_area'):
+            area = game_info.playable_area
+            crop_x, crop_y = int(area.x), int(area.y)
+            mw, mh = int(area.width), int(area.height)
+
+        scale = min(self.cnn_width / max(mw, 1), self.cnn_height / max(mh, 1))
+        offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
+        offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
+
+        # 2. Create Blank Mask
+        mask_2d = np.zeros((self.cnn_height, self.cnn_width), dtype=np.uint8)
+
+        # 3. Mark Transports
+        # We define transport types here to avoid hard dependency on sc2.ids if possible,
+        # but for now we assume the caller passes units with type_id.
+        # Common transport IDs (integers):
+        # MEDIVAC: 54, OVERLORD: 106, WARPPRISM: 81, WARPPRISMFLYING: 85
+        # We can also check by name if passed object supports it, or import UnitTypeId.
+        # Since this is part of the agent, let's try to match by ID values or import if available.
+        # To be safe and clean, we will assume standard sc2 Unit objects.
+        
+        # UnitTypeId values
+        TRANSPORT_IDS = {54, 106, 81, 136, 85} # Medivac, Overlord, WarpPrism, WarpPrismPhasing, etc.
+        # Or better, check specific known IDs.
+        # Medivac=54, Overlord=106, OverlordTransport=893? 
+        # Let's trust the passed unit.type_id.
+        # We'll use a broader set or rely on the caller to filter?
+        # The spec says "Transport Identification: The mask must identify all allied transport units".
+        # So we should filter here.
+        
+        from sc2.ids.unit_typeid import UnitTypeId
+        valid_types = {
+            UnitTypeId.MEDIVAC, 
+            UnitTypeId.OVERLORD, # Standard overlord (with upgrade) or OverlordTransport?
+            UnitTypeId.OVERLORDTRANSPORT,
+            UnitTypeId.WARPPRISM
+        }
+
+        for unit in units:
+            if unit.type_id in valid_types:
+                # World -> CNN
+                # rel_x = unit.position.x - crop_x
+                # x_cnn = rel_x * scale + offset_x
+                
+                rel_x = unit.position.x - crop_x
+                rel_y = unit.position.y - crop_y
+                
+                # Y is flipped in SC2 grid data usually, but unit.position is standard cartesian?
+                # In get_action_mask: 
+                # sc2_y_1d = ((y_term - offset_y) / scale) + crop_y
+                # => y_term = (sc2_y - crop_y) * scale + offset_y
+                # => (self.cnn_height - 1) - y_range = ...
+                # => y_range = (self.cnn_height - 1) - ((sc2_y - crop_y) * scale + offset_y)
+                
+                x_cnn = int((rel_x * scale) + offset_x)
+                
+                # CAUTION: Coordinate systems.
+                # get_action_mask iterates Y from 0..cnn_height.
+                # y_term = (self.cnn_height - 1) - self._range_y
+                # sc2_y = ((y_term - offset_y) / scale) + crop_y
+                # Inverting for pixel Y:
+                # sc2_y - crop_y = (y_term - offset_y) / scale
+                # (sc2_y - crop_y) * scale = y_term - offset_y
+                # (sc2_y - crop_y) * scale + offset_y = y_term
+                # (sc2_y - crop_y) * scale + offset_y = (self.cnn_height - 1) - pixel_y
+                # pixel_y = (self.cnn_height - 1) - ((sc2_y - crop_y) * scale + offset_y)
+                
+                y_cnn = int((self.cnn_height - 1) - ((rel_y * scale) + offset_y))
+                
+                if 0 <= x_cnn < self.cnn_width and 0 <= y_cnn < self.cnn_height:
+                    mask_2d[y_cnn, x_cnn] = 255
+
+        # 4. Dilation
+        # We use a slightly larger dilation for load to ensure the "click" hits the unit radius
+        if self.dilation_size > 0:
+            # Maybe +1 to standard dilation for ease of use
+            kernel_size = self.dilation_size + 2
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+            mask_2d = cv2.dilate(mask_2d, kernel, iterations=1)
+
+        # 5. Resize to Action Grid
+        resized_mask = cv2.resize(mask_2d, (self.grid_size, self.grid_size), interpolation=cv2.INTER_AREA)
+        
+        return (resized_mask.flatten() > 0).astype(bool)
+
     def convert_spatial_action_to_world(self, action_idx: int) -> Tuple[float, float]:
         self.last_action = action_idx
         if self.last_game_info is None: return (0.0, 0.0)

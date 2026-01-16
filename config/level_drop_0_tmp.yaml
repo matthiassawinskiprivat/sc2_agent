@@ -29,7 +29,7 @@ model:
     net_arch: []
 training:
   batch_size: 64
-  ent_coef: 0.01
+  ent_coef: 0.02
   gamma: 0.99
   learning_rate: 0.0003
   n_epochs: 10
