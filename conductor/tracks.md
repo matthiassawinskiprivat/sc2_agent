@@ -276,3 +276,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./conductor/tracks/drop_operations_prototype_20260107/](./conductor/tracks/drop_operations_prototype_20260107/)*
 
 
+---
+
+## [x] Track: Fix LevelDropEnv immediate termination by implementing Total Annihilation win condition.
+*Link: [./conductor/tracks/fix_level_drop_termination_20260116/](./conductor/tracks/fix_level_drop_termination_20260116/)*
