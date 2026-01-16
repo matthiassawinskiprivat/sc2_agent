@@ -1,6 +1,6 @@
 # Implementation Plan - Fix Unload AttributeError in SC2Bot
 
-## Phase 1: Bug Fix Implementation
+## Phase 1: Bug Fix Implementation [checkpoint: 0c184fc]
 - [x] Task: Fix Unload Logic in `SC2Bot`. [0df303f]
     - [x] Create failing test `tests/test_sc2bot_unload_fix.py` to reproduce the `AttributeError`.
     - [x] Update `SC2Bot.apply_action` to use `AbilityId.UNLOADALL`.
