@@ -15,10 +15,10 @@
 - [ ] Task: Conductor - User Manual Verification 'Integration' (Protocol in workflow.md)
 
 ## Phase 3: Final Integration & Quality Gate
-- [ ] Task: Full verification and regression check.
-    - [ ] Run all existing tests.
-    - [ ] Verify no regressions in `move` masking.
-- [ ] Task: Final Quality Gate.
+- [x] Task: Full verification and regression check. [587341e]
+    - [x] Run all existing tests.
+    - [x] Verify no regressions in `move` masking.
+- [~] Task: Final Quality Gate.
     - [ ] Check code coverage for new masking logic.
     - [ ] Ensure adherence to project code style.
 - [ ] Task: Conductor - User Manual Verification 'Final Verification' (Protocol in workflow.md)
