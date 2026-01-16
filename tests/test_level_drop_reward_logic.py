@@ -52,10 +52,10 @@ async def test_drop_reward_logic_reproduction():
     
     # 4. Assert Failure (Current Behavior)
     # Because it looks in self.structures, it finds None, so reward is 0.0
-    assert reward == 0.0, "Reward should be 0.0 because of the bug (looking in allied structures)"
+    # assert reward == 0.0, "Reward should be 0.0 because of the bug (looking in allied structures)"
     
     # 5. Assert Desired Behavior (Commented out until fix)
-    # assert reward == 10.0
+    assert reward == 10.0
 
 @pytest.mark.asyncio
 async def test_drop_reward_logic_with_visible_enemy():
@@ -81,7 +81,7 @@ async def test_drop_reward_logic_with_visible_enemy():
     marine1.tag = 101
     marine1.is_flying = False
     marine1.cargo_used = 0
-    marine1.distance_to.side_effect = lambda target: 5.0 if target == enemy_cc else 100.0
+    marine1.distance_to.side_effect = lambda target: 5.0 if target == enemy_cc or target == Point2((20.0, 20.0)) else 100.0
     
     bot.units = [marine1]
     bot.previous_units_in_zone = set()
@@ -89,4 +89,4 @@ async def test_drop_reward_logic_with_visible_enemy():
     
     reward = bot.calculate_drop_reward()
     
-    assert reward == 0.0, "Reward should be 0.0 due to incorrect structure lookup list"
+    assert reward == 10.0, "Reward should be 10.0 now that logic is fixed"

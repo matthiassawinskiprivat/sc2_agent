@@ -139,12 +139,18 @@ class LevelDropBot(Level7Bot):
         self.previous_cargo_sum = current_cargo_sum
         
         # 2. Arrival Reward
-        cc = self.structures.find_by_tag(self.command_center_tag)
-        if cc:
+        target_pos = self._objective_pos
+        if not target_pos and self.command_center_tag:
+            cc = self.enemy_structures.find_by_tag(self.command_center_tag)
+            if cc:
+                target_pos = cc.position
+
+        if target_pos:
             # Units on ground near CC
+            # We use distance_to_point because target_pos is a Point2
             units_in_zone = {u.tag for u in self.units 
                              if not u.is_flying 
-                             and u.distance_to(cc) < 15.0}
+                             and u.distance_to(target_pos) < 15.0}
             
             new_arrivals = units_in_zone - self.previous_units_in_zone
             if new_arrivals:
