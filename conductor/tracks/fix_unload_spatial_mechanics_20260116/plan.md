@@ -9,15 +9,15 @@
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Research & Test Infrastructure' (Protocol in workflow.md)
 
 ## Phase 2: Core Implementation (TDD)
-- [ ] Task: Implement Spatial Unload for Medivacs.
+- [x] Task: Implement Spatial Unload for Medivacs. [319d12c]
     - [ ] Create failing test `tests/test_unload_spatial_medivac.py` that asserts `UNLOADALLAT_MEDIVAC` is called with `target_pos`.
     - [ ] Update `SC2Bot.apply_action` to use unit-specific mapping for Medivacs.
     - [ ] Verify test passes.
-- [ ] Task: Implement Multi-Race Support (Overlord, Warp Prism).
+- [x] Task: Implement Multi-Race Support (Overlord, Warp Prism). [aac7fea]
     - [ ] Create failing test `tests/test_unload_multi_race.py` covering Zerg and Protoss transport scenarios.
     - [ ] Implement the mapping dictionary/logic in `SC2Bot.apply_action`.
     - [ ] Verify tests pass.
-- [ ] Task: Implement Fallback and Safety Logic.
+- [x] Task: Implement Fallback and Safety Logic. [57897b8]
     - [ ] Create failing test for unknown transport units or units with no cargo.
     - [ ] Ensure the bot falls back to a generic unload or gracefully skips the action.
     - [ ] Verify all tests pass.
