@@ -18,10 +18,10 @@
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Implementation' (Protocol in workflow.md)
 
 ## Phase 3: Integration & Quality Gate
-- [ ] Task: Integration Verification.
+- [x] Task: Integration Verification. [783a1c5]
     - [ ] Run existing tests: `tests/test_level_drop_env.py` and `tests/test_level_drop_system.py`.
     - [ ] Verify no regressions in reward accumulation.
-- [ ] Task: Final Quality Gate.
+- [x] Task: Final Quality Gate. [783a1c5]
     - [ ] Check code coverage for `src/level_drop_bot.py`.
     - [ ] Ensure adherence to project code style.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration & Quality Gate' (Protocol in workflow.md)
