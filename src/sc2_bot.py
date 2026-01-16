@@ -130,7 +130,10 @@ class SC2Bot(BotAI):
                 cmd = unit.move(target_pos)
         elif action_name == "unload":
             if unit.cargo_used > 0:
-                cmd = unit(AbilityId.UNLOADALL)
+                if unit.type_id == UnitTypeId.MEDIVAC:
+                    cmd = unit(AbilityId.UNLOADALLAT_MEDIVAC, target_pos)
+                else:
+                    cmd = unit(AbilityId.UNLOADALL)
         
         if cmd:
             self.do(cmd)
