@@ -280,7 +280,4 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 
 
-- [x] **Track: Fix Cross-Race Spatial Unload Mechanics**
-*Link: [./conductor/tracks/fix_unload_spatial_mechanics_20260116/](./conductor/tracks/fix_unload_spatial_mechanics_20260116/)*
-
 
