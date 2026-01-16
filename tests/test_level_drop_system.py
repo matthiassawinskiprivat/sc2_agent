@@ -74,5 +74,6 @@ async def test_level_drop_bot_action_mapping():
     
     # Action 350 -> head 3 (unload)
     unit.reset_mock()
+    from sc2.ids.ability_id import AbilityId
     await bot.apply_action(1, 350)
-    unit.unload_all_at.assert_called_once()
+    unit.assert_called_with(AbilityId.UNLOADALL)
