@@ -27,22 +27,30 @@ class LevelDropBot(Level7Bot):
         self.current_assignments = {}
         self.previous_health = {}
         
-        # Identify Enemy Main Structure (Objective)
+        # Reset objective tracking
+        self.command_center_tag = None
+        self._objective_pos = None
+        
+        # Initial attempt to identify Enemy Main Structure (Objective)
+        # We don't warn here because it might not be visible at frame 0
+        self._find_objective()
+
+    def _find_objective(self):
+        """
+        Scans for the primary objective (enemy main structure).
+        """
         main_structures = self.enemy_structures.filter(lambda s: s.type_id in {
             UnitTypeId.COMMANDCENTER, UnitTypeId.HATCHERY, UnitTypeId.NEXUS,
             UnitTypeId.ORBITALCOMMAND, UnitTypeId.PLANETARYFORTRESS, UnitTypeId.LAIR, UnitTypeId.HIVE
         })
         
         if main_structures:
-            # We use the first one found as the primary objective
             target = main_structures.first
             self.command_center_tag = target.tag
             self._objective_pos = target.position
             logger.info(f"Objective identified: {target.type_id} at {target.position}")
-        else:
-            logger.warning("No enemy main structure found! Reward logic will be broken.")
-            self.command_center_tag = None
-            self._objective_pos = None
+            return True
+        return False
 
     def get_active_units(self):
         """
@@ -63,7 +71,14 @@ class LevelDropBot(Level7Bot):
         original_unit = self.zergling
         self.zergling = unit # 'zergling' is the centering unit alias
         
-        # 1. Persistent Objective: Try to find the structure by tag (persistent across FoW if tag known)
+        # 1. Lazy Objective Discovery: if missing, try to find it
+        if not self.command_center_tag:
+            self._find_objective()
+            # If still missing after 100 steps (approx), warn once.
+            if not self.command_center_tag and self.state.game_loop > 100 and self.state.game_loop % 500 == 0:
+                logger.warning(f"Step {self.state.game_loop}: Still no enemy main structure found! Reward logic may be broken.")
+
+        # 2. Persistent Objective: Try to find the structure by tag (persistent across FoW if tag known)
         target_pos = None
         if self.command_center_tag:
             # We first check if the structure is visible
