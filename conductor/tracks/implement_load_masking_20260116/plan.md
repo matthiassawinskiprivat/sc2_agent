@@ -14,11 +14,11 @@
     - [x] Verify test passes.
 - [ ] Task: Conductor - User Manual Verification 'Integration' (Protocol in workflow.md)
 
-## Phase 3: Final Integration & Quality Gate
+## Phase 3: Final Integration & Quality Gate [checkpoint: 30ebc99]
 - [x] Task: Full verification and regression check. [587341e]
     - [x] Run all existing tests.
     - [x] Verify no regressions in `move` masking.
-- [~] Task: Final Quality Gate.
-    - [ ] Check code coverage for new masking logic.
-    - [ ] Ensure adherence to project code style.
-- [ ] Task: Conductor - User Manual Verification 'Final Verification' (Protocol in workflow.md)
+- [x] Task: Final Quality Gate. [30ebc99]
+    - [x] Check code coverage for new masking logic.
+    - [x] Ensure adherence to project code style.
+- [x] Task: Conductor - User Manual Verification 'Final Verification' (Protocol in workflow.md)
