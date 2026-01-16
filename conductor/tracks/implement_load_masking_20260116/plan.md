@@ -8,10 +8,10 @@
 - [ ] Task: Conductor - User Manual Verification 'Core Logic' (Protocol in workflow.md)
 
 ## Phase 2: Integration into SC2Bot
-- [ ] Task: Integrate transport mask into `SC2Bot.action_masks`.
-    - [ ] Create failing test `tests/test_sc2bot_load_mask.py` asserting the `load` head uses the new mask.
-    - [ ] Update `SC2Bot.action_masks()` to call `get_transport_mask` for the `load` head.
-    - [ ] Verify test passes.
+- [x] Task: Integrate transport mask into `SC2Bot.action_masks`. [641dd96]
+    - [x] Create failing test `tests/test_sc2bot_load_mask.py` asserting the `load` head uses the new mask.
+    - [x] Update `SC2Bot.action_masks()` to call `get_transport_mask` for the `load` head.
+    - [x] Verify test passes.
 - [ ] Task: Conductor - User Manual Verification 'Integration' (Protocol in workflow.md)
 
 ## Phase 3: Final Integration & Quality Gate
