@@ -8,13 +8,13 @@
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Test Infrastructure & Reproduction' (Protocol in workflow.md)
 
 ## Phase 2: Implementation
-- [ ] Task: Update `LevelDropBot.calculate_drop_reward` logic.
-    - [ ] Modify distance calculation to prioritize `self._objective_pos`.
-    - [ ] Implement fallback to `self.enemy_structures.find_by_tag` if `_objective_pos` is missing.
-    - [ ] Ensure units are correctly filtered (not flying and within 15.0 radius).
-- [ ] Task: Verify fix with reproduction tests.
-    - [ ] Run `pytest tests/test_level_drop_reward_logic.py`.
-    - [ ] Confirm all tests pass.
+- [x] Task: Update `LevelDropBot.calculate_drop_reward` logic. [1ea8693]
+    - [x] Modify distance calculation to prioritize `self._objective_pos`.
+    - [x] Implement fallback to `self.enemy_structures.find_by_tag` if `_objective_pos` is missing.
+    - [x] Ensure units are correctly filtered (not flying and within 15.0 radius).
+- [x] Task: Verify fix with reproduction tests. [1ea8693]
+    - [x] Run `pytest tests/test_level_drop_reward_logic.py`.
+    - [x] Confirm all tests pass.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Implementation' (Protocol in workflow.md)
 
 ## Phase 3: Integration & Quality Gate
