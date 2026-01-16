@@ -24,9 +24,9 @@
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Core Implementation' (Protocol in workflow.md)
 
 ## Phase 3: Final Integration & Quality Gate
-- [ ] Task: Run full test suite and verify coverage.
-    - [ ] Ensure no regressions in `LevelDropEnv` or other bots.
-    - [ ] Verify that `unload` actions are no longer ignored in logs (via manual dry run if possible).
-- [ ] Task: Code style and documentation.
-    - [ ] Ensure new mapping logic is documented.
+- [x] Task: Run full test suite and verify coverage. [57897b8]
+    - [x] Ensure no regressions in `LevelDropEnv` or other bots.
+    - [x] Verify that `unload` actions are no longer ignored in logs (via manual dry run if possible).
+- [x] Task: Code style and documentation. [7dcff86]
+    - [x] Ensure new mapping logic is documented.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Final Integration & Quality Gate' (Protocol in workflow.md)

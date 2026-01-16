@@ -2,8 +2,8 @@
 
 ## Phase 1: Bug Fix Implementation
 - [x] Task: Fix Unload Logic in `SC2Bot`. [0df303f]
-    - [ ] Create failing test `tests/test_sc2bot_unload_fix.py` to reproduce the `AttributeError`.
-    - [ ] Update `SC2Bot.apply_action` to use `AbilityId.UNLOADALL`.
+    - [x] Create failing test `tests/test_sc2bot_unload_fix.py` to reproduce the `AttributeError`.
+    - [x] Update `SC2Bot.apply_action` to use `AbilityId.UNLOADALL`.
 - [ ] Task: Conductor - User Manual Verification 'Bug Fix Implementation' (Protocol in workflow.md)
 
 ## Phase 2: Integration Verification
