@@ -130,10 +130,18 @@ class SC2Bot(BotAI):
                 cmd = unit.move(target_pos)
         elif action_name == "unload":
             if unit.cargo_used > 0:
-                if unit.type_id == UnitTypeId.MEDIVAC:
-                    cmd = unit(AbilityId.UNLOADALLAT_MEDIVAC, target_pos)
+                mapping = {
+                    UnitTypeId.MEDIVAC: AbilityId.UNLOADALLAT_MEDIVAC,
+                    UnitTypeId.OVERLORD: AbilityId.UNLOADALLAT_OVERLORD,
+                    UnitTypeId.WARPPRISM: AbilityId.UNLOADALLAT_WARPPRISM,
+                    UnitTypeId.WARPPRISMPHASING: AbilityId.UNLOADALLAT_WARPPRISM,
+                }
+                
+                ability = mapping.get(unit.type_id, AbilityId.UNLOADALL)
+                if ability in {AbilityId.UNLOADALLAT_MEDIVAC, AbilityId.UNLOADALLAT_OVERLORD, AbilityId.UNLOADALLAT_WARPPRISM}:
+                    cmd = unit(ability, target_pos)
                 else:
-                    cmd = unit(AbilityId.UNLOADALL)
+                    cmd = unit(ability)
         
         if cmd:
             self.do(cmd)
