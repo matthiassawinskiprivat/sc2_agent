@@ -31,9 +31,6 @@ class CaptureTheFlagBot(BotAI):
         self.is_trainee = True # Default to trainee
         self.model = None # Snapshot model for automated inference
         
-        # Satisfaction for BotAI initialization
-        self._initialize_variables()
-        
         # State tracking for rewards
         self.prev_pylon_health = {1: 20.0, 2: 20.0} # Combined HP + Shield
         self.prev_enemy_units_health = {1: 0.0, 2: 0.0}

@@ -38,11 +38,8 @@ class SC2Bot(BotAI):
 
         # enemy_race must be set to avoid AttributeError in BotAIInternal._prepare_step
         # when it checks for Race.Random to update it from observations.
-        self.enemy_race = Race.Random
         self._enemy_race = Race.Random
         
-        # Satisfaction for BotAI initialization
-        self._initialize_variables()
         from sc2.units import Units
         self.units = Units([], self)
         self.structures = Units([], self)
@@ -239,6 +236,11 @@ class SC2Bot(BotAI):
                 game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
                 load_mask = self.agent_system.unit_agents["agent_0"].get_transport_mask(self.units, game_info)
                 final_masks.append(load_mask)
+            elif head == "unload":
+                # Use specialized safety mask for the 'unload' head
+                game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
+                unload_mask = self.agent_system.unit_agents["agent_0"].get_unload_mask(self.units, game_info)
+                final_masks.append(unload_mask)
             else:
                 # Most other heads are unrestricted spatially
                 final_masks.append(unrestricted_mask)

@@ -192,6 +192,93 @@ class UnitControlAgent:
         
         return (resized_mask.flatten() > 0).astype(bool)
 
+    def get_unload_mask(self, units: list, game_info: Any) -> np.ndarray:
+        """
+        Generates a mask for the unload action.
+        1. Excludes unpathable terrain with a 2-pixel safety margin (erosion).
+        2. Excludes buildings and resources with exact footprints.
+        """
+        if not game_info:
+            return np.ones(self.grid_size * self.grid_size, dtype=bool)
+
+        # 1. Geometry Setup (Same as get_action_mask)
+        grid = game_info.pathing_grid
+        crop_x, crop_y = 0, 0
+        mw, mh = grid.width, grid.height
+
+        if hasattr(game_info, 'playable_area'):
+            area = game_info.playable_area
+            crop_x, crop_y = int(area.x), int(area.y)
+            mw, mh = int(area.width), int(area.height)
+
+        scale = min(self.cnn_width / max(mw, 1), self.cnn_height / max(mh, 1))
+        offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
+        offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
+
+        # 2. Get Raw Pathing Data
+        raw_data = grid.data_numpy if hasattr(grid, "data_numpy") else np.ones((mw, mh), dtype=np.uint8)
+        total_w = game_info.map_size.width
+        total_h = game_info.map_size.height
+
+        # 3. Create Terrain-Only Mask (Walkable = 255)
+        # Use Inverse Mapping to get pathing into CNN space
+        sc2_x_1d = ((self._range_x - offset_x) / scale) + crop_x
+        y_term = (self.cnn_height - 1) - self._range_y
+        sc2_y_1d = ((y_term - offset_y) / scale) + crop_y
+
+        sc2_x_grid, sc2_y_grid = np.meshgrid(sc2_x_1d.astype(int), sc2_y_1d.astype(int))
+        valid_coords = (sc2_x_grid >= 0) & (sc2_x_grid < total_w) & \
+                       (sc2_y_grid >= 0) & (sc2_y_grid < total_h)
+
+        terrain_mask = np.zeros((self.cnn_height, self.cnn_width), dtype=np.uint8)
+        valid_x = sc2_x_grid[valid_coords]
+        valid_y = sc2_y_grid[valid_coords]
+
+        # Sample from raw_data
+        dim0, dim1 = raw_data.shape
+        if dim0 == total_w and dim1 == total_h:
+            terrain_mask[valid_coords] = (raw_data[valid_y, valid_x] != 0).astype(np.uint8) * 255
+        elif dim0 == total_h and dim1 == total_w:
+            terrain_mask[valid_coords] = (raw_data[valid_y, valid_x] != 0).astype(np.uint8) * 255
+        else:
+            cx = np.clip(valid_x, 0, dim1 - 1)
+            cy = np.clip(valid_y, 0, dim0 - 1)
+            terrain_mask[valid_coords] = (raw_data[cy, cx] != 0).astype(np.uint8) * 255
+
+        # 4. Erode Terrain Mask (Safety Margin from Cliffs)
+        # 2-pixel erosion to ensure units aren't dropped on the edge
+        kernel = np.ones((5, 5), np.uint8) # 5x5 kernel approx 2px radius
+        eroded_terrain = cv2.erode(terrain_mask, kernel, iterations=1)
+
+        # 5. Create Entity Footprint Mask (Blocked = 255)
+        entity_mask = np.zeros((self.cnn_height, self.cnn_width), dtype=np.uint8)
+        
+        # Filter for buildings and resources
+        # Resources: MINERALFIELD, VESPENEGEYSER
+        for unit in units:
+            if unit.is_structure or unit.is_mineral_field or unit.is_vespene_geyser:
+                rel_x = unit.position.x - crop_x
+                rel_y = unit.position.y - crop_y
+                
+                x_cnn = int((rel_x * scale) + offset_x)
+                y_cnn = int((self.cnn_height - 1) - ((rel_y * scale) + offset_y))
+                
+                if 0 <= x_cnn < self.cnn_width and 0 <= y_cnn < self.cnn_height:
+                    # Use footprint_radius if available, else radius
+                    radius = getattr(unit, "footprint_radius", unit.radius)
+                    r_px = int(radius * scale)
+                    if r_px < 1: r_px = 1
+                    cv2.circle(entity_mask, (x_cnn, y_cnn), r_px, 255, -1)
+
+        # 6. Final Combine
+        # Valid = (Eroded Terrain) AND (NOT Entity)
+        final_mask_2d = cv2.bitwise_and(eroded_terrain, cv2.bitwise_not(entity_mask))
+
+        # 7. Resize to Action Grid
+        resized_mask = cv2.resize(final_mask_2d, (self.grid_size, self.grid_size), interpolation=cv2.INTER_AREA)
+        
+        return (resized_mask.flatten() > 0).astype(bool)
+
     def convert_spatial_action_to_world(self, action_idx: int) -> Tuple[float, float]:
         self.last_action = action_idx
         if self.last_game_info is None: return (0.0, 0.0)
