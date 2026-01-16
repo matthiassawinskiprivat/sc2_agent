@@ -7,6 +7,6 @@
 - [ ] Task: Conductor - User Manual Verification 'Bug Fix Implementation' (Protocol in workflow.md)
 
 ## Phase 2: Integration Verification
-- [ ] Task: Run integration test `tests/test_level_drop_system.py`.
+- [x] Task: Run integration test `tests/test_level_drop_system.py`. [9de9020]
     - [ ] Verify that the environment no longer crashes during unload.
 - [ ] Task: Conductor - User Manual Verification 'Integration Verification' (Protocol in workflow.md)
