@@ -1,0 +1,27 @@
+# Implementation Plan - Fix Level Drop Reward Logic
+
+## Phase 1: Test Infrastructure & Reproduction
+- [ ] Task: Create reproduction test suite `tests/test_level_drop_reward_logic.py`.
+    - [ ] Mock `LevelDropBot` state with allied units near a known enemy position.
+    - [ ] Simulate Fog of War (position `_objective_pos` known but unit not in `enemy_structures`).
+    - [ ] Assert that `calculate_drop_reward` currently returns 0.0 (reproducing the bug).
+- [ ] Task: Conductor - User Manual Verification 'Phase 1: Test Infrastructure & Reproduction' (Protocol in workflow.md)
+
+## Phase 2: Implementation
+- [ ] Task: Update `LevelDropBot.calculate_drop_reward` logic.
+    - [ ] Modify distance calculation to prioritize `self._objective_pos`.
+    - [ ] Implement fallback to `self.enemy_structures.find_by_tag` if `_objective_pos` is missing.
+    - [ ] Ensure units are correctly filtered (not flying and within 15.0 radius).
+- [ ] Task: Verify fix with reproduction tests.
+    - [ ] Run `pytest tests/test_level_drop_reward_logic.py`.
+    - [ ] Confirm all tests pass.
+- [ ] Task: Conductor - User Manual Verification 'Phase 2: Implementation' (Protocol in workflow.md)
+
+## Phase 3: Integration & Quality Gate
+- [ ] Task: Integration Verification.
+    - [ ] Run existing tests: `tests/test_level_drop_env.py` and `tests/test_level_drop_system.py`.
+    - [ ] Verify no regressions in reward accumulation.
+- [ ] Task: Final Quality Gate.
+    - [ ] Check code coverage for `src/level_drop_bot.py`.
+    - [ ] Ensure adherence to project code style.
+- [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration & Quality Gate' (Protocol in workflow.md)
