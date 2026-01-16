@@ -129,7 +129,13 @@ class SC2Bot(BotAI):
             else:
                 cmd = unit.move(target_pos)
         elif action_name == "unload":
+            # The agent unloads only if the transport is carrying something.
+            # In RL, this pre-condition prevents the agent from wasting actions
+            # on empty transports, making the learning process more efficient.
             if unit.cargo_used > 0:
+                # Different races use different AbilityIds for 'Unload All At'.
+                # We map the unit type to the specific ability to ensure 
+                # cross-race compatibility in the drop environment.
                 mapping = {
                     UnitTypeId.MEDIVAC: AbilityId.UNLOADALLAT_MEDIVAC,
                     UnitTypeId.OVERLORD: AbilityId.UNLOADALLAT_OVERLORD,
@@ -138,9 +144,14 @@ class SC2Bot(BotAI):
                 }
                 
                 ability = mapping.get(unit.type_id, AbilityId.UNLOADALL)
+                
+                # If the ability supports spatial targeting (UnloadAllAt), 
+                # we use the target_pos predicted by the agent's spatial head.
+                # This allows the agent to learn to target specific drop zones.
                 if ability in {AbilityId.UNLOADALLAT_MEDIVAC, AbilityId.UNLOADALLAT_OVERLORD, AbilityId.UNLOADALLAT_WARPPRISM}:
                     cmd = unit(ability, target_pos)
                 else:
+                    # Fallback for units like Bunkers that unload in place.
                     cmd = unit(ability)
         
         if cmd:
