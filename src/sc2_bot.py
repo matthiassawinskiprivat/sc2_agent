@@ -13,6 +13,7 @@ from loguru import logger
 from sc2.bot_ai import BotAI
 from sc2.data import Race
 from sc2.ids.unit_typeid import UnitTypeId
+from sc2.ids.ability_id import AbilityId
 from sc2.position import Point2
 from sc2.unit import Unit
 from src.hierarchical_agent import HierarchicalAgentSystem
@@ -39,6 +40,15 @@ class SC2Bot(BotAI):
         # when it checks for Race.Random to update it from observations.
         self.enemy_race = Race.Random
         self._enemy_race = Race.Random
+        
+        # Satisfaction for BotAI initialization
+        self._initialize_variables()
+        from sc2.units import Units
+        self.units = Units([], self)
+        self.structures = Units([], self)
+        self.enemy_units = Units([], self)
+        self.enemy_structures = Units([], self)
+        self.all_units = Units([], self)
         
         self.unit_command_uses_self_do = False
         self.actions = []
@@ -120,7 +130,7 @@ class SC2Bot(BotAI):
                 cmd = unit.move(target_pos)
         elif action_name == "unload":
             if unit.cargo_used > 0:
-                cmd = unit.unload_all_at(target_pos)
+                cmd = unit(AbilityId.UNLOADALL)
         
         if cmd:
             self.do(cmd)
