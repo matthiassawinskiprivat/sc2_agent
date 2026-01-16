@@ -234,6 +234,11 @@ class SC2Bot(BotAI):
         for head in self.action_heads:
             if head == "move":
                 final_masks.append(move_mask)
+            elif head == "load":
+                # Use specialized transport mask for the 'load' head
+                game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
+                load_mask = self.agent_system.unit_agents["agent_0"].get_transport_mask(self.units, game_info)
+                final_masks.append(load_mask)
             else:
                 # Most other heads are unrestricted spatially
                 final_masks.append(unrestricted_mask)
