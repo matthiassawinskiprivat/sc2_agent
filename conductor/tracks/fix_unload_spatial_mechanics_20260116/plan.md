@@ -1,6 +1,6 @@
 # Implementation Plan - Fix Cross-Race Spatial Unload Mechanics
 
-## Phase 1: Research & Test Infrastructure
+## Phase 1: Research & Test Infrastructure [checkpoint: a52d92c]
 - [x] Task: Verify Ability IDs and Unit Type IDs for all transport units. [f58a076]
     - [ ] Confirm `UNLOADALLAT_MEDIVAC`, `UNLOADALLAT_OVERLORD`, and `UNLOADALLAT_WARPPRISM` availability in `burnysc2`.
     - [ ] Identify `UnitTypeId` for each transport to use in mapping logic.
