@@ -1,10 +1,10 @@
 # Implementation Plan - Fix Cross-Race Spatial Unload Mechanics
 
 ## Phase 1: Research & Test Infrastructure
-- [~] Task: Verify Ability IDs and Unit Type IDs for all transport units.
+- [x] Task: Verify Ability IDs and Unit Type IDs for all transport units. [f58a076]
     - [ ] Confirm `UNLOADALLAT_MEDIVAC`, `UNLOADALLAT_OVERLORD`, and `UNLOADALLAT_WARPPRISM` availability in `burnysc2`.
     - [ ] Identify `UnitTypeId` for each transport to use in mapping logic.
-- [ ] Task: Set up multi-race unit mocking for TDD.
+- [x] Task: Set up multi-race unit mocking for TDD. [2478fa6]
     - [ ] Ensure `tests/test_sc2bot_unload_fix.py` or a new test can easily simulate different unit types.
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Research & Test Infrastructure' (Protocol in workflow.md)
 

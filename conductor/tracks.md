@@ -1,4 +1,4 @@
-# Project Tracks
+﻿# Project Tracks
 
 This file tracks all major tracks for the project. Each track has its own detailed plan in its respective folder.
 
@@ -280,4 +280,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [~] Track: Fix AttributeError: 'Unit' object has no attribute 'unload_all_at' in SC2Bot.
 *Link: [./conductor/tracks/fix_unload_attribute_error_20260116/](./conductor/tracks/fix_unload_attribute_error_20260116/)*
+
+
+---
+
+- [~] **Track: Fix Cross-Race Spatial Unload Mechanics**
+*Link: [./conductor/tracks/fix_unload_spatial_mechanics_20260116/](./conductor/tracks/fix_unload_spatial_mechanics_20260116/)*
+
 

@@ -113,6 +113,47 @@ def test_level0_env_dynamic_action_space(mock_client, mock_sc2, mock_config_mana
         # Grid size 32 -> grid_area 1024
         env = Level0Env(level_name="test_level", visualize=False, grid_size=32)
     
-    # Action space should be heads * area = 2 * 1024 = 2048
     assert env.action_space.n == 2048
     assert env.action_heads == ['move', 'extra']
+
+@patch('train.envs.level_0_env.ConfigManager')
+@patch('train.envs.level_0_env.SC2Process')
+@patch('train.envs.level_0_env.Client')
+def test_level7_env_dynamic_action_space(mock_client, mock_sc2, mock_config_manager_cls):
+    from train.envs.level_7_env import Level7Env
+    # Mock ConfigManager instance
+    mock_instance = MagicMock()
+    mock_instance.get_cumulative_active_layers.return_value = ['layer1']
+    # Simulate 2 action heads (move, attack)
+    mock_instance.get_cumulative_action_heads.return_value = ['move', 'attack']
+    mock_config_manager_cls.return_value = mock_instance
+    
+    # Initialize env
+    with patch.object(Level7Env, '_discover_maps', return_value=['map1']):
+        # Grid size 10 -> grid_area 100
+        env = Level7Env(level_name="level_7", visualize=False, grid_size=10)
+    
+    # Action space should be 2 * 100 = 200
+    assert env.action_space.n == 200
+    assert env.action_heads == ['move', 'attack']
+
+@patch('train.envs.level_0_env.ConfigManager')
+@patch('train.envs.level_0_env.SC2Process')
+@patch('train.envs.level_0_env.Client')
+def test_level_drop_env_accumulation(mock_client, mock_sc2, mock_config_manager_cls):
+    from train.envs.level_drop_env import LevelDropEnv
+    # Mock ConfigManager instance
+    mock_instance = MagicMock()
+    mock_instance.get_cumulative_active_layers.return_value = ['layer1']
+    # Simulate 4 action heads (inherited move, attack + self load, unload)
+    mock_instance.get_cumulative_action_heads.return_value = ['move', 'attack', 'load', 'unload']
+    mock_config_manager_cls.return_value = mock_instance
+    
+    # Initialize env
+    with patch.object(LevelDropEnv, '_discover_maps', return_value=['map1']):
+        # Grid size 10 -> grid_area 100
+        env = LevelDropEnv(level_name="level_drop", visualize=False, grid_size=10)
+    
+    # Action space should be 4 * 100 = 400
+    assert env.action_space.n == 400
+    assert env.action_heads == ['move', 'attack', 'load', 'unload']
