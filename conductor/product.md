@@ -49,8 +49,27 @@ The project employs a curriculum-driven observation system where the fidelity of
 - **Transparency:** Environments log the layer expansion during initialization (e.g., `Observation layers: (5) -> (23)`), providing clear feedback on the agent's current state space.
 
 ### Air Unit Mechanics
+
 Air units (e.g., Medivacs, Void Rays) are handled differently than ground units to respect their ability to cross any terrain.
 
+
+
 - **Unrestricted Movement:** Action masks for flying units are fully open (all `True`). This allows the agent to command air units to any grid coordinate, even those marked as unpathable in the `pathing_grid`.
+
 - **Combat Versatility:** Attack masks for air units are also unrestricted, enabling them to engage targets over cliffs or voids.
+
 - **Ground Parity:** Ground units continue to be constrained by the `pathing_grid` to ensure realistic movement behaviors.
+
+
+
+### Safe Unloading Mechanics
+
+To prevent agents from attempting to unload units on invalid terrain or inside buildings, a specialized mask is applied to the `unload` action head.
+
+
+
+- **Terrain Erosion:** The mask excludes unpathable terrain with a 2-pixel safety margin, ensuring units are not dropped too close to cliff edges or voids.
+
+- **Exact Footprints:** Buildings, resource patches, and destructible debris are excluded using their exact footprints (calculated via `footprint_radius`), ensuring that units can be dropped adjacent to these objects but not directly on top of them.
+
+- **Flying Unit Constraint:** Unlike movement, the `unload` mask is strictly enforced even for flying units to maintain mechanical realism and drop safety.

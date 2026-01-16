@@ -139,6 +139,7 @@ The existing spatial agent, enhanced with reasoning capabilities for tactical si
     *   **Attack Head:** `128x128` grid.
     *   **Load Head:** `128x128` grid (Targeting Transport).
     *   **Unload Head:** `128x128` grid (Targeting Ground).
+    *   **Unload Masking:** Implements a safety-first drop policy. It uses `cv2.erode` on the pathing grid for terrain safety and `cv2.circle` with `footprint_radius` for exact entity exclusion.
     *   **Ability Selector:** Softmax over the available heads.
 
 ---
