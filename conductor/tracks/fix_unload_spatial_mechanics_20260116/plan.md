@@ -8,7 +8,7 @@
     - [ ] Ensure `tests/test_sc2bot_unload_fix.py` or a new test can easily simulate different unit types.
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Research & Test Infrastructure' (Protocol in workflow.md)
 
-## Phase 2: Core Implementation (TDD)
+## Phase 2: Core Implementation (TDD) [checkpoint: 512b70b]
 - [x] Task: Implement Spatial Unload for Medivacs. [319d12c]
     - [ ] Create failing test `tests/test_unload_spatial_medivac.py` that asserts `UNLOADALLAT_MEDIVAC` is called with `target_pos`.
     - [ ] Update `SC2Bot.apply_action` to use unit-specific mapping for Medivacs.
