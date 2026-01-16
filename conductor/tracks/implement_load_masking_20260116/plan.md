@@ -1,10 +1,10 @@
 # Implementation Plan - Implement Action Masking for Load Head
 
-## Phase 1: Core Logic in UnitControlAgent
-- [~] Task: Implement `get_transport_mask` in `UnitControlAgent`.
-    - [ ] Create failing test `tests/test_transport_mask.py` that asserts a mask is generated near mocked transports.
-    - [ ] Add `get_transport_mask` to `UnitControlAgent` which identifies transport positions and applies dilation.
-    - [ ] Verify test passes.
+## Phase 1: Core Logic in UnitControlAgent [checkpoint: aca9d57]
+- [x] Task: Implement `get_transport_mask` in `UnitControlAgent`. [aca9d57]
+    - [x] Create failing test `tests/test_transport_mask.py` that asserts a mask is generated near mocked transports.
+    - [x] Add `get_transport_mask` to `UnitControlAgent` which identifies transport positions and applies dilation.
+    - [x] Verify test passes.
 - [ ] Task: Conductor - User Manual Verification 'Core Logic' (Protocol in workflow.md)
 
 ## Phase 2: Integration into SC2Bot
