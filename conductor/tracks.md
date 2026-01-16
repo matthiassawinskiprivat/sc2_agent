@@ -281,7 +281,3 @@ This file tracks all major tracks for the project. Each track has its own detail
 ## [~] Track: Fix AttributeError: 'Unit' object has no attribute 'unload_all_at' in SC2Bot.
 *Link: [./conductor/tracks/fix_unload_attribute_error_20260116/](./conductor/tracks/fix_unload_attribute_error_20260116/)*
 
----
-
-## [x] **Track: Fix Level Drop Objective Tracking**
-*Link: [./conductor/tracks/fix_level_drop_objective_tracking_20260116/](./conductor/tracks/fix_level_drop_objective_tracking_20260116/)*
