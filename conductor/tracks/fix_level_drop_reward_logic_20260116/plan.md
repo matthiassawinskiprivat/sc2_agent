@@ -7,7 +7,7 @@
     - [ ] Assert that `calculate_drop_reward` currently returns 0.0 (reproducing the bug).
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Test Infrastructure & Reproduction' (Protocol in workflow.md)
 
-## Phase 2: Implementation
+## Phase 2: Implementation [checkpoint: 93b698f]
 - [x] Task: Update `LevelDropBot.calculate_drop_reward` logic. [1ea8693]
     - [x] Modify distance calculation to prioritize `self._objective_pos`.
     - [x] Implement fallback to `self.enemy_structures.find_by_tag` if `_objective_pos` is missing.
