@@ -7,7 +7,7 @@
     - [x] Verify test passes.
 - [ ] Task: Conductor - User Manual Verification 'Core Logic' (Protocol in workflow.md)
 
-## Phase 2: Integration into SC2Bot
+## Phase 2: Integration into SC2Bot [checkpoint: 2d60354]
 - [x] Task: Integrate transport mask into `SC2Bot.action_masks`. [641dd96]
     - [x] Create failing test `tests/test_sc2bot_load_mask.py` asserting the `load` head uses the new mask.
     - [x] Update `SC2Bot.action_masks()` to call `get_transport_mask` for the `load` head.
