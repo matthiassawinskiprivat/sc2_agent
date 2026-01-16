@@ -1,6 +1,6 @@
 # Implementation Plan - Fix Level Drop Reward Logic
 
-## Phase 1: Test Infrastructure & Reproduction
+## Phase 1: Test Infrastructure & Reproduction [checkpoint: 769d0a2]
 - [x] Task: Create reproduction test suite `tests/test_level_drop_reward_logic.py`. [89f0f7a]
     - [ ] Mock `LevelDropBot` state with allied units near a known enemy position.
     - [ ] Simulate Fog of War (position `_objective_pos` known but unit not in `enemy_structures`).
