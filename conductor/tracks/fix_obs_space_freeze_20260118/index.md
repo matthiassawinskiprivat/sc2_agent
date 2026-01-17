@@ -1,4 +1,4 @@
-# Track remove_dilation_load_mask_20260117 Context
+# Track fix_obs_space_freeze_20260118 Context
 
 - [Specification](./spec.md)
 - [Implementation Plan](./plan.md)
