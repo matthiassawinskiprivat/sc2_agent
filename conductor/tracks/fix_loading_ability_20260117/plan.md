@@ -19,6 +19,6 @@
 - [x] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
 
 ## Phase 3: Validation & Cleanup
-- [ ] Task: Run full integration tests to ensure no regressions.
-- [ ] Task: Update `tech-stack.md` if any new libraries or patterns were introduced (Unlikely).
+- [x] Task: Run full integration tests to ensure no regressions.
+- [x] Task: Update `tech-stack.md` if any new libraries or patterns were introduced (Unlikely).
 - [ ] Task: Conductor - User Manual Verification 'Validation & Cleanup' (Protocol in workflow.md)
