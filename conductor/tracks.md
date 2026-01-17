@@ -283,7 +283,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Fix Training Freeze in `is_image_space`**
+- [x] **Track: Fix Training Freeze in `is_image_space`**
 *Link: [./tracks/fix_obs_space_freeze_20260118/](./tracks/fix_obs_space_freeze_20260118/)*
 
 
