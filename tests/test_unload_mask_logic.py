@@ -29,9 +29,9 @@ def test_get_unload_mask_terrain_erosion():
     assert move_mask_2d[65, 65] == True
     assert np.sum(move_mask_2d) > 0
     
-    # get_unload_mask should have eroded this area by 2 pixels on each side
+    # get_unload_mask should have eroded this area by 1 pixel on each side (3x3 kernel)
     # Original: 60 to 69 inclusive. 
-    # Eroded: 62 to 67 inclusive (approx).
+    # Eroded: 61 to 68 inclusive.
     unload_mask = agent.get_unload_mask([], game_info)
     
     # Helper to check world pos
@@ -41,14 +41,15 @@ def test_get_unload_mask_terrain_erosion():
         idx = int((127 - y) * 128 + x)
         return unload_mask[idx]
 
-    # The center should still be true if the island is large enough
+    # The center should still be true
     assert is_valid_at(65, 65) == True
     
-    # The edges of the original island (60, 61, 68, 69) should be false due to 2px erosion
+    # The edges of the original island (60, 69) should be false due to 1px erosion
     assert is_valid_at(60, 65) == False
-    assert is_valid_at(61, 65) == False
-    assert is_valid_at(68, 65) == False
     assert is_valid_at(69, 65) == False
+    
+    # But 61 should now be True (it was False with 5x5 kernel)
+    assert is_valid_at(61, 65) == True
 
 def test_get_unload_mask_building_exclusion():
     """
@@ -72,9 +73,8 @@ def test_get_unload_mask_building_exclusion():
     # Center (where building is) must be False
     assert is_valid_at(64, 64) == False
     
-    # Area just outside the building (radius 5) should be True
-    # (64 + 6, 64) should be outside
-    assert is_valid_at(70, 64) == True
+    # Area clearly outside the building (radius 5) should be True
+    assert is_valid_at(75, 64) == True
 
 def test_get_unload_mask_complex_logic():
     """

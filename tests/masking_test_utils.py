@@ -39,6 +39,9 @@ class MockUnit:
         self.radius = radius
         self.footprint_radius = radius if is_structure else 0.0
         self.is_structure = is_structure
+        self.is_mineral_field = False
+        self.is_vespene_geyser = False
+        self.is_flying = False
         self.type_id = type_id
 
 def create_mock_game_state(grid_size: int = 128, pathing_value: int = 1) -> MockGameInfo:
