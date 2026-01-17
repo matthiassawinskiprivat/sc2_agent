@@ -77,4 +77,5 @@ To ensure reliable transport operations, the agent implements a dual-mode loadin
 
 - **Dual Interaction:** The system automatically distinguishes between a unit entering a transport and a transport picking up a unit.
 - **Explicit Ability Usage:** Transports (Medivacs, Overlords, Warp Prisms) utilize explicit `LOAD` AbilityIds rather than generic right-click commands, ensuring robust behavior in dense unit environments.
+- **Targeting Precision:** The system uses zero-dilation action masks for entity interaction (e.g., loading), forcing the agent to target the exact unit location and eliminating "ghost target" artifacts that cause command fallbacks.
 - **Race-Agnostic:** The implementation handles race-specific transport abilities (e.g., `LOAD_MEDIVAC` vs. `LOAD_OVERLORD`) through a unified action head, facilitating multi-race training.
