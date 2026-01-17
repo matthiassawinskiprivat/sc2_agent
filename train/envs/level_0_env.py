@@ -191,15 +191,43 @@ class Level0Env(gym.Env):
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
     
     async def _launch_sc2_process(self):
-        await asyncio.sleep(random.random() * 5)
-        self._log("Launching SC2 process...")
-        self._sc2_process = self._sc2_process_cls(fullscreen=self.visualize)
-        self._controller = await self._sc2_process.__aenter__()
-        # Use _ws if available (real SC2Process), fallback to ws (for some mocks)
-        ws = getattr(self._sc2_process, "_ws", getattr(self._sc2_process, "ws", None))
-        self._client = self._client_cls(ws)
-        # Give the client a moment to stabilize
-        await asyncio.sleep(0.5)
+        max_launch_attempts = 3
+        for attempt in range(max_launch_attempts):
+            await asyncio.sleep(random.random() * 5 + attempt * 2)
+            self._log(f"Launching SC2 process (Attempt {attempt+1}/{max_launch_attempts})...")
+            
+            self._sc2_process = self._sc2_process_cls(fullscreen=self.visualize)
+            try:
+                self._controller = await self._sc2_process.__aenter__()
+                
+                # Verify port was assigned correctly
+                if self._sc2_process.port is None:
+                    self._log(f"WARNING: SC2Process launched with port=None on attempt {attempt+1}")
+                    await self._sc2_process.__aexit__(None, None, None)
+                    if attempt == max_launch_attempts - 1:
+                        raise RuntimeError("Failed to obtain a valid port for SC2Process after multiple attempts.")
+                    continue
+
+                # Use _ws if available (real SC2Process), fallback to ws (for some mocks)
+                ws = getattr(self._sc2_process, "_ws", getattr(self._sc2_process, "ws", None))
+                if ws is None:
+                    self._log(f"WARNING: WebSocket is None on attempt {attempt+1}")
+                    await self._sc2_process.__aexit__(None, None, None)
+                    continue
+
+                self._client = self._client_cls(ws)
+                # Give the client a moment to stabilize
+                await asyncio.sleep(0.5)
+                # Success
+                return
+            except Exception as e:
+                self._log(f"Error during SC2 launch attempt {attempt+1}: {e}")
+                try:
+                    await self._sc2_process.__aexit__(None, None, None)
+                except:
+                    pass
+                if attempt == max_launch_attempts - 1:
+                    raise e
 
     async def _setup_game_session(self):
         # Verify connection
