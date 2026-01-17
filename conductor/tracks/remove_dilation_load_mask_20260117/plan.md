@@ -7,11 +7,11 @@
 - [x] Task: Run the test to confirm it fails with current dilation (Red Phase).
 - [x] Task: Conductor - User Manual Verification 'Preparation & Testing Strategy' (Protocol in workflow.md)
 
-## Phase 2: Implementation
+## Phase 2: Implementation [checkpoint: ca52743]
 - [x] Task: Modify `src/agent/unit_control_agent.py`. 48bd188
     - [x] In `get_transport_mask`, remove the call to `cv2.dilate`.
 - [x] Task: Run `tests/test_transport_mask_precision.py` to verify the fix (Green Phase).
-- [ ] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
 - [ ] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
 
 ## Phase 3: Validation & Cleanup
