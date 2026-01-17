@@ -278,10 +278,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Fix Drop Mechanics Masking**
+- [x] **Track: Fix Drop Mechanics Masking**
 *Link: [./conductor/tracks/fix_drop_mechanics_20260117/](./conductor/tracks/fix_drop_mechanics_20260117/)*
 
 ---
 
-- [ ] **Track: Implement Unload Action Masking**
-*Link: [./conductor/tracks/unload_action_mask_20260116/](./conductor/tracks/unload_action_mask_20260116/)*
+- [~] **Track: Improve Loading Logic**
+*Link: [./tracks/fix_loading_ability_20260117/](./tracks/fix_loading_ability_20260117/)*
