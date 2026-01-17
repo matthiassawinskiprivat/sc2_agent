@@ -153,13 +153,9 @@ class UnitControlAgent:
                 if 0 <= x_cnn < self.cnn_width and 0 <= y_cnn < self.cnn_height:
                     mask_2d[y_cnn, x_cnn] = 255
 
-        # 4. Dilation
-        if self.dilation_size > 0:
-            kernel_size = self.dilation_size + 2
-            kernel = np.ones((kernel_size, kernel_size), np.uint8)
-            mask_2d = cv2.dilate(mask_2d, kernel, iterations=1)
-
-        # 5. Resize to Action Grid
+        # 4. Resize to Action Grid
+        # We skip dilation for the transport mask to ensure the agent targets 
+        # the exact unit position, avoiding "ghost targets" in adjacent cells.
         resized_mask = cv2.resize(mask_2d, (self.grid_size, self.grid_size), interpolation=cv2.INTER_AREA)
         
         return (resized_mask.flatten() > 0).astype(bool)
