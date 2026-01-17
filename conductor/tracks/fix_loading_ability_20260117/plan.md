@@ -10,12 +10,12 @@
 - [x] Task: Conductor - User Manual Verification 'Preparation & Testing Strategy' (Protocol in workflow.md)
 
 ## Phase 2: Implementation
-- [ ] Task: Refactor `load` action in `src/sc2_bot.py`.
-    - [ ] Define the `TRANSPORT_LOAD_ABILITIES` mapping constant.
-    - [ ] Implement the `is_transport` check logic.
-    - [ ] Implement the logic branch: `Transport` -> `Specific Ability` vs `Unit` -> `Smart`.
-    - [ ] Implement the target finding logic (find loadable unit vs. find transport).
-- [ ] Task: Verify changes with `tests/test_loading_mechanics.py`.
+- [x] Task: Refactor `load` action in `src/sc2_bot.py`. fe8680b
+    - [x] Define the `TRANSPORT_LOAD_ABILITIES` mapping constant.
+    - [x] Implement the `is_transport` check logic.
+    - [x] Implement the logic branch: `Transport` -> `Specific Ability` vs `Unit` -> `Smart`.
+    - [x] Implement the target finding logic (find loadable unit vs. find transport).
+- [x] Task: Verify changes with `tests/test_loading_mechanics.py`.
 - [ ] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
 
 ## Phase 3: Validation & Cleanup
