@@ -18,6 +18,6 @@
 - [x] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
 - [ ] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
 
-## Phase 3: Validation & Cleanup
+## Phase 3: Validation & Cleanup [checkpoint: 16ee703]
 - [x] Task: Run a sanity training pass (minimal steps) using `train_pipeline.py` to ensure the watchdog no longer triggers.
 - [x] Task: Conductor - User Manual Verification 'Validation & Cleanup' (Protocol in workflow.md)
