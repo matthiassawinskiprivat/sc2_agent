@@ -120,13 +120,37 @@ class SC2Bot(BotAI):
             cmd = unit.move(target_pos)
         elif action_name == "attack":
             cmd = unit.attack(target_pos)
-        elif action_name == "load": # Smart on Unit
+        elif action_name == "load":
+            # Map of transport types to their specific LOAD ability (for picking up units).
+            # Using explicit AbilityId is more robust than relying on smart() for transports.
+            transport_load_mapping = {
+                UnitTypeId.MEDIVAC: AbilityId.LOAD_MEDIVAC,
+                UnitTypeId.OVERLORD: AbilityId.LOAD_OVERLORD,
+                UnitTypeId.WARPPRISM: AbilityId.LOAD_WARPPRISM,
+                UnitTypeId.WARPPRISMPHASING: AbilityId.LOAD_WARPPRISM,
+            }
+
             candidates = self.units.filter(lambda u: u.distance_to(target_pos) < 3.0)
-            transport = next((u for u in candidates if u.cargo_max > 0), None)
-            if transport:
-                cmd = unit.smart(transport)
+            
+            # Branch logic: Is the acting unit a transport picking up, or a unit entering?
+            if unit.type_id in transport_load_mapping:
+                # The actor is a Transport (e.g. Medivac) -> Pick up a nearby unit.
+                # We look for a loadable unit (not a transport) near the target.
+                loadable = next((u for u in candidates if u.cargo_max == 0), None)
+                if loadable:
+                    ability = transport_load_mapping[unit.type_id]
+                    cmd = unit(ability, loadable)
+                else:
+                    # Fallback: Move to target if no loadable unit found.
+                    cmd = unit.move(target_pos)
             else:
-                cmd = unit.move(target_pos)
+                # The actor is a regular unit (e.g. Marine) -> Enter a nearby transport.
+                transport = next((u for u in candidates if u.cargo_max > 0), None)
+                if transport:
+                    # Using smart() on a transport is the standard way to enter it.
+                    cmd = unit.smart(transport)
+                else:
+                    cmd = unit.move(target_pos)
         elif action_name == "unload":
             # The agent unloads only if the transport is carrying something.
             # In RL, this pre-condition prevents the agent from wasting actions
