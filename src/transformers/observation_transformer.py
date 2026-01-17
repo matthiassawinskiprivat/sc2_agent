@@ -176,11 +176,10 @@ class ObservationTransformer:
         layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
         layers[0:dps_start] = np.log1p(layers[0:dps_start])
         
-        # Centralized Scaling: Transform float32 [0, 1+] to uint8 [0, 255]
-        # We clip to [0, 1] for layers that should be normalized (like health, density)
-        # Note: log1p can exceed 1.0, so we clip at 1.0 before scaling to 255
-        # This ensures maximum intensity for any significant presence.
-        layers = np.clip(layers * 255.0, 0, 255.0).astype(np.uint8)
+        # Centralized Scaling: Transform float32 [0, 1+] to float32 [0, 1]
+        # We clip to [0, 1] for layers that should be normalized.
+        # Changing to float32 [0, 1] avoids SB3's expensive is_image_space check on uint8 arrays.
+        layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
 
         if self.active_layers:
             # Extract indices for active layers

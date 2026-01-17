@@ -36,7 +36,7 @@ class MockLevel0Env(Level0Env):
         # self._log(f"Worker {self.worker_index}: Mocked __init__.") # Log disabled for mock
 
         # Define proper action and observation spaces for gymnasium
-        self.observation_space = spaces.Box(low=0, high=255, shape=(42, 128, 128), dtype=np.uint8)
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(42, 128, 128), dtype=np.float32)
         self.action_space = spaces.Discrete(self.grid_size * self.grid_size)
 
         # Mock HierarchicalAgentSystem and its agent

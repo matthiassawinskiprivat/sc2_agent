@@ -67,9 +67,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self.action_heads = env_conf.get("action_heads", ["move", "attack"])
         self.training_conf["action_heads"] = self.action_heads
 
-        num_layers = len(self.active_layers)
-        self.observation_space = spaces.Box(low=0, high=255, shape=(num_layers, 128, 128), dtype=np.uint8)
-        self.action_space = spaces.Discrete(len(self.action_heads) * grid_size * grid_size)
+        num_layers = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32)
+        self.action_space = spaces.Discrete(len(self.action_heads) * self.grid_size * self.grid_size)
         
         self.bot: Optional[CaptureTheFlagBot] = None
         self.active_player_id = 1

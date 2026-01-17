@@ -10,7 +10,7 @@ from train.train_pipeline import PipelineManager
 class SimpleEnv(gym.Env):
     def __init__(self, obs_shape, n_actions):
         super().__init__()
-        self.observation_space = spaces.Box(low=0, high=255, shape=obs_shape, dtype=np.uint8)
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=obs_shape, dtype=np.float32)
         self.action_space = spaces.Discrete(n_actions)
     def reset(self, seed=None, options=None):
         return np.zeros(self.observation_space.shape, dtype=np.uint8), {}

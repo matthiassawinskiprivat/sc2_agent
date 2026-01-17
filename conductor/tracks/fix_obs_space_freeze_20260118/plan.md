@@ -9,11 +9,12 @@
 - [x] Task: Conductor - User Manual Verification 'Preparation & Testing Strategy' (Protocol in workflow.md)
 
 ## Phase 2: Implementation
-- [ ] Task: Refactor the `observation_space` definition.
-    - [ ] Locate the space definition in `src/transformers/observation_transformer.py` or the environment wrappers.
-    - [ ] Ensure `Box` spaces for image channels use scalar bounds (e.g., `low=0, high=255`) rather than `np.full(...)` arrays.
-    - [ ] Ensure `dtype=np.uint8` is strictly used for all spatial/image layers.
-- [ ] Task: Run the performance test `tests/test_obs_space_check_performance.py` to verify the fix (Green Phase).
+- [x] Task: Refactor the `observation_space` definition.
+    - [x] Locate the space definition in `src/transformers/observation_transformer.py` or the environment wrappers.
+    - [x] Ensure `Box` spaces for image channels use scalar bounds (e.g., `low=0, high=255`) rather than `np.full(...)` arrays.
+    - [x] Ensure `dtype=np.uint8` is strictly used for all spatial/image layers.
+- [x] Task: Run the performance test `tests/test_obs_space_check_performance.py` to verify the fix (Green Phase).
+- [ ] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
 - [ ] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
 
 ## Phase 3: Validation & Cleanup

@@ -95,7 +95,7 @@ class Level0Env(gym.Env):
         self._log(f"Initialized Worker {self.worker_id} (Index: {self.worker_index}) with map {self.map_name}")
 
         num_channels = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
-        self.observation_space = spaces.Box(low=0, high=255, shape=(num_channels, 128, 128), dtype=np.uint8)
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_channels, 128, 128), dtype=np.float32)
         self.action_space = spaces.Discrete(len(self.action_heads) * self.grid_size * self.grid_size)
 
         self._sc2_process = None
