@@ -229,7 +229,6 @@ class UnitControlAgent:
         # Resources: MINERALFIELD, VESPENEGEYSER
         for unit in units:
             if unit.is_structure or unit.is_mineral_field or unit.is_vespene_geyser:
-                print(f"DEBUG: Unload Masking entity {unit.type_id} at {unit.position}")
                 rel_x = unit.position.x - crop_x
                 rel_y = unit.position.y - crop_y
                 
@@ -237,11 +236,15 @@ class UnitControlAgent:
                 y_cnn = int((self.cnn_height - 1) - ((rel_y * scale) + offset_y))
                 
                 if 0 <= x_cnn < self.cnn_width and 0 <= y_cnn < self.cnn_height:
-                    # Use footprint_radius if available, else radius
-                    radius = getattr(unit, "footprint_radius", unit.radius)
-                    r_px = int(radius * scale)
-                    if r_px < 1: r_px = 1
-                    cv2.circle(entity_mask, (x_cnn, y_cnn), r_px, 255, -1)
+                    # Use footprint_radius if available, else radius. Fallback to 0.0 if both None.
+                    radius = getattr(unit, "footprint_radius", None)
+                    if radius is None:
+                        radius = getattr(unit, "radius", 0.5) # Default small radius if missing
+                    
+                    if radius is not None:
+                        r_px = int(radius * scale)
+                        if r_px < 1: r_px = 1
+                        cv2.circle(entity_mask, (x_cnn, y_cnn), r_px, 255, -1)
 
         # 6. Final Combine
         # Valid = (Eroded Terrain) AND (NOT Entity)
