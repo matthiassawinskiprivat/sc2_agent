@@ -278,8 +278,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [x] **Track: Fix Drop Mechanics Masking**
-*Link: [./conductor/tracks/fix_drop_mechanics_20260117/](./conductor/tracks/fix_drop_mechanics_20260117/)*
+- [ ] **Track: Fix Watchdog Timeout during Training Optimization**
+*Link: [./tracks/fix_watchdog_timeout_20260118/](./tracks/fix_watchdog_timeout_20260118/)*
 
 
 

@@ -357,8 +357,9 @@ class PipelineManager:
             logger.info(f"Training for up to {training_params['training_steps']} timesteps...")
             
             # Watchdog to detect hangs in the training loop
-            # Timeout of 300s (5 minutes) should be enough for even slow SC2 loads/resets
-            watchdog = Watchdog(timeout=300.0, recurring=True)
+            # Default to 1 hour (3600s) to accommodate slow CPU training optimization phases.
+            w_timeout = training_params.get("watchdog_timeout", 3600.0)
+            watchdog = Watchdog(timeout=w_timeout, recurring=True)
             watchdog.start()
 
             checkpoint_callback = CheckpointCallback(save_freq=5000, save_path=model_dir, name_prefix="zerg")
