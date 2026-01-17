@@ -281,8 +281,4 @@ This file tracks all major tracks for the project. Each track has its own detail
 - [x] **Track: Fix Drop Mechanics Masking**
 *Link: [./conductor/tracks/fix_drop_mechanics_20260117/](./conductor/tracks/fix_drop_mechanics_20260117/)*
 
----
-
-- [x] **Track: Remove dilation from the load action mask**
-*Link: [./tracks/remove_dilation_load_mask_20260117/](./tracks/remove_dilation_load_mask_20260117/)*
 
