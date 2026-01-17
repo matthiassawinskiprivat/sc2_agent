@@ -41,6 +41,18 @@ class CaptureTheFlagBot(BotAI):
         self.frame_count = 0
         self.cached_observation: Optional[np.ndarray] = None
 
+        # enemy_race must be set to avoid AttributeError in BotAIInternal._prepare_step
+        self._enemy_race = Race.Random
+        
+        # Satisfaction for BotAI initialization
+        self._initialize_variables()
+        from sc2.units import Units
+        self.units = Units([], self)
+        self.structures = Units([], self)
+        self.enemy_units = Units([], self)
+        self.enemy_structures = Units([], self)
+        self.all_units = Units([], self)
+
     async def on_start(self):
         env_conf = self.training_conf.get("env", {})
         self.grid_size = self.training_conf.get("grid_size", env_conf.get("grid_size", 128))

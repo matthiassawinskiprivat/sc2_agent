@@ -40,6 +40,15 @@ class SC2Bot(BotAI):
         # when it checks for Race.Random to update it from observations.
         self._enemy_race = Race.Random
         
+        # Satisfaction for BotAI initialization
+        self._initialize_variables()
+        from sc2.units import Units
+        self.units = Units([], self)
+        self.structures = Units([], self)
+        self.enemy_units = Units([], self)
+        self.enemy_structures = Units([], self)
+        self.all_units = Units([], self)
+        
         self.unit_command_uses_self_do = False
         self.actions = []
         self.unit_tags_received_action = set()
