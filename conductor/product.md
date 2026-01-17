@@ -48,6 +48,12 @@ The project employs a curriculum-driven observation system where the fidelity of
 - **Persistence:** This ensures that skills learned in early levels (e.g., following beacons, respecting terrain) remain available as the agent learns more complex behaviors (e.g., combat micro, air unit management).
 - **Transparency:** Environments log the layer expansion during initialization (e.g., `Observation layers: (5) -> (23)`), providing clear feedback on the agent's current state space.
 
+### Optimized Observation Pipeline
+To maximize training stability and performance, the project utilizes an optimized observation data flow.
+
+- **Float32 Representation:** Observations are represented as `float32` tensors in the `[0, 1]` range. This eliminates expensive redundant bounds-checking and normalization steps in the Stable Baselines 3 training loop.
+- **Bypass Library Preprocessing:** By pre-normalizing data in the `ObservationTransformer` and explicitly disabling internal library normalization (`normalize_images=False`), the system achieves a significant speedup in policy evaluation, preventing watchdog timeouts during large-scale training.
+
 ### Air Unit Mechanics
 
 Air units (e.g., Medivacs, Void Rays) are handled differently than ground units to respect their ability to cross any terrain.

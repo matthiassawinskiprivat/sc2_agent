@@ -26,6 +26,7 @@
 
 ## Quality Assurance
 *   **Pytest**: The framework for writing and running unit and integration tests.
+*   **High-Performance Observation Spaces**: Optimized `float32` [0, 1] Box spaces for seamless SB3 integration.
 
 
 ## Infrastructure
