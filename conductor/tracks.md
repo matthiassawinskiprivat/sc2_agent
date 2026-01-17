@@ -283,5 +283,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Improve Loading Logic**
+- [x] **Track: Improve Loading Logic**
 *Link: [./tracks/fix_loading_ability_20260117/](./tracks/fix_loading_ability_20260117/)*
