@@ -278,14 +278,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+- [ ] **Track: Fix Drop Mechanics Masking**
+*Link: [./conductor/tracks/fix_drop_mechanics_20260117/](./conductor/tracks/fix_drop_mechanics_20260117/)*
 
+---
 
-
----
-
-
- - - - 
- 
- -   [   ]   * * T r a c k :   I m p l e m e n t   U n l o a d   A c t i o n   M a s k i n g * * 
- * L i n k :   [ . / c o n d u c t o r / t r a c k s / u n l o a d _ a c t i o n _ m a s k _ 2 0 2 6 0 1 1 6 / ] ( . / c o n d u c t o r / t r a c k s / u n l o a d _ a c t i o n _ m a s k _ 2 0 2 6 0 1 1 6 / ) *  
- 
+- [ ] **Track: Implement Unload Action Masking**
+*Link: [./conductor/tracks/unload_action_mask_20260116/](./conductor/tracks/unload_action_mask_20260116/)*

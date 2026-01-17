@@ -40,13 +40,6 @@ class SC2Bot(BotAI):
         # when it checks for Race.Random to update it from observations.
         self._enemy_race = Race.Random
         
-        from sc2.units import Units
-        self.units = Units([], self)
-        self.structures = Units([], self)
-        self.enemy_units = Units([], self)
-        self.enemy_structures = Units([], self)
-        self.all_units = Units([], self)
-        
         self.unit_command_uses_self_do = False
         self.actions = []
         self.unit_tags_received_action = set()
@@ -221,9 +214,14 @@ class SC2Bot(BotAI):
         # AIR UNIT BYPASS: If unit is flying, it can move anywhere (ignore pathing)
         active_units = self.get_active_units()
         idx = getattr(self, "current_unit_index", 0)
+        is_transport_actor = False
         if 0 <= idx < len(active_units):
-            if active_units[idx].is_flying:
+            active_unit = active_units[idx]
+            if active_unit.is_flying:
                 move_mask = np.ones_like(move_mask, dtype=bool)
+            
+            # Context for Load head: Is the current unit a transport?
+            is_transport_actor = active_unit.cargo_max > 0
 
         unrestricted_mask = np.ones_like(move_mask, dtype=bool)
         
@@ -234,12 +232,18 @@ class SC2Bot(BotAI):
             elif head == "load":
                 # Use specialized transport mask for the 'load' head
                 game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
-                load_mask = self.agent_system.unit_agents["agent_0"].get_transport_mask(self.units, game_info)
+                # Pass is_transport context so Medivacs see Marines and vice-versa
+                load_mask = self.agent_system.unit_agents["agent_0"].get_transport_mask(
+                    self.units, game_info, is_transport=is_transport_actor
+                )
                 final_masks.append(load_mask)
             elif head == "unload":
                 # Use specialized safety mask for the 'unload' head
                 game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
-                unload_mask = self.agent_system.unit_agents["agent_0"].get_unload_mask(self.units, game_info)
+                # Pass ALL units (allied + enemy structures) to ensure safe drops
+                from sc2.units import Units
+                all_obstacles = Units(list(self.all_units) + list(self.enemy_structures), self)
+                unload_mask = self.agent_system.unit_agents["agent_0"].get_unload_mask(all_obstacles, game_info)
                 final_masks.append(unload_mask)
             else:
                 # Most other heads are unrestricted spatially
