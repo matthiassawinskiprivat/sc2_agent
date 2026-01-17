@@ -315,7 +315,7 @@ class PipelineManager:
                         gamma=model_params["gamma"],
                         ent_coef=model_params["ent_coef"],
                         n_epochs=model_params["n_epochs"],
-                        policy_kwargs=model_params.get("policy_kwargs", {}),
+                        policy_kwargs={**model_params.get("policy_kwargs", {}), "normalize_images": False},
                         device="cuda" if torch.cuda.is_available() else "cpu",
                     )
                     
@@ -349,7 +349,7 @@ class PipelineManager:
                     gamma=model_params["gamma"],
                     ent_coef=model_params["ent_coef"],
                     n_epochs=model_params["n_epochs"],
-                    policy_kwargs=model_params.get("policy_kwargs", {}),
+                    policy_kwargs={**model_params.get("policy_kwargs", {}), "normalize_images": False},
                     device="cuda" if torch.cuda.is_available() else "cpu",
                 )
 
