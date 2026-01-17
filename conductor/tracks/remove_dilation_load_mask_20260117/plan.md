@@ -1,11 +1,11 @@
 # Implementation Plan - Remove Dilation from Load Action Mask
 
-## Phase 1: Preparation & Testing Strategy
-- [~] Task: Create a new test file `tests/test_transport_mask_precision.py`.
-    - [ ] Implement a test that places a single unit and verifies the `get_transport_mask` output area.
-    - [ ] Assert that the masked area is not expanded by dilation (e.g., check that the number of masked pixels is consistent with a non-dilated point).
+## Phase 1: Preparation & Testing Strategy [checkpoint: c988819]
+- [x] Task: Create a new test file `tests/test_transport_mask_precision.py`.
+    - [x] Implement a test that places a single unit and verifies the `get_transport_mask` output area.
+    - [x] Assert that the masked area is not expanded by dilation (e.g., check that the number of masked pixels is consistent with a non-dilated point).
 - [x] Task: Run the test to confirm it fails with current dilation (Red Phase).
-- [ ] Task: Conductor - User Manual Verification 'Preparation & Testing Strategy' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Preparation & Testing Strategy' (Protocol in workflow.md)
 
 ## Phase 2: Implementation
 - [ ] Task: Modify `src/agent/unit_control_agent.py`.
