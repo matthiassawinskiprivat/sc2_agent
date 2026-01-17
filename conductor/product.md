@@ -72,4 +72,9 @@ To prevent agents from attempting to unload units on invalid terrain or inside b
 
 - **Exact Footprints:** Buildings, resource patches, and destructible debris are excluded using their exact footprints (calculated via `footprint_radius`), ensuring that units can be dropped adjacent to these objects but not directly on top of them.
 
-- **Flying Unit Constraint:** Unlike movement, the `unload` mask is strictly enforced even for flying units to maintain mechanical realism and drop safety.
+### Robust Loading Mechanics
+To ensure reliable transport operations, the agent implements a dual-mode loading system that supports all three races.
+
+- **Dual Interaction:** The system automatically distinguishes between a unit entering a transport and a transport picking up a unit.
+- **Explicit Ability Usage:** Transports (Medivacs, Overlords, Warp Prisms) utilize explicit `LOAD` AbilityIds rather than generic right-click commands, ensuring robust behavior in dense unit environments.
+- **Race-Agnostic:** The implementation handles race-specific transport abilities (e.g., `LOAD_MEDIVAC` vs. `LOAD_OVERLORD`) through a unified action head, facilitating multi-race training.
