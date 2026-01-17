@@ -9,8 +9,8 @@ class MockSC2ProcessNone:
     attempt_count = 0
     def __init__(self, *args, **kwargs):
         MockSC2ProcessNone.attempt_count += 1
-        self.port = None if MockSC2ProcessNone.attempt_count == 1 else 12345
-        self.ws = "ws://127.0.0.1:12345/sc2api" if self.port else None
+        self._port = None if MockSC2ProcessNone.attempt_count == 1 else 12345
+        self.ws = "ws://127.0.0.1:12345/sc2api" if self._port else None
         
     async def __aenter__(self):
         return MagicMock()
@@ -40,7 +40,7 @@ async def test_launch_retry_on_none_port():
     
     # Should have attempted twice (first failed with None, second succeeded)
     assert MockSC2ProcessNone.attempt_count == 2
-    assert env._sc2_process.port == 12345
+    assert getattr(env._sc2_process, "_port", None) == 12345
     print("\nSUCCESS: SC2 process launch retried and succeeded after port=None")
 
 if __name__ == "__main__":

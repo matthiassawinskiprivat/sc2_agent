@@ -201,7 +201,9 @@ class Level0Env(gym.Env):
                 self._controller = await self._sc2_process.__aenter__()
                 
                 # Verify port was assigned correctly
-                if self._sc2_process.port is None:
+                # SC2Process uses _port internally in burnysc2
+                current_port = getattr(self._sc2_process, "_port", None)
+                if current_port is None:
                     self._log(f"WARNING: SC2Process launched with port=None on attempt {attempt+1}")
                     await self._sc2_process.__aexit__(None, None, None)
                     if attempt == max_launch_attempts - 1:
