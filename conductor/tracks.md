@@ -276,10 +276,6 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./conductor/tracks/drop_operations_prototype_20260107/](./conductor/tracks/drop_operations_prototype_20260107/)*
 
 
----
-
-- [x] **Track: Fix Watchdog Timeout during Training Optimization**
-*Link: [./tracks/fix_watchdog_timeout_20260118/](./tracks/fix_watchdog_timeout_20260118/)*
 
 
 
