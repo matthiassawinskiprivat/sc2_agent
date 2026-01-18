@@ -15,6 +15,6 @@
 - [x] Task: Run `tests/test_watchdog_config.py` (updated) to verify the watchdog now initializes with 3600.0.
 - [x] Task: Conductor - User Manual Verification 'Implementation' (Protocol in workflow.md)
 
-## Phase 3: Validation & Cleanup
+## Phase 3: Validation & Cleanup [checkpoint: 82b186a]
 - [x] Task: Verify that `debug_train.py` or other scripts using `train_pipeline.py` logic (if any) are not negatively affected.
 - [x] Task: Conductor - User Manual Verification 'Validation & Cleanup' (Protocol in workflow.md)
