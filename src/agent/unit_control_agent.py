@@ -98,9 +98,17 @@ class UnitControlAgent:
     def get_transport_mask(self, units: list, game_info: Any, is_transport: bool = False) -> np.ndarray:
         """
         Generates a mask for the load action.
-        If is_transport is True (actor is a Medivac), it highlights loadable ground units.
-        If is_transport is False (actor is ground), it highlights allied transports.
+        If is_transport is True (actor is a Medivac), it returns the terrain mask (cliffs masked).
+        If is_transport is False (actor is ground), it highlights allied transports with circle targets.
         """
+        if game_info:
+            self.last_game_info = game_info
+
+        if is_transport:
+             # Task 3: Transport actor uses Terrain Mask (same as move mask)
+             # This masks out cliffs/void, focusing search on valid ground.
+             return self.get_action_mask()
+
         if not game_info:
             return np.ones(self.grid_size * self.grid_size, dtype=bool)
 
@@ -133,17 +141,8 @@ class UnitControlAgent:
         }
 
         for unit in units:
-            is_target = False
-            if is_transport:
-                # Medivac looks for loadable ground units
-                if not unit.is_flying and not unit.is_structure and unit.type_id not in {UnitTypeId.LARVA, UnitTypeId.EGG}:
-                    is_target = True
-            else:
-                # Ground unit looks for allied transports
-                if unit.type_id in TRANSPORT_TYPES:
-                    is_target = True
-
-            if is_target:
+            # Ground unit looks for allied transports
+            if unit.type_id in TRANSPORT_TYPES:
                 rel_x = unit.position.x - crop_x
                 rel_y = unit.position.y - crop_y
                 
@@ -151,11 +150,14 @@ class UnitControlAgent:
                 y_cnn = int((self.cnn_height - 1) - ((rel_y * scale) + offset_y))
                 
                 if 0 <= x_cnn < self.cnn_width and 0 <= y_cnn < self.cnn_height:
-                    mask_2d[y_cnn, x_cnn] = 255
+                    # Draw Circle based on radius (Task 4)
+                    radius = getattr(unit, "radius", 1.0)
+                    r_px = int(radius * scale)
+                    if r_px < 1: r_px = 1
+                    cv2.circle(mask_2d, (x_cnn, y_cnn), r_px, 255, -1)
 
         # 4. Resize to Action Grid
-        # We skip dilation for the transport mask to ensure the agent targets 
-        # the exact unit position, avoiding "ghost targets" in adjacent cells.
+        # We skip dilation here because we already used the unit radius (circle).
         resized_mask = cv2.resize(mask_2d, (self.grid_size, self.grid_size), interpolation=cv2.INTER_AREA)
         
         return (resized_mask.flatten() > 0).astype(bool)

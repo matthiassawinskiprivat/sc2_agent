@@ -248,36 +248,53 @@ class SC2Bot(BotAI):
         active_units = self.get_active_units()
         idx = getattr(self, "current_unit_index", 0)
         is_transport_actor = False
+        is_flying = False
+        cargo_used = 0
+
         if 0 <= idx < len(active_units):
             active_unit = active_units[idx]
-            if active_unit.is_flying:
+            is_flying = active_unit.is_flying
+            if is_flying:
                 move_mask = np.ones_like(move_mask, dtype=bool)
             
-            # Context for Load head: Is the current unit a transport?
+            # Context for Load/Unload heads
             is_transport_actor = active_unit.cargo_max > 0
+            cargo_used = getattr(active_unit, "cargo_used", 0)
 
         unrestricted_mask = np.ones_like(move_mask, dtype=bool)
+        zero_mask = np.zeros_like(move_mask, dtype=bool)
         
         final_masks = []
         for head in self.action_heads:
             if head == "move":
                 final_masks.append(move_mask)
+            elif head == "attack":
+                # Use move_mask to enforce terrain limits for ground units (move_mask is already adjusted for flyers)
+                final_masks.append(move_mask)
             elif head == "load":
-                # Use specialized transport mask for the 'load' head
-                game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
-                # Pass is_transport context so Medivacs see Marines and vice-versa
-                load_mask = self.agent_system.unit_agents["agent_0"].get_transport_mask(
-                    self.units, game_info, is_transport=is_transport_actor
-                )
-                final_masks.append(load_mask)
+                # Non-transport flyers cannot load
+                if is_flying and not is_transport_actor:
+                    final_masks.append(zero_mask)
+                else:
+                    # Use specialized transport mask for the 'load' head
+                    game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
+                    # Pass is_transport context so Medivacs see Marines and vice-versa
+                    load_mask = self.agent_system.unit_agents["agent_0"].get_transport_mask(
+                        self.units, game_info, is_transport=is_transport_actor
+                    )
+                    final_masks.append(load_mask)
             elif head == "unload":
-                # Use specialized safety mask for the 'unload' head
-                game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
-                # Pass ALL units (allied + enemy structures) to ensure safe drops
-                from sc2.units import Units
-                all_obstacles = Units(list(self.all_units) + list(self.enemy_structures), self)
-                unload_mask = self.agent_system.unit_agents["agent_0"].get_unload_mask(all_obstacles, game_info)
-                final_masks.append(unload_mask)
+                # Only valid if Transport AND has cargo
+                if is_transport_actor and cargo_used > 0:
+                    # Use specialized safety mask for the 'unload' head
+                    game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
+                    # Pass ALL units (allied + enemy structures) to ensure safe drops
+                    from sc2.units import Units
+                    all_obstacles = Units(list(self.all_units) + list(self.enemy_structures), self)
+                    unload_mask = self.agent_system.unit_agents["agent_0"].get_unload_mask(all_obstacles, game_info)
+                    final_masks.append(unload_mask)
+                else:
+                    final_masks.append(zero_mask)
             else:
                 # Most other heads are unrestricted spatially
                 final_masks.append(unrestricted_mask)

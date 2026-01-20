@@ -8,6 +8,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers.action_masker import ActionMasker
+from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
 import torch
 
 # Disable distribution validation to avoid Simplex errors with MaskablePPO
@@ -272,11 +273,25 @@ class PipelineManager:
 
         try:
             # 3. Setup or Load Model
+            algo_name = model_params.get("algorithm", "MaskablePPO")
+            AlgoClass = MaskableRecurrentPPO if algo_name == "MaskableRecurrentPPO" else MaskablePPO
+            logger.info(f"Using algorithm: {algo_name}")
+
             if model_path_to_load:
                 logger.info(f"Resuming/Loading training from: {model_path_to_load}")
                 
                 # Check for space mismatches
-                saved_model = MaskablePPO.load(model_path_to_load, device="cpu")
+                # We use AlgoClass to load, but if the saved model was different, it might fail or warn.
+                # SB3 usually handles loading into a different class if they are compatible enough, 
+                # but MaskablePPO and MaskableRecurrentPPO have different policy structures.
+                
+                # For safety, we try to load with the requested AlgoClass.
+                try:
+                    saved_model = AlgoClass.load(model_path_to_load, device="cpu")
+                except Exception as e:
+                    logger.warning(f"Failed to load with {algo_name}, attempting fallback load with MaskablePPO: {e}")
+                    saved_model = MaskablePPO.load(model_path_to_load, device="cpu")
+
                 saved_policy = saved_model.policy
                 
                 current_obs_shape = env.observation_space.shape
@@ -285,8 +300,12 @@ class PipelineManager:
                 obs_mismatch = current_obs_shape != saved_obs_shape
                 act_mismatch = env.action_space.n != saved_policy.action_space.n
                 
-                if obs_mismatch or act_mismatch:
-                    logger.warning(f"Space mismatch detected. Obs: {saved_obs_shape} -> {current_obs_shape}, Act: {saved_policy.action_space.n} -> {env.action_space.n}")
+                # Arch mismatch: if we want recurrent but saved is not, or vice versa
+                arch_mismatch = (algo_name == "MaskableRecurrentPPO" and not isinstance(saved_model, MaskableRecurrentPPO)) or \
+                                (algo_name == "MaskablePPO" and isinstance(saved_model, MaskableRecurrentPPO))
+
+                if obs_mismatch or act_mismatch or arch_mismatch:
+                    logger.warning(f"Mismatch detected. Obs: {saved_obs_shape} -> {current_obs_shape}, Act: {saved_policy.action_space.n} -> {env.action_space.n}, Arch Change: {arch_mismatch}")
                     logger.info("Transferring weights to a new model structure.")
                     
                     state_dict = saved_policy.state_dict()
@@ -304,20 +323,24 @@ class PipelineManager:
                         raise e
                     
                     # Create fresh model
-                    model = MaskablePPO(
-                        policy=model_params["policy"],
-                        env=env,
-                        verbose=1,
-                        tensorboard_log=log_dir,
-                        learning_rate=training_params["learning_rate"],
-                        batch_size=training_params["batch_size"],
-                        n_steps=training_params["n_steps"],
-                        gamma=model_params["gamma"],
-                        ent_coef=model_params["ent_coef"],
-                        n_epochs=model_params["n_epochs"],
-                        policy_kwargs={**model_params.get("policy_kwargs", {}), "normalize_images": False},
-                        device="cuda" if torch.cuda.is_available() else "cpu",
-                    )
+                    model_kwargs = {
+                        "policy": model_params["policy"],
+                        "env": env,
+                        "verbose": 1,
+                        "tensorboard_log": log_dir,
+                        "learning_rate": training_params["learning_rate"],
+                        "batch_size": training_params["batch_size"],
+                        "n_steps": training_params["n_steps"],
+                        "gamma": model_params["gamma"],
+                        "ent_coef": model_params["ent_coef"],
+                        "n_epochs": model_params["n_epochs"],
+                        "policy_kwargs": {**model_params.get("policy_kwargs", {}), "normalize_images": False},
+                        "device": "cuda" if torch.cuda.is_available() else "cpu",
+                    }
+                    if AlgoClass == MaskableRecurrentPPO:
+                        model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
+
+                    model = AlgoClass(**model_kwargs)
                     
                     # Load compatible weights
                     missing, unexpected = model.policy.load_state_dict(state_dict, strict=False)
@@ -329,7 +352,7 @@ class PipelineManager:
                         "n_steps": training_params["n_steps"],
                         "batch_size": training_params["batch_size"],
                     }
-                    model = MaskablePPO.load(
+                    model = AlgoClass.load(
                         model_path_to_load,
                         env=env,
                         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -337,21 +360,25 @@ class PipelineManager:
                         custom_objects=custom_objects
                     )
             else:
-                logger.info("Starting new training session with MaskablePPO.")
-                model = MaskablePPO(
-                    policy=model_params["policy"],
-                    env=env,
-                    verbose=1,
-                    tensorboard_log=log_dir,
-                    learning_rate=training_params["learning_rate"],
-                    batch_size=training_params["batch_size"],
-                    n_steps=training_params["n_steps"],
-                    gamma=model_params["gamma"],
-                    ent_coef=model_params["ent_coef"],
-                    n_epochs=model_params["n_epochs"],
-                    policy_kwargs={**model_params.get("policy_kwargs", {}), "normalize_images": False},
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                )
+                logger.info(f"Starting new training session with {algo_name}.")
+                model_kwargs = {
+                    "policy": model_params["policy"],
+                    "env": env,
+                    "verbose": 1,
+                    "tensorboard_log": log_dir,
+                    "learning_rate": training_params["learning_rate"],
+                    "batch_size": training_params["batch_size"],
+                    "n_steps": training_params["n_steps"],
+                    "gamma": model_params["gamma"],
+                    "ent_coef": model_params["ent_coef"],
+                    "n_epochs": model_params["n_epochs"],
+                    "policy_kwargs": {**model_params.get("policy_kwargs", {}), "normalize_images": False},
+                    "device": "cuda" if torch.cuda.is_available() else "cpu",
+                }
+                if AlgoClass == MaskableRecurrentPPO:
+                    model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
+
+                model = AlgoClass(**model_kwargs)
 
             # 4. Train Model
             logger.info(f"Training for up to {training_params['training_steps']} timesteps...")

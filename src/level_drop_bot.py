@@ -26,6 +26,7 @@ class LevelDropBot(Level7Bot):
         self.previous_distances = {}
         self.current_assignments = {}
         self.previous_health = {}
+        self.previous_medivac_distances = {}
         
         # Reset objective tracking
         self.command_center_tag = None
@@ -127,18 +128,33 @@ class LevelDropBot(Level7Bot):
              
         load_reward = rewards_conf.get('load_reward', 0.1)
         unload_reward = rewards_conf.get('unload_reward', 1.0)
+        distance_reward_scale = rewards_conf.get('distance_reward_scale', 0.05)
         
-        # 1. Load Reward
-        # We check all allied units (including flying ones)
+        # 1. Progressive Load Reward
+        # Reward increases for each additional unit loaded
         current_cargo_sum = sum(u.cargo_used for u in self.units if hasattr(u, "cargo_used"))
         cargo_diff = current_cargo_sum - self.previous_cargo_sum
         
         if cargo_diff > 0:
-            total_reward += cargo_diff * load_reward
+            # Multiplier: (Current Cargo + 1)
+            # 1st unit: 1 * 0.1 * 1 = 0.1
+            # 2nd unit: 1 * 0.1 * 2 = 0.2
+            # 3rd unit: 1 * 0.1 * 3 = 0.3
+            # 8th unit: 1 * 0.1 * 8 = 0.8
+            # Total reward for full load (8 units) ~ 3.6 (much better than 0.8 flat)
+            load_multiplier = (current_cargo_sum // 1) + 1 # Approximate unit count if we assume cargo size 1
+            # Actually cargo_used is accurate. Marine size is 1.
+            # But just use cargo_used directly.
+            
+            # If multiple units loaded at once, we approximate.
+            # For simplicity, we use the NEW cargo sum as the multiplier.
+            progressive_reward = cargo_diff * load_reward * current_cargo_sum
+            total_reward += progressive_reward
+            logger.info(f"Loading Reward: +{progressive_reward:.2f} (Total Cargo: {current_cargo_sum})")
             
         self.previous_cargo_sum = current_cargo_sum
         
-        # 2. Arrival Reward
+        # 2. Cargo-Weighted Distance Reward (Shaping)
         target_pos = self._objective_pos
         if not target_pos and self.command_center_tag:
             cc = self.enemy_structures.find_by_tag(self.command_center_tag)
@@ -146,8 +162,28 @@ class LevelDropBot(Level7Bot):
                 target_pos = cc.position
 
         if target_pos:
+            medivacs = self.units.filter(lambda u: u.type_id == UnitTypeId.MEDIVAC)
+            for medivac in medivacs:
+                dist = medivac.distance_to(target_pos)
+                prev_dist = self.previous_medivac_distances.get(medivac.tag, dist)
+                
+                # We want to reward moving closer (prev > curr)
+                dist_diff = prev_dist - dist
+                
+                # Only reward if carrying cargo!
+                # Weight by amount of cargo. 
+                # Empty medivac: 0 reward.
+                # Full medivac (8 units): 8x reward.
+                if medivac.cargo_used > 0:
+                    shaping_reward = dist_diff * distance_reward_scale * medivac.cargo_used
+                    # Clamp to avoid massive spikes on teleports or bugs
+                    shaping_reward = max(-1.0, min(1.0, shaping_reward))
+                    total_reward += shaping_reward
+                
+                self.previous_medivac_distances[medivac.tag] = dist
+
+            # 3. Arrival Reward
             # Units on ground near CC
-            # We use distance_to_point because target_pos is a Point2
             units_in_zone = {u.tag for u in self.units 
                              if not u.is_flying 
                              and u.distance_to(target_pos) < 15.0}

@@ -275,6 +275,72 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 *Link: [./conductor/tracks/drop_operations_prototype_20260107/](./conductor/tracks/drop_operations_prototype_20260107/)*
 
+---
+
+## [x] Track: Improve Action Masking
+*Link: [./conductor/tracks/improve-action-masking/](./conductor/tracks/improve-action-masking/)*
+
+---
+
+## [x] Track: Implement Maskable Recurrent PPO
+*Link: [./conductor/tracks/implement_maskable_recurrent_ppo/](./conductor/tracks/implement_maskable_recurrent_ppo/)*
+
+---
+
+## [x] Track: Implement GRU Memory
+*Link: [./conductor/tracks/implement_gru_memory/](./conductor/tracks/implement_gru_memory/)*
+
+---
+
+## [x] Track: Optimize PPO VRAM Cache
+
+*Link: [./conductor/tracks/optimize_ppo_vram_cache/](./conductor/tracks/optimize_ppo_vram_cache/)*
+
+
+
+---
+
+
+
+## [x] Track: JIT Recurrent Loop Optimization
+
+
+
+*Link: [./conductor/tracks/jit_recurrent_loop_optimization/](./conductor/tracks/jit_recurrent_loop_optimization/)*
+
+
+
+
+
+
+
+---
+
+
+
+
+
+
+
+## [x] Track: Optimize Drop Rewards
+
+
+
+
+
+
+
+*Link: [./conductor/tracks/optimize_drop_rewards/](./conductor/tracks/optimize_drop_rewards/)*
+
+
+
+
+
+
+
+
+
+
 
 
 

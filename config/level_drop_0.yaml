@@ -25,10 +25,13 @@ training:
   gamma: 0.99
   ent_coef: 0.01
   training_steps: 1_000_000
-  num_envs: 1 # Map based envs often safer with 1 process first
+  num_envs: 1
+  watchdog_timeout: 7200
 
 model:
-  policy: "CnnPolicy"
+  algorithm: "MaskableRecurrentPPO"
+  policy: "CnnLstmPolicy"
+  rnn_type: "gru"
   ent_coef: 0.01
   gamma: 0.99
   n_epochs: 10
@@ -37,4 +40,5 @@ model:
     features_extractor_kwargs:
       features_dim: 512
       thinking_steps: 3
+    lstm_hidden_size: 512
     net_arch: []
