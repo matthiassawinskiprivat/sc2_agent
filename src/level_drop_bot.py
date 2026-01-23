@@ -33,6 +33,8 @@ class LevelDropBot(Level7Bot):
         self.previous_meeting_distances = {} # tag -> distance to closest pickup partner or centroid
         self.previous_transport_cargo = {} # tag -> cargo_used
         self.previous_passenger_tags = set() # tags of units currently in cargo
+        self.initially_loaded_units = set() # tags of units that have been loaded once
+        self.target_unloaded_units = set() # tags of units that have been unloaded in target zone once
         self.command_center_tag = None
 
     async def reset_game_state(self):
@@ -50,6 +52,8 @@ class LevelDropBot(Level7Bot):
         self.previous_meeting_distances = {}
         self.previous_transport_cargo = {}
         self.previous_passenger_tags = set()
+        self.initially_loaded_units = set()
+        self.target_unloaded_units = set()
         
         # Reset objective tracking
         self.command_center_tag = None
@@ -302,6 +306,7 @@ class LevelDropBot(Level7Bot):
         # --- PHASE 2: LOADING REWARD (FLAT) ---
         # Fixed: Removed scaling by current_cargo_sum to prevent advantage explosion.
         if is_passenger and active_tag not in self.previous_passenger_tags:
+            self.initially_loaded_units.add(active_tag) # Track initial load
             total_reward += load_reward
             self.previous_passenger_tags.add(active_tag)
             logger.info(f"Unit Load Reward: +{load_reward:.2f}{acting_info}")
@@ -316,6 +321,11 @@ class LevelDropBot(Level7Bot):
                 prev_cargo = self.previous_transport_cargo.get(active_tag, 0)
                 curr_cargo = transport.cargo_used
                 if curr_cargo > prev_cargo:
+                    # Identify which unit was just loaded to track it
+                    if hasattr(transport, "passengers"):
+                        for p in transport.passengers:
+                            self.initially_loaded_units.add(p.tag)
+
                     diff = curr_cargo - prev_cargo
                     total_reward += diff * load_reward
                     self.previous_transport_cargo[active_tag] = curr_cargo
@@ -345,6 +355,10 @@ class LevelDropBot(Level7Bot):
                              and u.distance_to(target_pos) < 15.0}
             new_arrivals = units_in_zone - self.previous_units_in_zone
             if new_arrivals:
+                # Track arrivals that were previously in cargo
+                actually_unloaded = new_arrivals.intersection(self.previous_passenger_tags)
+                self.target_unloaded_units.update(actually_unloaded)
+
                 count = len(new_arrivals)
                 total_reward += count * unload_reward
                 self.previous_units_in_zone.update(new_arrivals)
