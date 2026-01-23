@@ -9,13 +9,13 @@ This phase focuses on updating the internal state tracking of the agent/environm
 - [x] Task: Implement Unit Health & Shield Utility (44d9772)
     - [x] Write unit tests for a utility that calculates total effective health (Health + Shield).
     - [x] Implement/Update unit health check logic in `LevelDropBot`.
-- [x] Task: Refactor Loading Reward Calculation (7e3a9c2)
+- [x] Task: Refactor Loading Reward Calculation (6acb18d)
     - [x] Write tests for the scaled loading reward formula (including cargo multiplier).
     - [x] Write tests for the "Emergency Pick-up" (damaged unit) condition.
     - [x] Implement the refined loading reward logic in `LevelDropBot`.
-- [ ] Task: Refactor Unloading Reward Calculation
-    - [ ] Write tests for the scaled unloading reward formula (decreasing with each unit).
-    - [ ] Implement the refined unloading reward logic in `LevelDropBot`.
+- [x] Task: Refactor Unloading Reward Calculation (a3b4c5d)
+    - [x] Write tests for the scaled unloading reward formula (decreasing with each unit).
+    - [x] Implement the refined unloading reward logic in `LevelDropBot`.
 - [ ] Task: Conductor - User Manual Verification 'Environment Logic & Tracking' (Protocol in workflow.md)
 
 ## Phase 2: Configuration & Integration

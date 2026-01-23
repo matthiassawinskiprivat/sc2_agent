@@ -108,45 +108,49 @@ async def test_target_unloading_tracking(bot):
     assert 101 in bot.target_unloaded_units
 
 @pytest.mark.asyncio
-async def test_refined_loading_rewards(bot):
+async def test_refined_unloading_rewards(bot):
     await bot.reset_game_state()
-    bot.training_conf['rewards']['load_reward'] = 0.1
+    bot.training_conf['rewards']['unload_reward'] = 1.0
+    target_pos = Point2((10, 10))
+    bot._objective_pos = target_pos
     
-    # 1. Initial load into empty transport
-    marine1 = MockUnit(tag=101, type_id=UnitTypeId.MARINE)
-    medivac = MockUnit(tag=1, type_id=UnitTypeId.MEDIVAC, cargo_used=1)
-    medivac.passengers = [marine1]
+    # 1. Unload from full transport (cargo=4)
+    marine1 = MockUnit(tag=101, type_id=UnitTypeId.MARINE, position=target_pos)
+    medivac = MockUnit(tag=1, type_id=UnitTypeId.MEDIVAC, position=target_pos, cargo_used=3)
     
-    bot.units = create_mock_filter_result([medivac])
+    bot.previous_passenger_tags = {101, 102, 103, 104}
+    bot.previous_transport_cargo = {1: 4}
+    bot.units = create_mock_filter_result([medivac, marine1])
     bot.all_units = create_mock_filter_result([medivac, marine1])
-    bot.previous_transport_cargo = {1: 0}
     
     reward = bot.calculate_drop_reward(active_tag=1)
-    assert reward == pytest.approx(0.1) # Base reward (multiplier 1.0)
-    assert 101 in bot.initially_loaded_units
+    assert reward == pytest.approx(1.75) # 1.0 * (1 + (4-1)*0.25)
+    assert 101 in bot.target_unloaded_units
 
-    # 2. Initial load into non-empty transport (cargo=1)
-    marine2 = MockUnit(tag=102, type_id=UnitTypeId.MARINE)
-    medivac.passengers = [marine1, marine2]
+    # 2. Second unit from same drop (cargo was 3 before this one)
+    # Note: bot.previous_units_in_zone will contain marine1 now
+    bot.previous_units_in_zone = {101}
+    bot.previous_transport_cargo = {1: 3}
+    marine2 = MockUnit(tag=102, type_id=UnitTypeId.MARINE, position=target_pos)
     medivac.cargo_used = 2
-    bot.previous_transport_cargo = {1: 1}
-    bot.all_units = create_mock_filter_result([medivac, marine1, marine2])
+    bot.units = create_mock_filter_result([medivac, marine1, marine2])
     
     reward = bot.calculate_drop_reward(active_tag=1)
-    assert reward == pytest.approx(0.125) # 0.1 * (1 + 1*0.25)
-    assert 102 in bot.initially_loaded_units
+    assert reward == pytest.approx(1.5) # 1.0 * (1 + (3-1)*0.25)
+    assert 102 in bot.target_unloaded_units
 
-    # 3. Second load of healthy unit
-    bot.previous_passenger_tags = set()
-    bot.previous_transport_cargo = {1: 0}
-    medivac.passengers = [marine1]
-    medivac.cargo_used = 1
+    # 3. Last unit (cargo was 1 before this one)
+    bot.previous_units_in_zone = {101, 102, 103}
+    bot.previous_transport_cargo = {1: 1}
+    marine4 = MockUnit(tag=104, type_id=UnitTypeId.MARINE, position=target_pos)
+    medivac.cargo_used = 0
+    bot.units = create_mock_filter_result([medivac, marine1, marine2, marine4])
     
     reward = bot.calculate_drop_reward(active_tag=1)
-    assert reward == 0.0 # Already in initially_loaded_units
+    assert reward == pytest.approx(1.0) # 1.0 * (1 + (1-1)*0.25)
     
-    # 4. Second load of damaged unit (emergency pickup)
-    marine1.health = 10 # Damaged (Max 100)
-    bot.previous_transport_cargo = {1: 0} # Reset to simulate new load event
+    # 4. Second unload of same unit
+    bot.previous_units_in_zone = set() # Force "new arrival"
+    bot.target_unloaded_units = {104}
     reward = bot.calculate_drop_reward(active_tag=1)
-    assert reward == pytest.approx(0.1) # Flat base reward
+    assert reward == 0.0 # Already in target_unloaded_units

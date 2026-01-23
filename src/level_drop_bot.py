@@ -363,21 +363,40 @@ class LevelDropBot(Level7Bot):
                 shaping_reward = max(-1.0, min(1.0, shaping_reward))
                 total_reward += shaping_reward
 
-        # --- PHASE 4: ARRIVAL REWARD (FLAT) ---
+        # --- PHASE 4: ARRIVAL REWARD (Refined) ---
         if target_pos and active_unit_type in self.TRANSPORT_TYPES:
             units_in_zone = {u.tag for u in self.units 
                              if not u.is_flying 
                              and u.distance_to(target_pos) < 15.0}
             new_arrivals = units_in_zone - self.previous_units_in_zone
             if new_arrivals:
-                # Track arrivals that were previously in cargo
+                # Identify which units were just unloaded from THIS transport
+                # (Intersection with previous_passenger_tags ensures they were actually in cargo)
                 actually_unloaded = new_arrivals.intersection(self.previous_passenger_tags)
-                self.target_unloaded_units.update(actually_unloaded)
+                
+                prev_cargo = self.previous_transport_cargo.get(active_tag, 0)
+                arrival_reward = 0.0
+                unloaded_count = 0
+                
+                # Sort arrivals to ensure deterministic reward if multiple (though rare in one step)
+                for tag in sorted(actually_unloaded):
+                    if tag not in self.target_unloaded_units:
+                        # Scaled Reward: Highest when transport was full
+                        # Formula: R * (1 + (Cargo_Before - 1) * 0.25)
+                        # We decrement simulated cargo for each unit in this batch
+                        effective_cargo = max(1, prev_cargo - unloaded_count)
+                        multiplier = 1.0 + ((effective_cargo - 1) * 0.25)
+                        unit_reward = unload_reward * multiplier
+                        
+                        arrival_reward += unit_reward
+                        self.target_unloaded_units.add(tag)
+                        unloaded_count += 1
+                        logger.info(f"Unit Arrival Reward: +{unit_reward:.3f} (Cargo before: {effective_cargo}) {acting_info}")
 
-                count = len(new_arrivals)
-                total_reward += count * unload_reward
+                total_reward += arrival_reward
                 self.previous_units_in_zone.update(new_arrivals)
-                logger.info(f"{count} units arrived at Drop Zone! Reward: {count * unload_reward}{acting_info}")
+                if unloaded_count > 0:
+                    logger.info(f"{unloaded_count} units successfully dropped in Zone! Total Reward: {arrival_reward:.3f}{acting_info}")
                 
         return total_reward
 
