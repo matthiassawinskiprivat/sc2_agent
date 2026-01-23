@@ -168,9 +168,10 @@ A specialized gym environment designed to force the agent to learn the `Load` ->
     *   **Island B (Goal):** Contains a Target Beacon.
 *   **Fog of War:** Enabled (unlike previous basic levels) to test the Reasoning Core's memory.
 *   **Reward Function:**
-    *   `+0.1` per Marine loaded into the Medivac.
+    *   **Scaled Loading:** `+Base * (1 + (Cargo_Before * 0.25))` for first-time loading.
+    *   **Emergency Pickup:** `+Base` for reloading damaged units (<50% HP).
     *   `+0.5` when Medivac crosses the void gap.
-    *   `+1.0` per Marine unloaded on Island B.
+    *   **Scaled Unloading:** `+Base * (1 + ((Cargo_Before - 1) * 0.25))` for first-time unloading in target zone.
     *   `+10.0` (Episode Termination) when all Marines are on Island B.
 
 ### B. Observation Updates

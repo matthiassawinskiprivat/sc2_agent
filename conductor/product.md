@@ -86,6 +86,15 @@ To ensure reliable transport operations, the agent implements a dual-mode loadin
 - **Targeting Precision:** The system uses zero-dilation action masks for entity interaction (e.g., loading), forcing the agent to target the exact unit location and eliminating "ghost target" artifacts that cause command fallbacks.
 - **Race-Agnostic:** The implementation handles race-specific transport abilities (e.g., `LOAD_MEDIVAC` vs. `LOAD_OVERLORD`) through a unified action head, facilitating multi-race training.
 
+### Refined Transport Rewards
+To prevent excessive unit shuffling and incentivize efficient tactical maneuvers, the transport reward system utilizes a context-aware scaling mechanism.
+
+- **Initial Load Scaling:** Loading a unit into a transport is rewarded once per unit per episode. The reward scales positively with the transport's current cargo occupancy, encouraging the agent to fill transports before departing.
+
+- **Emergency Pickups:** Recurring rewards for loading previously-handled units are granted only if the unit is significantly damaged (below 50% HP), incentivizing rescue operations while penalizing redundant load/unload cycles for healthy units.
+
+- **Efficient Bulk Unloading:** Unloading rewards in the target zone scale based on the transport's fullness at the start of the drop sequence. The first units dropped from a full transport yield the highest rewards, discouraging inefficient single-unit shuttle runs.
+
 # Future Plans
 
 ### Hybrid Action Heads (Multi-Race Optimization)
