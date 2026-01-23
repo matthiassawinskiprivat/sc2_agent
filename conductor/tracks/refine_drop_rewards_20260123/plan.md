@@ -18,10 +18,10 @@ This phase focuses on updating the internal state tracking of the agent/environm
     - [x] Implement the refined unloading reward logic in `LevelDropBot`.
 - [x] Task: Conductor - User Manual Verification 'Environment Logic & Tracking' (Protocol in workflow.md)
 
-## Phase 2: Configuration & Integration
+## Phase 2: Configuration & Integration [checkpoint: cc106f8]
 Updating the YAML configurations to reflect the new reward structure and verifying the end-to-end signal flow.
 
 - [x] Task: Update Configuration Files (1af667c)
-- [x] Task: Integration Test for Reward Signals (b2d1f0e)
-    - [ ] Create a specialized integration test that mocks a loading sequence and verifies the exact reward values returned by the environment.
-- [ ] Task: Conductor - User Manual Verification 'Configuration & Integration' (Protocol in workflow.md)
+- [x] Task: Integration Test for Reward Signals (3fcbb8f)
+    - [x] Create a specialized integration test that mocks a loading sequence and verifies the exact reward values returned by the environment.
+- [x] Task: Conductor - User Manual Verification 'Configuration & Integration' (Protocol in workflow.md)
