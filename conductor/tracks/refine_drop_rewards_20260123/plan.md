@@ -21,7 +21,7 @@ This phase focuses on updating the internal state tracking of the agent/environm
 ## Phase 2: Configuration & Integration
 Updating the YAML configurations to reflect the new reward structure and verifying the end-to-end signal flow.
 
-- [ ] Task: Update Configuration Files
+- [x] Task: Update Configuration Files (f1e2d3c)
     - [ ] Update `config/level_drop_0.yaml` (and related drop configs) to include `base_load_reward` and `base_unload_reward`.
 - [ ] Task: Integration Test for Reward Signals
     - [ ] Create a specialized integration test that mocks a loading sequence and verifies the exact reward values returned by the environment.
