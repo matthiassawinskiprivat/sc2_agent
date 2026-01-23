@@ -324,14 +324,54 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## [x] Track: Optimize Drop Rewards
 
-
-
-
-
-
-
 *Link: [./conductor/tracks/optimize_drop_rewards/](./conductor/tracks/optimize_drop_rewards/)*
 
+---
+
+## [x] Track: Enhance Load Action Masking
+*Link: [./conductor/tracks/enhance_load_masking_20260121/](./conductor/tracks/enhance_load_masking_20260121/)*
+
+---
+
+## [x] Track: Verify Drop Environment Penalties
+*Link: [./conductor/tracks/verify_drop_penalties_20260121/](./conductor/tracks/verify_drop_penalties_20260121/)*
+
+---
+
+## [x] Track: Fix Level Drop Integration Test
+*Link: [./conductor/tracks/fix_integration_test_20260121/](./conductor/tracks/fix_integration_test_20260121/)*
+
+---
+
+## [x] Track: Fix Training Instability & Reward Volatility
+*Link: [./conductor/tracks/fix_training_instability_20260121/](./conductor/tracks/fix_training_instability_20260121/)*
+
+---
+
+## [x] Track: Implement Pickup Guidance
+*Link: [./conductor/tracks/implement_pickup_guidance_20260121/](./conductor/tracks/implement_pickup_guidance_20260121/)*
+
+---
+
+## [x] Track: Fix Reward Explosion & Attribution
+*Link: [./conductor/tracks/fix_reward_explosion_20260121/](./conductor/tracks/fix_reward_explosion_20260121/)*
+
+---
+
+## [x] Track: Fix Hidden Drop Reward Bugs
+*Link: [./conductor/tracks/fix_drop_reward_bugs_20260121/](./conductor/tracks/fix_drop_reward_bugs_20260121/)*
+
+---
+
+## [x] Track: Optimize Drop Reward Logic
+*Link: [./conductor/tracks/optimize_drop_reward_logic_20260121/](./conductor/tracks/optimize_drop_reward_logic_20260121/)*
+
+---
+
+## [x] Track: Medivac Heal Action Masking
+*Link: [./conductor/tracks/medivac_heal_masking_20260121/](./conductor/tracks/medivac_heal_masking_20260121/)*
+
+---
 
 
 
@@ -339,8 +379,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 
 
+## [x] Track: Fix Unload Action Handler
 
 
+
+*Link: [./conductor/tracks/fix_unload_handler_20260122/](./conductor/tracks/fix_unload_handler_20260122/)*
 
 
 

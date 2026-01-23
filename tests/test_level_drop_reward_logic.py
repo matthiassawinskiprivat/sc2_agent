@@ -27,18 +27,30 @@ async def test_drop_reward_logic_reproduction():
     bot.enemy_structures = MagicMock()
     bot.enemy_structures.find_by_tag.return_value = None
     
-    # 2. Setup Allied Units (Marines) near the objective
-    marine1 = MagicMock()
-    marine1.tag = 101
-    marine1.is_flying = False
-    marine1.cargo_used = 0 # Not a transport
-    marine1.distance_to.return_value = 5.0 # Close enough (< 15.0)
+    # 2. Setup Allied Units (Medivac) near the objective
+    medivac = MagicMock()
+    medivac.tag = 101
+    medivac.type_id = UnitTypeId.MEDIVAC
+    medivac.is_flying = True
+    medivac.cargo_used = 1
+    medivac.distance_to.return_value = 5.0
     
-    # Mock bot.units to return our marine
-    bot.units = [marine1]
-    
+    marine_on_ground = MagicMock()
+    marine_on_ground.tag = 202
+    marine_on_ground.is_flying = False
+    marine_on_ground.distance_to.return_value = 5.0
+
+    # Mock bot.units to return our units and support filter
+    bot.units = MagicMock()
+    bot.units.__iter__.return_value = [medivac, marine_on_ground]
+    bot.units.filter.return_value = [medivac]
+    bot.units.find_by_tag.return_value = medivac
+    bot.all_units = MagicMock()
+    bot.all_units.find_by_tag.return_value = medivac
+
     # Setup previous state (no units in zone previously)
     bot.previous_units_in_zone = set()
+    bot.previous_transport_cargo = {101: 1} # Already loaded to avoid load reward noise
     
     # Mock rewards config
     bot.training_conf = {
@@ -46,13 +58,9 @@ async def test_drop_reward_logic_reproduction():
             "unload_reward": 10.0
         }
     }
-    
+
     # 3. Calculate Reward
-    reward = bot.calculate_drop_reward()
-    
-    # 4. Assert Failure (Current Behavior)
-    # Because it looks in self.structures, it finds None, so reward is 0.0
-    # assert reward == 0.0, "Reward should be 0.0 because of the bug (looking in allied structures)"
+    reward = bot.calculate_drop_reward(active_tag=101)
     
     # 5. Assert Desired Behavior (Commented out until fix)
     assert reward == 10.0
@@ -76,17 +84,31 @@ async def test_drop_reward_logic_with_visible_enemy():
     # But NOT in allied structures
     bot.structures = MagicMock()
     bot.structures.find_by_tag.return_value = None
+
+    medivac = MagicMock()
+    medivac.tag = 101
+    medivac.type_id = UnitTypeId.MEDIVAC
+    medivac.is_flying = True
+    medivac.cargo_used = 1
+    medivac.distance_to.side_effect = lambda target: 5.0 if target == enemy_cc or target == Point2((20.0, 20.0)) else 100.0
     
-    marine1 = MagicMock()
-    marine1.tag = 101
-    marine1.is_flying = False
-    marine1.cargo_used = 0
-    marine1.distance_to.side_effect = lambda target: 5.0 if target == enemy_cc or target == Point2((20.0, 20.0)) else 100.0
+    marine_on_ground = MagicMock()
+    marine_on_ground.tag = 202
+    marine_on_ground.is_flying = False
+    marine_on_ground.distance_to.return_value = 5.0
+
+    # Mock bot.units
+    bot.units = MagicMock()
+    bot.units.__iter__.return_value = [medivac, marine_on_ground]
+    bot.units.filter.return_value = [medivac]
+    bot.units.find_by_tag.return_value = medivac
+    bot.all_units = MagicMock()
+    bot.all_units.find_by_tag.return_value = medivac
     
-    bot.units = [marine1]
     bot.previous_units_in_zone = set()
+    bot.previous_transport_cargo = {101: 1} # Already loaded
     bot.training_conf = {"rewards": {"unload_reward": 10.0}}
-    
-    reward = bot.calculate_drop_reward()
+
+    reward = bot.calculate_drop_reward(active_tag=101)
     
     assert reward == 10.0, "Reward should be 10.0 now that logic is fixed"

@@ -71,6 +71,9 @@ class Level0Env(gym.Env):
             self.action_heads = self.config_manager.get_cumulative_action_heads(self.level_name)
             self.training_conf['action_heads'] = self.action_heads
             
+            self.categorical_heads = self.config_manager.get_cumulative_categorical_heads(self.level_name)
+            self.training_conf['categorical_heads'] = self.categorical_heads
+            
             # Load rewards from level config
             level_conf = self.config_manager.get_level_config(self.level_name)
             if 'env' in level_conf and 'rewards' in level_conf['env']:
@@ -79,6 +82,7 @@ class Level0Env(gym.Env):
             print(f"Warning: Failed to load config for {self.level_name}: {e}")
             self.active_layers = []
             self.action_heads = ["move"] # Default
+            self.categorical_heads = []
 
         # Dependency Injection for testing
         self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
@@ -96,7 +100,10 @@ class Level0Env(gym.Env):
 
         num_channels = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_channels, 128, 128), dtype=np.float32)
-        self.action_space = spaces.Discrete(len(self.action_heads) * self.grid_size * self.grid_size)
+        
+        spatial_size = len(self.action_heads) * self.grid_size * self.grid_size
+        categorical_size = len(self.categorical_heads)
+        self.action_space = spaces.Discrete(spatial_size + categorical_size)
 
         self._sc2_process = None
         self._client = None

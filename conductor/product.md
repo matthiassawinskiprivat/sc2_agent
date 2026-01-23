@@ -85,3 +85,16 @@ To ensure reliable transport operations, the agent implements a dual-mode loadin
 - **Explicit Ability Usage:** Transports (Medivacs, Overlords, Warp Prisms) utilize explicit `LOAD` AbilityIds rather than generic right-click commands, ensuring robust behavior in dense unit environments.
 - **Targeting Precision:** The system uses zero-dilation action masks for entity interaction (e.g., loading), forcing the agent to target the exact unit location and eliminating "ghost target" artifacts that cause command fallbacks.
 - **Race-Agnostic:** The implementation handles race-specific transport abilities (e.g., `LOAD_MEDIVAC` vs. `LOAD_OVERLORD`) through a unified action head, facilitating multi-race training.
+
+# Future Plans
+
+### Hybrid Action Heads (Multi-Race Optimization)
+To scale the agent to handle the full complexity of all three StarCraft II races, the action architecture will evolve from a flat joint distribution to a hybrid system that distinguishes between spatial targeting and state management.
+
+- **Spatial Heads:** High-resolution (128x128) grids will be reserved exclusively for actions requiring precise world coordinates (e.g., Move, Attack, Yamato Cannon, Abduct, Force Field, Psionic Storm).
+- **Categorical Toggle Head:** A compact categorical head will manage all "instant" or "state-based" abilities that do not require a spatial target.
+    - **Terran:** Stimpack, Siege/Unsiege, Cloak, Lift/Land.
+    - **Zerg:** Burrow/Unburrow, Morph to Overseer, Generate Creep.
+    - **Protoss:** Activate Guardian Shield, Chrono Boost (on self/nearby), Warp Gate Transformation.
+- **Parameter Efficiency:** This optimization eliminates the massive parameter waste of 16k-neuron spatial heads for non-spatial toggles, significantly accelerating training convergence and reducing VRAM usage across all race models.
+- **Hierarchical Conditioning:** The system will move toward a hierarchical model where the categorical selection can provide context to the spatial heads, allowing the agent to learn "Targeted Abilities" (like Abduct or Snipe) more efficiently by sharing spatial targeting logic.

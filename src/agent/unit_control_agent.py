@@ -95,12 +95,66 @@ class UnitControlAgent:
         return (resized_mask.flatten() > 0).astype(bool)
 
 
-    def get_transport_mask(self, units: list, game_info: Any, is_transport: bool = False) -> np.ndarray:
+    def get_transport_mask(self, units: list, game_info: Any, is_transport: bool = False, active_unit: Any = None, cast_range: float = 4.0) -> np.ndarray:
         """
         Generates a mask for the load action.
         If is_transport is True (actor is a Medivac), it returns the terrain mask (cliffs masked).
         If is_transport is False (actor is ground), it highlights allied transports with circle targets.
+        
+        NEW: If active_unit is provided, we mask EVERYTHING if no valid target is within interaction range.
         """
+        from sc2.ids.unit_typeid import UnitTypeId
+        
+        TRANSPORT_TYPES = {
+            UnitTypeId.MEDIVAC, 
+            UnitTypeId.OVERLORD, 
+            UnitTypeId.OVERLORDTRANSPORT,
+            UnitTypeId.WARPPRISM,
+            UnitTypeId.WARPPRISMPHASING
+        }
+
+        # --- Range Check Optimization ---
+        if active_unit:
+            active_radius = getattr(active_unit, "radius", 0.0)
+            can_interact = False
+
+            if is_transport:
+                # Active: Transport. Target: Loadable Ground Units.
+                # We assume anything with cargo_max=0 and not a structure is loadable.
+                # Also exclude self.
+                for u in units:
+                    if u.tag == active_unit.tag: continue
+                    if u.is_structure: continue
+                    if u.cargo_max > 0: continue # Skip other transports
+                    
+                    # Calculate distance
+                    # python-sc2 units have distance_to. 
+                    # If we are mocking, ensure position is available.
+                    dist = active_unit.distance_to(u)
+                    target_radius = getattr(u, "radius", 0.0)
+                    
+                    # Effective Range = Cast + RadiusA + RadiusB
+                    if dist <= (cast_range + active_radius + target_radius):
+                        can_interact = True
+                        break
+            else:
+                # Active: Ground. Target: Transports.
+                for u in units:
+                    if u.tag == active_unit.tag: continue
+                    if u.type_id not in TRANSPORT_TYPES: continue
+                    
+                    dist = active_unit.distance_to(u)
+                    target_radius = getattr(u, "radius", 0.0)
+                    
+                    if dist <= (cast_range + active_radius + target_radius):
+                        can_interact = True
+                        break
+            
+            # If NO unit is in range, strictly forbid the load action.
+            if not can_interact:
+                return np.zeros(self.grid_size * self.grid_size, dtype=bool)
+        # -------------------------------
+
         if game_info:
             self.last_game_info = game_info
 
@@ -130,16 +184,6 @@ class UnitControlAgent:
         mask_2d = np.zeros((self.cnn_height, self.cnn_width), dtype=np.uint8)
 
         # 3. Mark Targets
-        from sc2.ids.unit_typeid import UnitTypeId
-        
-        TRANSPORT_TYPES = {
-            UnitTypeId.MEDIVAC, 
-            UnitTypeId.OVERLORD, 
-            UnitTypeId.OVERLORDTRANSPORT,
-            UnitTypeId.WARPPRISM,
-            UnitTypeId.WARPPRISMPHASING
-        }
-
         for unit in units:
             # Ground unit looks for allied transports
             if unit.type_id in TRANSPORT_TYPES:

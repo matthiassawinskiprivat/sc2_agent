@@ -155,6 +155,23 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                     new_state_dict[key] = new_b
                 else:
                     del new_state_dict[key]
+
+            elif new_action_dim > old_dim:
+                # CATEGORICAL APPEND: Handle adding categorical heads to existing spatial heads
+                logger.info(f"Appending categorical actions for '{key}': {old_dim} -> {new_action_dim} (Loud Bias: +5.0)")
+                if len(old_weight.shape) == 2:
+                    out_dim, in_feat = old_weight.shape
+                    # For weights, we use small random values for new indices
+                    new_w = torch.randn(new_action_dim, in_feat) * 0.01
+                    new_w[:old_dim, :] = old_weight
+                    new_state_dict[key] = new_w
+                elif len(old_weight.shape) == 1:
+                    # For biases, we use a LOUD (+5.0) value for the new categorical slots
+                    new_b = torch.ones(new_action_dim) * 5.0
+                    new_b[:old_dim] = old_weight
+                    new_state_dict[key] = new_b
+                else:
+                    del new_state_dict[key]
             
             else:
                 logger.info(f"Dropping incompatible layer '{key}'")

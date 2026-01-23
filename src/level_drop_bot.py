@@ -9,11 +9,30 @@ class LevelDropBot(Level7Bot):
     """
     Specialized Bot for Drop Operations Training.
     Focus: Loading, Moving, Unloading.
+    Supports Terran (Medivac/Marine), Zerg (Overlord/Zergling), and Protoss (WarpPrism/Zealot).
     """
+    TRANSPORT_TYPES = {
+        UnitTypeId.MEDIVAC, 
+        UnitTypeId.OVERLORD, 
+        UnitTypeId.OVERLORDTRANSPORT,
+        UnitTypeId.WARPPRISM,
+        UnitTypeId.WARPPRISMPHASING
+    }
+
+    INFANTRY_TYPES = {
+        UnitTypeId.MARINE, UnitTypeId.MARAUDER,
+        UnitTypeId.ZERGLING, UnitTypeId.ROACH, UnitTypeId.HYDRALISK,
+        UnitTypeId.ZEALOT, UnitTypeId.STALKER, UnitTypeId.ADEPT
+    }
+
     def __init__(self, conn, training_conf=None):
         super().__init__(conn, training_conf)
         self.previous_cargo_sum = 0
         self.previous_units_in_zone = set()
+        self.previous_transport_distances = {}
+        self.previous_meeting_distances = {} # tag -> distance to closest pickup partner or centroid
+        self.previous_transport_cargo = {} # tag -> cargo_used
+        self.previous_passenger_tags = set() # tags of units currently in cargo
         self.command_center_tag = None
 
     async def reset_game_state(self):
@@ -26,15 +45,35 @@ class LevelDropBot(Level7Bot):
         self.previous_distances = {}
         self.current_assignments = {}
         self.previous_health = {}
-        self.previous_medivac_distances = {}
+        self.previous_allied_health = {}
+        self.previous_transport_distances = {}
+        self.previous_meeting_distances = {}
+        self.previous_transport_cargo = {}
+        self.previous_passenger_tags = set()
         
         # Reset objective tracking
         self.command_center_tag = None
         self._objective_pos = None
         
         # Initial attempt to identify Enemy Main Structure (Objective)
-        # We don't warn here because it might not be visible at frame 0
         self._find_objective()
+        
+        # Initialize tracking for existing entities
+        for u in self.enemy_units + self.enemy_structures:
+            self.previous_health[u.tag] = u.health + u.shield
+        
+        all_allies = self.units.filter(lambda u: u.type_id in self.INFANTRY_TYPES or u.type_id in self.TRANSPORT_TYPES)
+        for u in all_allies:
+            self.previous_allied_health[u.tag] = u.health + u.shield
+            if u.type_id in self.TRANSPORT_TYPES:
+                self.previous_transport_cargo[u.tag] = u.cargo_used
+                if hasattr(u, "passengers"):
+                    for p in u.passengers:
+                        self.previous_passenger_tags.add(p.tag)
+                        self.previous_allied_health[p.tag] = p.health + p.shield
+        
+        # Initial meeting distances (to centroid if multiple, else to closest)
+        self.update_reward_states()
 
     def _find_objective(self):
         """
@@ -55,12 +94,12 @@ class LevelDropBot(Level7Bot):
 
     def get_active_units(self):
         """
-        Returns active allied units (Marines and Medivacs).
+        Returns active allied units (Infantry and Transports).
         """
         if not hasattr(self, "units"): return []
         
-        # We control both Marines and Medivacs for the drop sequence
-        controlled_units = self.units.filter(lambda u: u.type_id in {UnitTypeId.MARINE, UnitTypeId.MEDIVAC})
+        # We control both Infantry and Transports for the drop sequence
+        controlled_units = self.units.filter(lambda u: u.type_id in self.INFANTRY_TYPES or u.type_id in self.TRANSPORT_TYPES)
         return sorted(controlled_units, key=lambda u: u.tag)
 
     def get_observation_for_unit(self, unit_tag) -> Tuple[np.ndarray, Dict]:
@@ -87,16 +126,6 @@ class LevelDropBot(Level7Bot):
             if target:
                 target_pos = target.position
             else:
-                # If NOT visible, we use the LAST KNOWN position if we have it
-                # Or we can look into the full raw structure list if provided by engine?
-                # Actually, SC2 persistent objects are usually stored in 'self.structures' 
-                # but FoW removes them unless we manually track them.
-                
-                # For this level, we use 'Intelligence' (A choice in spec):
-                # We can iterate over the entire known structure list from the client if needed,
-                # but standard BotAI only shows visible ones.
-                
-                # Better: Cache the position during reset_game_state and reuse it here.
                 target_pos = getattr(self, "_objective_pos", None)
 
         raw_obs = {
@@ -118,82 +147,268 @@ class LevelDropBot(Level7Bot):
         self.zergling = original_unit
         return processed_obs, {}
 
-    def calculate_drop_reward(self) -> float:
+    def calculate_combat_reward(self) -> float:
+        """
+        Specialized combat reward for Drop Operations.
+        Tracks damage to ALL enemy entities (units and structures).
+        """
+        rewards_conf = self.training_conf.get('rewards', {})
+        damage_reward = rewards_conf.get('damage_reward', 0.1)
+        kill_reward = rewards_conf.get('kill_reward', 10.0)
+        
         total_reward = 0.0
-        # Read from env.rewards first, fallback to root rewards (legacy), then default
+        
+        # 1. Track ALL Enemy Health (Damage Dealt)
+        all_enemies = self.enemy_units + self.enemy_structures
+        current_enemy_tags = {u.tag for u in all_enemies}
+        
+        for u in all_enemies:
+            # If unit is new, initialize its health in tracking WITHOUT giving reward
+            if u.tag not in self.previous_health:
+                self.previous_health[u.tag] = u.health + u.shield
+                continue
+
+            prev = self.previous_health[u.tag]
+            curr = u.health + u.shield
+            damage = max(0, prev - curr)
+            if damage > 0:
+                total_reward += damage * damage_reward
+                self.previous_health[u.tag] = curr
+            
+        # Check for Kills
+        tracked_tags = set(self.previous_health.keys())
+        died_tags = tracked_tags - current_enemy_tags
+        
+        for tag in died_tags:
+             total_reward += kill_reward
+             del self.previous_health[tag]
+             
+        return total_reward
+
+    def calculate_allied_attrition_penalty(self) -> float:
+        """
+        Specialized attrition penalty for Drop operations.
+        Includes passengers in the 'living' set to avoid 'fake death' penalties on load.
+        """
+        rewards_conf = self.training_conf.get('rewards', {})
+        damage_penalty = rewards_conf.get('damage_penalty', -0.1)
+        kill_penalty = rewards_conf.get('kill_penalty', -10.0)
+        
+        total_penalty = 0.0
+        
+        allies = self.units.filter(lambda u: u.type_id in self.INFANTRY_TYPES or u.type_id in self.TRANSPORT_TYPES)
+        living_tags = {u.tag for u in allies}
+        all_living_units = list(allies)
+        
+        for transport in allies.filter(lambda u: u.type_id in self.TRANSPORT_TYPES):
+            if hasattr(transport, "passengers"):
+                for passenger in transport.passengers:
+                    living_tags.add(passenger.tag)
+                    all_living_units.append(passenger)
+        
+        for u in all_living_units:
+            # If unit is new (e.g. just spawned or discovered), initialize tracking
+            if u.tag not in self.previous_allied_health:
+                self.previous_allied_health[u.tag] = u.health + u.shield
+                continue
+
+            prev = self.previous_allied_health[u.tag]
+            curr = u.health + u.shield
+            damage = max(0, prev - curr)
+            if damage > 0:
+                total_penalty += damage * damage_penalty
+                self.previous_allied_health[u.tag] = curr
+            
+        tracked_tags = set(self.previous_allied_health.keys())
+        died_tags = tracked_tags - living_tags
+        
+        for tag in died_tags:
+            if tag in self.previous_allied_health:
+                total_penalty += kill_penalty
+                del self.previous_allied_health[tag]
+            
+        return total_penalty
+
+    def calculate_distance_reward(self, unit_tag: int = None) -> float:
+        """
+        In Drop operations, distance reward is handled by calculate_drop_reward.
+        """
+        return 0.0
+
+    def calculate_drop_reward(self, active_tag: int = None) -> float:
+        total_reward = 0.0
         env_conf = self.training_conf.get('env', {})
         rewards_conf = env_conf.get('rewards')
         if not rewards_conf:
              rewards_conf = self.training_conf.get('rewards', {})
              
         load_reward = rewards_conf.get('load_reward', 0.1)
-        unload_reward = rewards_conf.get('unload_reward', 1.0)
+        unload_reward = rewards_conf.get('unload_reward', 2.0) # Increased from 1.0 to 2.0
         distance_reward_scale = rewards_conf.get('distance_reward_scale', 0.05)
+        meeting_reward_scale = distance_reward_scale * 0.5
+        occupancy_penalty = -0.01 # Penalty per unit per step in cargo
+
+        active_unit_found = False
+        active_unit_type = None
+        is_passenger = False
+        acting_info = ""
         
-        # 1. Progressive Load Reward
-        # Reward increases for each additional unit loaded
-        current_cargo_sum = sum(u.cargo_used for u in self.units if hasattr(u, "cargo_used"))
-        cargo_diff = current_cargo_sum - self.previous_cargo_sum
+        # Identify acting unit status
+        unit = self.all_units.find_by_tag(active_tag)
+        if unit:
+            active_unit_found = True
+            active_unit_type = unit.type_id
+            acting_info = f" [Actor: {unit.type_id.name} ({active_tag})]"
+        else:
+            # Check if it's a passenger
+            for transport in self.units.filter(lambda u: u.type_id in self.TRANSPORT_TYPES):
+                for passenger in getattr(transport, "passengers", []):
+                    if passenger.tag == active_tag:
+                        active_unit_found = True
+                        active_unit_type = getattr(passenger, "unit_id", None)
+                        is_passenger = True
+                        acting_info = f" [Actor: Passenger ({active_tag})]"
+                        break
+                if active_unit_found: break
         
-        if cargo_diff > 0:
-            # Multiplier: (Current Cargo + 1)
-            # 1st unit: 1 * 0.1 * 1 = 0.1
-            # 2nd unit: 1 * 0.1 * 2 = 0.2
-            # 3rd unit: 1 * 0.1 * 3 = 0.3
-            # 8th unit: 1 * 0.1 * 8 = 0.8
-            # Total reward for full load (8 units) ~ 3.6 (much better than 0.8 flat)
-            load_multiplier = (current_cargo_sum // 1) + 1 # Approximate unit count if we assume cargo size 1
-            # Actually cargo_used is accurate. Marine size is 1.
-            # But just use cargo_used directly.
-            
-            # If multiple units loaded at once, we approximate.
-            # For simplicity, we use the NEW cargo sum as the multiplier.
-            progressive_reward = cargo_diff * load_reward * current_cargo_sum
-            total_reward += progressive_reward
-            logger.info(f"Loading Reward: +{progressive_reward:.2f} (Total Cargo: {current_cargo_sum})")
-            
-        self.previous_cargo_sum = current_cargo_sum
-        
-        # 2. Cargo-Weighted Distance Reward (Shaping)
+        if not active_unit_found:
+            return 0.0
+
+        # --- PHASE 1: PICKUP GUIDANCE (Centroid-based) ---
+        if not is_passenger:
+            # Transports move to Infantry Group Centroid
+            if active_unit_type in self.TRANSPORT_TYPES and unit.cargo_used == 0:
+                target_centroid = getattr(self, "_infantry_centroid", None)
+                if target_centroid:
+                    dist = unit.distance_to(target_centroid)
+                    prev_dist = self.previous_meeting_distances.get(active_tag, dist)
+                    dist_diff = prev_dist - dist
+                    shaping_reward = dist_diff * meeting_reward_scale
+                    shaping_reward = max(-0.5, min(0.5, shaping_reward))
+                    total_reward += shaping_reward
+
+            # Infantry move to Transport Group Centroid
+            elif active_unit_type in self.INFANTRY_TYPES:
+                target_centroid = getattr(self, "_transport_centroid", None)
+                if target_centroid:
+                    dist = unit.distance_to(target_centroid)
+                    prev_dist = self.previous_meeting_distances.get(active_tag, dist)
+                    dist_diff = prev_dist - dist
+                    if dist > 2.0: # Only reward until close
+                        shaping_reward = dist_diff * meeting_reward_scale
+                        shaping_reward = max(-0.5, min(0.5, shaping_reward))
+                        total_reward += shaping_reward
+
+        # --- PHASE 2: LOADING REWARD (FLAT) ---
+        # Fixed: Removed scaling by current_cargo_sum to prevent advantage explosion.
+        if is_passenger and active_tag not in self.previous_passenger_tags:
+            total_reward += load_reward
+            self.previous_passenger_tags.add(active_tag)
+            logger.info(f"Unit Load Reward: +{load_reward:.2f}{acting_info}")
+
+        # Occupancy Penalty: Discourage units staying in cargo forever
+        if is_passenger:
+            total_reward += occupancy_penalty
+
+        if active_unit_type in self.TRANSPORT_TYPES:
+            transport = self.units.find_by_tag(active_tag)
+            if transport:
+                prev_cargo = self.previous_transport_cargo.get(active_tag, 0)
+                curr_cargo = transport.cargo_used
+                if curr_cargo > prev_cargo:
+                    diff = curr_cargo - prev_cargo
+                    total_reward += diff * load_reward
+                    self.previous_transport_cargo[active_tag] = curr_cargo
+                    logger.info(f"Transport Load Reward: +{diff * load_reward:.2f}{acting_info}")
+
+        # --- PHASE 3: OBJECTIVE GUIDANCE ---
         target_pos = self._objective_pos
         if not target_pos and self.command_center_tag:
             cc = self.enemy_structures.find_by_tag(self.command_center_tag)
             if cc:
                 target_pos = cc.position
 
-        if target_pos:
-            medivacs = self.units.filter(lambda u: u.type_id == UnitTypeId.MEDIVAC)
-            for medivac in medivacs:
-                dist = medivac.distance_to(target_pos)
-                prev_dist = self.previous_medivac_distances.get(medivac.tag, dist)
-                
-                # We want to reward moving closer (prev > curr)
+        if target_pos and active_unit_type in self.TRANSPORT_TYPES:
+            transport = self.units.find_by_tag(active_tag)
+            if transport and transport.cargo_used > 0:
+                dist = transport.distance_to(target_pos)
+                prev_dist = self.previous_transport_distances.get(transport.tag, dist)
                 dist_diff = prev_dist - dist
-                
-                # Only reward if carrying cargo!
-                # Weight by amount of cargo. 
-                # Empty medivac: 0 reward.
-                # Full medivac (8 units): 8x reward.
-                if medivac.cargo_used > 0:
-                    shaping_reward = dist_diff * distance_reward_scale * medivac.cargo_used
-                    # Clamp to avoid massive spikes on teleports or bugs
-                    shaping_reward = max(-1.0, min(1.0, shaping_reward))
-                    total_reward += shaping_reward
-                
-                self.previous_medivac_distances[medivac.tag] = dist
+                shaping_reward = dist_diff * distance_reward_scale * transport.cargo_used
+                shaping_reward = max(-1.0, min(1.0, shaping_reward))
+                total_reward += shaping_reward
 
-            # 3. Arrival Reward
-            # Units on ground near CC
+        # --- PHASE 4: ARRIVAL REWARD (FLAT) ---
+        if target_pos and active_unit_type in self.TRANSPORT_TYPES:
             units_in_zone = {u.tag for u in self.units 
                              if not u.is_flying 
                              and u.distance_to(target_pos) < 15.0}
-            
             new_arrivals = units_in_zone - self.previous_units_in_zone
             if new_arrivals:
                 count = len(new_arrivals)
                 total_reward += count * unload_reward
-                logger.info(f"{count} units arrived at Drop Zone! Reward: {count * unload_reward}")
+                self.previous_units_in_zone.update(new_arrivals)
+                logger.info(f"{count} units arrived at Drop Zone! Reward: {count * unload_reward}{acting_info}")
                 
-            self.previous_units_in_zone = units_in_zone
-            
         return total_reward
+
+    def update_reward_states(self):
+        """
+        Updates tracking states for rewards at the end of each unit cycle.
+        Uses Centroids for stable meeting guidance.
+        """
+        all_allies = self.units.filter(lambda u: u.type_id in self.INFANTRY_TYPES or u.type_id in self.TRANSPORT_TYPES)
+        transports = all_allies.filter(lambda u: u.type_id in self.TRANSPORT_TYPES)
+        infantry = all_allies.filter(lambda u: u.type_id in self.INFANTRY_TYPES)
+
+        # Calculate Centroids
+        if infantry:
+            mean_pos = np.mean([(u.position.x, u.position.y) for u in infantry], axis=0)
+            self._infantry_centroid = Point2((mean_pos[0], mean_pos[1]))
+        else:
+            self._infantry_centroid = None
+
+        if transports:
+            mean_pos = np.mean([(u.position.x, u.position.y) for u in transports], axis=0)
+            self._transport_centroid = Point2((mean_pos[0], mean_pos[1]))
+        else:
+            self._transport_centroid = None
+
+        # 1. Update Meeting Distances
+        for t in transports:
+            if self._infantry_centroid:
+                self.previous_meeting_distances[t.tag] = t.distance_to(self._infantry_centroid)
+        for i in infantry:
+            if self._transport_centroid:
+                self.previous_meeting_distances[i.tag] = i.distance_to(self._transport_centroid)
+
+        # 2. Update Transport Cargo
+        for transport in transports:
+            self.previous_transport_cargo[transport.tag] = transport.cargo_used
+
+        # 3. Update Passenger tags
+        self.previous_passenger_tags = set()
+        for transport in transports:
+            if hasattr(transport, "passengers"):
+                for p in transport.passengers:
+                    self.previous_passenger_tags.add(p.tag)
+
+        # 4. Update Transport Distances to Objective
+        target_pos = self._objective_pos
+        if target_pos:
+            for transport in transports:
+                self.previous_transport_distances[transport.tag] = transport.distance_to(target_pos)
+
+            # 5. Update Units in Zone
+            self.previous_units_in_zone = {u.tag for u in self.units 
+                                         if not u.is_flying 
+                                         and u.distance_to(target_pos) < 15.0}
+
+        # 6. Health tracking
+        for u in all_allies:
+            self.previous_allied_health[u.tag] = u.health + u.shield
+            if hasattr(u, "passengers"):
+                for p in u.passengers:
+                    self.previous_allied_health[p.tag] = p.health + p.shield
+        for u in self.enemy_units + self.enemy_structures:
+            self.previous_health[u.tag] = u.health + u.shield

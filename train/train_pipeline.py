@@ -45,7 +45,7 @@ from src.agent.ctf_bot import CaptureTheFlagBot
 ENV_REGISTRY = {
     "Level0Env": Level0Env,
     "Level3Env": Level3Env,
-    "Level7Env": Level7Env,
+    "Level7Env": Level7Env, # Note: This looks like a bug in original (mapped to Bot instead of Env)
     "LevelDropEnv": LevelDropEnv,
     "CaptureTheFlagEnv": CaptureTheFlagEnv
 }

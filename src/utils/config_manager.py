@@ -52,6 +52,37 @@ class ConfigManager:
 
         return accumulated_layers
 
+    def get_cumulative_categorical_heads(self, target_level: str) -> List[str]:
+        """
+        Returns the cumulative list of categorical heads up to the target level.
+        Iterates through the levels defined in pipeline.yaml.
+        """
+        accumulated_heads = []
+        found_target = False
+        
+        for level in self.levels:
+            level_conf = self._load_yaml(f"{level}.yaml")
+            new_heads = level_conf.get("env", {}).get("categorical_heads", [])
+            
+            if new_heads:
+                for head in new_heads:
+                    if head not in accumulated_heads:
+                        accumulated_heads.append(head)
+            
+            if level == target_level:
+                found_target = True
+                break
+        
+        if not found_target:
+            level_conf = self._load_yaml(f"{target_level}.yaml")
+            new_heads = level_conf.get("env", {}).get("categorical_heads", [])
+            if new_heads:
+                for head in new_heads:
+                    if head not in accumulated_heads:
+                        accumulated_heads.append(head)
+
+        return accumulated_heads
+
     def get_cumulative_action_heads(self, target_level: str) -> List[str]:
         """
         Returns the cumulative list of action heads up to the target level.

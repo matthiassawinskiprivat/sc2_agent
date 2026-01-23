@@ -392,7 +392,7 @@ class ObservationTransformer:
         self._draw_unit_body(unit, layers, is_enemy, px, py)
         self._draw_unit_vitals(unit, layers, is_enemy, px, py)
         self._draw_unit_detection(unit, layers, is_enemy, px, py)
-        self._draw_unit_healing(unit, layers, is_enemy, px, py)
+        self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
         self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
 
     def _draw_unit_body(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
@@ -468,7 +468,7 @@ class ObservationTransformer:
         if radius > 0:
             self._draw_circle_vectorized(layers, idx_det, px, py, radius, None, 1.0, False)
 
-    def _draw_unit_healing(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
+    def _draw_unit_healing(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int, game_data: Any = None):
         prefix = "enemy" if is_enemy else "allied"
         layer_idx = LayerConstants.LAYERS[f"{prefix}_hps_field"]
         hps = 0.0
@@ -478,10 +478,29 @@ class ObservationTransformer:
             uid = unit.type_id
             if uid == UnitTypeId.MEDIVAC and unit.energy > 5:
                 hps, rng = 12.6, 4.0
+                if game_data and hasattr(game_data, "abilities"):
+                    # Dynamically retrieve range from game data if possible
+                    try:
+                        val = game_data.abilities[AbilityId.MEDIVACHEAL_HEAL.value]._proto.cast_range
+                        if val > 0: rng = val
+                    except:
+                        pass
             elif uid == UnitTypeId.SHIELDBATTERY and unit.energy > 3:
                 hps, rng = 50.4, 6.0
+                if game_data and hasattr(game_data, "abilities"):
+                    try:
+                        val = game_data.abilities[AbilityId.SHIELDBATTERYRECHARGE_EXOTICSHIELDBATTERYRECHARGE.value]._proto.cast_range
+                        if val > 0: rng = val
+                    except:
+                        pass
             elif uid == UnitTypeId.QUEEN and unit.energy >= 50:
                 hps, rng = 25.0, 7.0
+                if game_data and hasattr(game_data, "abilities"):
+                    try:
+                        val = game_data.abilities[AbilityId.TRANSFUSION_TRANSFUSION.value]._proto.cast_range
+                        if val > 0: rng = val
+                    except:
+                        pass
         if hps > 0:
             self._draw_circle_vectorized(layers, layer_idx, px, py, rng, None, hps, accumulate=True)
 

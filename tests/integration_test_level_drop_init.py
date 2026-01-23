@@ -1,6 +1,9 @@
 import os
 import sys
 import torch
+import yaml
+import builtins
+from unittest.mock import patch, mock_open
 from train.train_pipeline import PipelineManager
 from loguru import logger
 
@@ -23,26 +26,38 @@ def test_pipeline_init_level_drop():
     level_conf["training"]["training_steps"] = 100
     level_conf["training"]["num_envs"] = 1
     
-    # Write back temp config
-    import yaml
-    with open("config/level_drop_0_tmp.yaml", "w") as f:
-        yaml.dump(level_conf, f)
+    # Dump modified config to string
+    modified_yaml_str = yaml.dump(level_conf)
+    
+    # Save original open to call it for non-matching files
+    original_open = builtins.open
+
+    def mocked_open(file, *args, **kwargs):
+        # Check if file matches the config we want to intercept
+        # We handle string paths only
+        if isinstance(file, (str, bytes, os.PathLike)):
+            s_file = str(file).replace("\\", "/")
+            if "config/level_drop_0.yaml" in s_file:
+                # Return a mock that simulates reading the modified yaml
+                print(f"[TEST] Intercepting read for {file}, supplying mocked config with 100 steps.")
+                return mock_open(read_data=modified_yaml_str)(file, *args, **kwargs)
+        
+        # Fallback to real open
+        return original_open(file, *args, **kwargs)
     
     try:
         # Run training for the level
-        # We use a custom level name to avoid polluting existing models
-        # but PipelineManager._train_level expects config to be in config/level_name.yaml
-        
-        # Let's just run it for level_drop_0 but ensure it uses the CTF model
-        manager._train_level("level_drop_0", model_path_to_load=model_to_resume)
+        # We patch 'builtins.open' to inject our modified config
+        with patch('builtins.open', side_effect=mocked_open):
+            # We call it with "level_drop_0", which will try to open "config/level_drop_0.yaml"
+            # Our mock will intercept this specific call.
+            manager._train_level("level_drop_0", model_path_to_load=model_to_resume)
+            
         print("SUCCESS: Pipeline initialized and ran successfully.")
     except Exception as e:
         print(f"FAILURE: Pipeline failed during LevelDrop initialization: {e}")
         import traceback
         traceback.print_exc()
-    finally:
-        if os.path.exists("config/level_drop_0_tmp.yaml"):
-            os.remove("config/level_drop_0_tmp.yaml")
 
 if __name__ == "__main__":
     # Ensure logs don't spam too much

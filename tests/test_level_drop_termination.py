@@ -85,3 +85,53 @@ async def test_level_drop_termination_victory():
         assert done is True, "Should terminate when all enemy units and structures are gone."
         # Reward is win_reward (50) + step_penalty (-0.05)
         assert reward >= 49.0
+
+@pytest.mark.asyncio
+async def test_level_drop_termination_townhall_victory():
+    """
+    Verifies that LevelDropEnv terminates when the enemy Townhall (Command Center) is destroyed,
+    even if other structures (e.g. Supply Depots) remain.
+    """
+    with patch('train.envs.level_0_env.ConfigManager') as mock_cm, \
+         patch('sc2.game_state.GameState') as mock_gs:
+        
+        mock_cm.return_value.get_cumulative_active_layers.return_value = []
+        mock_cm.return_value.get_cumulative_action_heads.return_value = ["move"]
+        mock_cm.return_value.get_level_config.return_value = {"env": {"grid_size": 128}}
+        
+        env = LevelDropEnv(level_name="level_drop_0")
+        bot = MagicMock()
+        bot.apply_action = AsyncMock()
+        env._bot = bot
+        env._client = AsyncMock()
+        
+        env.training_conf = {"rewards": {"win_reward": 50.0}}
+        
+        # Scenario: 
+        # - Enemy units exist (shouldn't matter for this victory condition)
+        bot.enemy_units.amount = 5
+        # - Enemy structures exist (e.g. Depots), so Total Annihilation is NOT met
+        bot.enemy_structures.amount = 2
+        
+        # - BUT, Townhalls are gone (amount=0)
+        # Mock the filter call: enemy_structures.filter(...) -> townhalls
+        mock_townhalls = MagicMock()
+        mock_townhalls.amount = 0
+        bot.enemy_structures.filter.return_value = mock_townhalls
+        
+        mock_marine = MagicMock(tag=1)
+        bot.get_active_units.return_value = [mock_marine]
+        
+        bot.calculate_combat_reward.return_value = 0.0
+        bot.calculate_distance_reward.return_value = 0.0
+        bot.calculate_allied_attrition_penalty.return_value = 0.0
+        bot.calculate_drop_reward.return_value = 0.0
+        bot.get_observation_for_unit.return_value = (np.zeros((1, 128, 128)), dict())
+        
+        env.active_unit_tags = [1]
+        env.current_unit_index = 0
+        
+        obs, reward, done, truncated, info = await env._async_step(action=0)
+        
+        assert done is True, "Should terminate when Townhall is destroyed (0 townhalls found)."
+        assert reward >= 49.0, "Should receive win reward"

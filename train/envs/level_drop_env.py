@@ -2,6 +2,7 @@ from train.envs.level_7_env import Level7Env
 from src.level_drop_bot import LevelDropBot
 from gymnasium import spaces
 from sc2.data import Race, Difficulty
+from sc2.ids.unit_typeid import UnitTypeId
 from sc2.player import Bot, Computer
 import numpy as np
 
@@ -165,28 +166,48 @@ class LevelDropEnv(Level7Env):
         combat_reward = self._bot.calculate_combat_reward()
         dist_reward = self._bot.calculate_distance_reward(current_tag)
         attrition_penalty = self._bot.calculate_allied_attrition_penalty()
-        drop_reward = self._bot.calculate_drop_reward()
+        drop_reward = self._bot.calculate_drop_reward(current_tag)
         
         rewards_conf = self.training_conf.get('rewards', {})
         step_penalty = rewards_conf.get('step_penalty', -0.05)
         
         total_reward = combat_reward + dist_reward + attrition_penalty + drop_reward + step_penalty
         
-        # 5. Check Win/Loss Conditions (Total Annihilation)
-        # Victory: 0 enemy units AND 0 enemy structures
+        # 5. Check Win/Loss Conditions (Townhall Destruction OR Total Annihilation)
         enemy_units_count = self._bot.enemy_units.amount
         enemy_structs_count = self._bot.enemy_structures.amount
+        
+        townhall_types = {
+            UnitTypeId.COMMANDCENTER, UnitTypeId.ORBITALCOMMAND, UnitTypeId.PLANETARYFORTRESS,
+            UnitTypeId.HATCHERY, UnitTypeId.LAIR, UnitTypeId.HIVE,
+            UnitTypeId.NEXUS
+        }
+        # Check if any enemy townhall exists
+        enemy_townhalls = self._bot.enemy_structures.filter(lambda u: u.type_id in townhall_types)
         
         # Defeat: 0 controlled units (Marines + Medivacs)
         controlled_units = self._bot.get_active_units()
         allied_count = len(controlled_units)
         
         done = False
-        if enemy_units_count == 0 and enemy_structs_count == 0:
+        
+        # Victory Condition 1: Primary Objective (Main Structure) Destroyed
+        # We assume the map started with at least one townhall.
+        # If we can't find any now, we win.
+        if enemy_townhalls.amount == 0 and enemy_structs_count > 0:
+             # Distinguish from total annihilation for logging clarity
+             done = True
+             win_reward = rewards_conf.get('win_reward', 50.0)
+             total_reward += win_reward
+             self._log(f"VICTORY: Enemy Main Structure destroyed! Reward: {win_reward}")
+             
+        # Victory Condition 2: Total Annihilation (Cleanup)
+        elif enemy_units_count == 0 and enemy_structs_count == 0:
             done = True
             win_reward = rewards_conf.get('win_reward', 50.0)
             total_reward += win_reward
             self._log(f"VICTORY: All enemy entities destroyed! Reward: {win_reward}")
+            
         elif allied_count == 0:
             done = True
             loss_penalty = rewards_conf.get('loss_penalty', -10.0)
@@ -228,6 +249,11 @@ class LevelDropEnv(Level7Env):
             # End of cycle reached normally
             self.current_unit_index = 0
             self.active_unit_tags = all_active_tags
+            
+            # UPDATE REWARD STATES: Only once per full cycle
+            if hasattr(self._bot, "update_reward_states"):
+                 self._bot.update_reward_states()
+            
             if self.active_unit_tags:
                 obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
             else:

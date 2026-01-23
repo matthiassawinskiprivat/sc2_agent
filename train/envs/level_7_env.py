@@ -9,9 +9,7 @@ import numpy as np
 class Level7Env(Level3Env):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Dynamic Action Space based on accumulated heads
-        grid_area = self.grid_size * self.grid_size
-        self.action_space = spaces.Discrete(len(self.action_heads) * grid_area)
+        # Dynamic Action Space based on accumulated heads (now handled by super().__init__)
         
         # Unit and Enemy types from config
         self.unit_type = self.training_conf.get('env', {}).get('unit_type', 'MARINE').upper()
@@ -38,6 +36,11 @@ class Level7Env(Level3Env):
         Retrieves and validates the action mask shape.
         """
         if self._bot:
+            # Robust unit identification for masking
+            if hasattr(self, "active_unit_tags") and 0 <= self.current_unit_index < len(self.active_unit_tags):
+                self._bot.active_unit_tag = self.active_unit_tags[self.current_unit_index]
+            else:
+                self._bot.active_unit_tag = None
             self._bot.current_unit_index = self.current_unit_index
         mask = super().action_masks()
         if mask.shape[0] != self.action_space.n:
