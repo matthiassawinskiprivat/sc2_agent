@@ -6,13 +6,13 @@ This phase focuses on updating the internal state tracking of the agent/environm
 - [x] Task: Implement Load/Unload Registry (9d05ec4)
     - [x] Write unit tests for `LevelDropBot` state tracking (initializing and updating registries).
     - [x] Update `LevelDropBot` to maintain `initially_loaded_units` and `target_unloaded_units` sets.
-- [x] Task: Implement Unit Health & Shield Utility (8d3f1a2)
+- [x] Task: Implement Unit Health & Shield Utility (44d9772)
     - [x] Write unit tests for a utility that calculates total effective health (Health + Shield).
     - [x] Implement/Update unit health check logic in `LevelDropBot`.
-- [ ] Task: Refactor Loading Reward Calculation
-    - [ ] Write tests for the scaled loading reward formula (including cargo multiplier).
-    - [ ] Write tests for the "Emergency Pick-up" (damaged unit) condition.
-    - [ ] Implement the refined loading reward logic in `LevelDropBot`.
+- [x] Task: Refactor Loading Reward Calculation (7e3a9c2)
+    - [x] Write tests for the scaled loading reward formula (including cargo multiplier).
+    - [x] Write tests for the "Emergency Pick-up" (damaged unit) condition.
+    - [x] Implement the refined loading reward logic in `LevelDropBot`.
 - [ ] Task: Refactor Unloading Reward Calculation
     - [ ] Write tests for the scaled unloading reward formula (decreasing with each unit).
     - [ ] Implement the refined unloading reward logic in `LevelDropBot`.

@@ -312,17 +312,10 @@ class LevelDropBot(Level7Bot):
                         shaping_reward = max(-0.5, min(0.5, shaping_reward))
                         total_reward += shaping_reward
 
-        # --- PHASE 2: LOADING REWARD (FLAT) ---
-        # Fixed: Removed scaling by current_cargo_sum to prevent advantage explosion.
+        # --- PHASE 2: LOADING REWARD (Refined) ---
         if is_passenger and active_tag not in self.previous_passenger_tags:
-            self.initially_loaded_units.add(active_tag) # Track initial load
-            total_reward += load_reward
-            self.previous_passenger_tags.add(active_tag)
-            logger.info(f"Unit Load Reward: +{load_reward:.2f}{acting_info}")
-
-        # Occupancy Penalty: Discourage units staying in cargo forever
-        if is_passenger:
-            total_reward += occupancy_penalty
+            # Passenger-side reward (if enabled/needed, currently redundant with transport-side)
+            pass 
 
         if active_unit_type in self.TRANSPORT_TYPES:
             transport = self.units.find_by_tag(active_tag)
@@ -330,15 +323,28 @@ class LevelDropBot(Level7Bot):
                 prev_cargo = self.previous_transport_cargo.get(active_tag, 0)
                 curr_cargo = transport.cargo_used
                 if curr_cargo > prev_cargo:
-                    # Identify which unit was just loaded to track it
+                    # Identify newly loaded units
                     if hasattr(transport, "passengers"):
                         for p in transport.passengers:
-                            self.initially_loaded_units.add(p.tag)
-
-                    diff = curr_cargo - prev_cargo
-                    total_reward += diff * load_reward
+                            if p.tag not in self.previous_passenger_tags:
+                                # This unit was just loaded
+                                if p.tag not in self.initially_loaded_units:
+                                    # Initial Load: Scaled Reward
+                                    multiplier = 1.0 + (prev_cargo * 0.25)
+                                    unit_reward = load_reward * multiplier
+                                    total_reward += unit_reward
+                                    self.initially_loaded_units.add(p.tag)
+                                    logger.info(f"Initial Load Reward: +{unit_reward:.3f} (Cargo: {prev_cargo}) {acting_info}")
+                                elif self.is_unit_damaged(p):
+                                    # Emergency Pickup: Flat Reward
+                                    total_reward += load_reward
+                                    logger.info(f"Emergency Pickup Reward: +{load_reward:.3f} (Damaged) {acting_info}")
+                    
                     self.previous_transport_cargo[active_tag] = curr_cargo
-                    logger.info(f"Transport Load Reward: +{diff * load_reward:.2f}{acting_info}")
+
+        # Occupancy Penalty: Discourage units staying in cargo forever
+        if is_passenger:
+            total_reward += occupancy_penalty
 
         # --- PHASE 3: OBJECTIVE GUIDANCE ---
         target_pos = self._objective_pos
