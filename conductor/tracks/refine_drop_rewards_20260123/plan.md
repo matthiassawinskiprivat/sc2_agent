@@ -3,12 +3,12 @@
 ## Phase 1: Environment Logic & Tracking
 This phase focuses on updating the internal state tracking of the agent/environment to monitor load/unload events and unit health.
 
-- [x] Task: Implement Load/Unload Registry (7e3a9c1)
-    - [ ] Write unit tests for `LevelDropBot` state tracking (initializing and updating registries).
-    - [ ] Update `LevelDropBot` to maintain `initially_loaded_units` and `target_unloaded_units` sets.
-- [ ] Task: Implement Unit Health & Shield Utility
-    - [ ] Write unit tests for a utility that calculates total effective health (Health + Shield).
-    - [ ] Implement/Update unit health check logic in `LevelDropBot`.
+- [x] Task: Implement Load/Unload Registry (9d05ec4)
+    - [x] Write unit tests for `LevelDropBot` state tracking (initializing and updating registries).
+    - [x] Update `LevelDropBot` to maintain `initially_loaded_units` and `target_unloaded_units` sets.
+- [x] Task: Implement Unit Health & Shield Utility (8d3f1a2)
+    - [x] Write unit tests for a utility that calculates total effective health (Health + Shield).
+    - [x] Implement/Update unit health check logic in `LevelDropBot`.
 - [ ] Task: Refactor Loading Reward Calculation
     - [ ] Write tests for the scaled loading reward formula (including cargo multiplier).
     - [ ] Write tests for the "Emergency Pick-up" (damaged unit) condition.

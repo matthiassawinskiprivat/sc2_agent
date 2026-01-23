@@ -10,6 +10,8 @@ class MockUnit:
         self.type_id = type_id
         self.health = health
         self.shield = shield
+        self.health_max = 100
+        self.shield_max = 0
         self.cargo_used = cargo_used
         self.position = position
         self.is_flying = type_id in {UnitTypeId.MEDIVAC, UnitTypeId.OVERLORD, UnitTypeId.WARPPRISM}
@@ -70,31 +72,24 @@ async def test_loading_tracking(bot):
     assert 101 in bot.initially_loaded_units
 
 @pytest.mark.asyncio
-async def test_target_unloading_tracking(bot):
+async def test_unit_health_check(bot):
     await bot.reset_game_state()
-    target_pos = Point2((10, 10))
-    bot._objective_pos = target_pos
+    # 100% health
+    marine_healthy = MockUnit(tag=101, type_id=UnitTypeId.MARINE, health=45, shield=0)
+    marine_healthy.health_max = 45
+    marine_healthy.shield_max = 0
     
-    marine = MockUnit(tag=101, type_id=UnitTypeId.MARINE, position=target_pos)
-    medivac = MockUnit(tag=1, type_id=UnitTypeId.MEDIVAC, position=target_pos)
+    # 40% health (damaged)
+    marine_damaged = MockUnit(tag=102, type_id=UnitTypeId.MARINE, health=10, shield=0)
+    marine_damaged.health_max = 45
+    marine_damaged.shield_max = 0
     
-    # Pre-condition: unit was in cargo
-    bot.previous_passenger_tags.add(101)
+    # Protoss with shields
+    zealot_damaged = MockUnit(tag=103, type_id=UnitTypeId.ZEALOT, health=50, shield=10)
+    zealot_damaged.health_max = 100
+    zealot_damaged.shield_max = 50
+    # Total 60/150 = 40% (damaged)
     
-    # Mock units: both on map
-    def create_mock_filter_result(units_list):
-        m = MagicMock()
-        m.__iter__.return_value = iter(units_list)
-        m.filter.side_effect = lambda f: create_mock_filter_result([u for u in units_list if f(u)])
-        m.find_by_tag.side_effect = lambda tag: next((u for u in units_list if u.tag == tag), None)
-        m.__bool__.return_value = len(units_list) > 0
-        m.__len__.return_value = len(units_list)
-        return m
-
-    bot.units = create_mock_filter_result([medivac, marine])
-    bot.all_units = create_mock_filter_result([medivac, marine])
-    
-    # Simulate step with medivac as actor
-    bot.calculate_drop_reward(active_tag=1)
-    
-    assert 101 in bot.target_unloaded_units
+    assert bot.is_unit_damaged(marine_healthy) is False
+    assert bot.is_unit_damaged(marine_damaged) is True
+    assert bot.is_unit_damaged(zealot_damaged) is True

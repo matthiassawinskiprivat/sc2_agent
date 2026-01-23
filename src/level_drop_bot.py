@@ -96,6 +96,15 @@ class LevelDropBot(Level7Bot):
             return True
         return False
 
+    def is_unit_damaged(self, unit) -> bool:
+        """
+        Returns True if the unit's total health (health + shield) is below 50% of its maximum.
+        """
+        current_total = unit.health + unit.shield
+        max_total = unit.health_max + unit.shield_max
+        if max_total == 0: return False
+        return (current_total / max_total) < 0.5
+
     def get_active_units(self):
         """
         Returns active allied units (Infantry and Transports).
