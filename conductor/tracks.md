@@ -383,15 +383,3 @@ This file tracks all major tracks for the project. Each track has its own detail
 ## [x] Track: Fix Level Drop Termination Logic
 
 *Link: [./conductor/tracks/fix_level_drop_termination_20260123/](./conductor/tracks/fix_level_drop_termination_20260123/)*
-
-
-
----
-
-
-
-## [x] **Track: Refine Drop Rewards**
-
-
-
-*Link: [./conductor/tracks/refine_drop_rewards_20260123/](./conductor/tracks/refine_drop_rewards_20260123/)*
