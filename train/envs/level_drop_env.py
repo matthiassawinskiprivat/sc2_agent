@@ -178,13 +178,20 @@ class LevelDropEnv(Level7Env):
         enemy_structs_count = self._bot.enemy_structures.amount
         
         townhall_types = {
-            UnitTypeId.COMMANDCENTER, UnitTypeId.ORBITALCOMMAND, UnitTypeId.PLANETARYFORTRESS,
+            UnitTypeId.COMMANDCENTER, UnitTypeId.COMMANDCENTERFLYING,
+            UnitTypeId.ORBITALCOMMAND, UnitTypeId.ORBITALCOMMANDFLYING,
+            UnitTypeId.PLANETARYFORTRESS,
             UnitTypeId.HATCHERY, UnitTypeId.LAIR, UnitTypeId.HIVE,
             UnitTypeId.NEXUS
         }
         # Check if any enemy townhall exists
         enemy_townhalls = self._bot.enemy_structures.filter(lambda u: u.type_id in townhall_types)
         
+        # Debug Logging for Termination Diagnosis
+        if self.steps % 100 == 0 or enemy_townhalls.amount == 0:
+             structure_types = [u.type_id.name for u in self._bot.enemy_structures]
+             self._log(f"Step {self.steps}: Enemy Structures: {len(structure_types)} {structure_types}. Townhalls: {enemy_townhalls.amount}")
+
         # Defeat: 0 controlled units (Marines + Medivacs)
         controlled_units = self._bot.get_active_units()
         allied_count = len(controlled_units)
@@ -199,14 +206,14 @@ class LevelDropEnv(Level7Env):
              done = True
              win_reward = rewards_conf.get('win_reward', 50.0)
              total_reward += win_reward
-             self._log(f"VICTORY: Enemy Main Structure destroyed! Reward: {win_reward}")
+             self._log(f"\033[92mVICTORY: Enemy Main Structure destroyed! Reward: {win_reward}\033[0m")
              
         # Victory Condition 2: Total Annihilation (Cleanup)
         elif enemy_units_count == 0 and enemy_structs_count == 0:
             done = True
             win_reward = rewards_conf.get('win_reward', 50.0)
             total_reward += win_reward
-            self._log(f"VICTORY: All enemy entities destroyed! Reward: {win_reward}")
+            self._log(f"\033[92mVICTORY: All enemy entities destroyed! Reward: {win_reward}\033[0m")
             
         elif allied_count == 0:
             done = True
