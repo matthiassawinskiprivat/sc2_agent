@@ -31,9 +31,6 @@ class CaptureTheFlagBot(BotAI):
         self.is_trainee = True # Default to trainee
         self.model = None # Snapshot model for automated inference
         
-        # Satisfaction for BotAI initialization
-        self._initialize_variables()
-        
         # State tracking for rewards
         self.prev_pylon_health = {1: 20.0, 2: 20.0} # Combined HP + Shield
         self.prev_enemy_units_health = {1: 0.0, 2: 0.0}
@@ -43,6 +40,18 @@ class CaptureTheFlagBot(BotAI):
         
         self.frame_count = 0
         self.cached_observation: Optional[np.ndarray] = None
+
+        # enemy_race must be set to avoid AttributeError in BotAIInternal._prepare_step
+        self._enemy_race = Race.Random
+        
+        # Satisfaction for BotAI initialization
+        self._initialize_variables()
+        from sc2.units import Units
+        self.units = Units([], self)
+        self.structures = Units([], self)
+        self.enemy_units = Units([], self)
+        self.enemy_structures = Units([], self)
+        self.all_units = Units([], self)
 
     async def on_start(self):
         env_conf = self.training_conf.get("env", {})

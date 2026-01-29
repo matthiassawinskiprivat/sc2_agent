@@ -1,0 +1,44 @@
+env:
+  env_class: "LevelDropEnv"
+  grid_size: 128
+  max_steps: 1250
+  rewards:
+    load_reward: 0.3
+    unload_reward: 7
+    damage_reward: 1
+    kill_reward: 5
+    win_reward: 20.0
+    loss_penalty: -10.0
+    step_penalty: -0.01
+    damage_penalty: -0.05
+    kill_penalty: -0.25
+    distance_multiplier: 0.0
+  active_layers: []
+  action_heads: []
+  categorical_heads: []
+
+training:
+  learning_rate: 0.0001
+  n_steps: 2048
+  batch_size: 128
+  n_epochs: 10
+  gamma: 0.99
+  ent_coef: 0.01
+  training_steps: 250_000
+  num_envs: 1
+  watchdog_timeout: 7200
+
+model:
+  algorithm: "MaskableRecurrentPPO"
+  policy: "CnnLstmPolicy"
+  rnn_type: "gru"
+  ent_coef: 0.01
+  gamma: 0.99
+  n_epochs: 10
+  policy_kwargs:
+    features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
+    features_extractor_kwargs:
+      features_dim: 512
+      thinking_steps: 5
+    lstm_hidden_size: 512
+    net_arch: []

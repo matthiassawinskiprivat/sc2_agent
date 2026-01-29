@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_unload_spatial_mechanics_20260116",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-16T13:43:00Z",
+  "updated_at": "2026-01-16T13:43:00Z",
+  "description": "Fix cross-race spatial unload mechanics where Medivacs and other transports ignore spatial targets and use incorrect ability IDs."
+}

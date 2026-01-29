@@ -44,13 +44,66 @@ To maximize training efficiency and minimize data noise, the project supports as
 - **Persistence:** If the opponent army is defeated, the game continues, allowing the trainee to learn secondary objectives (like destroying enemy structures) without noise from the "dead" opponent.
 The project employs a curriculum-driven observation system where the fidelity of the agent's perception increases over time.
 
-- **Additive Accumulation:** Each training level defines a set of `active_layers` in its configuration. As the agent progresses through the curriculum (Level 0 → Level 10 → Capture the Flag), the `ConfigManager` dynamically accumulates all layers defined in previous levels.
+- **Additive Accumulation:** Each training level defines a set of `active_layers` and `action_heads` in its configuration. As the agent progresses through the curriculum (Level 0 → Level 10 → Capture the Flag → Level Drop), the `ConfigManager` dynamically accumulates all layers and action capabilities defined in previous levels.
 - **Persistence:** This ensures that skills learned in early levels (e.g., following beacons, respecting terrain) remain available as the agent learns more complex behaviors (e.g., combat micro, air unit management).
 - **Transparency:** Environments log the layer expansion during initialization (e.g., `Observation layers: (5) -> (23)`), providing clear feedback on the agent's current state space.
 
+### Optimized Observation Pipeline
+To maximize training stability and performance, the project utilizes an optimized observation data flow.
+
+- **Float32 Representation:** Observations are represented as `float32` tensors in the `[0, 1]` range. This eliminates expensive redundant bounds-checking and normalization steps in the Stable Baselines 3 training loop.
+- **Bypass Library Preprocessing:** By pre-normalizing data in the `ObservationTransformer` and explicitly disabling internal library normalization (`normalize_images=False`), the system achieves a significant speedup in policy evaluation, preventing watchdog timeouts during large-scale training.
+
 ### Air Unit Mechanics
+
 Air units (e.g., Medivacs, Void Rays) are handled differently than ground units to respect their ability to cross any terrain.
 
+
+
 - **Unrestricted Movement:** Action masks for flying units are fully open (all `True`). This allows the agent to command air units to any grid coordinate, even those marked as unpathable in the `pathing_grid`.
+
 - **Combat Versatility:** Attack masks for air units are also unrestricted, enabling them to engage targets over cliffs or voids.
+
 - **Ground Parity:** Ground units continue to be constrained by the `pathing_grid` to ensure realistic movement behaviors.
+
+
+
+### Safe Unloading Mechanics
+
+To prevent agents from attempting to unload units on invalid terrain or inside buildings, a specialized mask is applied to the `unload` action head.
+
+
+
+- **Terrain Erosion:** The mask excludes unpathable terrain with a 2-pixel safety margin, ensuring units are not dropped too close to cliff edges or voids.
+
+- **Exact Footprints:** Buildings, resource patches, and destructible debris are excluded using their exact footprints (calculated via `footprint_radius`), ensuring that units can be dropped adjacent to these objects but not directly on top of them.
+
+### Robust Loading Mechanics
+To ensure reliable transport operations, the agent implements a dual-mode loading system that supports all three races.
+
+- **Dual Interaction:** The system automatically distinguishes between a unit entering a transport and a transport picking up a unit.
+- **Explicit Ability Usage:** Transports (Medivacs, Overlords, Warp Prisms) utilize explicit `LOAD` AbilityIds rather than generic right-click commands, ensuring robust behavior in dense unit environments.
+- **Targeting Precision:** The system uses zero-dilation action masks for entity interaction (e.g., loading), forcing the agent to target the exact unit location and eliminating "ghost target" artifacts that cause command fallbacks.
+- **Race-Agnostic:** The implementation handles race-specific transport abilities (e.g., `LOAD_MEDIVAC` vs. `LOAD_OVERLORD`) through a unified action head, facilitating multi-race training.
+
+### Refined Transport Rewards
+To prevent excessive unit shuffling and incentivize efficient tactical maneuvers, the transport reward system utilizes a context-aware scaling mechanism.
+
+- **Initial Load Scaling:** Loading a unit into a transport is rewarded once per unit per episode. The reward scales positively with the transport's current cargo occupancy, encouraging the agent to fill transports before departing.
+
+- **Emergency Pickups:** Recurring rewards for loading previously-handled units are granted only if the unit is significantly damaged (below 50% HP), incentivizing rescue operations while penalizing redundant load/unload cycles for healthy units.
+
+- **Efficient Bulk Unloading:** Unloading rewards in the target zone scale based on the transport's fullness at the start of the drop sequence. The first units dropped from a full transport yield the highest rewards, discouraging inefficient single-unit shuttle runs.
+
+# Future Plans
+
+### Hybrid Action Heads (Multi-Race Optimization)
+To scale the agent to handle the full complexity of all three StarCraft II races, the action architecture will evolve from a flat joint distribution to a hybrid system that distinguishes between spatial targeting and state management.
+
+- **Spatial Heads:** High-resolution (128x128) grids will be reserved exclusively for actions requiring precise world coordinates (e.g., Move, Attack, Yamato Cannon, Abduct, Force Field, Psionic Storm).
+- **Categorical Toggle Head:** A compact categorical head will manage all "instant" or "state-based" abilities that do not require a spatial target.
+    - **Terran:** Stimpack, Siege/Unsiege, Cloak, Lift/Land.
+    - **Zerg:** Burrow/Unburrow, Morph to Overseer, Generate Creep.
+    - **Protoss:** Activate Guardian Shield, Chrono Boost (on self/nearby), Warp Gate Transformation.
+- **Parameter Efficiency:** This optimization eliminates the massive parameter waste of 16k-neuron spatial heads for non-spatial toggles, significantly accelerating training convergence and reducing VRAM usage across all race models.
+- **Hierarchical Conditioning:** The system will move toward a hierarchical model where the categorical selection can provide context to the spatial heads, allowing the agent to learn "Targeted Abilities" (like Abduct or Snipe) more efficiently by sharing spatial targeting logic.

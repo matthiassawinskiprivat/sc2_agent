@@ -8,6 +8,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers.action_masker import ActionMasker
+from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
 import torch
 
 # Disable distribution validation to avoid Simplex errors with MaskablePPO
@@ -21,6 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from train.envs.level_0_env import Level0Env
 from train.envs.level_3_env import Level3Env
 from train.envs.level_7_env import Level7Env
+from train.envs.level_drop_env import LevelDropEnv
 from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv as CaptureTheFlagEnv
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from train.sync_vec_env import SyncVecEnv
@@ -29,18 +31,32 @@ from src.utils.sc2_cleanup import kill_switch_sc2
 from src.utils.model_utils import graft_model_weights
 from train.env_utils import EnvFactory, get_action_masks
 
+# Import Custom Network
+from src.agent.models.unit_control_network import UnitControlNetwork
+
 # Specialized Bots for Environment initialization
 from src.level_0_bot import Level0Bot
 from src.level_3_bot import Level3Bot
 from src.level_7_bot import Level7Bot
+from src.level_drop_bot import LevelDropBot
 from src.agent.ctf_bot import CaptureTheFlagBot
 
 # Environment Registry
 ENV_REGISTRY = {
     "Level0Env": Level0Env,
     "Level3Env": Level3Env,
-    "Level7Env": Level7Env,
+    "Level7Env": Level7Env, # Note: This looks like a bug in original (mapped to Bot instead of Env)
+    "LevelDropEnv": LevelDropEnv,
     "CaptureTheFlagEnv": CaptureTheFlagEnv
+}
+
+# Bot Registry for environments that instantiate their own bot (Level0, Level3, Level7)
+BOT_REGISTRY = {
+    "Level0Env": Level0Bot,
+    "Level3Env": Level3Bot,
+    "Level7Env": Level7Bot,
+    "LevelDropEnv": LevelDropBot,
+    "CaptureTheFlagEnv": CaptureTheFlagBot
 }
 
 # Bot Registry for environments that instantiate their own bot (Level0, Level3, Level7)
@@ -199,6 +215,17 @@ class PipelineManager:
         num_envs = training_params["num_envs"]
         headless = env_params.get("headless", True)
         
+        # Resolve Policy Kwargs strings to classes
+        if "policy_kwargs" in model_params:
+            pk = model_params["policy_kwargs"]
+            if "features_extractor_class" in pk and isinstance(pk["features_extractor_class"], str):
+                class_path = pk["features_extractor_class"]
+                if class_path == "src.agent.models.unit_control_network.UnitControlNetwork":
+                    pk["features_extractor_class"] = UnitControlNetwork
+                else:
+                    # Generic resolver could be added here
+                    pass
+
         # Resolve Environment Class
         env_class_name = env_params.get("env_class", "Level0Env")
 
@@ -246,11 +273,25 @@ class PipelineManager:
 
         try:
             # 3. Setup or Load Model
+            algo_name = model_params.get("algorithm", "MaskablePPO")
+            AlgoClass = MaskableRecurrentPPO if algo_name == "MaskableRecurrentPPO" else MaskablePPO
+            logger.info(f"Using algorithm: {algo_name}")
+
             if model_path_to_load:
                 logger.info(f"Resuming/Loading training from: {model_path_to_load}")
                 
                 # Check for space mismatches
-                saved_model = MaskablePPO.load(model_path_to_load, device="cpu")
+                # We use AlgoClass to load, but if the saved model was different, it might fail or warn.
+                # SB3 usually handles loading into a different class if they are compatible enough, 
+                # but MaskablePPO and MaskableRecurrentPPO have different policy structures.
+                
+                # For safety, we try to load with the requested AlgoClass.
+                try:
+                    saved_model = AlgoClass.load(model_path_to_load, device="cpu")
+                except Exception as e:
+                    logger.warning(f"Failed to load with {algo_name}, attempting fallback load with MaskablePPO: {e}")
+                    saved_model = MaskablePPO.load(model_path_to_load, device="cpu")
+
                 saved_policy = saved_model.policy
                 
                 current_obs_shape = env.observation_space.shape
@@ -259,8 +300,12 @@ class PipelineManager:
                 obs_mismatch = current_obs_shape != saved_obs_shape
                 act_mismatch = env.action_space.n != saved_policy.action_space.n
                 
-                if obs_mismatch or act_mismatch:
-                    logger.warning(f"Space mismatch detected. Obs: {saved_obs_shape} -> {current_obs_shape}, Act: {saved_policy.action_space.n} -> {env.action_space.n}")
+                # Arch mismatch: if we want recurrent but saved is not, or vice versa
+                arch_mismatch = (algo_name == "MaskableRecurrentPPO" and not isinstance(saved_model, MaskableRecurrentPPO)) or \
+                                (algo_name == "MaskablePPO" and isinstance(saved_model, MaskableRecurrentPPO))
+
+                if obs_mismatch or act_mismatch or arch_mismatch:
+                    logger.warning(f"Mismatch detected. Obs: {saved_obs_shape} -> {current_obs_shape}, Act: {saved_policy.action_space.n} -> {env.action_space.n}, Arch Change: {arch_mismatch}")
                     logger.info("Transferring weights to a new model structure.")
                     
                     state_dict = saved_policy.state_dict()
@@ -278,20 +323,24 @@ class PipelineManager:
                         raise e
                     
                     # Create fresh model
-                    model = MaskablePPO(
-                        policy=model_params["policy"],
-                        env=env,
-                        verbose=1,
-                        tensorboard_log=log_dir,
-                        learning_rate=training_params["learning_rate"],
-                        batch_size=training_params["batch_size"],
-                        n_steps=training_params["n_steps"],
-                        gamma=model_params["gamma"],
-                        ent_coef=model_params["ent_coef"],
-                        n_epochs=model_params["n_epochs"],
-                        policy_kwargs=model_params.get("policy_kwargs", {}),
-                        device="cuda" if torch.cuda.is_available() else "cpu",
-                    )
+                    model_kwargs = {
+                        "policy": model_params["policy"],
+                        "env": env,
+                        "verbose": 1,
+                        "tensorboard_log": log_dir,
+                        "learning_rate": training_params["learning_rate"],
+                        "batch_size": training_params["batch_size"],
+                        "n_steps": training_params["n_steps"],
+                        "gamma": model_params["gamma"],
+                        "ent_coef": model_params["ent_coef"],
+                        "n_epochs": model_params["n_epochs"],
+                        "policy_kwargs": {**model_params.get("policy_kwargs", {}), "normalize_images": False},
+                        "device": "cuda" if torch.cuda.is_available() else "cpu",
+                    }
+                    if AlgoClass == MaskableRecurrentPPO:
+                        model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
+
+                    model = AlgoClass(**model_kwargs)
                     
                     # Load compatible weights
                     missing, unexpected = model.policy.load_state_dict(state_dict, strict=False)
@@ -303,7 +352,7 @@ class PipelineManager:
                         "n_steps": training_params["n_steps"],
                         "batch_size": training_params["batch_size"],
                     }
-                    model = MaskablePPO.load(
+                    model = AlgoClass.load(
                         model_path_to_load,
                         env=env,
                         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -311,28 +360,33 @@ class PipelineManager:
                         custom_objects=custom_objects
                     )
             else:
-                logger.info("Starting new training session with MaskablePPO.")
-                model = MaskablePPO(
-                    policy=model_params["policy"],
-                    env=env,
-                    verbose=1,
-                    tensorboard_log=log_dir,
-                    learning_rate=training_params["learning_rate"],
-                    batch_size=training_params["batch_size"],
-                    n_steps=training_params["n_steps"],
-                    gamma=model_params["gamma"],
-                    ent_coef=model_params["ent_coef"],
-                    n_epochs=model_params["n_epochs"],
-                    policy_kwargs=model_params.get("policy_kwargs", {}),
-                    device="cuda" if torch.cuda.is_available() else "cpu",
-                )
+                logger.info(f"Starting new training session with {algo_name}.")
+                model_kwargs = {
+                    "policy": model_params["policy"],
+                    "env": env,
+                    "verbose": 1,
+                    "tensorboard_log": log_dir,
+                    "learning_rate": training_params["learning_rate"],
+                    "batch_size": training_params["batch_size"],
+                    "n_steps": training_params["n_steps"],
+                    "gamma": model_params["gamma"],
+                    "ent_coef": model_params["ent_coef"],
+                    "n_epochs": model_params["n_epochs"],
+                    "policy_kwargs": {**model_params.get("policy_kwargs", {}), "normalize_images": False},
+                    "device": "cuda" if torch.cuda.is_available() else "cpu",
+                }
+                if AlgoClass == MaskableRecurrentPPO:
+                    model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
+
+                model = AlgoClass(**model_kwargs)
 
             # 4. Train Model
             logger.info(f"Training for up to {training_params['training_steps']} timesteps...")
             
             # Watchdog to detect hangs in the training loop
-            # Timeout of 300s (5 minutes) should be enough for even slow SC2 loads/resets
-            watchdog = Watchdog(timeout=300.0, recurring=True)
+            # Default to 1 hour (3600s) to accommodate slow CPU training optimization phases.
+            w_timeout = training_params.get("watchdog_timeout", 3600.0)
+            watchdog = Watchdog(timeout=w_timeout, recurring=True)
             watchdog.start()
 
             checkpoint_callback = CheckpointCallback(save_freq=5000, save_path=model_dir, name_prefix="zerg")

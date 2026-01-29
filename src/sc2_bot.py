@@ -13,6 +13,7 @@ from loguru import logger
 from sc2.bot_ai import BotAI
 from sc2.data import Race
 from sc2.ids.unit_typeid import UnitTypeId
+from sc2.ids.ability_id import AbilityId
 from sc2.position import Point2
 from sc2.unit import Unit
 from src.hierarchical_agent import HierarchicalAgentSystem
@@ -31,15 +32,17 @@ class SC2Bot(BotAI):
         self.previous_distance = None
         self.last_target_pos: Optional[Point2] = None
         
+        # Load Action Heads
+        env_conf = self.training_conf.get("env", {})
+        self.action_heads = env_conf.get("action_heads", self.training_conf.get("action_heads", ["move"]))
+        self.categorical_heads = env_conf.get("categorical_heads", self.training_conf.get("categorical_heads", []))
+
         # enemy_race must be set to avoid AttributeError in BotAIInternal._prepare_step
         # when it checks for Race.Random to update it from observations.
-        self.enemy_race = Race.Random
         self._enemy_race = Race.Random
         
-        # Manual initialization of BotAI attributes.
-        # This is necessary because we are running the game session manually in Level0Env
-        # and bypassing sc2.main.run_game(), which normally calls self._initialize_variables()
-        # and self._prepare_start() at the appropriate times.
+        # Satisfaction for BotAI initialization
+        self._initialize_variables()
         from sc2.units import Units
         self.units = Units([], self)
         self.structures = Units([], self)
@@ -74,13 +77,9 @@ class SC2Bot(BotAI):
         command, data = self.conn.recv()
         if command == "step":
             action = data
-            world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(action)
-            self.last_target_pos = Point2((world_x, world_y))
-
+            # Use zergling as default unit for legacy on_step loop
             if self.zergling:
-                cmd = self.zergling.move(self.last_target_pos)
-                if cmd and not isinstance(cmd, bool):
-                    self.do(cmd)
+                await self.apply_action(self.zergling.tag, action)
             
             obs, reward, done, truncated, info = self._get_step_results()
             self.conn.send((obs, reward, done, truncated, info))
@@ -92,6 +91,106 @@ class SC2Bot(BotAI):
 
         elif command == "close":
             await self.client.leave()
+
+    async def apply_action(self, unit_tag, action):
+        """
+        Handles hybrid actions (Spatial + Categorical).
+        """
+        if not self.agent_system: return
+        
+        grid_area = self.grid_size * self.grid_size
+        total_spatial_indices = len(self.action_heads) * grid_area
+        
+        unit = self.units.find_by_tag(unit_tag)
+        if not unit: return
+
+        cmd = None
+
+        if action < total_spatial_indices:
+            # --- SPATIAL ACTION ---
+            head_idx = action // grid_area
+            spatial_idx = action % grid_area
+            action_name = self.action_heads[head_idx]
+            
+            # Resolve target
+            world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(spatial_idx)
+            target_pos = Point2((world_x, world_y))
+            self.last_target_pos = target_pos 
+            
+            if action_name == "move":
+                cmd = unit.move(target_pos)
+            elif action_name == "attack":
+                cmd = unit.attack(target_pos)
+            elif action_name == "load":
+                # Map of transport types to their specific LOAD ability (for picking up units).
+                transport_load_mapping = {
+                    UnitTypeId.MEDIVAC: AbilityId.LOAD_MEDIVAC,
+                    UnitTypeId.OVERLORD: AbilityId.LOAD_OVERLORD,
+                    UnitTypeId.WARPPRISM: AbilityId.LOAD_WARPPRISM,
+                    UnitTypeId.WARPPRISMPHASING: AbilityId.LOAD_WARPPRISM,
+                }
+
+                candidates = self.units.filter(lambda u: u.distance_to(target_pos) < 3.0)
+                
+                if unit.type_id in transport_load_mapping:
+                    loadable = next((u for u in candidates if u.cargo_max == 0), None)
+                    if loadable:
+                        ability = transport_load_mapping[unit.type_id]
+                        cmd = unit(ability, loadable)
+                    else:
+                        cmd = unit.move(target_pos)
+                else:
+                    transport = next((u for u in candidates if u.cargo_max > 0), None)
+                    if transport:
+                        cmd = unit.smart(transport)
+                    else:
+                        cmd = unit.move(target_pos)
+            elif action_name == "unload":
+                # Spatial UNLOAD: Unload at target position
+                # This handles the case where 'unload' is configured as a spatial action.
+                # Note: MEDIVAC has UNLOADALLAT_MEDIVAC, others use SMART or UNLOADALL_AT
+                if unit.cargo_used > 0:
+                    cmd = unit(AbilityId.SMART, target_pos)
+                else:
+                    cmd = unit.move(target_pos)
+            else:
+                logger.error(f"Unhandled spatial action head: {action_name}")
+
+        else:
+            # --- CATEGORICAL ACTION ---
+            cat_idx = action - total_spatial_indices
+            if cat_idx >= len(self.categorical_heads):
+                logger.error(f"Categorical index {cat_idx} out of bounds")
+                return
+                
+            action_name = self.categorical_heads[cat_idx]
+            
+            if action_name == "unload":
+                # CATEGORICAL UNLOAD (UnloadAll at current position)
+                logger.debug(f"Attempting Categorical UNLOAD for {unit.type_id} ({unit.tag}). Cargo: {unit.cargo_used}/{unit.cargo_max}")
+                if unit.cargo_used > 0:
+                    # Specialized UNLOADALL mapping for reliability
+                    mapping = {
+                        UnitTypeId.MEDIVAC: AbilityId.UNLOADALLAT_MEDIVAC,
+                        UnitTypeId.OVERLORD: AbilityId.UNLOADALLAT_OVERLORD,
+                        UnitTypeId.OVERLORDTRANSPORT: AbilityId.UNLOADALLAT_OVERLORD,
+                        UnitTypeId.WARPPRISM: AbilityId.UNLOADALLAT_WARPPRISM,
+                        UnitTypeId.WARPPRISMPHASING: AbilityId.UNLOADALL_WARPPRISM,
+                    }
+                    ability = mapping.get(unit.type_id, AbilityId.UNLOADALL)
+                    
+                    logger.debug(f"Executing categorical UNLOAD for {unit.type_id} ({unit.tag}) using {ability}")
+                    
+                    # Handle 'AT' variants which require a target position
+                    if ability in {AbilityId.UNLOADALLAT_MEDIVAC, AbilityId.UNLOADALLAT_OVERLORD, AbilityId.UNLOADALLAT_WARPPRISM}:
+                        cmd = unit(ability, unit.position)
+                    else:
+                        cmd = unit(ability)
+                else:
+                    logger.warning(f"Categorical UNLOAD skipped: Unit {unit.tag} has no cargo.")
+
+        if cmd:
+            self.do(cmd)
 
     async def reset_game_state(self, verify: bool = True):
         """
@@ -125,6 +224,12 @@ class SC2Bot(BotAI):
         if self.all_units:
             logger.error(f"Failed to clear map after {max_cleanup_attempts} cleanup attempts. Remaining: {self.all_units.amount}")
 
+    def get_active_units(self):
+        """Returns active allied units. Default implementation for single-unit bots."""
+        if self.zergling:
+            return [self.zergling]
+        return []
+
     async def _refresh_state(self):
         """Refreshes the bot's internal state from a new observation."""
         obs = await self.client.observation()
@@ -140,14 +245,142 @@ class SC2Bot(BotAI):
         self._prepare_step(GameState(obs.observation), ProtoWrapper(proto))
 
     def action_masks(self) -> np.ndarray:
-        if self.agent_system and "agent_0" in self.agent_system.unit_agents:
-            return self.agent_system.unit_agents["agent_0"].get_action_mask()
+        if not self.agent_system or "agent_0" not in self.agent_system.unit_agents:
+             # Determine fallback grid_size
+             gs = 128
+             if hasattr(self, "grid_size"):
+                 gs = self.grid_size
+             elif self.agent_system:
+                 gs = self.agent_system.grid_size
+             return np.ones(gs * gs, dtype=bool)
+
+        move_mask = self.agent_system.unit_agents["agent_0"].get_action_mask()
         
-        # Determine fallback grid_size
-        gs = 128
-        if self.agent_system:
-            gs = self.agent_system.grid_size
-        return np.ones(gs * gs, dtype=bool)
+        # Robust Unit Identification
+        active_unit_tag = getattr(self, "active_unit_tag", None)
+        active_unit = None
+        if active_unit_tag:
+            active_unit = self.all_units.find_by_tag(active_unit_tag)
+        
+        if not active_unit:
+            # Fallback to index-based for legacy support
+            active_units = self.get_active_units()
+            idx = getattr(self, "current_unit_index", 0)
+            if 0 <= idx < len(active_units):
+                active_unit = active_units[idx]
+
+        is_transport_actor = False
+        is_flying = False
+        cargo_used = 0
+
+        if active_unit:
+            is_flying = active_unit.is_flying
+            if is_flying:
+                move_mask = np.ones_like(move_mask, dtype=bool)
+            
+            # Context for Load/Unload heads
+            is_transport_actor = active_unit.cargo_max > 0
+            cargo_used = getattr(active_unit, "cargo_used", 0)
+
+        unrestricted_mask = np.ones_like(move_mask, dtype=bool)
+        zero_mask = np.zeros_like(move_mask, dtype=bool)
+        
+        # 0. Retrieve Dynamic Ranges (Load/Heal)
+        load_range = 4.0
+        heal_range = 4.0
+        if hasattr(self, "game_data") and hasattr(self.game_data, "abilities"):
+            try:
+                # Use Medivac Load and Heal as standard reference
+                # Some abilities (like LOAD) might return 0.0 in cast_range if they are proximity-based or triggered by smart()
+                l_rng = self.game_data.abilities[AbilityId.LOAD_MEDIVAC.value]._proto.cast_range
+                h_rng = self.game_data.abilities[AbilityId.MEDIVACHEAL_HEAL.value]._proto.cast_range
+                
+                # If the game returns 0.0, we use a sensible default (4.0) to allow the agent to function.
+                if l_rng > 0: load_range = l_rng
+                if h_rng > 0: heal_range = h_rng
+            except:
+                pass
+
+        final_masks = []
+        for head in self.action_heads:
+            if head == "move":
+                final_masks.append(move_mask)
+            elif head == "attack":
+                # Special Case: Medivac 'Attack' is actually 'Heal'
+                if active_unit and active_unit.type_id == UnitTypeId.MEDIVAC:
+                    active_radius = getattr(active_unit, "radius", 0.0)
+                    
+                    # Find any damaged biological allied units in range
+                    # We filter our own units
+                    damaged_allies = self.units.filter(lambda u: u.tag != active_unit.tag and u.is_biological and u.health < u.health_max)
+                    
+                    can_heal = False
+                    for u in damaged_allies:
+                        target_radius = getattr(u, "radius", 0.0)
+                        if active_unit.distance_to(u) <= (heal_range + active_radius + target_radius):
+                            can_heal = True
+                            break
+                    
+                    if not can_heal:
+                        final_masks.append(zero_mask)
+                    else:
+                        # If can heal, use move_mask (which is already adjusted for flyers/ground in the code above)
+                        final_masks.append(move_mask)
+                else:
+                    # Use move_mask to enforce terrain limits for ground units (move_mask is already adjusted for flyers)
+                    final_masks.append(move_mask)
+            elif head == "load":
+                # Non-transport flyers cannot load
+                if is_flying and not is_transport_actor:
+                    final_masks.append(zero_mask)
+                else:
+                    # Use specialized transport mask for the 'load' head
+                    game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
+                    # Pass is_transport context so Medivacs see Marines and vice-versa
+                    load_mask = self.agent_system.unit_agents["agent_0"].get_transport_mask(
+                        self.units, game_info, is_transport=is_transport_actor, active_unit=active_unit, cast_range=load_range
+                    )
+                    final_masks.append(load_mask)
+            else:
+                # Most other heads are unrestricted spatially
+                final_masks.append(unrestricted_mask)
+        
+        # --- CATEGORICAL HEADS MASKING ---
+        categorical_masks = []
+        for head in getattr(self, "categorical_heads", []):
+            if head == "unload":
+                # Valid only if:
+                # 1. Active unit is a transport
+                # 2. It has cargo
+                # 3. It is over pathable terrain
+                # 4. It is NOT over a structure/resource
+                if active_unit and active_unit.cargo_max > 0 and active_unit.cargo_used > 0:
+                    pos = active_unit.position
+                    try:
+                        # BurnySC2 PixelMap allows indexing by Point2 or rounded coordinates
+                        # 0 = Unpathable (Void/Cliff), 1 = Pathable
+                        is_pathable = self.game_info.pathing_grid[pos] != 0
+                        
+                        # Check for structures/resources blocking the unload
+                        # We use a small safety margin (radius + 0.5)
+                        blocking_entities = self.structures + self.mineral_field + self.vespene_geyser
+                        is_blocked = any(u.distance_to(pos) < (u.radius + 0.5) for u in blocking_entities)
+                        
+                        can_unload = is_pathable and not is_blocked
+                        categorical_masks.append(can_unload)
+                        
+                        if self.state.game_loop % 100 == 0:
+                            logger.debug(f"Categorical UNLOAD mask for {active_unit.type_id}: {can_unload} (Pathable: {is_pathable}, Blocked: {is_blocked}, Cargo: {active_unit.cargo_used})")
+                    except Exception as e:
+                        # Fallback if pathing grid check fails
+                        categorical_masks.append(True)
+                else:
+                    categorical_masks.append(False)
+            else:
+                # Default to True for unknown categorical heads
+                categorical_masks.append(True)
+
+        return np.concatenate(final_masks + [np.array(categorical_masks)])
 
     def _get_observation(self) -> Tuple[np.ndarray, Dict]:
         self.zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None

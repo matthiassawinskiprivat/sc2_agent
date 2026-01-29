@@ -20,6 +20,7 @@ from sc2.player import Bot, Computer
 from sc2.protocol import ConnectionAlreadyClosed, ProtocolError, Protocol
 from sc2.sc2process import SC2Process
 
+from src.sc2_bot import SC2Bot
 from src.level_0_bot import Level0Bot
 from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.config_manager import ConfigManager
@@ -60,12 +61,18 @@ class Level0Env(gym.Env):
         self.episode_counter = 0
         self.training_conf = training_conf or {}
         
-        # Load Additive Layer Configuration
+        # Load Additive Configuration
         # We assume 'config' directory is in the root of the project
         try:
             self.config_manager = ConfigManager("config")
             self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
             self.training_conf['active_layers'] = self.active_layers
+            
+            self.action_heads = self.config_manager.get_cumulative_action_heads(self.level_name)
+            self.training_conf['action_heads'] = self.action_heads
+            
+            self.categorical_heads = self.config_manager.get_cumulative_categorical_heads(self.level_name)
+            self.training_conf['categorical_heads'] = self.categorical_heads
             
             # Load rewards from level config
             level_conf = self.config_manager.get_level_config(self.level_name)
@@ -74,6 +81,8 @@ class Level0Env(gym.Env):
         except Exception as e:
             print(f"Warning: Failed to load config for {self.level_name}: {e}")
             self.active_layers = []
+            self.action_heads = ["move"] # Default
+            self.categorical_heads = []
 
         # Dependency Injection for testing
         self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
@@ -90,8 +99,11 @@ class Level0Env(gym.Env):
         self._log(f"Initialized Worker {self.worker_id} (Index: {self.worker_index}) with map {self.map_name}")
 
         num_channels = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
-        self.observation_space = spaces.Box(low=0, high=255, shape=(num_channels, 128, 128), dtype=np.uint8)
-        self.action_space = spaces.Discrete(self.grid_size * self.grid_size)
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_channels, 128, 128), dtype=np.float32)
+        
+        spatial_size = len(self.action_heads) * self.grid_size * self.grid_size
+        categorical_size = len(self.categorical_heads)
+        self.action_space = spaces.Discrete(spatial_size + categorical_size)
 
         self._sc2_process = None
         self._client = None
@@ -186,15 +198,45 @@ class Level0Env(gym.Env):
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
     
     async def _launch_sc2_process(self):
-        await asyncio.sleep(random.random() * 5)
-        self._log("Launching SC2 process...")
-        self._sc2_process = self._sc2_process_cls(fullscreen=self.visualize)
-        self._controller = await self._sc2_process.__aenter__()
-        # Use _ws if available (real SC2Process), fallback to ws (for some mocks)
-        ws = getattr(self._sc2_process, "_ws", getattr(self._sc2_process, "ws", None))
-        self._client = self._client_cls(ws)
-        # Give the client a moment to stabilize
-        await asyncio.sleep(0.5)
+        max_launch_attempts = 3
+        for attempt in range(max_launch_attempts):
+            await asyncio.sleep(random.random() * 5 + attempt * 2)
+            self._log(f"Launching SC2 process (Attempt {attempt+1}/{max_launch_attempts})...")
+            
+            self._sc2_process = self._sc2_process_cls(fullscreen=self.visualize)
+            try:
+                self._controller = await self._sc2_process.__aenter__()
+                
+                # Verify port was assigned correctly
+                # SC2Process uses _port internally in burnysc2
+                current_port = getattr(self._sc2_process, "_port", None)
+                if current_port is None:
+                    self._log(f"WARNING: SC2Process launched with port=None on attempt {attempt+1}")
+                    await self._sc2_process.__aexit__(None, None, None)
+                    if attempt == max_launch_attempts - 1:
+                        raise RuntimeError("Failed to obtain a valid port for SC2Process after multiple attempts.")
+                    continue
+
+                # Use _ws if available (real SC2Process), fallback to ws (for some mocks)
+                ws = getattr(self._sc2_process, "_ws", getattr(self._sc2_process, "ws", None))
+                if ws is None:
+                    self._log(f"WARNING: WebSocket is None on attempt {attempt+1}")
+                    await self._sc2_process.__aexit__(None, None, None)
+                    continue
+
+                self._client = self._client_cls(ws)
+                # Give the client a moment to stabilize
+                await asyncio.sleep(0.5)
+                # Success
+                return
+            except Exception as e:
+                self._log(f"Error during SC2 launch attempt {attempt+1}: {e}")
+                try:
+                    await self._sc2_process.__aexit__(None, None, None)
+                except:
+                    pass
+                if attempt == max_launch_attempts - 1:
+                    raise e
 
     async def _setup_game_session(self):
         # Verify connection
@@ -267,13 +309,8 @@ class Level0Env(gym.Env):
         return obs, reward, done, truncated, info
 
     async def _async_step(self, action):
-        world_x, world_y = self._bot.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(action)
-        from sc2.position import Point2
-        self._bot.last_target_pos = Point2((world_x, world_y))
         if self._bot.zergling:
-            cmd = self._bot.zergling.move(self._bot.last_target_pos)
-            if cmd and not isinstance(cmd, bool):
-                self._bot.do(cmd)
+            await self._bot.apply_action(self._bot.zergling.tag, action)
         
         # Send queued actions to the client before stepping
         # SC2Bot uses 'actions', but standard BotAI uses '_actions'

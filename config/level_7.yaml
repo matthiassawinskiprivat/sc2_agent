@@ -34,6 +34,8 @@ env:
     - "enemy_g_dps_base"
     - "allied_health"
     - "enemy_health"
+  action_heads:
+    - "attack"
 
 # Model parameters
 model:

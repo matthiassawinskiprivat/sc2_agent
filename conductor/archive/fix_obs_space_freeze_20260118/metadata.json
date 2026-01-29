@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_obs_space_freeze_20260118",
+  "type": "bugfix",
+  "status": "new",
+  "created_at": "2026-01-18T00:09:00Z",
+  "updated_at": "2026-01-18T00:09:00Z",
+  "description": "Fix training freeze/hang in SB3 is_image_space check by optimizing the observation space definition."
+}

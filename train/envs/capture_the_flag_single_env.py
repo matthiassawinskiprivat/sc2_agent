@@ -57,14 +57,20 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         
         # Fallback for testing/repro if ConfigManager returns empty
         if not self.active_layers:
-            env_conf = self.training_conf.get("env", {})
             self.active_layers = env_conf.get("active_layers", [])
             
         self.training_conf["active_layers"] = self.active_layers
         
-        num_layers = len(self.active_layers)
-        self.observation_space = spaces.Box(low=0, high=255, shape=(num_layers, 128, 128), dtype=np.uint8)
-        self.action_space = spaces.Discrete(2 * grid_size * grid_size)
+        # Dynamic Action Heads from Curriculum
+        self.action_heads = self.config_manager.get_cumulative_action_heads(self.level_name)
+        if not self.action_heads:
+            self.action_heads = env_conf.get("action_heads", ["move", "attack"])
+        self.training_conf["action_heads"] = self.action_heads
+
+        num_layers = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32)
+        
+        # Action space is initialized in base class Level0Env (via SingleClientEnv)
         
         self.bot: Optional[CaptureTheFlagBot] = None
         self.active_player_id = 1

@@ -8,6 +8,7 @@ training:
   batch_size: 128
   learning_rate: 0.0005
   render_beacon: True
+  watchdog_timeout: 3600
 
 # Environment parameters
 env:
@@ -25,6 +26,8 @@ env:
     - "terrain_pathable"
     - "command_objective"
     - "command_assignment"
+  action_heads:
+    - "move"
 
 # Model parameters
 model:

@@ -24,8 +24,10 @@ class CaptureTheFlagSelfPlayEnv(CaptureTheFlagSingleEnv):
         
         # Override observation space to ensure it's correct for the perspective flipping
         # (Though SingleEnv already does this)
-        num_layers = len(self.active_layers)
-        self.observation_space = spaces.Box(low=0, high=255, shape=(num_layers, 128, 128), dtype=np.uint8)
+        num_layers = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32)
+        
+        # Action space
 
     def set_opponent_model(self, model):
         self.opponent_model = model

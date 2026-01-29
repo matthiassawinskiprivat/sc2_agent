@@ -2,18 +2,27 @@ import pytest
 from train.envs.level_7_env import Level7Env
 from src.level_7_bot import Level7Bot
 from unittest.mock import patch, MagicMock, AsyncMock
+import numpy as np
 
 def test_level_7_env_action_space_is_doubled():
     # Grid size 16 -> 16*16 = 256. Level 7 -> 2 * 256 = 512.
-    with patch('train.envs.level_0_env.ConfigManager'), \
+    mock_cm = MagicMock()
+    mock_cm.get_cumulative_active_layers.return_value = []
+    mock_cm.get_cumulative_action_heads.return_value = ["move", "attack"]
+    
+    with patch('train.envs.level_0_env.ConfigManager', return_value=mock_cm), \
          patch('train.envs.level_0_env.Level0Env._discover_maps', return_value=['map1']):
         env = Level7Env(grid_size=16, level_name="level_7")
-        assert env.action_space.n == 512
+    
+    assert env.action_space.n == 512
 
 @pytest.mark.asyncio
 async def test_level_7_bot_apply_action_splitting():
     # Verify that the bot correctly splits actions into move/attack
-    training_conf = {"targets": 1}
+    training_conf = {
+        "targets": 1,
+        "env": {"action_heads": ["move", "attack"]}
+    }
     bot = Level7Bot(conn=MagicMock(), training_conf=training_conf)
     bot.grid_size = 10 # 100 area
     bot.agent_system = MagicMock()

@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_unload_attribute_error_20260116",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-16T11:03:00Z",
+  "updated_at": "2026-01-16T11:03:00Z",
+  "description": "Fix AttributeError: 'Unit' object has no attribute 'unload_all_at' in SC2Bot."
+}

@@ -7,9 +7,14 @@ from src.level_7_bot import Level7Bot
 class TestLevel7MaskMismatch:
     @pytest.fixture
     def mock_env(self):
+        mock_cm = MagicMock()
+        mock_cm.get_cumulative_active_layers.return_value = ["layer1"]
+        mock_cm.get_cumulative_action_heads.return_value = ["move", "attack"]
+        mock_cm.get_level_config.return_value = {"env": {"rewards": {}}}
+
         with patch('train.envs.level_0_env.SC2Process'), \
              patch('train.envs.level_0_env.Client'), \
-             patch('train.envs.level_0_env.ConfigManager'), \
+             patch('train.envs.level_0_env.ConfigManager', return_value=mock_cm), \
              patch('sc2.game_state.GameState'), \
              patch('sc2.pixel_map.PixelMap'), \
              patch('train.envs.level_0_env.Level0Env._discover_maps', return_value=['map1']):

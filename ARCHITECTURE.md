@@ -81,6 +81,14 @@ class UIManager:
 - UI thread handling
 - Frame queue management
 
+### 5. Hybrid Action System
+The agent utilizes a hybrid action space that combines spatial targeting with categorical "button" toggles. This architecture ensures high-fidelity movement while maintaining efficiency for non-spatial abilities.
+
+- **Spatial Heads:** 128x128 grid outputs for actions requiring coordinates (e.g., `move`, `attack`, `load`).
+- **Categorical Heads:** Single-logit outputs for state-based actions (e.g., `unload`, `stimpack`, `siege`).
+- **Additive Accumulation:** Like observation layers, action heads are accumulated throughout the curriculum, allowing the agent to retain early skills while learning complex new abilities.
+- **Loud-Bias Grafting:** When transitioning to new action spaces, categorical neurons are initialized with a **+2.0 bias** to prioritize exploration of new capabilities.
+
 ## Architecture Benefits
 
 ### 1. Separation of Concerns

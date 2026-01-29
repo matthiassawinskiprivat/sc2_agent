@@ -133,33 +133,6 @@ class Level7Bot(Level3Bot):
         if not hasattr(self, "units"): return []
         return sorted(self.units(self.allied_unit_type), key=lambda u: u.tag)
 
-    async def apply_action(self, unit_tag, action):
-        """
-        Handles Move (0..N) and Attack (N..2N).
-        """
-        if not self.agent_system: return
-        
-        grid_area = self.grid_size * self.grid_size
-        is_attack = False
-        spatial_idx = action
-        
-        if action >= grid_area:
-            is_attack = True
-            spatial_idx = action - grid_area
-            
-        world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(spatial_idx)
-        target_pos = Point2((world_x, world_y))
-        
-        unit = self.units.find_by_tag(unit_tag)
-        if unit:
-            if is_attack:
-                cmd = unit.attack(target_pos)
-            else:
-                cmd = unit.move(target_pos)
-                
-            if cmd:
-                self.do(cmd)
-
     def calculate_combat_reward(self) -> float:
         """
         Calculates reward based on damage dealt and kills.
@@ -327,31 +300,3 @@ class Level7Bot(Level3Bot):
              
         self.zergling = original_unit
         return processed_obs, {}
-
-    def action_masks(self) -> np.ndarray:
-        """
-        Returns a concatenated mask for Move (first half) and Attack (second half).
-        """
-        # Get the base move mask from the agent system
-        move_mask = super().action_masks()
-        
-        # AIR UNIT BYPASS: If unit is flying, it can move anywhere (ignore pathing)
-        # We need to find which unit is currently being 'asked' for an action.
-        # In Level 7, this is driven by self.current_unit_index in the Env.
-        # However, the bot can check its own state if we provide a hint.
-        # For now, let's check if the first active unit is flying (as a heuristic for single-type levels)
-        # OR if we have a current_unit_tag hint (to be added to envs).
-        active_units = self.get_active_units()
-        
-        # If the environment has a current_unit_index, use it
-        idx = getattr(self, "current_unit_index", 0)
-        if 0 <= idx < len(active_units):
-            if active_units[idx].is_flying:
-                move_mask = np.ones_like(move_mask, dtype=bool)
-
-        # For Level 7, we want 2 * GridSize^2
-        # Move mask (first half) is restricted by pathing (unless flying).
-        # Attack mask (second half) is unmasked to allow Attack-Move to any location.
-        attack_mask = np.ones_like(move_mask, dtype=bool)
-        
-        return np.concatenate([move_mask, attack_mask])

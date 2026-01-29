@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_level_drop_objective_tracking_20260116",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-01-16T12:29:00Z",
+  "updated_at": "2026-01-16T12:29:00Z",
+  "description": "The LevelDropBot currently fails to identify the enemy main structure (objective) at the start of training episodes, resulting in a 'No enemy main structure found!' warning and breaking the command objective layer visualization."
+}

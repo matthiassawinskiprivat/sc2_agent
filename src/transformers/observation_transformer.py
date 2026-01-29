@@ -160,6 +160,11 @@ class ObservationTransformer:
         # 5. Draw Command/State
         # ------------------------------------------------------------------
         self._draw_command_info(raw_obs, layers)
+        
+        # ------------------------------------------------------------------
+        # 5.5 Draw Transport Info
+        # ------------------------------------------------------------------
+        self._draw_transport_info(raw_obs, layers)
 
         # ------------------------------------------------------------------
         # 6. Normalize & Scale to uint8 [0, 255]
@@ -171,11 +176,10 @@ class ObservationTransformer:
         layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
         layers[0:dps_start] = np.log1p(layers[0:dps_start])
         
-        # Centralized Scaling: Transform float32 [0, 1+] to uint8 [0, 255]
-        # We clip to [0, 1] for layers that should be normalized (like health, density)
-        # Note: log1p can exceed 1.0, so we clip at 1.0 before scaling to 255
-        # This ensures maximum intensity for any significant presence.
-        layers = np.clip(layers * 255.0, 0, 255.0).astype(np.uint8)
+        # Centralized Scaling: Transform float32 [0, 1+] to float32 [0, 1]
+        # We clip to [0, 1] for layers that should be normalized.
+        # Changing to float32 [0, 1] avoids SB3's expensive is_image_space check on uint8 arrays.
+        layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
 
         if self.active_layers:
             # Extract indices for active layers
@@ -388,7 +392,7 @@ class ObservationTransformer:
         self._draw_unit_body(unit, layers, is_enemy, px, py)
         self._draw_unit_vitals(unit, layers, is_enemy, px, py)
         self._draw_unit_detection(unit, layers, is_enemy, px, py)
-        self._draw_unit_healing(unit, layers, is_enemy, px, py)
+        self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
         self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
 
     def _draw_unit_body(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
@@ -464,7 +468,7 @@ class ObservationTransformer:
         if radius > 0:
             self._draw_circle_vectorized(layers, idx_det, px, py, radius, None, 1.0, False)
 
-    def _draw_unit_healing(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
+    def _draw_unit_healing(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int, game_data: Any = None):
         prefix = "enemy" if is_enemy else "allied"
         layer_idx = LayerConstants.LAYERS[f"{prefix}_hps_field"]
         hps = 0.0
@@ -474,10 +478,29 @@ class ObservationTransformer:
             uid = unit.type_id
             if uid == UnitTypeId.MEDIVAC and unit.energy > 5:
                 hps, rng = 12.6, 4.0
+                if game_data and hasattr(game_data, "abilities"):
+                    # Dynamically retrieve range from game data if possible
+                    try:
+                        val = game_data.abilities[AbilityId.MEDIVACHEAL_HEAL.value]._proto.cast_range
+                        if val > 0: rng = val
+                    except:
+                        pass
             elif uid == UnitTypeId.SHIELDBATTERY and unit.energy > 3:
                 hps, rng = 50.4, 6.0
+                if game_data and hasattr(game_data, "abilities"):
+                    try:
+                        val = game_data.abilities[AbilityId.SHIELDBATTERYRECHARGE_EXOTICSHIELDBATTERYRECHARGE.value]._proto.cast_range
+                        if val > 0: rng = val
+                    except:
+                        pass
             elif uid == UnitTypeId.QUEEN and unit.energy >= 50:
                 hps, rng = 25.0, 7.0
+                if game_data and hasattr(game_data, "abilities"):
+                    try:
+                        val = game_data.abilities[AbilityId.TRANSFUSION_TRANSFUSION.value]._proto.cast_range
+                        if val > 0: rng = val
+                    except:
+                        pass
         if hps > 0:
             self._draw_circle_vectorized(layers, layer_idx, px, py, rng, None, hps, accumulate=True)
 
@@ -645,6 +668,63 @@ class ObservationTransformer:
                     self._draw_circle_vectorized(layers, idx, px, py, radius, None, dps, True)
                     if idx_air is not None:
                         self._draw_circle_vectorized(layers, idx_air, px, py, radius, None, dps, True)
+
+    def _draw_transport_info(self, raw_obs, layers):
+        """
+        Draws Transport Slots and Passenger Density.
+        Transport Slots: 0.5 = Available, 1.0 = Full.
+        Passenger Density: Count of passengers at transport location.
+        """
+        units = raw_obs.get('units')
+        if not units: return
+
+        idx_slots = LayerConstants.LAYERS.get(LayerConstants.TRANSPORT_SLOTS)
+        idx_pass = LayerConstants.LAYERS.get(LayerConstants.PASSENGER_DENSITY)
+
+        if idx_slots is None and idx_pass is None:
+            return
+
+        # Transport Type IDs
+        transport_ids = {
+            UnitTypeId.MEDIVAC.value, UnitTypeId.MEDIVAC.value, # Handle both enum/int
+            UnitTypeId.OVERLORDTRANSPORT.value,
+            UnitTypeId.WARPPRISM.value, UnitTypeId.WARPPRISMPHASING.value,
+            UnitTypeId.BUNKER.value # Bunkers are technically transports
+        }
+        
+        # Add standard Overlord just in case, though it needs upgrade to transport
+        transport_ids.add(UnitTypeId.OVERLORD.value)
+
+        for unit in units:
+            u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
+            
+            if u_id not in transport_ids:
+                continue
+                
+            px, py = self._get_pixel_coords(unit.position)
+            if px is None: continue
+
+            # Check cargo
+            cargo_used = getattr(unit, "cargo_used", 0)
+            cargo_max = getattr(unit, "cargo_max", 0)
+            
+            if cargo_max > 0:
+                # Draw Slot Status
+                if idx_slots is not None:
+                    val = 0.5 # Available
+                    if cargo_used >= cargo_max:
+                        val = 1.0 # Full
+                    
+                    # Radius slightly larger than unit to be visible
+                    r = int(unit.radius * self.scale) + 1
+                    self._draw_circle_vectorized(layers, idx_slots, px, py, 0, r, val, False)
+
+                # Draw Passenger Density
+                if idx_pass is not None and cargo_used > 0:
+                    # Normalize by 8 (standard max cargo) to fit 0-1 range
+                    # 1 marine = 1/8 = 0.125
+                    norm_val = min(float(cargo_used) / 8.0, 1.0)
+                    self._draw_circle_vectorized(layers, idx_pass, px, py, 0, r, norm_val, True)
 
     def _draw_circle_vectorized(self, layers, layer_idx, cx, cy, radius_game, radius_px_override=None, value=1.0,
                                 accumulate=False):

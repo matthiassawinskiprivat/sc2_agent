@@ -1,3 +1,6 @@
+# Project Tracks
+
+This file tracks all major tracks for the project. Each track has its own detailed plan in its respective folder.
 
 ---
 
@@ -266,9 +269,122 @@
 
 ---
 
-## [x] Track: Fix CTF Distance and HP Rewards
-*Link: [./conductor/tracks/fix_ctf_rewards_20260110/](./conductor/tracks/fix_ctf_rewards_20260110/)*
+
+
+## [x] Track: Drop Operations Prototype
+
+*Link: [./conductor/tracks/drop_operations_prototype_20260107/](./conductor/tracks/drop_operations_prototype_20260107/)*
+
+---
+
+## [x] Track: Improve Action Masking
+*Link: [./conductor/tracks/improve-action-masking/](./conductor/tracks/improve-action-masking/)*
+
+---
+
+## [x] Track: Implement Maskable Recurrent PPO
+*Link: [./conductor/tracks/implement_maskable_recurrent_ppo/](./conductor/tracks/implement_maskable_recurrent_ppo/)*
+
+---
+
+## [x] Track: Implement GRU Memory
+*Link: [./conductor/tracks/implement_gru_memory/](./conductor/tracks/implement_gru_memory/)*
+
+---
+
+## [x] Track: Optimize PPO VRAM Cache
+
+*Link: [./conductor/tracks/optimize_ppo_vram_cache/](./conductor/tracks/optimize_ppo_vram_cache/)*
+
+
+
+---
+
+
+
+## [x] Track: JIT Recurrent Loop Optimization
+
+
+
+*Link: [./conductor/tracks/jit_recurrent_loop_optimization/](./conductor/tracks/jit_recurrent_loop_optimization/)*
 
 
 
 
+
+
+
+---
+
+
+
+
+
+
+
+## [x] Track: Optimize Drop Rewards
+
+*Link: [./conductor/tracks/optimize_drop_rewards/](./conductor/tracks/optimize_drop_rewards/)*
+
+---
+
+## [x] Track: Enhance Load Action Masking
+*Link: [./conductor/tracks/enhance_load_masking_20260121/](./conductor/tracks/enhance_load_masking_20260121/)*
+
+---
+
+## [x] Track: Verify Drop Environment Penalties
+*Link: [./conductor/tracks/verify_drop_penalties_20260121/](./conductor/tracks/verify_drop_penalties_20260121/)*
+
+---
+
+## [x] Track: Fix Level Drop Integration Test
+*Link: [./conductor/tracks/fix_integration_test_20260121/](./conductor/tracks/fix_integration_test_20260121/)*
+
+---
+
+## [x] Track: Fix Training Instability & Reward Volatility
+*Link: [./conductor/tracks/fix_training_instability_20260121/](./conductor/tracks/fix_training_instability_20260121/)*
+
+---
+
+## [x] Track: Implement Pickup Guidance
+*Link: [./conductor/tracks/implement_pickup_guidance_20260121/](./conductor/tracks/implement_pickup_guidance_20260121/)*
+
+---
+
+## [x] Track: Fix Reward Explosion & Attribution
+*Link: [./conductor/tracks/fix_reward_explosion_20260121/](./conductor/tracks/fix_reward_explosion_20260121/)*
+
+---
+
+## [x] Track: Fix Hidden Drop Reward Bugs
+*Link: [./conductor/tracks/fix_drop_reward_bugs_20260121/](./conductor/tracks/fix_drop_reward_bugs_20260121/)*
+
+---
+
+## [x] Track: Optimize Drop Reward Logic
+*Link: [./conductor/tracks/optimize_drop_reward_logic_20260121/](./conductor/tracks/optimize_drop_reward_logic_20260121/)*
+
+---
+
+## [x] Track: Medivac Heal Action Masking
+*Link: [./conductor/tracks/medivac_heal_masking_20260121/](./conductor/tracks/medivac_heal_masking_20260121/)*
+
+---
+
+## [x] Track: Fix Unload Action Handler
+*Link: [./conductor/tracks/fix_unload_handler_20260122/](./conductor/tracks/fix_unload_handler_20260122/)*
+
+---
+
+
+
+## [x] Track: Fix Level Drop Termination Logic
+
+*Link: [./conductor/tracks/fix_level_drop_termination_20260123/](./conductor/tracks/fix_level_drop_termination_20260123/)*
+
+---
+
+## [x] Track: Level Drop Optimization
+*Link: [./conductor/tracks/level_drop_optimization/](./conductor/tracks/level_drop_optimization/)*
