@@ -257,7 +257,8 @@ class LevelDropBot(Level7Bot):
              
         load_reward = rewards_conf.get('load_reward', 0.1)
         unload_reward = rewards_conf.get('unload_reward', 2.0) # Increased from 1.0 to 2.0
-        distance_reward_scale = rewards_conf.get('distance_reward_scale', 0.05)
+        # Support user's preferred naming 'distance_multiplier' while keeping backward compatibility
+        distance_reward_scale = rewards_conf.get('distance_multiplier', rewards_conf.get('distance_reward_scale', 0.05))
         meeting_reward_scale = distance_reward_scale * 0.5
         occupancy_penalty = -0.01 # Penalty per unit per step in cargo
 
@@ -296,9 +297,9 @@ class LevelDropBot(Level7Bot):
                     dist = unit.distance_to(target_centroid)
                     prev_dist = self.previous_meeting_distances.get(active_tag, dist)
                     dist_diff = prev_dist - dist
-                    shaping_reward = dist_diff * meeting_reward_scale
-                    shaping_reward = max(-0.5, min(0.5, shaping_reward))
-                    total_reward += shaping_reward
+                    # shaping_reward = dist_diff * meeting_reward_scale
+                    # shaping_reward = max(-0.5, min(0.5, shaping_reward))
+                    # total_reward += shaping_reward
 
             # Infantry move to Transport Group Centroid
             elif active_unit_type in self.INFANTRY_TYPES:
@@ -307,10 +308,10 @@ class LevelDropBot(Level7Bot):
                     dist = unit.distance_to(target_centroid)
                     prev_dist = self.previous_meeting_distances.get(active_tag, dist)
                     dist_diff = prev_dist - dist
-                    if dist > 2.0: # Only reward until close
-                        shaping_reward = dist_diff * meeting_reward_scale
-                        shaping_reward = max(-0.5, min(0.5, shaping_reward))
-                        total_reward += shaping_reward
+                    #if dist > 2.0: # Only reward until close
+                        # shaping_reward = dist_diff * meeting_reward_scale
+                        # shaping_reward = max(-0.5, min(0.5, shaping_reward))
+                        # total_reward += shaping_reward
 
         # --- PHASE 2: LOADING REWARD (Refined) ---
         if is_passenger and active_tag not in self.previous_passenger_tags:
@@ -353,6 +354,8 @@ class LevelDropBot(Level7Bot):
             if cc:
                 target_pos = cc.position
 
+        # Distance Shaping Reward (Configurable)
+        # Can be disabled (set to 0.0) for levels where flanking is required.
         if target_pos and active_unit_type in self.TRANSPORT_TYPES:
             transport = self.units.find_by_tag(active_tag)
             if transport and transport.cargo_used > 0:

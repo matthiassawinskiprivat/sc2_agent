@@ -4,14 +4,15 @@ env:
   max_steps: 1250
   rewards:
     load_reward: 0.3
-    unload_reward: 5
+    unload_reward: 7
     damage_reward: 1
     kill_reward: 5
     win_reward: 20.0
     loss_penalty: -10.0
     step_penalty: -0.01
-    damage_penalty: -0.25
-    kill_penalty: -0.5
+    damage_penalty: -0.05
+    kill_penalty: -0.25
+    distance_multiplier: 0.0
   active_layers: []
   action_heads: []
   categorical_heads: []
@@ -38,6 +39,6 @@ model:
     features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
     features_extractor_kwargs:
       features_dim: 512
-      thinking_steps: 3
+      thinking_steps: 5
     lstm_hidden_size: 512
     net_arch: []

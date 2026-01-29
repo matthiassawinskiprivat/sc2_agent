@@ -214,8 +214,49 @@ class LevelDropEnv(Level7Env):
             win_reward = rewards_conf.get('win_reward', 50.0)
             total_reward += win_reward
             self._log(f"\033[92mVICTORY: All enemy entities destroyed! Reward: {win_reward}\033[0m")
+
+        # Smart Cutoff: Check for "Stranded" Condition
+        # If all transports are dead, we must verify if any ground units can actually reach the objective.
+        # If not (e.g., they are on the starting island), we end the episode to save time.
+        elif allied_count > 0:
+            transports = [u for u in controlled_units if u.type_id in self._bot.TRANSPORT_TYPES]
+            infantry = [u for u in controlled_units if u.type_id in self._bot.INFANTRY_TYPES]
             
-        elif allied_count == 0:
+            if len(transports) == 0 and len(infantry) > 0:
+                # 1. Determine Target
+                target_pos = getattr(self._bot, "_objective_pos", None)
+                if not target_pos and self._bot.enemy_start_locations:
+                    target_pos = self._bot.enemy_start_locations[0]
+                
+                if target_pos:
+                    # 2. Check Pathing for ALL infantry units (batch query is faster if supported, but single is fine here)
+                    # We only need ONE unit to have a path to continue.
+                    can_reach_objective = False
+                    
+                    # Optimization: Check closest unit first
+                    infantry.sort(key=lambda u: u.distance_to(target_pos))
+                    
+                    try:
+                        # Attempt to query pathing for the closest unit
+                        # pathing_distance returns float distance or 0.0 if unreachable
+                        # Note: query_pathing usually takes (start, end)
+                        start_pos = infantry[0].position
+                        path_dist = await self._client.query_pathing(start_pos, target_pos)
+                        
+                        if path_dist is not None and path_dist > 0.0:
+                             can_reach_objective = True
+                    except Exception as e:
+                        # If pathing query fails (e.g. timeout), give benefit of doubt
+                        self._log(f"Pathing query failed: {e}. Assuming reachable.")
+                        can_reach_objective = True
+                    
+                    if not can_reach_objective:
+                        done = True
+                        loss_penalty = rewards_conf.get('loss_penalty', -10.0)
+                        total_reward += loss_penalty
+                        self._log(f"DEFEAT: Transports lost and remaining units are stranded! Penalty: {loss_penalty}")
+
+        if not done and allied_count == 0:
             done = True
             loss_penalty = rewards_conf.get('loss_penalty', -10.0)
             total_reward += loss_penalty

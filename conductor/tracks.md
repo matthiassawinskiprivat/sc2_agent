@@ -383,3 +383,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 ## [x] Track: Fix Level Drop Termination Logic
 
 *Link: [./conductor/tracks/fix_level_drop_termination_20260123/](./conductor/tracks/fix_level_drop_termination_20260123/)*
+
+---
+
+## [x] Track: Level Drop Optimization
+*Link: [./conductor/tracks/level_drop_optimization/](./conductor/tracks/level_drop_optimization/)*
