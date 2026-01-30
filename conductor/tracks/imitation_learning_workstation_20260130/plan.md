@@ -42,13 +42,10 @@
 - [x] Task: Conductor - User Manual Verification 'Replay Translation Engine' (Protocol in workflow.md)
 
 ## Phase 5: Validator Module
-- [ ] Task: Implement ValidatorBot
-    - [ ] Write tests for `.npz` data playback logic
-    - [ ] Implement `ValidatorBot` that reads from the data queue
-- [ ] Task: Integrate DebugUI Visualization
-    - [ ] Write tests for feeding recorded layers into `DebugUI`
-    - [ ] Implement side-by-side visualization of Game + Debug Layers
-- [ ] Task: Conductor - User Manual Verification 'Validator Module' (Protocol in workflow.md)
+- [x] Task: Integrate DebugUI Visualization 8ef033d
+    - [x] Write tests for feeding recorded layers into `DebugUI`
+    - [x] Implement side-by-side visualization of Game + Debug Layers
+- [x] Task: Conductor - User Manual Verification 'Validator Module' (Protocol in workflow.md)
 
 ## Phase 6: Training Integration
 - [ ] Task: Update Environment Configuration
