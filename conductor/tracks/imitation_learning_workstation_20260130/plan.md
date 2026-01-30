@@ -28,7 +28,7 @@
     - [x] Implement logic to move `.SC2Replay` files to `replays_raw/<level>/`
 - [x] Task: Conductor - User Manual Verification 'Recorder Module' (Protocol in workflow.md)
 
-## Phase 4: Replay Translation Engine (Phase 2 & 3)
+## Phase 4: Replay Translation Engine (Phase 2 & 3) [checkpoint: 1be37ac]
 - [x] Task: Implement Replay Simluation Wrapper ffd8ea1
     - [x] Write tests for stepping through a replay using `sc2.Client`
     - [x] Implement `ReplaySimulator` to extract raw frame data
@@ -39,7 +39,7 @@
 - [x] Task: Implement Observation Reconstruction ffd8ea1
     - [x] Write tests for `SharedObservationTransformer` integration during replay
     - [x] Implement logic to save `(Obs, Action)` pairs into `.npz` files
-- [ ] Task: Conductor - User Manual Verification 'Replay Translation Engine' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Replay Translation Engine' (Protocol in workflow.md)
 
 ## Phase 5: Validator Module
 - [ ] Task: Implement ValidatorBot
