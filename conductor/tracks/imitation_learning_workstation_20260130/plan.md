@@ -1,6 +1,6 @@
 # Implementation Plan: Imitation Learning Workstation (ILW)
 
-## Phase 1: Infrastructure & Directory Setup
+## Phase 1: Infrastructure & Directory Setup [checkpoint: ffb09e2]
 - [x] Task: Create directory structure for ILW 48184c0
     - [x] Create `imitation_learning/`
     - [x] Create `imitation_learning/replays_raw/`
@@ -8,7 +8,7 @@
 - [x] Task: Implement Config Resolver 316e512
     - [x] Write tests for `imitation_learning/config_resolver.py` (ensure it parses `level_*.yaml` correctly for action heads and layers)
     - [x] Implement `ConfigResolver` class
-- [ ] Task: Conductor - User Manual Verification 'Infrastructure & Directory Setup' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Infrastructure & Directory Setup' (Protocol in workflow.md)
 
 ## Phase 2: PyQt5 UI Skeleton
 - [ ] Task: Implement Main Window Layout
