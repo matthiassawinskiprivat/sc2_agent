@@ -1,0 +1,8 @@
+{
+  "track_id": "imitation_learning_workstation_20260130",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-01-30T13:10:00Z",
+  "updated_at": "2026-01-30T13:10:00Z",
+  "description": "Create a PyQt5-based Imitation Learning Workstation to record, translate, and verify human replays for agent training."
+}
