@@ -26,6 +26,8 @@ It aims to evolve from its current high-fidelity unit micro-management capabilit
 
 - Dynamic observation transformation with customizable layer stacks.
 
+- **Human-in-the-Loop Training:** Integrated workstation for recording human gameplay, translating replays into agent-compatible data, and verifying dataset integrity via visual playback.
+
 - Curriculum learning through progressively complex training levels.
 
 - Competitive self-play in specialized environments like Capture the Flag, utilizing perspective flipping and asymmetric training modes.
@@ -94,6 +96,13 @@ To prevent excessive unit shuffling and incentivize efficient tactical maneuvers
 - **Emergency Pickups:** Recurring rewards for loading previously-handled units are granted only if the unit is significantly damaged (below 50% HP), incentivizing rescue operations while penalizing redundant load/unload cycles for healthy units.
 
 - **Efficient Bulk Unloading:** Unloading rewards in the target zone scale based on the transport's fullness at the start of the drop sequence. The first units dropped from a full transport yield the highest rewards, discouraging inefficient single-unit shuttle runs.
+
+### Imitation Learning Integration
+To accelerate the discovery of complex behavioral sequences (e.g., transport operations, tactical flanking), the project supports hybrid training using expert human demonstrations.
+
+- **Action Decomposition:** The system automatically translates human group-selection commands into individual agent training examples, ensuring compatibility with the single-unit control paradigm.
+- **Curriculum Control:** Training can be configured to prioritize expert data early in the process (e.g., 100% imitation for N steps) before gradually transitioning to pure reinforcement learning.
+- **Verified Datasets:** A dedicated validation tool allows developers to "watch" the translated data being played back in the game engine, ensuring translation accuracy and alignment between human intent and agent representation.
 
 # Future Plans
 

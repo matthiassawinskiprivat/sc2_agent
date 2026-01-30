@@ -38,6 +38,8 @@
 
 - **Dynamic Configuration Manager:** Orchestrates additive accumulation of observation layers and action heads across the training curriculum.
 
+- **Imitation Learning Pipeline:** A comprehensive suite comprising a PyQt5-based workstation, a frame-accurate replay simulator, and a coordinate-aware action translation engine.
+
 ---
 
 # Long Term Plan / Final Architecture
