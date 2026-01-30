@@ -336,6 +336,9 @@ class PipelineManager:
                         "n_epochs": model_params["n_epochs"],
                         "policy_kwargs": {**model_params.get("policy_kwargs", {}), "normalize_images": False},
                         "device": "cuda" if torch.cuda.is_available() else "cpu",
+                        # Imitation Learning
+                        "imitation_data_percentage": training_params.get("imitation_data_percentage", 0.0),
+                        "imitation_data_max_steps": training_params.get("imitation_data_max_steps", 0),
                     }
                     if AlgoClass == MaskableRecurrentPPO:
                         model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
@@ -374,6 +377,9 @@ class PipelineManager:
                     "n_epochs": model_params["n_epochs"],
                     "policy_kwargs": {**model_params.get("policy_kwargs", {}), "normalize_images": False},
                     "device": "cuda" if torch.cuda.is_available() else "cpu",
+                    # Imitation Learning
+                    "imitation_data_percentage": training_params.get("imitation_data_percentage", 0.0),
+                    "imitation_data_max_steps": training_params.get("imitation_data_max_steps", 0),
                 }
                 if AlgoClass == MaskableRecurrentPPO:
                     model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")

@@ -594,32 +594,93 @@ class MaskableMultiInputLstmPolicy(MaskableRecurrentActorCriticPolicy):
         super().__init__(*args, **kwargs)
 
 
+from imitation_learning.buffer import ImitationReplayBuffer
+
 class MaskableRecurrentPPO(RecurrentPPO):
     """
-    Maskable Recurrent PPO (MaskablePPO + RecurrentPPO)
-    Supports LSTM and GRU.
-    Included VRAM Caching optimization.
+    Custom PPO implementation that supports:
+    1. Action Masking (from sb3-contrib MaskablePPO)
+    2. Recurrent Policy (from sb3-contrib RecurrentPPO)
+    3. Hybrid Action Space (Spatial + Categorical)
+    4. Imitation Learning from expert demonstrations
     """
-    
-    policy_aliases: ClassVar[Dict[str, Type[BasePolicy]]] = {
-        "MlpLstmPolicy": MaskableMlpLstmPolicy,
-        "CnnLstmPolicy": MaskableCnnLstmPolicy,
-        "MultiInputLstmPolicy": MaskableMultiInputLstmPolicy,
-    }
-    
+
     def __init__(
         self,
-        policy: Union[str, Type[MaskableRecurrentActorCriticPolicy]],
+        policy: Union[str, Type[RecurrentActorCriticPolicy]],
         env: Union[GymEnv, str],
-        rnn_type: str = "lstm",
-        **kwargs,
+        learning_rate: Union[float, Schedule] = 3e-4,
+        n_steps: int = 128,
+        batch_size: int = 128,
+        n_epochs: int = 10,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        clip_range: Union[float, Schedule] = 0.2,
+        clip_range_vf: Union[float, Schedule] = None,
+        normalize_advantage: bool = True,
+        ent_coef: float = 0.0,
+        vf_coef: float = 0.5,
+        max_grad_norm: float = 0.5,
+        use_sde: bool = False,
+        sde_sample_freq: int = -1,
+        target_kl: Optional[float] = None,
+        stats_window_size: int = 100,
+        tensorboard_log: Optional[str] = None,
+        policy_kwargs: Optional[Dict[str, Any]] = None,
+        verbose: int = 0,
+        seed: Optional[int] = None,
+        device: Union[torch.device, str] = "auto",
+        _init_setup_model: bool = True,
+        # New parameters for imitation learning
+        imitation_data_percentage: float = 0.0,
+        imitation_data_max_steps: int = 0,
     ):
-        self.rnn_type = rnn_type.lower()
-        if "policy_kwargs" not in kwargs:
-            kwargs["policy_kwargs"] = {}
-        kwargs["policy_kwargs"]["rnn_type"] = self.rnn_type
+        super().__init__(
+            policy,
+            env,
+            learning_rate,
+            n_steps,
+            batch_size,
+            n_epochs,
+            gamma,
+            gae_lambda,
+            clip_range,
+            clip_range_vf,
+            normalize_advantage,
+            ent_coef,
+            vf_coef,
+            max_grad_norm,
+            use_sde,
+            sde_sample_freq,
+            target_kl,
+            stats_window_size,
+            tensorboard_log,
+            policy_kwargs,
+            verbose,
+            seed,
+            device,
+            _init_setup_model,
+        )
         
-        super().__init__(policy, env, **kwargs)
+        self.imitation_data_percentage = imitation_data_percentage
+        self.imitation_data_max_steps = imitation_data_max_steps
+        self.imitation_buffer = None
+        
+        if _init_setup_model:
+            self._setup_imitation()
+
+    def _setup_imitation(self):
+        """Initializes the imitation buffer if data exists for the current level."""
+        # Try to resolve level name from env
+        level_name = getattr(self.env, "level_name", None)
+        if not level_name and hasattr(self.env, "envs"):
+            level_name = getattr(self.env.envs[0], "level_name", None)
+            
+        if level_name:
+            self.imitation_buffer = ImitationReplayBuffer(level_name)
+            if self.imitation_buffer.total_size == 0:
+                self.imitation_buffer = None
+
         
     def _setup_model(self) -> None:
         self._setup_lr_schedule()
@@ -789,6 +850,7 @@ class MaskableRecurrentPPO(RecurrentPPO):
         entropy_losses = []
         pg_losses, value_losses = [], []
         clip_fractions = []
+        imitation_losses = []
 
         continue_training = True
 
@@ -842,7 +904,37 @@ class MaskableRecurrentPPO(RecurrentPPO):
 
                 entropy_losses.append(entropy_loss.item())
 
-                loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+                # --- IMITATION LOSS ---
+                imitation_loss = torch.tensor(0.0, device=self.device)
+                if self.imitation_buffer and self.num_timesteps < self.imitation_data_max_steps:
+                    if np.random.rand() < (self.imitation_data_percentage / 100.0):
+                        expert_obs, expert_acts = self.imitation_buffer.sample_batch(self.batch_size)
+                        expert_obs_tensor = torch.as_tensor(expert_obs, device=self.device)
+                        expert_acts_tensor = torch.as_tensor(expert_acts, device=self.device).long()
+                        
+                        # Evaluate expert actions using current policy
+                        # Note: We use None for LSTM states and ones for episode_starts for now 
+                        # as offline data might not have the full recurrent sequence context.
+                        # This simplifies expert data to i.i.d. transitions.
+                        batch_size_expert = expert_obs_tensor.shape[0]
+                        dummy_lstm_states = RNNStates(
+                            pi=(torch.zeros(self.policy.lstm_hidden_size, device=self.device), 
+                                torch.zeros(self.policy.lstm_hidden_size, device=self.device)),
+                            vf=(torch.zeros(self.policy.lstm_hidden_size, device=self.device), 
+                                torch.zeros(self.policy.lstm_hidden_size, device=self.device))
+                        )
+                        dummy_episode_starts = torch.ones(batch_size_expert, device=self.device)
+                        
+                        # Evaluate expert actions
+                        _, expert_log_prob, _ = self.policy.evaluate_actions(
+                            expert_obs_tensor, expert_acts_tensor, dummy_lstm_states, dummy_episode_starts
+                        )
+                        
+                        # Supervised loss: minimize -log_prob of expert actions
+                        imitation_loss = -torch.mean(expert_log_prob)
+                        imitation_losses.append(imitation_loss.item())
+
+                loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + imitation_loss
 
                 with torch.no_grad():
                     log_ratio = log_prob - rollout_data.old_log_prob
@@ -870,6 +962,9 @@ class MaskableRecurrentPPO(RecurrentPPO):
         self.logger.record("train/entropy_loss", np.mean(entropy_losses))
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
+        if imitation_losses:
+            self.logger.record("train/imitation_loss", np.mean(imitation_losses))
+
         self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())

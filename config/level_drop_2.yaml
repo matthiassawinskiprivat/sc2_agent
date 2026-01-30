@@ -27,6 +27,8 @@ training:
   training_steps: 250_000
   num_envs: 1
   watchdog_timeout: 7200
+  imitation_data_percentage: 20
+  imitation_data_max_steps: 100_000
 
 model:
   algorithm: "MaskableRecurrentPPO"

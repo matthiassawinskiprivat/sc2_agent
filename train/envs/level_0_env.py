@@ -78,6 +78,15 @@ class Level0Env(gym.Env):
             level_conf = self.config_manager.get_level_config(self.level_name)
             if 'env' in level_conf and 'rewards' in level_conf['env']:
                 self.training_conf['rewards'] = level_conf['env']['rewards']
+            
+            # Imitation Learning Configuration
+            training_section = level_conf.get('training', {})
+            self.imitation_data_percentage = training_section.get('imitation_data_percentage', 0)
+            self.imitation_data_max_steps = training_section.get('imitation_data_max_steps', max_steps)
+            
+            # Inject into training_conf for bot/agent visibility
+            self.training_conf['imitation_data_percentage'] = self.imitation_data_percentage
+            self.imitation_data_max_steps = self.imitation_data_max_steps
         except Exception as e:
             print(f"Warning: Failed to load config for {self.level_name}: {e}")
             self.active_layers = []
