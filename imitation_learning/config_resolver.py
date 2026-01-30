@@ -8,9 +8,9 @@ class ConfigResolver:
     Resolves level and map configurations for the Imitation Learning Workstation.
     """
     def __init__(self, project_root: str = "."):
-        self.project_root = project_root
-        self.config_dir = os.path.join(project_root, "config")
-        self.maps_root = os.path.join(project_root, "train", "maps")
+        self.project_root = os.path.abspath(project_root)
+        self.config_dir = os.path.join(self.project_root, "config")
+        self.maps_root = os.path.join(self.project_root, "train", "maps")
         self.config_manager = ConfigManager(self.config_dir)
 
     def list_levels(self) -> List[str]:

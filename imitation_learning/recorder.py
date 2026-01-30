@@ -2,17 +2,35 @@ import os
 import datetime
 from pathlib import Path
 from sc2 import maps
-from sc2.player import Human, Computer
+from sc2.player import Human, Computer, Bot
 from sc2.data import Race, Difficulty
 from sc2.main import run_game
+from sc2.bot_ai import BotAI
 from loguru import logger
+
+class ReplayObserver(BotAI):
+    """
+    An interactive bot that does nothing, allowing a human to take control.
+    Supports a 'quit' command via chat to ensure graceful replay saving.
+    """
+    async def on_step(self, iteration: int):
+        # Listen for chat commands from the human player
+        if self.state.chat:
+            for msg in self.state.chat:
+                command = msg.message.lower().strip()
+                if command in ["quit", "exit", "done", "end"]:
+                    logger.info(f"Graceful quit requested via chat command: '{command}'")
+                    await self.client.leave()
+
+    async def on_end(self, game_result):
+        logger.info(f"Game ended with result: {game_result}")
 
 class Recorder:
     """
     Handles launching SC2 games for human recording of training data.
     """
     def __init__(self, project_root: str = "."):
-        self.project_root = Path(project_root)
+        self.project_root = Path(project_root).resolve()
         self.replays_raw_root = self.project_root / "imitation_learning" / "replays_raw"
         self.maps_root = self.project_root / "train" / "maps"
 
@@ -66,18 +84,24 @@ class Recorder:
         replay_path = level_replay_dir / replay_filename
 
         logger.info(f"Starting recording on {map_name} as {agent_race.name}")
+        logger.info("NOTE: You are playing as a 'Bot' proxy. You can still use the mouse/keyboard to move units.")
         
         try:
             run_game(
                 maps.Map(map_path),
                 [
-                    Human(agent_race),
+                    Bot(agent_race, ReplayObserver()),
                     Computer(enemy_race, Difficulty.Easy)
                 ],
                 realtime=True,
                 save_replay_as=str(replay_path)
             )
-            logger.info(f"Recording finished. Replay saved to {replay_path}")
+            
+            if replay_path.exists():
+                logger.info(f"Recording finished. Replay saved to {replay_path}")
+            else:
+                logger.warning(f"Game ended but replay file was not found at {replay_path}.")
+                
             return str(replay_path)
         except Exception as e:
             logger.error(f"Failed to run game for recording: {e}")

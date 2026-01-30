@@ -8,7 +8,7 @@ class ReplayManager:
     Manages raw and translated replays on disk.
     """
     def __init__(self, project_root: str = "."):
-        self.project_root = Path(project_root)
+        self.project_root = Path(project_root).resolve()
         self.raw_dir = self.project_root / "imitation_learning" / "replays_raw"
         self.translated_dir = self.project_root / "imitation_learning" / "replays_translated"
 
