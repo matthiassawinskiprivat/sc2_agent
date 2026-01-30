@@ -20,13 +20,13 @@
 - [x] Task: Conductor - User Manual Verification 'PyQt5 UI Skeleton' (Protocol in workflow.md)
 
 ## Phase 3: Recorder Module
-- [ ] Task: Implement Game Launcher
-    - [ ] Write tests for `sc2.run_game` parameter generation
-    - [ ] Implement "Start Recording" logic that launches Human vs. CPU
-- [ ] Task: Implement Post-Game File Management
-    - [ ] Write tests for automatic file movement and renaming (with timestamps)
-    - [ ] Implement logic to move `.SC2Replay` files to `replays_raw/<level>/`
-- [ ] Task: Conductor - User Manual Verification 'Recorder Module' (Protocol in workflow.md)
+- [x] Task: Implement Game Launcher a7fe24b
+    - [x] Write tests for `sc2.run_game` parameter generation
+    - [x] Implement "Start Recording" logic that launches Human vs. CPU
+- [x] Task: Implement Post-Game File Management 268f228
+    - [x] Write tests for automatic file movement and renaming (with timestamps)
+    - [x] Implement logic to move `.SC2Replay` files to `replays_raw/<level>/`
+- [x] Task: Conductor - User Manual Verification 'Recorder Module' (Protocol in workflow.md)
 
 ## Phase 4: Replay Translation Engine (Phase 2 & 3)
 - [ ] Task: Implement Replay Simluation Wrapper
