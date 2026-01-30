@@ -5,9 +5,9 @@
     - [x] Create `imitation_learning/`
     - [x] Create `imitation_learning/replays_raw/`
     - [x] Create `imitation_learning/replays_translated/`
-- [ ] Task: Implement Config Resolver
-    - [ ] Write tests for `imitation_learning/config_resolver.py` (ensure it parses `level_*.yaml` correctly for action heads and layers)
-    - [ ] Implement `ConfigResolver` class
+- [x] Task: Implement Config Resolver 316e512
+    - [x] Write tests for `imitation_learning/config_resolver.py` (ensure it parses `level_*.yaml` correctly for action heads and layers)
+    - [x] Implement `ConfigResolver` class
 - [ ] Task: Conductor - User Manual Verification 'Infrastructure & Directory Setup' (Protocol in workflow.md)
 
 ## Phase 2: PyQt5 UI Skeleton
