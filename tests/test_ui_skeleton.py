@@ -36,8 +36,8 @@ def test_level_and_map_selectors(app, qtbot):
     
     assert level_selector.count() > 0
     
-    # Select a known level
-    level_name = "level_0"
+    # Select a known level (that we know has maps)
+    level_name = "level_0" 
     index = level_selector.findText(level_name)
     if index >= 0:
         level_selector.setCurrentIndex(index)
@@ -45,4 +45,10 @@ def test_level_and_map_selectors(app, qtbot):
         # Verify maps are updated
         assert map_selector.count() > 0
         assert app.record_tab.start_button.isEnabled()
+
+def test_replay_list_population(app):
+    # Verify the table has headers
+    assert app.translate_tab.replay_table.columnCount() == 3
+    assert app.translate_tab.replay_table.horizontalHeaderItem(0).text() == "Name"
+
 
