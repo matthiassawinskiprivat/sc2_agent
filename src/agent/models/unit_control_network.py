@@ -3,18 +3,31 @@ import torch.nn as nn
 import gymnasium as gym
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from src.models.components.reasoning_core import ReasoningCore
+from src.utils.layer_constants import LayerConstants
 
 class UnitControlNetwork(BaseFeaturesExtractor):
     """
     Custom Feature Extractor for Unit Control Agent.
     Includes:
-    1. CNN Encoder (Spatial Processing)
-    2. Reasoning Core (System 2 / Recurrent Depth)
+    1. GPU Preprocessing (Normalization)
+    2. CNN Encoder (Spatial Processing)
+    3. Reasoning Core (System 2 / Recurrent Depth)
     """
     def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512, thinking_steps: int = 3):
         super().__init__(observation_space, features_dim)
         
         n_input_channels = observation_space.shape[0]
+
+        # Determine indices for GPU preprocessing based on LayerConstants
+        # We assume the standard ordering defined in LayerConstants.LAYERS
+        try:
+            self.dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
+            # HPS ends at ENEMY_HPS_FIELD, so we want the index after it
+            self.hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
+        except KeyError:
+            # Fallback if specific keys are missing (though they shouldn't be)
+            self.dps_start = 18
+            self.hps_end = 36
         
         # 1. CNN Encoder (Standard NatureCNN-like but preserved spatial info longer)
         self.cnn = nn.Sequential(
@@ -50,10 +63,37 @@ class UnitControlNetwork(BaseFeaturesExtractor):
         
         # Paper approach: "The L-module converges to a local equilibrium".
         # We can use the CNN output as the initial 'H' and loop it.
+
+    def preprocess(self, observations: torch.Tensor) -> torch.Tensor:
+        """
+        Applies normalization on the GPU.
+        Mathematically equivalent to the old CPU-based numpy normalization.
+        """
+        # Ensure we don't modify the original tensor in place if it's used elsewhere
+        obs = observations.clone()
+        
+        # 1. Log Transform: Count Layers (0 to dps_start)
+        # equivalent to np.log1p
+        if self.dps_start > 0:
+            obs[:, 0:self.dps_start] = torch.log1p(obs[:, 0:self.dps_start])
+        
+        # 2. Tanh Transform: DPS/HPS Layers (dps_start to hps_end)
+        # equivalent to np.tanh(x / 50.0)
+        if self.hps_end > self.dps_start:
+            obs[:, self.dps_start:self.hps_end] = torch.tanh(obs[:, self.dps_start:self.hps_end] / 50.0)
+            
+        # 3. Clip to [0, 1]
+        # equivalent to np.clip
+        obs = torch.clamp(obs, 0.0, 1.0)
+        
+        return obs
         
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        # 0. Preprocess (GPU)
+        x = self.preprocess(observations)
+
         # 1. Encode
-        x = self.cnn(observations)
+        x = self.cnn(x)
         x = self.linear(x)
         
         # 2. Reason (Loop x on itself)
