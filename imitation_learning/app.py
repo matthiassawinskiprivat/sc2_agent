@@ -8,6 +8,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from imitation_learning.config_resolver import ConfigResolver
 from imitation_learning.recorder import Recorder
 from imitation_learning.replay_manager import ReplayManager
+from imitation_learning.translator import ReplayTranslator
 
 class GameThread(QThread):
     finished = pyqtSignal(str)
@@ -23,6 +24,24 @@ class GameThread(QThread):
         try:
             path = self.recorder.start_recording(self.level, self.map_name)
             self.finished.emit(path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+class TranslationThread(QThread):
+    finished = pyqtSignal(int)
+    error = pyqtSignal(str)
+
+    def __init__(self, translator, replay_path, level, config):
+        super().__init__()
+        self.translator = translator
+        self.replay_path = replay_path
+        self.level = level
+        self.config = config
+
+    def run(self):
+        try:
+            count = self.translator.translate(self.replay_path, self.level, self.config)
+            self.finished.emit(count)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -89,10 +108,13 @@ class RecordTab(QWidget):
         QMessageBox.critical(self, "Error", f"Failed to start game:\n{err}")
 
 class TranslateTab(QWidget):
-    def __init__(self, config_resolver: ConfigResolver, replay_manager: ReplayManager):
+    translation_finished = pyqtSignal()
+
+    def __init__(self, config_resolver: ConfigResolver, replay_manager: ReplayManager, translator: ReplayTranslator):
         super().__init__()
         self.resolver = config_resolver
         self.replay_manager = replay_manager
+        self.translator = translator
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Translate raw replays into training data."))
         
@@ -113,6 +135,7 @@ class TranslateTab(QWidget):
         
         self.translate_button = QPushButton("Translate Selected")
         self.translate_button.setEnabled(False)
+        self.translate_button.clicked.connect(self.on_translate_clicked)
         self.replay_table.itemSelectionChanged.connect(self.on_selection_changed)
         
         layout.addWidget(self.replay_table)
@@ -127,11 +150,41 @@ class TranslateTab(QWidget):
         self.replay_table.setRowCount(len(replays))
         for i, r in enumerate(replays):
             self.replay_table.setItem(i, 0, QTableWidgetItem(r["name"]))
+            # Store the path in user data
+            self.replay_table.item(i, 0).setData(Qt.UserRole, r["path"])
             self.replay_table.setItem(i, 1, QTableWidgetItem(r["date"]))
             self.replay_table.setItem(i, 2, QTableWidgetItem(r["size"]))
 
     def on_selection_changed(self):
         self.translate_button.setEnabled(len(self.replay_table.selectedItems()) > 0)
+
+    def on_translate_clicked(self):
+        selected_items = self.replay_table.selectedItems()
+        if not selected_items: return
+        
+        row = selected_items[0].row()
+        replay_path = self.replay_table.item(row, 0).data(Qt.UserRole)
+        level = self.level_selector.currentText()
+        config = self.resolver.get_cumulative_config(level)
+        
+        self.translate_button.setEnabled(False)
+        self.translate_button.setText("Translating...")
+        
+        self.thread = TranslationThread(self.translator, replay_path, level, config)
+        self.thread.finished.connect(self.on_translation_finished)
+        self.thread.error.connect(self.on_translation_error)
+        self.thread.start()
+
+    def on_translation_finished(self, count):
+        self.translate_button.setEnabled(True)
+        self.translate_button.setText("Translate Selected")
+        QMessageBox.information(self, "Success", f"Translation complete!\nGenerated {count} training examples.")
+        self.translation_finished.emit()
+
+    def on_translation_error(self, err):
+        self.translate_button.setEnabled(True)
+        self.translate_button.setText("Translate Selected")
+        QMessageBox.critical(self, "Error", f"Translation failed:\n{err}")
 
 class VerifyTab(QWidget):
     def __init__(self, config_resolver: ConfigResolver, replay_manager: ReplayManager):
@@ -183,6 +236,7 @@ class ImitationLearningWorkstation(QMainWindow):
         self.resolver = ConfigResolver(project_root)
         self.recorder = Recorder(project_root)
         self.replay_manager = ReplayManager(project_root)
+        self.translator = ReplayTranslator(project_root)
         
         self.setWindowTitle("SC2 Imitation Learning Workstation")
         self.resize(1000, 700)
@@ -191,11 +245,12 @@ class ImitationLearningWorkstation(QMainWindow):
         self.setCentralWidget(self.tabs)
         
         self.record_tab = RecordTab(self.resolver, self.recorder)
-        self.translate_tab = TranslateTab(self.resolver, self.replay_manager)
+        self.translate_tab = TranslateTab(self.resolver, self.replay_manager, self.translator)
         self.verify_tab = VerifyTab(self.resolver, self.replay_manager)
         
         # Connect signals
         self.record_tab.recording_finished.connect(self.translate_tab.refresh_list)
+        self.translate_tab.translation_finished.connect(self.verify_tab.refresh_list)
         
         self.tabs.addTab(self.record_tab, "Record")
         self.tabs.addTab(self.translate_tab, "Translate")
