@@ -29,16 +29,16 @@
 - [x] Task: Conductor - User Manual Verification 'Recorder Module' (Protocol in workflow.md)
 
 ## Phase 4: Replay Translation Engine (Phase 2 & 3)
-- [ ] Task: Implement Replay Simluation Wrapper
-    - [ ] Write tests for stepping through a replay using `sc2.Client`
-    - [ ] Implement `ReplaySimulator` to extract raw frame data
-- [ ] Task: Implement Action Translation Logic
-    - [ ] Write tests for coordinate mapping (World -> Grid)
-    - [ ] Implement mapping for Move, Attack, Load, Unload heads
-    - [ ] Implement Multi-Unit Selection splitting (Decomposition)
-- [ ] Task: Implement Observation Reconstruction
-    - [ ] Write tests for `SharedObservationTransformer` integration during replay
-    - [ ] Implement logic to save `(Obs, Action)` pairs into `.npz` files
+- [x] Task: Implement Replay Simluation Wrapper ffd8ea1
+    - [x] Write tests for stepping through a replay using `sc2.Client`
+    - [x] Implement `ReplaySimulator` to extract raw frame data
+- [x] Task: Implement Action Translation Logic ffd8ea1
+    - [x] Write tests for coordinate mapping (World -> Grid)
+    - [x] Implement mapping for Move, Attack, Load, Unload heads
+    - [x] Implement Multi-Unit Selection splitting (Decomposition)
+- [x] Task: Implement Observation Reconstruction ffd8ea1
+    - [x] Write tests for `SharedObservationTransformer` integration during replay
+    - [x] Implement logic to save `(Obs, Action)` pairs into `.npz` files
 - [ ] Task: Conductor - User Manual Verification 'Replay Translation Engine' (Protocol in workflow.md)
 
 ## Phase 5: Validator Module
