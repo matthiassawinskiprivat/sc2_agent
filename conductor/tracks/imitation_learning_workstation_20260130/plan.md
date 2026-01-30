@@ -11,12 +11,12 @@
 - [x] Task: Conductor - User Manual Verification 'Infrastructure & Directory Setup' (Protocol in workflow.md)
 
 ## Phase 2: PyQt5 UI Skeleton
-- [ ] Task: Implement Main Window Layout
-    - [ ] Write tests for UI component initialization
-    - [ ] Create `imitation_learning/app.py` with 3 tabs: Record, Translate, Verify
-- [ ] Task: Implement Level and Map Selectors
-    - [ ] Write tests for dynamic map filtering based on level selection
-    - [ ] Implement reactive dropdowns for Level and Map selection
+- [x] Task: Implement Main Window Layout
+    - [x] Write tests for UI component initialization
+    - [x] Create `imitation_learning/app.py` with 3 tabs: Record, Translate, Verify
+- [x] Task: Implement Level and Map Selectors 5e2f55b
+    - [x] Write tests for dynamic map filtering based on level selection
+    - [x] Implement reactive dropdowns for Level and Map selection
 - [ ] Task: Conductor - User Manual Verification 'PyQt5 UI Skeleton' (Protocol in workflow.md)
 
 ## Phase 3: Recorder Module
