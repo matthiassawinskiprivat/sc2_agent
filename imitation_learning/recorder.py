@@ -13,6 +13,15 @@ class ReplayObserver(BotAI):
     An interactive bot that does nothing, allowing a human to take control.
     Supports a 'quit' command via chat to ensure graceful replay saving.
     """
+    def __init__(self, disable_fog: bool = False):
+        super().__init__()
+        self.disable_fog = disable_fog
+
+    async def on_start(self):
+        if self.disable_fog:
+            logger.info("Disabling Fog of War for recording...")
+            await self.client.debug_show_map()
+
     async def on_step(self, iteration: int):
         # Listen for chat commands from the human player
         if self.state.chat:
@@ -65,7 +74,7 @@ class Recorder:
         """Resolves the absolute path to a map file."""
         return self.maps_root / level_name / f"{map_name}.SC2Map"
 
-    def start_recording(self, level_name: str, map_name: str):
+    def start_recording(self, level_name: str, map_name: str, disable_fog: bool = False):
         """
         Launches a game in human mode and saves the replay.
         """
@@ -83,14 +92,14 @@ class Recorder:
         replay_filename = f"{timestamp}_{map_name}.SC2Replay"
         replay_path = level_replay_dir / replay_filename
 
-        logger.info(f"Starting recording on {map_name} as {agent_race.name}")
+        logger.info(f"Starting recording on {map_name} as {agent_race.name} (Fog of War: {not disable_fog})")
         logger.info("NOTE: You are playing as a 'Bot' proxy. You can still use the mouse/keyboard to move units.")
         
         try:
             run_game(
                 maps.Map(map_path),
                 [
-                    Bot(agent_race, ReplayObserver()),
+                    Bot(agent_race, ReplayObserver(disable_fog=disable_fog)),
                     Computer(enemy_race, Difficulty.Easy)
                 ],
                 realtime=True,

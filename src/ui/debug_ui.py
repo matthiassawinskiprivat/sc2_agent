@@ -229,14 +229,17 @@ class DebugUI(QMainWindow):
             # 2. Overlay Last Click
             if self.show_clicks and self.agent.last_action is not None:
                 idx = self.agent.last_action
-                # Convert 1D index to 2D (128x128)
-                y_128, x_128 = divmod(idx, 128)
+                
+                # Dynamic grid size (e.g. 32 or 128)
+                grid_size = getattr(self.agent, 'grid_size', 128)
+                
+                # Convert 1D index to 2D
+                y_grid, x_grid = divmod(idx, grid_size)
 
                 # Scale up to 512x512
-                # Center of the 4x4 block
-                scale = display_w / 128.0
-                cx = int(x_128 * scale + scale / 2)
-                cy = int(y_128 * scale + scale / 2)
+                scale = display_w / float(grid_size)
+                cx = int(x_grid * scale + scale / 2)
+                cy = int(y_grid * scale + scale / 2)
 
                 # Draw Crosshair (Green)
                 color = (0, 255, 0)  # BGR

@@ -286,6 +286,8 @@ class Level7Bot(Level3Bot):
             'units': self.units,
             'selected_units': [unit],
             'enemy_units': self.enemy_units,
+            'enemy_structures': self.enemy_structures,
+            'structures': self.structures,
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),

@@ -1,0 +1,196 @@
+    def run(self):
+        import signal
+        import asyncio
+        import traceback
+        import torch
+        from loguru import logger
+        from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
+        from src.agent.maskable_ppo import MaskablePPO
+        from src.hierarchical_agent import HierarchicalAgentSystem
+        from src.ui.ui_manager import UIManager
+        from sc2.bot_ai import BotAI
+        from sc2.main import run_game
+        from sc2.position import Point2
+        from sc2 import maps
+        from sc2.player import Bot, Computer
+        from sc2.data import Difficulty, Race
+        import numpy as np
+
+        class WatchBot(BotAI):
+            def __init__(self, model, config, level_name):
+                super().__init__()
+                self.model = model
+                self.config = config
+                self.level_name = level_name
+                self.agent_system = None
+                self.lstm_states = None
+                self.ui_manager = UIManager(self)
+                self.last_observation = None
+                self.transformed_observation = None
+                self.last_action = None
+
+            def reset(self):
+                self.lstm_states = None
+                if self.agent_system:
+                    self.agent_system.current_observation_id = 0
+
+            async def on_start(self):
+                grid_size = self.config.get("env", {}).get("grid_size", 128)
+                self.agent_system = HierarchicalAgentSystem(
+                    map_size=(128, 128),
+                    grid_size=grid_size,
+                    training_conf=self.config
+                )
+                self.agent_system.create_unit_agent("agent_0")
+                self.ui_manager.agent = self.agent_system.unit_agents["agent_0"]
+                active_layers = self.config.get("env", {}).get("active_layers", [])
+                if active_layers:
+                    self.ui_manager.active_layers = active_layers
+
+            async def on_step(self, iteration: int):
+                TRANSPORT_TYPES = {493, 54, 134, 895, 896}
+                INFANTRY_TYPES = {48, 51, 105, 110, 111, 73, 74, 311}
+                
+                allies = self.units.filter(lambda u: u.type_id.value in TRANSPORT_TYPES or u.type_id.value in INFANTRY_TYPES)
+                if not allies: return
+
+                unit = allies.sorted(lambda u: u.tag)[0]
+                
+                target_pos = None
+                main_structures = self.enemy_structures.filter(lambda s: s.type_id.value in {18, 86, 59, 132, 130, 472, 686})
+                if main_structures:
+                    target_pos = main_structures.first.position
+
+                raw_obs = {
+                    'units': self.units,
+                    'selected_units': [unit],
+                    'enemy_units': self.enemy_units,
+                    'enemy_structures': self.enemy_structures,
+                    'structures': self.structures,
+                    'effects': self.state.effects,
+                    'game_info': self.game_info,
+                    'game_data': self.game_data,
+                    'creep': self.state.creep,
+                    'command_target': target_pos
+                }
+                
+                processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+                self.transformed_observation = processed_obs
+                
+                mask = self.action_masks(unit)
+                episode_start = np.array([iteration == 0])
+                
+                action, self.lstm_states = self.model.predict(
+                    processed_obs, 
+                    state=self.lstm_states, 
+                    episode_start=episode_start,
+                    deterministic=True,
+                    action_masks=mask
+                )
+                
+                await self.apply_action(unit, action)
+
+            def action_masks(self, unit) -> np.ndarray:
+                self.agent_system.unit_agents["agent_0"].last_game_info = self.game_info
+                move_mask = self.agent_system.unit_agents["agent_0"].get_action_mask()
+                
+                is_transport = unit.cargo_max > 0
+                if unit.is_flying: move_mask = np.ones_like(move_mask, dtype=bool)
+                
+                action_heads = self.config.get("env", {}).get("action_heads", ["move"])
+                categorical_heads = self.config.get("env", {}).get("categorical_heads", [])
+                
+                final_masks = []
+                for head in action_heads:
+                    if head == "move": final_masks.append(move_mask)
+                    elif head == "load":
+                        final_masks.append(self.agent_system.unit_agents["agent_0"].get_transport_mask(
+                            self.units, self.game_info, is_transport=is_transport, active_unit=unit
+                        ))
+                    else: final_masks.append(np.ones_like(move_mask, dtype=bool))
+                
+                cat_masks = []
+                for head in categorical_heads:
+                    if head == "unload":
+                        cat_masks.append(is_transport and unit.cargo_used > 0)
+                    else: cat_masks.append(True)
+                
+                return np.concatenate(final_masks + [np.array(cat_masks)])
+
+            async def apply_action(self, unit, action):
+                self.last_action = action
+                grid_area = 128 * 128
+                action_heads = self.config.get("env", {}).get("action_heads", ["move"])
+                total_spatial = len(action_heads) * grid_area
+                
+                if action < total_spatial:
+                    head_idx = action // grid_area
+                    spatial_idx = action % grid_area
+                    head_name = action_heads[head_idx]
+                    world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(spatial_idx)
+                    target = Point2((world_x, world_y))
+                    if head_name == "move": self.do(unit.move(target))
+                    elif head_name == "load":
+                        targets = self.units.filter(lambda u: u.distance_to(target) < 3.0)
+                        if targets: self.do(unit.smart(targets.closest_to(target)))
+                        else: self.do(unit.move(target))
+                else:
+                    from sc2.ids.ability_id import AbilityId
+                    self.do(unit(AbilityId.UNLOADALLAT_MEDIVAC, unit.position))
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        original_signal = signal.signal
+        signal.signal = lambda *args: None
+        
+        try:
+            model_dir = os.path.join("models", self.level)
+            final_path = os.path.join(model_dir, "final_model.zip")
+            if os.path.exists(final_path):
+                model_path = final_path
+                logger.info(f"Using final model: {model_path}")
+            else:
+                import glob
+                import re
+                checkpoints = glob.glob(os.path.join(model_dir, "zerg_*_steps.zip"))
+                if not checkpoints: raise FileNotFoundError(f"No model found in {model_dir}")
+                def get_steps(path):
+                    match = re.search(r"zerg_(\d+)_steps", path)
+                    return int(match.group(1)) if match else 0
+                model_path = max(checkpoints, key=get_steps)
+                logger.info(f"Using highest-step checkpoint: {model_path}")
+
+            algo = self.config.get("model", {}).get("algorithm", "MaskableRecurrentPPO")
+            AlgoClass = MaskableRecurrentPPO if "Recurrent" in algo else MaskablePPO
+            
+            custom_objects = {
+                "level_name": self.level,
+                "imitation_data_percentage": 0.0,
+                "imitation_data_max_steps": self.config["training"].get("imitation_data_max_steps", 0),
+                "imitation_coef": self.config["training"].get("imitation_coef", 0.5),
+            }
+            
+            model = AlgoClass.load(model_path, device="cpu", custom_objects=custom_objects)
+            if hasattr(model, "_setup_imitation"):
+                model._setup_imitation(level_name=self.level, imitation_data_percentage=0.0)
+            
+            bot = WatchBot(model, self.config, self.level)
+            self.ui_ready.emit(bot, bot.ui_manager)
+            
+            from imitation_learning.recorder import Recorder
+            rec = Recorder(".")
+            map_path = rec.get_map_path(self.level, self.map_name)
+            agent_race, enemy_race = rec._parse_races_from_map_name(self.map_name)
+            
+            run_game(
+                maps.Map(map_path),
+                [Bot(agent_race, bot), Computer(enemy_race, Difficulty.Easy)],
+                realtime=True
+            )
+            self.finished.emit()
+        except Exception as e:
+            traceback.print_exc()
+            self.error.emit(str(e))
+        finally:
+            signal.signal = original_signal
+            loop.close()

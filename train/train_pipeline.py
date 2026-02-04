@@ -6,7 +6,7 @@ from typing import List, Any
 from loguru import logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
-from sb3_contrib import MaskablePPO
+from src.agent.maskable_ppo import MaskablePPO
 from sb3_contrib.common.wrappers.action_masker import ActionMasker
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
 import torch
@@ -76,7 +76,7 @@ LOG_DIR_BASE = "logs"
 if __name__ == "__main__":
     logger.remove()
     log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
-    logger.add(sys.stderr, level=log_level, colorize=False)
+    logger.add(sys.stderr, level=log_level, colorize=True)
 
 class MaskableSubprocVecEnv(SyncVecEnv):
     """
@@ -287,10 +287,12 @@ class PipelineManager:
                 
                 # For safety, we try to load with the requested AlgoClass.
                 try:
-                    saved_model = AlgoClass.load(model_path_to_load, device="cpu")
+                    saved_model = AlgoClass.load(model_path_to_load, device="cpu", custom_objects={"verbose": 1})
                 except Exception as e:
+                    from src.agent.maskable_ppo import MaskablePPO as CustomMaskablePPO
+                    logger.info(f"Using CustomMaskablePPO: {CustomMaskablePPO}")
                     logger.warning(f"Failed to load with {algo_name}, attempting fallback load with MaskablePPO: {e}")
-                    saved_model = MaskablePPO.load(model_path_to_load, device="cpu")
+                    saved_model = CustomMaskablePPO.load(model_path_to_load, device="cpu", custom_objects={"verbose": 1})
 
                 saved_policy = saved_model.policy
                 
@@ -326,7 +328,7 @@ class PipelineManager:
                     model_kwargs = {
                         "policy": model_params["policy"],
                         "env": env,
-                        "verbose": 1,
+                        "verbose": int(training_params.get("verbose", 1)),
                         "tensorboard_log": log_dir,
                         "learning_rate": training_params["learning_rate"],
                         "batch_size": training_params["batch_size"],
@@ -339,6 +341,8 @@ class PipelineManager:
                         # Imitation Learning
                         "imitation_data_percentage": training_params.get("imitation_data_percentage", 0.0),
                         "imitation_data_max_steps": training_params.get("imitation_data_max_steps", 0),
+                        "imitation_coef": training_params.get("imitation_coef", 0.5),
+                        "level_name": level_name,
                     }
                     if AlgoClass == MaskableRecurrentPPO:
                         model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
@@ -354,6 +358,10 @@ class PipelineManager:
                         "learning_rate": training_params["learning_rate"],
                         "n_steps": training_params["n_steps"],
                         "batch_size": training_params["batch_size"],
+                        "imitation_data_percentage": training_params.get("imitation_data_percentage", 0.0),
+                        "imitation_data_max_steps": training_params.get("imitation_data_max_steps", 0),
+                        "imitation_coef": training_params.get("imitation_coef", 0.5),
+                        "level_name": level_name,
                     }
                     model = AlgoClass.load(
                         model_path_to_load,
@@ -362,6 +370,14 @@ class PipelineManager:
                         tensorboard_log=log_dir,
                         custom_objects=custom_objects
                     )
+                    # Re-initialize imitation buffer as .load() bypasses constructor
+                    if hasattr(model, "_setup_imitation"):
+                        model._setup_imitation(
+                            level_name=level_name,
+                            imitation_data_percentage=training_params.get("imitation_data_percentage", 0.0),
+                            imitation_data_max_steps=training_params.get("imitation_data_max_steps", 0),
+                            imitation_coef=training_params.get("imitation_coef", 0.5)
+                        )
             else:
                 logger.info(f"Starting new training session with {algo_name}.")
                 model_kwargs = {
@@ -380,6 +396,8 @@ class PipelineManager:
                     # Imitation Learning
                     "imitation_data_percentage": training_params.get("imitation_data_percentage", 0.0),
                     "imitation_data_max_steps": training_params.get("imitation_data_max_steps", 0),
+                    "imitation_coef": training_params.get("imitation_coef", 0.5),
+                    "level_name": level_name,
                 }
                 if AlgoClass == MaskableRecurrentPPO:
                     model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")

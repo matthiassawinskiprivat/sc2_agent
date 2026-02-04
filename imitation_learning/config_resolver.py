@@ -42,6 +42,7 @@ class ConfigResolver:
     def get_cumulative_config(self, level_name: str) -> Dict[str, Any]:
         """
         Returns the merged configuration for the level, including additive layers and heads.
+        Matches the logic in Level0Env.
         """
         layers = self.config_manager.get_cumulative_active_layers(level_name)
         action_heads = self.config_manager.get_cumulative_action_heads(level_name)

@@ -74,16 +74,25 @@ class RealTimeUITransformer:
         }
 
     def update_display(self, observation: np.ndarray, enabled_layers: List[str],
-                       fps: float = 0) -> np.ndarray:
+                       fps: float = 0, active_layers: List[str] = None) -> np.ndarray:
         if observation is None:
             return self._create_black_frame()
 
         num_layers, obs_height, obs_width = observation.shape
         frame = np.zeros((obs_height, obs_width, 3), dtype=np.float32)
 
+        # Map layer names to observation indices. 
+        # If active_layers is provided, the observation is pruned.
+        if active_layers:
+            layer_map = {name: i for i, name in enumerate(active_layers)}
+        else:
+            layer_map = LayerConstants.LAYERS
+
         for layer_name in enabled_layers:
-            if layer_name not in LayerConstants.LAYERS: continue
-            layer_idx = LayerConstants.LAYERS[layer_name]
+            if layer_name not in layer_map: continue
+            layer_idx = layer_map[layer_name]
+            
+            # Bound check: ensure the mapped index exists in the observation array
             if layer_idx >= num_layers: continue
 
             layer_data = observation[layer_idx]

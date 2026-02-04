@@ -57,6 +57,7 @@ class UIManager:
         self.last_fps_time = time.time()
         self.current_fps = 0
         self._observation_lock = threading.Lock()
+        self.active_layers = None
 
     def start_real_time_mode(self):
         """Start real-time UI updates"""
@@ -94,7 +95,8 @@ class UIManager:
                         frame = self.ui_transformer.update_display(
                             current_obs,
                             self.enabled_layers,
-                            fps=self.current_fps
+                            fps=self.current_fps,
+                            active_layers=self.active_layers
                         )
 
                         if frame is not None:

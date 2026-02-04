@@ -76,6 +76,13 @@ class Level0Env(gym.Env):
             
             # Load rewards from level config
             level_conf = self.config_manager.get_level_config(self.level_name)
+            
+            # FLAT CONFIG: Move training/env flags to root for ObservationTransformer
+            for section in ["training", "env"]:
+                if section in level_conf:
+                    for k, v in level_conf[section].items():
+                        self.training_conf[k] = v
+
             if 'env' in level_conf and 'rewards' in level_conf['env']:
                 self.training_conf['rewards'] = level_conf['env']['rewards']
             

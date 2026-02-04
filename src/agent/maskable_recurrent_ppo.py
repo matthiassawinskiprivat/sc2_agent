@@ -1,6 +1,7 @@
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, NamedTuple, ClassVar
 from copy import deepcopy
+from loguru import logger
 
 import gymnasium as gym
 import numpy as np
@@ -604,6 +605,13 @@ class MaskableRecurrentPPO(RecurrentPPO):
     3. Hybrid Action Space (Spatial + Categorical)
     4. Imitation Learning from expert demonstrations
     """
+    policy_class = MaskableRecurrentActorCriticPolicy
+
+    policy_aliases: ClassVar[Dict[str, Type[BasePolicy]]] = {
+        "MlpLstmPolicy": MaskableMlpLstmPolicy,
+        "CnnLstmPolicy": MaskableCnnLstmPolicy,
+        "MultiInputLstmPolicy": MaskableMultiInputLstmPolicy,
+    }
 
     def __init__(
         self,
@@ -634,52 +642,99 @@ class MaskableRecurrentPPO(RecurrentPPO):
         # New parameters for imitation learning
         imitation_data_percentage: float = 0.0,
         imitation_data_max_steps: int = 0,
+        imitation_coef: float = 0.5,
+        level_name: Optional[str] = None,
     ):
+        # Ensure verbose is an int to prevent TypeErrors in SB3 base class
+        try:
+            verbose = int(verbose)
+        except (ValueError, TypeError):
+            verbose = 0
+
         super().__init__(
-            policy,
-            env,
-            learning_rate,
-            n_steps,
-            batch_size,
-            n_epochs,
-            gamma,
-            gae_lambda,
-            clip_range,
-            clip_range_vf,
-            normalize_advantage,
-            ent_coef,
-            vf_coef,
-            max_grad_norm,
-            use_sde,
-            sde_sample_freq,
-            target_kl,
-            stats_window_size,
-            tensorboard_log,
-            policy_kwargs,
-            verbose,
-            seed,
-            device,
-            _init_setup_model,
+            policy=policy,
+            env=env,
+            learning_rate=learning_rate,
+            n_steps=n_steps,
+            batch_size=batch_size,
+            n_epochs=n_epochs,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            clip_range=clip_range,
+            clip_range_vf=clip_range_vf,
+            normalize_advantage=normalize_advantage,
+            ent_coef=ent_coef,
+            vf_coef=vf_coef,
+            max_grad_norm=max_grad_norm,
+            use_sde=use_sde,
+            sde_sample_freq=sde_sample_freq,
+            target_kl=target_kl,
+            stats_window_size=stats_window_size,
+            tensorboard_log=tensorboard_log,
+            policy_kwargs=policy_kwargs,
+            verbose=verbose,
+            seed=seed,
+            device=device,
+            _init_setup_model=_init_setup_model,
         )
         
         self.imitation_data_percentage = imitation_data_percentage
         self.imitation_data_max_steps = imitation_data_max_steps
+        self.imitation_coef = imitation_coef
         self.imitation_buffer = None
+        self._start_timesteps = self.num_timesteps
         
         if _init_setup_model:
             self._setup_imitation()
 
-    def _setup_imitation(self):
+    def _excluded_save_params(self) -> List[str]:
+        return super()._excluded_save_params() + ["imitation_buffer"]
+
+    def _setup_imitation(self, level_name: Optional[str] = None, 
+                         imitation_data_percentage: Optional[float] = None,
+                         imitation_data_max_steps: Optional[int] = None,
+                         imitation_coef: Optional[float] = None):
         """Initializes the imitation buffer if data exists for the current level."""
-        # Try to resolve level name from env
-        level_name = getattr(self.env, "level_name", None)
-        if not level_name and hasattr(self.env, "envs"):
-            level_name = getattr(self.env.envs[0], "level_name", None)
+        # Capture current steps as the 'start' for relative imitation tracking
+        self._start_timesteps = self.num_timesteps
+        
+        # Apply Overrides
+        if imitation_data_percentage is not None: self.imitation_data_percentage = imitation_data_percentage
+        if imitation_data_max_steps is not None: self.imitation_data_max_steps = imitation_data_max_steps
+        if imitation_coef is not None: self.imitation_coef = imitation_coef
+
+        if self.imitation_data_percentage <= 0:
+            self.imitation_buffer = None
+            return
+
+        # Priority: 1. Argument, 2. Instance Attribute
+        level_name = level_name or getattr(self, "level_name", None)
+        
+        # Fallback to env resolution if not provided
+        if not level_name and self.env is not None:
+            # VecEnv might have 'level_name' attribute if it's SyncVecEnv/SubprocVecEnv wrapping our envs
+            level_name = getattr(self.env, "level_name", None)
+            
+            # Try to get from first wrapped env if it's a VecEnv
+            if not level_name and hasattr(self.env, "get_attr"):
+                try:
+                    attr_vals = self.env.get_attr("level_name", indices=[0])
+                    if attr_vals:
+                        level_name = attr_vals[0]
+                except:
+                    pass
             
         if level_name:
             self.imitation_buffer = ImitationReplayBuffer(level_name)
             if self.imitation_buffer.total_size == 0:
                 self.imitation_buffer = None
+                logger.opt(colors=True).warning(f"<yellow>Imitation buffer for {level_name} is EMPTY. Check translated replays.</yellow>")
+            else:
+                logger.opt(colors=True).info(f"<yellow>Imitation learning ENABLED for level {level_name}. Level Start: {self._start_timesteps}, Max Steps: {self.imitation_data_max_steps}</yellow>")
+                logger.info(f"Settings: Percentage: {self.imitation_data_percentage}%, Coef: {self.imitation_coef}")
+        else:
+            self.imitation_buffer = None
+            logger.warning("Imitation learning: Could not resolve level_name. Buffer disabled.")
 
         
     def _setup_model(self) -> None:
@@ -690,7 +745,6 @@ class MaskableRecurrentPPO(RecurrentPPO):
             self.observation_space,
             self.action_space,
             self.lr_schedule,
-            use_sde=self.use_sde,
             **self.policy_kwargs,
         )
         self.policy = self.policy.to(self.device)
@@ -703,6 +757,12 @@ class MaskableRecurrentPPO(RecurrentPPO):
              self.policy.action_dist = MaskableBernoulliDistribution(self.action_space.n)
         else:
              raise NotImplementedError("Only Discrete, MultiDiscrete and MultiBinary action spaces are supported for masking")
+
+        if not hasattr(self.policy, "lstm_actor"):
+            raise RuntimeError(
+                f"Error: The policy {type(self.policy)} is not a recurrent policy. "
+                "Ensure you are using a recurrent policy (e.g., CnnLstmPolicy) with MaskableRecurrentPPO."
+            )
 
         lstm = self.policy.lstm_actor
         single_hidden_state_shape = (lstm.num_layers, self.n_envs, lstm.hidden_size)
@@ -906,33 +966,92 @@ class MaskableRecurrentPPO(RecurrentPPO):
 
                 # --- IMITATION LOSS ---
                 imitation_loss = torch.tensor(0.0, device=self.device)
-                if self.imitation_buffer and self.num_timesteps < self.imitation_data_max_steps:
+                # Check relative steps since level start
+                steps_in_level = self.num_timesteps - getattr(self, "_start_timesteps", 0)
+                if self.imitation_buffer and steps_in_level < self.imitation_data_max_steps:
                     if np.random.rand() < (self.imitation_data_percentage / 100.0):
-                        expert_obs, expert_acts = self.imitation_buffer.sample_batch(self.batch_size)
-                        expert_obs_tensor = torch.as_tensor(expert_obs, device=self.device)
-                        expert_acts_tensor = torch.as_tensor(expert_acts, device=self.device).long()
+                        # Sample FULL sequence for state-preserving recurrent training
+                        # This solves the "Amnesia" problem by carrying hidden states forward
+                        expert_data = self.imitation_buffer.sample_full_episode()
                         
-                        # Evaluate expert actions using current policy
-                        # Note: We use None for LSTM states and ones for episode_starts for now 
-                        # as offline data might not have the full recurrent sequence context.
-                        # This simplifies expert data to i.i.d. transitions.
-                        batch_size_expert = expert_obs_tensor.shape[0]
-                        dummy_lstm_states = RNNStates(
-                            pi=(torch.zeros(self.policy.lstm_hidden_size, device=self.device), 
-                                torch.zeros(self.policy.lstm_hidden_size, device=self.device)),
-                            vf=(torch.zeros(self.policy.lstm_hidden_size, device=self.device), 
-                                torch.zeros(self.policy.lstm_hidden_size, device=self.device))
-                        )
-                        dummy_episode_starts = torch.ones(batch_size_expert, device=self.device)
-                        
-                        # Evaluate expert actions
-                        _, expert_log_prob, _ = self.policy.evaluate_actions(
-                            expert_obs_tensor, expert_acts_tensor, dummy_lstm_states, dummy_episode_starts
-                        )
-                        
-                        # Supervised loss: minimize -log_prob of expert actions
-                        imitation_loss = -torch.mean(expert_log_prob)
-                        imitation_losses.append(imitation_loss.item())
+                        if expert_data:
+                            if self._n_updates % 10 == 0:
+                                logger.opt(colors=True).info(f"<yellow>Imitation sampling expert episode ({expert_data['observations'].shape[1]} steps). Level Step: {steps_in_level}/{self.imitation_data_max_steps}</yellow>")
+                            expert_obs = torch.as_tensor(expert_data["observations"], device=self.device).float()
+                            expert_acts = torch.as_tensor(expert_data["actions"], device=self.device).long()
+                            expert_starts = torch.as_tensor(expert_data["episode_starts"], device=self.device).float()
+                            expert_masks = expert_data["action_masks"]
+                            if expert_masks is not None:
+                                expert_masks = torch.as_tensor(expert_masks, device=self.device)
+                                # BAND-AID: "Trust the Expert"
+                                # If the expert took an action, it MUST be valid, even if our heuristic mask says otherwise.
+                                # This fixes the "7 million loss" caused by strict masking in the translator.
+                                expert_masks.scatter_(2, expert_acts.unsqueeze(2), True)
+
+                            # Processing setup
+                            # We process the full episode in chunks of 'seq_len' (Truncated BPTT)
+                            seq_len = 64
+                            T = expert_obs.shape[1] # Total steps in episode
+                            n_expert_seq = 1 # We sample 1 full episode
+                            
+                            # Initialize Hidden States (Zeros at start of episode)
+                            num_layers = self.policy.lstm_actor.num_layers
+                            hidden_size = self.policy.lstm_actor.hidden_size
+                            
+                            h = torch.zeros((num_layers, n_expert_seq, hidden_size), device=self.device)
+                            if self.rnn_type == "lstm":
+                                c = torch.zeros((num_layers, n_expert_seq, hidden_size), device=self.device)
+                                expert_lstm_states = RNNStates(pi=(h, c), vf=(h, c))
+                            else:
+                                expert_lstm_states = RNNStates(pi=(h,), vf=(h,))
+
+                            accumulated_loss = torch.tensor(0.0, device=self.device)
+                            n_chunks = 0
+
+                            # Loop through episode in chunks
+                            for t in range(0, T, seq_len):
+                                end_t = min(t + seq_len, T)
+                                current_seq_len = end_t - t
+                                if current_seq_len <= 0: break
+
+                                # Slices for this chunk
+                                obs_chunk = expert_obs[:, t:end_t] # (1, seq_len, ...)
+                                acts_chunk = expert_acts[:, t:end_t]
+                                starts_chunk = expert_starts[:, t:end_t]
+                                masks_chunk = expert_masks[:, t:end_t] if expert_masks is not None else None
+
+                                # Flatten for API (Batch=1 * SeqLen)
+                                obs_flat = obs_chunk.reshape(-1, *obs_chunk.shape[2:])
+                                acts_flat = acts_chunk.reshape(-1)
+                                starts_flat = starts_chunk.reshape(-1)
+                                masks_flat = masks_chunk.reshape(-1, masks_chunk.shape[-1]) if masks_chunk is not None else None
+
+                                # Forward Pass: Get Distribution AND New States
+                                # We use get_distribution because evaluate_actions discards states
+                                distribution, new_lstm_states = self.policy.get_distribution(
+                                    obs_flat, expert_lstm_states, starts_flat, action_masks=masks_flat
+                                )
+                                
+                                # Calculate Loss
+                                expert_log_prob = distribution.log_prob(acts_flat)
+                                chunk_loss = -torch.mean(expert_log_prob)
+                                accumulated_loss += chunk_loss
+                                n_chunks += 1
+
+                                # Update States for Next Chunk (Detach to implement Truncated BPTT)
+                                # We preserve the VALUES of the state (Memory), but cut the Gradient history.
+                                def detach_state(s):
+                                    if isinstance(s, torch.Tensor): return s.detach()
+                                    return tuple(x.detach() for x in s)
+                                
+                                pi_state = detach_state(new_lstm_states.pi)
+                                vf_state = detach_state(new_lstm_states.vf)
+                                expert_lstm_states = RNNStates(pi=pi_state, vf=vf_state)
+
+                            # Average the loss over the number of chunks to scale it independently of episode length
+                            if n_chunks > 0:
+                                imitation_loss = (accumulated_loss / n_chunks) * self.imitation_coef
+                                imitation_losses.append(imitation_loss.item())
 
                 loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + imitation_loss
 

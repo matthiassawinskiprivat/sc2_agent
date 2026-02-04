@@ -57,8 +57,15 @@ class SC2Bot(BotAI):
     async def on_step(self, iteration: int):
         if iteration == 0:
             # Try to get grid_size from parent env if possible
+            # Default to 128, but strictly enforce 16 for level_0
             grid_size = 128
-            if hasattr(self, "_bot_object") and hasattr(self._bot_object, "grid_size"):
+            level_name = getattr(self, "level_name", "")
+            if not level_name and hasattr(self, "training_conf"):
+                level_name = self.training_conf.get("level_name", "")
+
+            if level_name == "level_0":
+                grid_size = 32
+            elif hasattr(self, "_bot_object") and hasattr(self._bot_object, "grid_size"):
                 grid_size = self._bot_object.grid_size
             elif hasattr(self, "grid_size"):
                 grid_size = self.grid_size
@@ -145,14 +152,6 @@ class SC2Bot(BotAI):
                         cmd = unit.smart(transport)
                     else:
                         cmd = unit.move(target_pos)
-            elif action_name == "unload":
-                # Spatial UNLOAD: Unload at target position
-                # This handles the case where 'unload' is configured as a spatial action.
-                # Note: MEDIVAC has UNLOADALLAT_MEDIVAC, others use SMART or UNLOADALL_AT
-                if unit.cargo_used > 0:
-                    cmd = unit(AbilityId.SMART, target_pos)
-                else:
-                    cmd = unit.move(target_pos)
             else:
                 logger.error(f"Unhandled spatial action head: {action_name}")
 
@@ -322,7 +321,9 @@ class SC2Bot(BotAI):
                             break
                     
                     if not can_heal:
-                        final_masks.append(zero_mask)
+                        # Allow move_mask (attempting to heal) even if we don't strictly see a target.
+                        # This prevents the agent from freezing if it disagrees with the game engine on range.
+                        final_masks.append(move_mask)
                     else:
                         # If can heal, use move_mask (which is already adjusted for flyers/ground in the code above)
                         final_masks.append(move_mask)
@@ -352,27 +353,28 @@ class SC2Bot(BotAI):
                 # Valid only if:
                 # 1. Active unit is a transport
                 # 2. It has cargo
-                # 3. It is over pathable terrain
-                # 4. It is NOT over a structure/resource
+                # 3. It is over safe ground (according to the advanced unload mask)
                 if active_unit and active_unit.cargo_max > 0 and active_unit.cargo_used > 0:
-                    pos = active_unit.position
                     try:
-                        # BurnySC2 PixelMap allows indexing by Point2 or rounded coordinates
-                        # 0 = Unpathable (Void/Cliff), 1 = Pathable
-                        is_pathable = self.game_info.pathing_grid[pos] != 0
+                        unit_agent = self.agent_system.unit_agents["agent_0"]
+                        # 1. Generate the advanced unload mask (Terrain erosion + Building Footprints)
+                        # We include ALL potential blockers
+                        blockers = self.structures + self.enemy_structures + self.mineral_field + self.vespene_geyser
+                        game_info = getattr(self, "game_info", getattr(self, "_game_info", None))
                         
-                        # Check for structures/resources blocking the unload
-                        # We use a small safety margin (radius + 0.5)
-                        blocking_entities = self.structures + self.mineral_field + self.vespene_geyser
-                        is_blocked = any(u.distance_to(pos) < (u.radius + 0.5) for u in blocking_entities)
+                        full_unload_mask = unit_agent.get_unload_mask(blockers, game_info)
                         
-                        can_unload = is_pathable and not is_blocked
+                        # 2. Map current position to grid index
+                        grid_idx = unit_agent.get_grid_index_at_world_pos(active_unit.position)
+                        
+                        # 3. Sample the mask
+                        can_unload = bool(full_unload_mask[grid_idx])
                         categorical_masks.append(can_unload)
                         
                         if self.state.game_loop % 100 == 0:
-                            logger.debug(f"Categorical UNLOAD mask for {active_unit.type_id}: {can_unload} (Pathable: {is_pathable}, Blocked: {is_blocked}, Cargo: {active_unit.cargo_used})")
+                            logger.debug(f"Advanced Categorical UNLOAD mask for {active_unit.type_id} at index {grid_idx}: {can_unload} (Cargo: {active_unit.cargo_used})")
                     except Exception as e:
-                        # Fallback if pathing grid check fails
+                        logger.error(f"Error calculating advanced unload mask: {e}")
                         categorical_masks.append(True)
                 else:
                     categorical_masks.append(False)
@@ -460,3 +462,35 @@ class SC2Bot(BotAI):
         if reached_target:
             done = True
         return obs, reward, done, truncated, info
+
+
+class UnitControlBot(BotAI):
+    """
+    Standalone bot implementation for visualizer and demo modes.
+    Directly uses HierarchicalAgentSystem.
+    """
+    def __init__(self, agent_system: HierarchicalAgentSystem, agent_id: str = "agent_0"):
+        super().__init__()
+        self.agent_system = agent_system
+        self.agent_id = agent_id
+        
+    async def on_step(self, iteration: int):
+        # 1. Capture Raw Observation components
+        raw_obs = {
+            'units': self.units,
+            'enemy_units': self.enemy_units,
+            'structures': self.structures,
+            'enemy_structures': self.enemy_structures,
+            'effects': self.state.effects,
+            'game_info': self.game_info,
+            'game_data': self.game_data,
+            'creep': self.state.creep,
+            'command_target': None # Optional: Set to current objective if known
+        }
+        
+        # 2. Process with Hierarchical System
+        # This also updates the agent's internal state for UI visualization
+        results = self.agent_system.process_observation(raw_obs, player_id=1)
+        
+        # 3. (Optional) Here you would get action from model
+        # For now, this bot just allows the UI to visualize what the agent sees

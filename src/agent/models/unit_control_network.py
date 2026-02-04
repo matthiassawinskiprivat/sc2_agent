@@ -9,25 +9,13 @@ class UnitControlNetwork(BaseFeaturesExtractor):
     """
     Custom Feature Extractor for Unit Control Agent.
     Includes:
-    1. GPU Preprocessing (Normalization)
-    2. CNN Encoder (Spatial Processing)
-    3. Reasoning Core (System 2 / Recurrent Depth)
+    1. CNN Encoder (Spatial Processing)
+    2. Reasoning Core (System 2 / Recurrent Depth)
     """
     def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512, thinking_steps: int = 3):
         super().__init__(observation_space, features_dim)
         
         n_input_channels = observation_space.shape[0]
-
-        # Determine indices for GPU preprocessing based on LayerConstants
-        # We assume the standard ordering defined in LayerConstants.LAYERS
-        try:
-            self.dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
-            # HPS ends at ENEMY_HPS_FIELD, so we want the index after it
-            self.hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
-        except KeyError:
-            # Fallback if specific keys are missing (though they shouldn't be)
-            self.dps_start = 18
-            self.hps_end = 36
         
         # 1. CNN Encoder (Standard NatureCNN-like but preserved spatial info longer)
         self.cnn = nn.Sequential(
@@ -52,57 +40,17 @@ class UnitControlNetwork(BaseFeaturesExtractor):
         # 2. Reasoning Core
         self.reasoning = ReasoningCore(input_dim=features_dim, hidden_dim=features_dim)
         self.thinking_steps = thinking_steps
-        
-        # Memory State (Hidden State for GRU)
-        # We need to manage this manually or let it reset?
-        # SB3 doesn't natively pass hidden states to FeaturesExtractor unless using LSTM Policy.
-        # For simplicity in this "Pseudo-Recurrent" setup (Depth Recurrence), 
-        # we initialize hidden state from the CNN output itself (or zero).
-        # Since ReasoningCore loops over the SAME input to refine it, 
-        # we can treat the Initial Memory as "Zero" or "CNN Output".
-        
-        # Paper approach: "The L-module converges to a local equilibrium".
-        # We can use the CNN output as the initial 'H' and loop it.
 
-    def preprocess(self, observations: torch.Tensor) -> torch.Tensor:
-        """
-        Applies normalization on the GPU.
-        Mathematically equivalent to the old CPU-based numpy normalization.
-        """
-        # Ensure we don't modify the original tensor in place if it's used elsewhere
-        obs = observations.clone()
-        
-        # 1. Log Transform: Count Layers (0 to dps_start)
-        # equivalent to np.log1p
-        if self.dps_start > 0:
-            obs[:, 0:self.dps_start] = torch.log1p(obs[:, 0:self.dps_start])
-        
-        # 2. Tanh Transform: DPS/HPS Layers (dps_start to hps_end)
-        # equivalent to np.tanh(x / 50.0)
-        if self.hps_end > self.dps_start:
-            obs[:, self.dps_start:self.hps_end] = torch.tanh(obs[:, self.dps_start:self.hps_end] / 50.0)
-            
-        # 3. Clip to [0, 1]
-        # equivalent to np.clip
-        obs = torch.clamp(obs, 0.0, 1.0)
-        
-        return obs
-        
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        # 0. Preprocess (GPU)
-        x = self.preprocess(observations)
-
+        # Normalization has been moved back to the ObservationTransformer (CPU)
+        x = observations
+        
         # 1. Encode
         x = self.cnn(x)
         x = self.linear(x)
         
         # 2. Reason (Loop x on itself)
-        # Initial State: We can start with x itself as the "thought".
         thought = x
-        
-        # We assume independent reasoning per step (stateless across time for now, 
-        # to match SB3 non-LSTM interfaces easily). 
-        # The recurrence is DEPTH-based (thinking hard about THIS frame).
         thought = self.reasoning(input_tensor=x, hidden_state=thought, thinking_steps=self.thinking_steps)
         
         return thought

@@ -171,14 +171,15 @@ class ObservationTransformer:
         # ------------------------------------------------------------------
         dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
-        
-        # OPTIMIZATION:
-        # We moved the heavy mathematical normalization (log1p, tanh) to the GPU 
-        # inside the Neural Network (UnitControlNetwork.preprocess).
-        # This significantly reduces CPU load. We just return the RAW float32 values here.
-        
-        # Just ensure it is float32
-        layers = layers.astype(np.float32)
+
+        # Apply non-linear compression to intensities
+        layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
+        layers[0:dps_start] = np.log1p(layers[0:dps_start])
+
+        # Centralized Scaling: Transform float32 [0, 1+] to float32 [0, 1]
+        # We clip to [0, 1] for layers that should be normalized.
+        # Changing to float32 [0, 1] avoids SB3's expensive is_image_space check on uint8 arrays.
+        layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
 
         if self.active_layers:
             # Extract indices for active layers

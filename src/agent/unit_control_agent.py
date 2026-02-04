@@ -334,6 +334,42 @@ class UnitControlAgent:
 
         return world_x, world_y
 
+    def get_grid_index_at_world_pos(self, pos) -> int:
+        """
+        Inverse of convert_spatial_action_to_world.
+        Maps SC2 World coordinates back to a 1D grid index.
+        """
+        if self.last_game_info is None:
+            return 0
+
+        crop_x, crop_y = 0, 0
+        mw, mh = self.last_game_info.map_size.width, self.last_game_info.map_size.height
+
+        if hasattr(self.last_game_info, 'playable_area'):
+            area = self.last_game_info.playable_area
+            crop_x, crop_y = area.x, area.y
+            mw, mh = area.width, area.height
+
+        scale = min(self.cnn_width / max(mw, 1), self.cnn_height / max(mh, 1))
+        offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
+        offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
+
+        rel_x = pos.x - crop_x
+        rel_y = pos.y - crop_y
+
+        x_cnn = (rel_x * scale) + offset_x
+        y_cnn = (self.cnn_height - 1) - ((rel_y * scale) + offset_y)
+
+        # Scale CNN coordinates to grid coordinates
+        grid_x = int(x_cnn * self.grid_size / self.cnn_width)
+        grid_y = int(y_cnn * self.grid_size / self.cnn_height)
+
+        # Clamp to grid bounds
+        grid_x = max(0, min(grid_x, self.grid_size - 1))
+        grid_y = max(0, min(grid_y, self.grid_size - 1))
+
+        return grid_y * self.grid_size + grid_x
+
     def reset(self):
         self.transformed_observation = None
         self.last_game_info = None

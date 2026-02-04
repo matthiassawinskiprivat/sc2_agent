@@ -1,5 +1,6 @@
 env:
   env_class: "LevelDropEnv"
+  observed_id: 1
   grid_size: 128
   max_steps: 1250
   rewards:
@@ -20,15 +21,16 @@ env:
 training:
   learning_rate: 0.0001
   n_steps: 2048
-  batch_size: 128
+  batch_size: 512
   n_epochs: 10
   gamma: 0.99
   ent_coef: 0.01
-  training_steps: 250_000
+  training_steps: 500_000
   num_envs: 1
   watchdog_timeout: 7200
-  imitation_data_percentage: 20
-  imitation_data_max_steps: 100_000
+  imitation_data_percentage: 40
+  imitation_data_max_steps: 500_000
+  imitation_coef: 1.0
 
 model:
   algorithm: "MaskableRecurrentPPO"
