@@ -272,14 +272,16 @@ class ObservationTransformer:
         sampled_path = None
         sampled_height = None
 
-        if dim0 == total_w and dim1 == total_h:
-            if np.all(valid_sc2_x < dim0) and np.all(valid_sc2_y < dim1):
-                sampled_path = path_data[valid_sc2_x, valid_sc2_y]
-                sampled_height = height_data[valid_sc2_x, valid_sc2_y]
-        elif dim0 == total_h and dim1 == total_w:
+        if dim0 == total_h and dim1 == total_w:
+            # Standard SC2 Grid: (height, width) -> (y, x)
             if np.all(valid_sc2_y < dim0) and np.all(valid_sc2_x < dim1):
                 sampled_path = path_data[valid_sc2_y, valid_sc2_x]
                 sampled_height = height_data[valid_sc2_y, valid_sc2_x]
+        elif dim0 == total_w and dim1 == total_h:
+            # Transposed Grid: (width, height) -> (x, y)
+            if np.all(valid_sc2_x < dim0) and np.all(valid_sc2_y < dim1):
+                sampled_path = path_data[valid_sc2_x, valid_sc2_y]
+                sampled_height = height_data[valid_sc2_x, valid_sc2_y]
 
         if sampled_path is None:
             cx = np.clip(valid_sc2_x, 0, dim0 - 1)
@@ -336,12 +338,14 @@ class ObservationTransformer:
         valid_sc2_y = Y_map[valid_mask]
         sampled_creep = None
 
-        if dim0 == total_w and dim1 == total_h:
-            if np.all(valid_sc2_x < dim0) and np.all(valid_sc2_y < dim1):
-                sampled_creep = creep_data[valid_sc2_x, valid_sc2_y]
-        elif dim0 == total_h and dim1 == total_w:
+        if dim0 == total_h and dim1 == total_w:
+            # Standard SC2 Grid: (height, width) -> (y, x)
             if np.all(valid_sc2_y < dim0) and np.all(valid_sc2_x < dim1):
                 sampled_creep = creep_data[valid_sc2_y, valid_sc2_x]
+        elif dim0 == total_w and dim1 == total_h:
+            # Transposed Grid: (width, height) -> (x, y)
+            if np.all(valid_sc2_x < dim0) and np.all(valid_sc2_y < dim1):
+                sampled_creep = creep_data[valid_sc2_x, valid_sc2_y]
 
         if sampled_creep is None:
             cx = np.clip(valid_sc2_x, 0, dim0 - 1)
