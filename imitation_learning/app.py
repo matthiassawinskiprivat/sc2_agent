@@ -489,11 +489,8 @@ class WatchBot(BotAI):
                 await self._setup_level()
                 
                 # Refresh state after setup so iteration 0 prediction is meaningful
-                obs_data = await self.client.observation()
-                from sc2.game_state import GameState
-                from src.utils.proto_utils import ProtoWrapper
-                game_state = GameState(obs_data.observation)
-                self._prepare_step(game_state, ProtoWrapper(self.game_info._proto))
+                # We use internal BotAI methods correctly here
+                await self._refresh_state()
             
             # 1. Identify units we control
             allies = self.units.filter(lambda u: u.type_id in self.TRANSPORT_TYPES or u.type_id in self.INFANTRY_TYPES)
@@ -541,12 +538,15 @@ class WatchBot(BotAI):
             if not unit: return
 
             # 4. Observation & Prediction
-            # Treat beacon as enemy for observation (matches training)
-            # Robust Beacon Search: check all entities
+            # Treat beacon as MISSION OBJECTIVE ONLY (matches training perspective)
             beacons = self.all_units.filter(lambda u: "BEACON" in u.type_id.name.upper())
-            obs_enemies = list(self.enemy_units) + list(beacons)
+            
+            # DO NOT add beacons to enemies list. 
+            # In replays, beacons are usually neutral (owner 0) and thus not in Allied or Enemy lists.
+            # They only appear in the 'command_target' layer.
+            obs_enemies = list(self.enemy_units)
 
-            # Filter allied units to NOT include the beacon
+            # Filter allied units to NOT include the beacon (even if we own it)
             clean_allied_units = self.units
             if beacons:
                 beacon_tags = {b.tag for b in beacons}
@@ -568,6 +568,15 @@ class WatchBot(BotAI):
                 raw_obs['enemy_structures'] = self.enemy_structures
                 raw_obs['structures'] = self.structures
             processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+            
+            # FIX: Automatic Scaling Detection
+            # If model was trained on uint8 [0, 255] but we have float32 [0, 1],
+            # we must scale up to restore signal. 
+            # We detect this by checking the observation space bounds.
+            if self.model.observation_space.high.max() > 1.0 and processed_obs.max() <= 1.0:
+                # logger.debug("Scaling observation by 255.0 to match model expectations.")
+                processed_obs = processed_obs * 255.0
+                
             self.transformed_observation = processed_obs
             self.last_observation = processed_obs
             
@@ -578,13 +587,19 @@ class WatchBot(BotAI):
             with torch.no_grad():
                 obs_tensor, _ = self.model.policy.obs_to_tensor(processed_obs)
                 if hasattr(self.model.policy, "get_distribution"):
-                    mask_tensor = torch.as_tensor(mask).bool().to(self.model.policy.device)
+                    mask_tensor = torch.as_tensor(mask).bool().to(self.model.policy.device).unsqueeze(0)
                     try:
-                        dist = self.model.policy.get_distribution(obs_tensor, action_masks=mask_tensor)
+                        # Try recurrent signature (dist, states)
+                        res = self.model.policy.get_distribution(obs_tensor, action_masks=mask_tensor)
+                        dist = res[0] if isinstance(res, tuple) else res
                         probs = dist.distribution.probs[0].detach().cpu().numpy()
-                    except:
-                        dist = self.model.policy.get_distribution(obs_tensor)
-                        probs = dist.distribution.probs[0].detach().cpu().numpy()
+                    except Exception as e:
+                        try:
+                            # Fallback for non-recurrent distribution
+                            dist = self.model.policy.get_distribution(obs_tensor)
+                            probs = dist.distribution.probs[0].detach().cpu().numpy()
+                        except:
+                            probs = np.zeros(mask.size)
                 else:
                     probs = np.zeros(mask.size)
 
@@ -654,6 +669,14 @@ class WatchBot(BotAI):
         except Exception as e:
             logger.error(f"Error in WatchBot.on_step: {e}")
             traceback.print_exc()
+
+    async def _refresh_state(self):
+        """Refreshes the bot's internal state from a new observation."""
+        obs = await self.client.observation()
+        from sc2.game_state import GameState
+        from src.utils.proto_utils import ProtoWrapper
+        self._prepare_step(GameState(obs.observation), ProtoWrapper(self.game_info._proto))
+
 
     def _log_action(self, unit, action):
         grid_area = self.agent_system.grid_size * self.agent_system.grid_size
