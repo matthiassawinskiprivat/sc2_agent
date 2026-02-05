@@ -236,14 +236,13 @@ class InferenceThread(QThread):
                 else:
                     raise e
 
-            # FIX: If model expects uint8, SB3 will divide by 255.0 during predict().
-            # But our features are already in float range (0-20). 
-            # We force the space to float32 to bypass auto-normalization.
+            # Standardized [0, 1] Observation Range. 
+            # We force the space to float32 [0, 1] to match training parity.
             from gymnasium import spaces
-            if model.observation_space.dtype == np.uint8:
-                logger.info(f"Correcting model observation space from uint8 to float32 to preserve signal.")
+            if model.observation_space.high.max() > 1.0 or model.observation_space.dtype != np.float32:
+                logger.info(f"Standardizing model observation space to float32 [0, 1].")
                 model.observation_space = spaces.Box(
-                    low=0.0, high=255.0, 
+                    low=0.0, high=1.0, 
                     shape=model.observation_space.shape, 
                     dtype=np.float32
                 )
@@ -251,11 +250,9 @@ class InferenceThread(QThread):
             if hasattr(model, "_setup_imitation"):
                 model._setup_imitation(level_name=self.level, imitation_data_percentage=0.0)
             
-            # FORCE normalize_images to False. 
-            # Our features are float32 raw values (0-20). 
-            # If this is True, SB3 will divide by 255 during predict.
+            # Standard Parity: normalize_images must be False project-wide.
             if hasattr(model.policy, "normalize_images"):
-                logger.info(f"Setting policy.normalize_images = False (was {model.policy.normalize_images})")
+                logger.info(f"Ensuring policy.normalize_images = False (was {model.policy.normalize_images})")
                 model.policy.normalize_images = False
 
             bot = WatchBot(model, self.config, self.level, disable_fog=self.disable_fog)
@@ -538,13 +535,14 @@ class WatchBot(BotAI):
             if not unit: return
 
             # 4. Observation & Prediction
-            # Treat beacon as MISSION OBJECTIVE ONLY (matches training perspective)
+            # Restore training parity: Beacons must be in 'enemy_units' to be rendered
+            # in the enemy_unit_density layer (which the model expects for the Goal).
             beacons = self.all_units.filter(lambda u: "BEACON" in u.type_id.name.upper())
             
-            # DO NOT add beacons to enemies list. 
-            # In replays, beacons are usually neutral (owner 0) and thus not in Allied or Enemy lists.
-            # They only appear in the 'command_target' layer.
+            # Match Level0Bot logic exactly
             obs_enemies = list(self.enemy_units)
+            if beacons:
+                obs_enemies.extend(list(beacons))
 
             # Filter allied units to NOT include the beacon (even if we own it)
             clean_allied_units = self.units
@@ -569,13 +567,7 @@ class WatchBot(BotAI):
                 raw_obs['structures'] = self.structures
             processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
             
-            # FIX: Automatic Scaling Detection
-            # If model was trained on uint8 [0, 255] but we have float32 [0, 1],
-            # we must scale up to restore signal. 
-            # We detect this by checking the observation space bounds.
-            if self.model.observation_space.high.max() > 1.0 and processed_obs.max() <= 1.0:
-                # logger.debug("Scaling observation by 255.0 to match model expectations.")
-                processed_obs = processed_obs * 255.0
+            # REMOVED x255 scaling: Model expects [0, 1] based on observation_space.high.max() == 1.0
                 
             self.transformed_observation = processed_obs
             self.last_observation = processed_obs
