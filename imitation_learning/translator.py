@@ -11,7 +11,6 @@ from sc2.game_state import GameState
 from sc2.position import Point2
 from sc2.ids.ability_id import AbilityId
 from sc2.ids.unit_typeid import UnitTypeId
-import s2clientprotocol.sc2api_pb2 as sc_pb
 from loguru import logger
 from src.hierarchical_agent import HierarchicalAgentSystem
 
@@ -297,7 +296,7 @@ class ReplayTranslatorBot(BotAI):
 
 async def _play_replay_fixed(client, ai, realtime=False, player_id=0):
     from sc2.game_state import GameState
-    from train.envs.level_0_env import ProtoWrapper
+    from src.utils.proto_utils import ProtoWrapper
     ai._initialize_variables()
     game_data = await client.get_game_data()
     game_info = await client.get_game_info()
@@ -305,8 +304,7 @@ async def _play_replay_fixed(client, ai, realtime=False, player_id=0):
     ai._prepare_start(client, player_id, game_info, game_data, realtime=realtime, base_build=ping.ping.base_build)
     state = await client.observation()
     gs = GameState(state.observation)
-    proto_game_info = await client._execute(game_info=sc_pb.RequestGameInfo())
-    ai._prepare_step(gs, ProtoWrapper(proto_game_info.game_info))
+    ai._prepare_step(gs, ProtoWrapper(game_info._proto))
     try: ai._prepare_first_step()
     except Exception: pass
     await ai.on_start()
@@ -316,8 +314,7 @@ async def _play_replay_fixed(client, ai, realtime=False, player_id=0):
             state = await client.observation() if not realtime else await client.observation(gs.game_loop + client.game_step)
             if client._game_result: return client._game_result[player_id]
             gs = GameState(state.observation)
-            proto_game_info = await client._execute(game_info=sc_pb.RequestGameInfo())
-            ai._prepare_step(gs, ProtoWrapper(proto_game_info.game_info))
+            ai._prepare_step(gs, ProtoWrapper(game_info._proto))
         await ai.issue_events()
         await ai.on_step(iteration)
         await ai._after_step()

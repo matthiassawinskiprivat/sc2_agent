@@ -27,7 +27,7 @@ from src.ui.ui_manager import UIManager
 
 # --- Configuration ---
 # Change this to "Zerg_Lower_Left" to test your training map
-MAP_NAME = "00_32x32_No_Middle"
+MAP_NAME = "06_32x32_Left"
 BOT_RACE = Race.Terran
 OPPONENT_RACE = Race.Zerg
 DIFFICULTY = Difficulty.Easy

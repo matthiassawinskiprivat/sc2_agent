@@ -25,28 +25,9 @@ from src.level_0_bot import Level0Bot
 from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.config_manager import ConfigManager
 from src.utils.layer_constants import LayerConstants
+from src.utils.proto_utils import ProtoWrapper
 
 HARD_RESET_COUNT = 10
-
-class ProtoWrapper:
-    def __init__(self, proto):
-        self._proto = proto
-
-    def __getattr__(self, name):
-        # Handle library expecting a Response object when we have a ResponseGameInfo
-        if name == "game_info" and not hasattr(self._proto, "game_info"):
-            return self._proto
-
-        # First try to get it from self._proto directly
-        try:
-            return getattr(self._proto, name)
-        except AttributeError:
-            # If not found, try to get it from self._proto.game_info if it exists
-            # This handles cases where we wrapped a ResponseGameInfo but 
-            # library code expect it to act like GameInfo
-            if hasattr(self._proto, "game_info"):
-                return getattr(self._proto.game_info, name)
-            raise AttributeError(f"'{type(self._proto).__name__}' has no attribute '{name}'")
 
 class Level0Env(gym.Env):
     def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1,

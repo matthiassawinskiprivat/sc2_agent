@@ -233,7 +233,7 @@ class SC2Bot(BotAI):
         """Refreshes the bot's internal state from a new observation."""
         obs = await self.client.observation()
         from sc2.game_state import GameState
-        from train.envs.level_0_env import ProtoWrapper
+        from src.utils.proto_utils import ProtoWrapper
         # Use existing game_info._proto if possible
         proto = getattr(self.game_info, "_proto", None)
         if not proto:

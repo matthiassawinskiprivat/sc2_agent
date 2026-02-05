@@ -491,7 +491,7 @@ class WatchBot(BotAI):
                 # Refresh state after setup so iteration 0 prediction is meaningful
                 obs_data = await self.client.observation()
                 from sc2.game_state import GameState
-                from train.envs.level_0_env import ProtoWrapper
+                from src.utils.proto_utils import ProtoWrapper
                 game_state = GameState(obs_data.observation)
                 self._prepare_step(game_state, ProtoWrapper(self.game_info._proto))
             
