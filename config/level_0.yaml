@@ -3,23 +3,27 @@
 
 training:
   training_steps: 100_000
-  num_envs: 1
-  n_steps: 1024
-  batch_size: 128
-  learning_rate: 0.0005
+  num_envs: 6
+  n_steps: 2048
+  batch_size: 256
+  learning_rate: 0.0003
   render_beacon: True
   watchdog_timeout: 3600
+  imitation_data_percentage: 50
+  imitation_data_max_steps: 50000
+  imitation_coef: 1.0
 
 # Environment parameters
 env:
   grid_size: 32
   headless: True
   max_steps: 300
+  larger_units: True
   maps_dir: "train/maps/level_0"
   rewards:
-    success: 10.0
-    step_penalty: -0.05
-    distance_multiplier: 0.5
+    success: 100.0
+    step_penalty: -0.02
+    distance_multiplier: 2.0
   active_layers:
     - "allied_unit_density"
     - "enemy_unit_density"
@@ -33,11 +37,13 @@ env:
 model:
   policy: "CnnPolicy"
   policy_kwargs:
+    features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
     features_extractor_kwargs:
       features_dim: 512
+      thinking_steps: 1
   gamma: 0.99
-  ent_coef: 0.01
-  n_epochs: 3
+  ent_coef: 0.001
+  n_epochs: 10
 
 # Evaluation parameters
 evaluation:

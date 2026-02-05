@@ -48,7 +48,6 @@ def watch():
             if info.get('is_success'):
                 print(">>> SUCCESS! Goal Reached.")
 
-            time.sleep(0.05)  # Slow down to watch
 
     except KeyboardInterrupt:
         pass

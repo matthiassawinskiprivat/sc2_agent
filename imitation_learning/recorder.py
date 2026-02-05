@@ -1,26 +1,98 @@
 import os
 import datetime
+import random
 from pathlib import Path
 from sc2 import maps
 from sc2.player import Human, Computer, Bot
 from sc2.data import Race, Difficulty
 from sc2.main import run_game
 from sc2.bot_ai import BotAI
+from sc2.position import Point2
+from sc2.ids.unit_typeid import UnitTypeId
 from loguru import logger
 
 class ReplayObserver(BotAI):
     """
     An interactive bot that does nothing, allowing a human to take control.
-    Supports a 'quit' command via chat to ensure graceful replay saving.
+    Supports level-specific setup (e.g. random unit placement) and chat commands.
     """
-    def __init__(self, disable_fog: bool = False):
+    def __init__(self, level_name: str, disable_fog: bool = False):
         super().__init__()
+        self.level_name = level_name
         self.disable_fog = disable_fog
 
     async def on_start(self):
         if self.disable_fog:
             logger.info("Disabling Fog of War for recording...")
             await self.client.debug_show_map()
+            
+        if self.level_name == "level_0":
+            await self._setup_level_0()
+
+    async def _setup_level_0(self):
+        """Randomizes Zergling and Beacon positions, favoring edges for the beacon."""
+        logger.info("Setting up Level 0: Randomizing Zergling and Beacon (Edge Bias enabled)...")
+        
+        # 1. Clear Map
+        if self.all_units:
+            await self.client.debug_kill_unit([u.tag for u in self.all_units])
+            # Materialize death
+            await self.client.step()
+        
+        # 2. Determine spawn area
+        area = self.game_info.playable_area
+        margin = 2.0 # Use smaller margin to allow getting closer to actual edges
+        
+        # Find valid pathable points
+        grid = self.game_info.pathing_grid
+        valid_points = []
+        
+        # Sample points with higher density (step 1)
+        for x in range(int(area.x + margin), int(area.x + area.width - margin)):
+            for y in range(int(area.y + margin), int(area.y + area.height - margin)):
+                if grid[(x, y)] != 0:
+                    valid_points.append(Point2((x, y)))
+
+        if len(valid_points) < 2:
+            p1 = Point2((area.x + area.width/2, area.y + area.height/2))
+            p2 = Point2((area.x + area.width/2 + 5, area.y + area.height/2))
+        else:
+            # Favor edges for the Beacon (p2)
+            min_x = min(p.x for p in valid_points)
+            max_x = max(p.x for p in valid_points)
+            min_y = min(p.y for p in valid_points)
+            max_y = max(p.y for p in valid_points)
+            
+            # Define 'edge points' as those within 4 units of any boundary
+            edge_threshold = 4.0
+            edge_points = [
+                p for p in valid_points
+                if p.x < min_x + edge_threshold or p.x > max_x - edge_threshold or
+                   p.y < min_y + edge_threshold or p.y > max_y - edge_threshold
+            ]
+            
+            # 80% chance to pick an edge point for the beacon to focus on difficult cases
+            if edge_points and random.random() < 0.8:
+                p2 = random.choice(edge_points)
+            else:
+                p2 = random.choice(valid_points)
+            
+            # Zergling (p1) can be anywhere
+            p1 = random.choice(valid_points)
+        
+        # Ensure minimum distance between them
+        attempts = 0
+        while p1.distance_to(p2) < 10.0 and attempts < 30:
+            p1 = random.choice(valid_points)
+            attempts += 1
+
+        # 3. Spawn units
+        await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, p1, self.player_id]])
+        await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, p2, self.player_id]])
+        
+        # Materialize units
+        await self.client.step()
+        logger.info(f"Units ready. Zergling at {p1}, Beacon (Edge-Favored) at {p2}")
 
     async def on_step(self, iteration: int):
         # Listen for chat commands from the human player
@@ -30,6 +102,10 @@ class ReplayObserver(BotAI):
                 if command in ["quit", "exit", "done", "end"]:
                     logger.info(f"Graceful quit requested via chat command: '{command}'")
                     await self.client.leave()
+                elif command == "reset":
+                    logger.info("Manual level reset requested via chat command.")
+                    if self.level_name == "level_0":
+                        await self._setup_level_0()
 
     async def on_end(self, game_result):
         logger.info(f"Game ended with result: {game_result}")
@@ -99,7 +175,7 @@ class Recorder:
             run_game(
                 maps.Map(map_path),
                 [
-                    Bot(agent_race, ReplayObserver(disable_fog=disable_fog)),
+                    Bot(agent_race, ReplayObserver(level_name=level_name, disable_fog=disable_fog)),
                     Computer(enemy_race, Difficulty.Easy)
                 ],
                 realtime=True,

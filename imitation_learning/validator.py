@@ -93,14 +93,41 @@ class ValidatorBot(BotAI):
                 replay_target_tag = int(self.dataset_target_unit_tags[self.current_step])
                 
                 if action_idx != -1:
-                    live_acting_tags = [self.tag_map[int(u["tag"])] for u in acting_data if int(u["tag"]) in self.tag_map]
+                    # Dynamically find the live unit tags for the acting units in this frame
+                    live_acting_tags = []
+                    for u_act in acting_data:
+                        r_tag = int(u_act["tag"])
+                        r_pos = Point2(u_act["pos"])
+                        r_type = u_act["type"]
+                        
+                        # 1. Check if we already have a valid mapping
+                        live_tag = self.tag_map.get(r_tag)
+                        live_unit = self.all_units.find_by_tag(live_tag) if live_tag else None
+                        
+                        # 2. If lost or not mapped, find the closest unit of correct type
+                        if not live_unit:
+                            candidates = self.all_units.filter(lambda u: u.type_id.value == r_type)
+                            if candidates:
+                                closest = candidates.closest_to(r_pos)
+                                # Only map if it's reasonably close to the recorded position
+                                # Increased threshold to 20.0 for better recovery on large maps
+                                if closest.distance_to(r_pos) < 20.0:
+                                    live_tag = closest.tag
+                                    self.tag_map[r_tag] = live_tag
+                                    live_unit = closest
+                        
+                        if live_tag:
+                            live_acting_tags.append(live_tag)
+
                     target_unit_tag_live = self.tag_map.get(replay_target_tag)
                     target_pos_replay = Point2(self.dataset_target_positions[self.current_step])
                     
                     # 1. Lock Check (Physical Gating)
+                    skip_step = False
                     for tag in live_acting_tags:
                         if tag in self.boarding_units or tag in self.boarding_units.values():
-                            return 
+                            skip_step = True
+                            break
                         
                         lock = self.unit_locks.get(tag)
                         if lock:
@@ -110,21 +137,19 @@ class ValidatorBot(BotAI):
                                 continue
                             cur_cargo = unit.cargo_used if hasattr(unit, "cargo_used") else 0
                             still_locked = (self.state.game_loop <= lock["timeout"]) and (lock["cargo"] < 0 or cur_cargo < lock["cargo"])
-                            if still_locked: return # WAIT
+                            if still_locked: 
+                                skip_step = True
+                                break
                             else: del self.unit_locks[tag]
+                    
+                    if skip_step:
+                        return # WAIT for next frame, don't consume step
 
-                    needs_apply = any(action_idx != self.last_unit_action.get(tag) for tag in live_acting_tags)
-                    if needs_apply:
-                        # Throttle: Only issue one major action per unit per step to allow physics to update
-                        if actions_issued_this_step > 0:
-                            return # Wait for next frame to process more commands
-                            
-                        success = await self._apply_action(action_idx, live_acting_tags, target_unit_tag_live, target_pos_replay)
-                        if not success: return # WAIT
-                        
-                        for tag in live_acting_tags: 
-                            self.last_unit_action[tag] = action_idx
-                        actions_issued_this_step += 1
+                    # 2. Apply Action
+                    # We removed the 'needs_apply' history check because 'already_has_order' 
+                    # provides a better, state-aware check of the live unit.
+                    success = await self._apply_action(action_idx, live_acting_tags, target_unit_tag_live, target_pos_replay)
+                    if not success: return # WAIT
                 
                 self.current_step += 1
                 if self.current_step == self.total_steps: self.end_time = self.state.game_loop + 112
@@ -202,7 +227,7 @@ class ValidatorBot(BotAI):
                         # Current order targets a unit tag, but we expect a Point2.
                         # This is not a match for our specific target check.
                         return False
-                    try: return unit.distance_to(ot) < 1.0
+                    try: return ot.distance_to(target) < 0.5
                     except: return False
             return True
 

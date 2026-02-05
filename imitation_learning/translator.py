@@ -222,7 +222,7 @@ class ReplayTranslatorBot(BotAI):
         for u in allied_units:
             unit_masks[u.tag] = self.action_masks(u)
 
-        # 4. Identify Mission Objective (Enemy Main Structure)
+        # 4. Identify Mission Objective (Enemy Main Structure or Beacon)
         main_structures = enemy_structures + [u for u in enemy_units if u.is_structure]
         objective_pos = None
         target_types = {
@@ -230,6 +230,14 @@ class ReplayTranslatorBot(BotAI):
             UnitTypeId.ORBITALCOMMAND, UnitTypeId.PLANETARYFORTRESS, UnitTypeId.LAIR, UnitTypeId.HIVE
         }
         found_objective = next((u for u in main_structures if u.type_id in target_types), None)
+        
+        # Level 0 Fallback: Find Beacon
+        if not found_objective:
+            # Check all allied and enemy units for beacons (since ownership varies in replays)
+            beacons = self.all_units.filter(lambda u: "BEACON" in u.type_id.name.upper())
+            if beacons:
+                found_objective = beacons.first
+
         if found_objective:
             objective_pos = (found_objective.position.x, found_objective.position.y)
 
@@ -342,7 +350,8 @@ class ReplayTranslator:
         from src.transformers.observation_transformer import ObservationTransformer
         final_pairs, action_heads = [], config.get("env", {}).get("action_heads", ["move"])
         categorical_heads, grid_size = config.get("env", {}).get("categorical_heads", []), config.get("env", {}).get("grid_size", 128)
-        transformer = ObservationTransformer(map_size=(grid_size, grid_size), training_conf=config.get("env", {}))
+        # Use fixed 128x128 map_size to match training observation space
+        transformer = ObservationTransformer(map_size=(128, 128), training_conf=config.get("env", {}))
         area = getattr(game_info, 'playable_area', None)
         crop_x, crop_y = (area.x, area.y) if area else (0, 0)
         mw, mh = (area.width, area.height) if area else (game_info.map_size.width, game_info.map_size.height)

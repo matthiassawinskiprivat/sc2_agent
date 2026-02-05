@@ -268,6 +268,10 @@ class SC2Bot(BotAI):
             if 0 <= idx < len(active_units):
                 active_unit = active_units[idx]
 
+        # Debug logging for masking
+        if self.state.game_loop % 100 == 0:
+            logger.debug(f"ActionMask check (Loop {self.state.game_loop}): Unit: {active_unit.type_id if active_unit else 'None'}, MoveMask True: {np.sum(move_mask)}")
+
         is_transport_actor = False
         is_flying = False
         cargo_used = 0
@@ -409,8 +413,13 @@ class SC2Bot(BotAI):
         # Unified Observation: command_target is the GOAL (Beacon), not the last action.
         target_pos = self.beacon.position if self.beacon else self.last_target_pos
         
+        # Filter allied units to NOT include the beacon if it's owned by the bot
+        clean_allied_units = self.units
+        if self.beacon:
+            clean_allied_units = self.units.filter(lambda u: u.tag != self.beacon.tag)
+
         raw_obs = {
-            'units': self.units,
+            'units': clean_allied_units,
             'enemy_units': enemies,
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),

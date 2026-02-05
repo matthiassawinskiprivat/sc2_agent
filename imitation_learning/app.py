@@ -279,6 +279,8 @@ class InferenceThread(QThread):
             signal.signal = original_signal
             loop.close()
 
+from src.utils.config_manager import ConfigManager
+
 class WatchBot(BotAI):
     def __init__(self, model, config, level_name, disable_fog=False):
         super().__init__()
@@ -332,7 +334,8 @@ class WatchBot(BotAI):
 
     def action_masks(self, unit):
         agent = self.agent_system.unit_agents["agent_0"]
-        action_heads = self.config.get("env", {}).get("action_heads", ["move"])
+        # Use updated config from on_start
+        action_heads = self.full_conf.get("action_heads", ["move"])
         
         masks = []
         for head in action_heads:
@@ -354,7 +357,7 @@ class WatchBot(BotAI):
                 masks.append(agent.get_unload_mask(self.units, self.game_info))
                 
         # Categorical
-        cat_heads = self.config.get("env", {}).get("categorical_heads", [])
+        cat_heads = self.full_conf.get("categorical_heads", [])
         if cat_heads:
             # Simple assumption: all categorical actions are valid
             masks.append(np.ones(len(cat_heads), dtype=bool))
@@ -377,7 +380,8 @@ class WatchBot(BotAI):
         # Look for Beacons
         beacons = self.enemy_units.filter(lambda u: "BEACON" in u.type_id.name.upper())
         if not beacons:
-            beacons = self.units.filter(lambda u: "BEACON" in u.type_id.name.upper())
+            # Check allied/neutral for Level 0
+            beacons = self.all_units.filter(lambda u: "BEACON" in u.type_id.name.upper())
         
         if beacons:
             t = beacons.first
@@ -392,21 +396,39 @@ class WatchBot(BotAI):
         if self.disable_fog:
             await self.client.debug_show_map()
 
-        # FLAT CONFIG: Matches Level0Env logic
-        full_conf = self.config.copy()
+        # REPLICATE LEVEL0ENV LOGIC EXACTLY
+        # Load Additive Configuration using ConfigManager
+        config_manager = ConfigManager("config")
+        
+        # 1. Base Config Flattening
+        self.full_conf = self.config.copy()
         for section in ["training", "env"]:
             if section in self.config:
                 for k, v in self.config[section].items():
-                    full_conf[k] = v
+                    self.full_conf[k] = v
+        
+        # 2. Additive Properties Override
+        # This ensures we get the exact same layer order as training
+        active_layers = config_manager.get_cumulative_active_layers(self.level_name)
+        action_heads = config_manager.get_cumulative_action_heads(self.level_name)
+        categorical_heads = config_manager.get_cumulative_categorical_heads(self.level_name)
+        
+        self.full_conf['active_layers'] = active_layers
+        self.full_conf['action_heads'] = action_heads
+        self.full_conf['categorical_heads'] = categorical_heads
+        
+        logger.info(f"WatchBot Configured for {self.level_name}:")
+        logger.info(f"  Layers ({len(active_layers)}): {active_layers}")
+        logger.info(f"  Action Heads: {action_heads}")
 
         self.agent_system = HierarchicalAgentSystem(
             map_size=(128, 128),
             grid_size=self.grid_size,
-            training_conf=full_conf
+            training_conf=self.full_conf
         )
         self.agent_system.create_unit_agent("agent_0")
         self.ui_manager.agent = self.agent_system.unit_agents["agent_0"]
-        active_layers = self.config.get("env", {}).get("active_layers", [])
+        
         if active_layers:
             self.ui_manager.active_layers = active_layers
 
@@ -524,8 +546,14 @@ class WatchBot(BotAI):
             beacons = self.all_units.filter(lambda u: "BEACON" in u.type_id.name.upper())
             obs_enemies = list(self.enemy_units) + list(beacons)
 
+            # Filter allied units to NOT include the beacon
+            clean_allied_units = self.units
+            if beacons:
+                beacon_tags = {b.tag for b in beacons}
+                clean_allied_units = self.units.filter(lambda u: u.tag not in beacon_tags)
+
             raw_obs = {
-                'units': self.units,
+                'units': clean_allied_units,
                 'enemy_units': obs_enemies,
                 'effects': self.state.effects,
                 'game_info': self.game_info,
@@ -659,7 +687,7 @@ class WatchBot(BotAI):
             world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(spatial_idx)
             target = Point2((world_x, world_y))
             
-            logger.info(f"Applying Action: {head_name} to {target} (Spatial: {spatial_idx})")
+            # logger.info(f"Applying Action: {head_name} to {target} (Spatial: {spatial_idx})")
 
             if head_name == "move": 
                 self.do(unit.move(target))
