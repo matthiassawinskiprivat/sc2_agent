@@ -55,9 +55,14 @@ class SC2Bot(BotAI):
         self.unit_tags_received_action = set()
 
     async def on_step(self, iteration: int):
+        """
+        The SC2Bot loop runs inside the StarCraft II simulation process.
+        It waits for commands from the Gymnasium environment process via a Pipe (self.conn).
+        """
         if iteration == 0:
+            # --- INITIALIZATION ---
             # Try to get grid_size from parent env if possible
-            # Default to 128, but strictly enforce 16 for level_0
+            # Default to 128, but strictly enforce 32 for level_0
             grid_size = 128
             level_name = getattr(self, "level_name", "")
             if not level_name and hasattr(self, "training_conf"):
@@ -77,59 +82,76 @@ class SC2Bot(BotAI):
             )
             self.agent_system.create_unit_agent("agent_0")
 
+            # Setup the specific scenario (e.g., spawn Zergling/Beacon)
             await self.reset_game_state()
+            
+            # Send initial observation back to the Environment process
             obs, info = self._get_observation()
             self.conn.send((obs, info))
 
+        # --- THE REMOTE CONTROL LOOP ---
+        # The bot process blocks here until the Env process sends a command.
         command, data = self.conn.recv()
+        
         if command == "step":
+            # Command: "Perform this action index and give me the next observation"
             action = data
-            # Use zergling as default unit for legacy on_step loop
+            
+            # 1. Execute: Convert index to movement and tell the unit to go there
             if self.zergling:
                 await self.apply_action(self.zergling.tag, action)
             
+            # 2. Results: Gather new pixels, calculate reward, and check if reached target
             obs, reward, done, truncated, info = self._get_step_results()
+            
+            # 3. Respond: Send the results back to the Env (which returns them to model.learn())
             self.conn.send((obs, reward, done, truncated, info))
 
         elif command == "reset":
+            # Command: "Restart the level"
             await self.reset_game_state()
             obs, info = self._get_observation()
             self.conn.send((obs, info))
 
         elif command == "close":
+            # Command: "Shut down SC2"
             await self.client.leave()
 
     async def apply_action(self, unit_tag, action):
         """
-        Handles hybrid actions (Spatial + Categorical).
+        ACTUATION: Integer Index -> StarCraft II Ability/Command
+        This is where the agent's "will" is translated into game physics.
         """
         if not self.agent_system: return
         
         grid_area = self.grid_size * self.grid_size
         total_spatial_indices = len(self.action_heads) * grid_area
         
+        # Find the unit in the current game state
         unit = self.units.find_by_tag(unit_tag)
         if not unit: return
 
         cmd = None
 
         if action < total_spatial_indices:
-            # --- SPATIAL ACTION ---
+            # --- CASE A: SPATIAL ACTION (Move/Attack/Load at Position) ---
+            # 1. Unpack the head (action type) and the pixel index
             head_idx = action // grid_area
             spatial_idx = action % grid_area
             action_name = self.action_heads[head_idx]
             
-            # Resolve target
+            # 2. Resolve target: Convert the 'pixel' back to game (world) coordinates
             world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(spatial_idx)
             target_pos = Point2((world_x, world_y))
             self.last_target_pos = target_pos 
             
+            # 3. Issue Command: Tell the unit to perform the ability at that location
             if action_name == "move":
                 cmd = unit.move(target_pos)
             elif action_name == "attack":
                 cmd = unit.attack(target_pos)
             elif action_name == "load":
-                # Map of transport types to their specific LOAD ability (for picking up units).
+                # Specialized logic for loading units into transports
                 transport_load_mapping = {
                     UnitTypeId.MEDIVAC: AbilityId.LOAD_MEDIVAC,
                     UnitTypeId.OVERLORD: AbilityId.LOAD_OVERLORD,
@@ -156,7 +178,7 @@ class SC2Bot(BotAI):
                 logger.error(f"Unhandled spatial action head: {action_name}")
 
         else:
-            # --- CATEGORICAL ACTION ---
+            # --- CASE B: CATEGORICAL ACTION (Logic-based, no position) ---
             cat_idx = action - total_spatial_indices
             if cat_idx >= len(self.categorical_heads):
                 logger.error(f"Categorical index {cat_idx} out of bounds")
@@ -165,30 +187,23 @@ class SC2Bot(BotAI):
             action_name = self.categorical_heads[cat_idx]
             
             if action_name == "unload":
-                # CATEGORICAL UNLOAD (UnloadAll at current position)
-                logger.debug(f"Attempting Categorical UNLOAD for {unit.type_id} ({unit.tag}). Cargo: {unit.cargo_used}/{unit.cargo_max}")
+                # E.g., "Empty all passengers here"
                 if unit.cargo_used > 0:
-                    # Specialized UNLOADALL mapping for reliability
                     mapping = {
                         UnitTypeId.MEDIVAC: AbilityId.UNLOADALLAT_MEDIVAC,
                         UnitTypeId.OVERLORD: AbilityId.UNLOADALLAT_OVERLORD,
-                        UnitTypeId.OVERLORDTRANSPORT: AbilityId.UNLOADALLAT_OVERLORD,
                         UnitTypeId.WARPPRISM: AbilityId.UNLOADALLAT_WARPPRISM,
                         UnitTypeId.WARPPRISMPHASING: AbilityId.UNLOADALL_WARPPRISM,
                     }
                     ability = mapping.get(unit.type_id, AbilityId.UNLOADALL)
                     
-                    logger.debug(f"Executing categorical UNLOAD for {unit.type_id} ({unit.tag}) using {ability}")
-                    
-                    # Handle 'AT' variants which require a target position
                     if ability in {AbilityId.UNLOADALLAT_MEDIVAC, AbilityId.UNLOADALLAT_OVERLORD, AbilityId.UNLOADALLAT_WARPPRISM}:
                         cmd = unit(ability, unit.position)
                     else:
                         cmd = unit(ability)
-                else:
-                    logger.warning(f"Categorical UNLOAD skipped: Unit {unit.tag} has no cargo.")
 
         if cmd:
+            # Actually send the byte-packet to the StarCraft II engine
             self.do(cmd)
 
     async def reset_game_state(self, verify: bool = True):

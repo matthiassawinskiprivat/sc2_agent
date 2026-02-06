@@ -292,25 +292,38 @@ class Level0Env(gym.Env):
             raise
 
     def step(self, action):
+        """
+        GYMNASIUM INTERFACE: Action Index -> Next Observation
+        This is called by model.learn() or stable_baselines3.
+        It bridges the synchronous Gym API with the asynchronous SC2 simulation.
+        """
         self.steps += 1
         try:
+            # 1. Run the async logic in our dedicated event loop
             obs, reward, done, truncated, info = self._loop.run_until_complete(self._async_step(action))
         except (ProtocolError, ConnectionAlreadyClosed) as e:
             self._log(f"Connection to game lost: {e}")
             obs, reward, done, truncated, info = np.zeros(self.observation_space.shape, dtype=np.uint8), 0, True, True, {}
+        
+        # 2. Handle Episode Termination (Max Steps)
         if self.steps >= self.max_steps:
             truncated = True
             if not done:
                 done = True
-                reward = -10
+                reward = -10 # Penalty for timing out
+        
         return obs, reward, done, truncated, info
 
     async def _async_step(self, action):
+        """
+        IMPLEMENTATION: How one step actually happens in the game.
+        """
+        # 1. TRANSMIT: Tell the bot which action the model picked
         if self._bot.zergling:
+            # Note: This calls SC2Bot.apply_action which we commented earlier
             await self._bot.apply_action(self._bot.zergling.tag, action)
         
-        # Send queued actions to the client before stepping
-        # SC2Bot uses 'actions', but standard BotAI uses '_actions'
+        # 2. FLUSH: Send all queued StarCraft commands to the game server
         actions = getattr(self._bot, "_actions", None)
         if actions is None:
             actions = getattr(self._bot, "actions", None)
@@ -319,13 +332,19 @@ class Level0Env(gym.Env):
             await self._client.actions(actions[:])
             actions.clear()
 
+        # 3. ADVANCE: Tell the SC2 engine to simulate the next few frames
         await self._client.step()
+        
+        # 4. OBSERVE: Download the new game state from the engine
         response = await self._client.observation()
         
         from sc2.game_state import GameState
         state = GameState(response.observation)
             
+        # Update the bot's internal tracking with the fresh state
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
+        
+        # 5. RESULT: Calculate pixels and reward for the transition
         return self._bot._get_step_results()
 
     def close(self):

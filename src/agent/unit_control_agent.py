@@ -298,18 +298,26 @@ class UnitControlAgent:
         return (resized_mask.flatten() > 0).astype(bool)
 
     def convert_spatial_action_to_world(self, action_idx: int) -> Tuple[float, float]:
+        """
+        CONVERSION: Model Index -> Game World Position
+        This is the most critical function for the agent's spatial awareness.
+        It takes a 1D index (from 0 to grid_size^2 - 1) and maps it to SC2 coordinates.
+        """
         self.last_action = action_idx
         if self.last_game_info is None: return (0.0, 0.0)
 
-        # Convert 1D action index from grid (e.g., 16x16) to 2D grid coordinates
+        # 1. Convert 1D action index (e.g., 822) to 2D grid coordinates (row, col)
+        # For Level 0, grid_size is 32.
         grid_y, grid_x = divmod(action_idx, self.grid_size)
 
-        # Scale grid coordinates to CNN coordinates (e.g., 128x128)
-        # This targets the center of the grid cell
+        # 2. Scale grid coordinates (32x32) to CNN coordinates (128x128)
+        # We target the CENTER of the grid cell by adding (scale_factor / 2)
         scale_factor = self.cnn_width / self.grid_size
         y_cnn = (grid_y * scale_factor) + (scale_factor / 2)
         x_cnn = (grid_x * scale_factor) + (scale_factor / 2)
 
+        # 3. Handle Playable Area (Cropping and Scaling)
+        # SC2 maps have 'void' areas outside the playable bounds.
         crop_x, crop_y = 0, 0
         mw, mh = self.last_game_info.map_size.width, self.last_game_info.map_size.height
 
@@ -318,17 +326,23 @@ class UnitControlAgent:
             crop_x, crop_y = area.x, area.y
             mw, mh = area.width, area.height
 
+        # 4. Calculate the scaling used in the ObservationTransformer
+        # This ensures the inverse math perfectly aligns with the 'pixels' the agent saw.
         scale = min(self.cnn_width / max(mw, 1), self.cnn_height / max(mh, 1))
         offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
         offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
 
+        # 5. Inverse Linear Transformation
+        # Formula: World = (CNN_Pixel - Offset) / Scale + Crop
         rel_x = (x_cnn - offset_x) / scale
+        # Note: SC2 Y-axis is inverted relative to standard image coordinates (top-down)
         y_term = (self.cnn_height - 1) - y_cnn
         rel_y = (y_term - offset_y) / scale
 
         world_x = rel_x + crop_x
         world_y = rel_y + crop_y
 
+        # 6. Clamp to absolute map bounds to prevent out-of-bounds errors
         world_x = max(0, min(world_x, self.last_game_info.map_size.width))
         world_y = max(0, min(world_y, self.last_game_info.map_size.height))
 
@@ -336,12 +350,14 @@ class UnitControlAgent:
 
     def get_grid_index_at_world_pos(self, pos) -> int:
         """
-        Inverse of convert_spatial_action_to_world.
-        Maps SC2 World coordinates back to a 1D grid index.
+        CONVERSION: Game World Position -> Model Index
+        Used during Replay Translation to turn human mouse clicks into training labels.
+        Must be the PERFECT mathematical inverse of convert_spatial_action_to_world.
         """
         if self.last_game_info is None:
             return 0
 
+        # 1. Get same geometry constants as the forward mapping
         crop_x, crop_y = 0, 0
         mw, mh = self.last_game_info.map_size.width, self.last_game_info.map_size.height
 
@@ -354,17 +370,18 @@ class UnitControlAgent:
         offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
         offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
 
+        # 2. Forward Linear Transformation (World -> CNN Pixel)
         rel_x = pos.x - crop_x
         rel_y = pos.y - crop_y
 
         x_cnn = (rel_x * scale) + offset_x
         y_cnn = (self.cnn_height - 1) - ((rel_y * scale) + offset_y)
 
-        # Scale CNN coordinates to grid coordinates
+        # 3. Scale CNN Pixel (128x128) down to Grid Index (e.g., 32x32)
         grid_x = int(x_cnn * self.grid_size / self.cnn_width)
         grid_y = int(y_cnn * self.grid_size / self.cnn_height)
 
-        # Clamp to grid bounds
+        # 4. Clamp and flatten to 1D index for the CrossEntropy loss
         grid_x = max(0, min(grid_x, self.grid_size - 1))
         grid_y = max(0, min(grid_y, self.grid_size - 1))
 
