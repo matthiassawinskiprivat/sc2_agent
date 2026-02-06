@@ -412,11 +412,12 @@ class ObservationTransformer:
         larger_units = self.training_conf.get('larger_units', False)
 
         if "BEACON" in u_name.upper():
-            if render_beacon:
-                val = 20.0
-                r = 3  # Make beacon visible for training
-            else:
-                return  # Skip drawing beacon if not in training mode
+            # If a beacon is explicitly passed to the transformer (especially in enemy_units),
+            # we SHOULD render it. The 'render_beacon' flag in training was to force
+            # visibility even if it wasn't strictly in the enemy list.
+            # In WatchBot/Level0Bot, we explicitly add it to enemy_units.
+            val = 20.0
+            r = 3  # Make beacon visible for training
         elif unit.is_structure:
             r = int(unit.radius * self.scale)
         elif larger_units and not is_enemy and not unit.is_structure:

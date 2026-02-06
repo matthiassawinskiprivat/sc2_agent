@@ -18,12 +18,12 @@ env:
   grid_size: 32
   headless: True
   max_steps: 300
-  larger_units: True
+  larger_units: False
   maps_dir: "train/maps/level_0"
   rewards:
-    success: 100.0
+    success: 10.0
     step_penalty: -0.02
-    distance_multiplier: 2.0
+    distance_multiplier: 0.5
   active_layers:
     - "allied_unit_density"
     - "enemy_unit_density"

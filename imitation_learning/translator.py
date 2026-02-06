@@ -144,10 +144,16 @@ class ReplayTranslatorBot(BotAI):
         unit_status = {}
         
         # 1. Primary Allied/Enemy Units
+        beacons = []
         for u in self.all_units:
             if u.tag in processed_tags: continue
             processed_tags.add(u.tag)
             
+            u_name = getattr(u.type_id, "name", "UNKNOWN")
+            if "BEACON" in u_name.upper():
+                beacons.append(u)
+                continue
+
             if u.owner_id == target_id:
                 if u.is_structure: allied_structures.append(u)
                 else: 
@@ -156,6 +162,16 @@ class ReplayTranslatorBot(BotAI):
             elif 0 < u.owner_id < 16:
                 if u.is_structure: enemy_structures.append(u)
                 else: enemy_units.append(u)
+            elif u.owner_id == 0 or u.owner_id == 16: # Neutral or Hostile
+                # Non-beacons are skipped
+                if iteration % 1000 == 0:
+                     logger.debug(f"Skipping neutral/hostile unit: {u_name} ({u.type_id})")
+
+        # Level 0 Special Handling: Beacons are ALWAYS enemies for the observation
+        for b in beacons:
+            enemy_units.append(b)
+            if iteration % 100 == 0:
+                logger.info(f"Forced Beacon {b.tag} to Enemy Layer (owner was {b.owner_id})")
 
         # 2. Include Passengers (They are missing from all_units)
         # We need them to record samples for units that just boarded or are about to unboard.
@@ -315,6 +331,10 @@ async def _play_replay_fixed(client, ai, realtime=False, player_id=0):
             if client._game_result: return client._game_result[player_id]
             gs = GameState(state.observation)
             ai._prepare_step(gs, ProtoWrapper(game_info._proto))
+        
+        # DEBUG: Check if units are actually populated
+        logger.info(f"Step {iteration}: all_units count = {len(ai.all_units)}")
+            
         await ai.issue_events()
         await ai.on_step(iteration)
         await ai._after_step()
@@ -339,11 +359,11 @@ class ReplayTranslator:
         loop = asyncio.get_event_loop()
         loop.run_until_complete(run_replay_fixed(bot, replay_path=replay_path, realtime=False, observed_id=observed_id))
         initial_units = bot.recorded_data[0].get("unit_snapshot", {}) if bot.recorded_data else {}
-        translated_pairs = self.process_raw_data(bot.recorded_data, config, bot.game_info)
+        translated_pairs = self.process_raw_data(bot.recorded_data, config, bot.game_info, bot.agent_system)
         self.save_translated_data(translated_pairs, level_name, os.path.basename(replay_path), initial_units)
         return len(translated_pairs)
 
-    def process_raw_data(self, recorded_data: List[Dict], config: Dict[str, Any], game_info: Any) -> List[Dict]:
+    def process_raw_data(self, recorded_data: List[Dict], config: Dict[str, Any], game_info: Any, agent_system: HierarchicalAgentSystem) -> List[Dict]:
         from src.transformers.observation_transformer import ObservationTransformer
         final_pairs, action_heads = [], config.get("env", {}).get("action_heads", ["move"])
         categorical_heads, grid_size = config.get("env", {}).get("categorical_heads", []), config.get("env", {}).get("grid_size", 128)
@@ -400,9 +420,15 @@ class ReplayTranslator:
                         if not target_pos: target_pos = (0,0)
                         if ad["head_name"] in action_heads:
                             head_idx = action_heads.index(ad["head_name"])
-                            px = int((target_pos[0] - crop_x) * scale + ox)
-                            py = int(grid_size - 1 - ((target_pos[1] - crop_y) * scale + oy))
-                            agent_action = head_idx * (grid_area) + (np.clip(py, 0, grid_size-1) * grid_size + np.clip(px, 0, grid_size-1))
+                            
+                            # Use UnitControlAgent to get the grid index (parities logic with SC2Bot/WatchBot)
+                            unit_agent = agent_system.unit_agents["agent_0"]
+                            # Ensure agent has current game info for scaling
+                            unit_agent.last_game_info = game_info
+                            
+                            # Convert world pos to grid index [0, grid_size*grid_size - 1]
+                            spatial_idx = unit_agent.get_grid_index_at_world_pos(Point2(target_pos))
+                            agent_action = head_idx * (grid_area) + spatial_idx
                         else: agent_action = len(action_heads) * (grid_area) + categorical_heads.index(ad["head_name"])
                         
                         # Get pre-calculated action mask
