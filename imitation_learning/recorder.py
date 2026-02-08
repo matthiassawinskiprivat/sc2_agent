@@ -95,14 +95,18 @@ class ReplayObserver(BotAI):
         logger.info(f"Units ready. Zergling at {p1}, Beacon (Edge-Favored) at {p2}")
 
     async def on_step(self, iteration: int):
+        if iteration == 5:
+            # Print instructions to the human player in-game after some frames to ensure visibility
+            await self.chat_send("Recording started. Type 'r' to reset level positions, 'q' to quit and save replay.")
+
         # Listen for chat commands from the human player
         if self.state.chat:
             for msg in self.state.chat:
                 command = msg.message.lower().strip()
-                if command in ["quit", "exit", "done", "end"]:
+                if command in ["q", "quit", "exit", "done", "end"]:
                     logger.info(f"Graceful quit requested via chat command: '{command}'")
                     await self.client.leave()
-                elif command == "reset":
+                elif command in ["r", "reset"]:
                     logger.info("Manual level reset requested via chat command.")
                     if self.level_name == "level_0":
                         await self._setup_level_0()

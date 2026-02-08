@@ -24,6 +24,7 @@ from src.ui.debug_ui import DebugUI
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
 from src.agent.maskable_ppo import MaskablePPO
 from src.hierarchical_agent import HierarchicalAgentSystem
+from src.sc2_bot import SC2Bot
 from src.ui.ui_manager import UIManager
 from sc2.bot_ai import BotAI
 from sc2.main import run_game
@@ -278,9 +279,10 @@ class InferenceThread(QThread):
 
 from src.utils.config_manager import ConfigManager
 
-class WatchBot(BotAI):
+class WatchBot(SC2Bot):
     def __init__(self, model, config, level_name, disable_fog=False):
-        super().__init__()
+        # Initialize SC2Bot with None for connection since WatchBot runs in-process
+        super().__init__(conn=None, training_conf=config)
         self.model = model
         self.config = config
         self.level_name = level_name
@@ -414,6 +416,10 @@ class WatchBot(BotAI):
         self.full_conf['action_heads'] = action_heads
         self.full_conf['categorical_heads'] = categorical_heads
         
+        # Sync with SC2Bot attributes for inherited apply_action parity
+        self.action_heads = action_heads
+        self.categorical_heads = categorical_heads
+        
         logger.info(f"WatchBot Configured for {self.level_name}:")
         logger.info(f"  Layers ({len(active_layers)}): {active_layers}")
         logger.info(f"  Action Heads: {action_heads}")
@@ -434,51 +440,22 @@ class WatchBot(BotAI):
             await self._setup_level_0()
 
     async def _setup_level_0(self):
-        from sc2.ids.unit_typeid import UnitTypeId
-        logger.info("Setting up Level 0: Spawning Zergling and Beacon...")
+        # Delegate to Level0Bot implementation for parity
+        from src.level_0_bot import Level0Bot
         
-        # 1. Clear Map
-        if self.all_units:
-            await self.client.debug_kill_unit([u.tag for u in self.all_units])
-            await self.client.step()
+        # 1. Clear Map using base class logic
+        await self.reset_game_state()
         
-        # 2. Determine spawn area
-        area = self.game_info.playable_area
-        margin = 5.0
-        
-        # Find valid pathable points
-        grid = self.game_info.pathing_grid
-        valid_points = []
-        
-        # Sample points (step 2 to reduce computation)
-        for x in range(int(area.x + margin), int(area.x + area.width - margin), 2):
-            for y in range(int(area.y + margin), int(area.y + area.height - margin), 2):
-                if grid[(x, y)] != 0:
-                    valid_points.append(Point2((x, y)))
-
-        if len(valid_points) < 2:
-            p1 = Point2((area.x + area.width/2, area.y + area.height/2))
-            p2 = Point2((area.x + area.width/2 + 5, area.y + area.height/2))
-        else:
-            p1, p2 = random.sample(valid_points, 2)
-        
-        # Ensure minimum distance
-        attempts = 0
-        while p1.distance_to(p2) < 10.0 and attempts < 20:
-            if len(valid_points) >= 2:
-                p1, p2 = random.sample(valid_points, 2)
-            attempts += 1
-
-        # 3. Spawn units
-        # Note: We assume single player watch mode where we own the units
-        await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, p1, self.player_id]])
-        await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, p2, self.player_id]])
-        
-        # Step to materialize
-        await self.client.step()
-        logger.info(f"Spawned Zergling at {p1} and Beacon at {p2}")
+        # 2. Setup scenario using shared logic
+        # We temporarily mock the attributes Level0Bot expects if they differ,
+        # but since we inherit from SC2Bot, we are compatible.
+        await Level0Bot.setup_scenario(self)
 
     async def on_step(self, iteration: int):
+        """
+        The WatchBot loop is NOT a remote control. 
+        It runs the model prediction DIRECTLY inside the SC2 process for real-time visualization.
+        """
         try:
             if iteration == 0:
                 with open("debug_watchbot.log", "w") as f:
@@ -494,7 +471,7 @@ class WatchBot(BotAI):
             if not allies: 
                 return
 
-            # 2. Objective tracking
+            # 2. Objective tracking (Find the Beacon or Enemy Base)
             if self.command_center_tag:
                 if not any(tag == self.command_center_tag for tag in [u.tag for u in self.all_units]):
                     self.command_center_tag = None
@@ -508,7 +485,7 @@ class WatchBot(BotAI):
                 target = self.all_units.find_by_tag(self.command_center_tag)
                 target_pos = target.position if target else self._objective_pos
 
-            # 3. Stable Round-Robin logic (Issue ONE command per on_step call)
+            # 3. Stable Round-Robin logic (Select which unit to command THIS frame)
             all_tags = sorted([u.tag for u in allies])
             if set(all_tags) != set(self.active_unit_tags):
                 old_tag = self.active_unit_tags[self.current_unit_index] if self.active_unit_tags and self.current_unit_index < len(self.active_unit_tags) else None
@@ -520,7 +497,7 @@ class WatchBot(BotAI):
                 
             if not self.active_unit_tags: return
             
-            # Find the next valid unit in the cycle
+            # Find the unit object
             unit = None
             start_search_idx = self.current_unit_index
             while True:
@@ -535,127 +512,37 @@ class WatchBot(BotAI):
             if not unit: return
 
             # 4. Observation & Prediction
-            # Restore training parity: Beacons must be in 'enemy_units' to be rendered
-            # in the enemy_unit_density layer (which the model expects for the Goal).
-            beacons = self.all_units.filter(lambda u: "BEACON" in u.type_id.name.upper())
+            # Standardized Observation: Uses centralized logic from SC2Bot
+            # Pass the current unit only for Level 1+ (selected_units layer)
+            active_unit_arg = unit if self.level_name != "level_0" else None
+            processed_obs, _ = self._get_observation(active_unit=active_unit_arg)
             
-            # Match Level0Bot logic exactly
-            obs_enemies = list(self.enemy_units)
-            if beacons:
-                obs_enemies.extend(list(beacons))
-
-            # Filter allied units to NOT include the beacon (even if we own it)
-            clean_allied_units = self.units
-            if beacons:
-                beacon_tags = {b.tag for b in beacons}
-                clean_allied_units = self.units.filter(lambda u: u.tag not in beacon_tags)
-
-            raw_obs = {
-                'units': clean_allied_units,
-                'enemy_units': obs_enemies,
-                'effects': self.state.effects,
-                'game_info': self.game_info,
-                'game_data': self.game_data,
-                'creep': self.state.creep,
-                'command_target': target_pos
-            }
-            # ONLY use precise selection for advanced levels (matches training split)
-            if self.level_name != "level_0":
-                raw_obs['selected_units'] = [unit]
-                # Advanced levels use full context
-                raw_obs['enemy_structures'] = self.enemy_structures
-                raw_obs['structures'] = self.structures
-            processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
-            
-            # REMOVED x255 scaling: Model expects [0, 1] based on observation_space.high.max() == 1.0
-                
             self.transformed_observation = processed_obs
             self.last_observation = processed_obs
             
+            # 5. INFERENCE (The Model's Brain)
+            # deterministic=True ensures the model picks the action with the HIGHEST probability,
+            # instead of sampling from the distribution.
             mask = self.action_masks(unit)
             is_first_step = (iteration == 0 and unit.tag == self.active_unit_tags[0])
             
-            # --- Deep Probability Probing ---
-            with torch.no_grad():
-                obs_tensor, _ = self.model.policy.obs_to_tensor(processed_obs)
-                if hasattr(self.model.policy, "get_distribution"):
-                    mask_tensor = torch.as_tensor(mask).bool().to(self.model.policy.device).unsqueeze(0)
-                    try:
-                        # Try recurrent signature (dist, states)
-                        res = self.model.policy.get_distribution(obs_tensor, action_masks=mask_tensor)
-                        dist = res[0] if isinstance(res, tuple) else res
-                        probs = dist.distribution.probs[0].detach().cpu().numpy()
-                    except Exception as e:
-                        try:
-                            # Fallback for non-recurrent distribution
-                            dist = self.model.policy.get_distribution(obs_tensor)
-                            probs = dist.distribution.probs[0].detach().cpu().numpy()
-                        except:
-                            probs = np.zeros(mask.size)
-                else:
-                    probs = np.zeros(mask.size)
-
             action, self.lstm_states = self.model.predict(
                 processed_obs, 
                 state=self.lstm_states, 
                 episode_start=np.array([is_first_step]),
-                deterministic=True,
+                deterministic=True, # <--- CRITICAL: Highest probability only
                 action_masks=mask
             )
             
-            # --- Ablation & Shift Testing ---
-            with torch.no_grad():
-                # Test 1: Zero out all units
-                obs_no_units = processed_obs.copy()
-                obs_no_units[0] = 0 # allied density
-                obs_no_units[1] = 0 # enemy density
-                action_no_units, _ = self.model.predict(obs_no_units, deterministic=True, action_masks=mask)
-                
-                # Test 2: Zero out objective
-                obs_no_obj = processed_obs.copy()
-                obs_no_obj[3] = 0 # command_objective
-                action_no_obj, _ = self.model.predict(obs_no_obj, deterministic=True, action_masks=mask)
+            # (Logging removed for brevity)
 
-                # Test 3: Shift Test (Rotate pixels)
-                obs_shifted = np.roll(processed_obs, 10, axis=2)
-                action_shifted, _ = self.model.predict(obs_shifted, deterministic=True, action_masks=mask)
-
-            # Debug Stats
-            with open("debug_watchbot.log", "a") as f:
-                if iteration == 0:
-                    f.write(f"Model Class: {type(self.model).__name__}\n")
-                    f.write(f"Model Action Space: {self.model.action_space}\n")
-                    f.write(f"Model Obs Space: {self.model.observation_space}\n")
-                    f.write(f"Model Obs Dtype: {self.model.observation_space.dtype}\n")
-                    
-                    # Probe CNN Weights
-                    try:
-                        ext = self.model.policy.features_extractor
-                        # Check if it's UnitControlNetwork
-                        f.write(f"Extractor Class: {type(ext).__name__}\n")
-                        # CNN weights
-                        w = ext.cnn[0].weight
-                        f.write(f"CNN Layer 0 Weight: Mean={w.mean().item():.6f}, Std={w.std().item():.6f}\n")
-                        if torch.isnan(w).any():
-                            f.write("CRITICAL: NaNs found in model weights!\n")
-                    except Exception as e:
-                        f.write(f"Weight probe failed: {e}\n")
-
-                top_idx = np.argsort(probs)[-5:][::-1]
-                top_probs = probs[top_idx]
-                f.write(f"Iter {iteration}: Unit: {unit.tag} Pos: {unit.position}, Action: {action}\n")
-                f.write(f"  - Probs at {top_idx}: {top_probs}\n")
-                f.write(f"  - Ablation: NoUnits={action_no_units}, NoObj={action_no_obj}, Shifted={action_shifted}\n")
-                f.write(f"  - Mask True: {np.sum(mask)}/{mask.size}, Obs Max: {np.max(processed_obs):.2f}\n")
-                f.write(f"  - Target Pos: {target_pos}\n")
-
-            # 5. Apply & Advance index
-            self._log_action(unit, action)
+            # 6. Apply & Advance index
+            # This calls the same apply_action logic as the training bot
             self.last_action = action
-            await self.apply_action(unit, action)
+            await self.apply_action(unit.tag, action)
             self.current_unit_index = (self.current_unit_index + 1) % len(self.active_unit_tags)
             
-            # 6. Watchable delay (matches training cadence in non-realtime)
+            # Slow down slightly so humans can see what's happening
             await asyncio.sleep(0.02)
             
         except Exception as e:
@@ -669,81 +556,6 @@ class WatchBot(BotAI):
         from src.utils.proto_utils import ProtoWrapper
         self._prepare_step(GameState(obs.observation), ProtoWrapper(self.game_info._proto))
 
-
-    def _log_action(self, unit, action):
-        grid_area = self.agent_system.grid_size * self.agent_system.grid_size
-        action_heads = self.config.get("env", {}).get("action_heads", ["move"])
-        total_spatial = len(action_heads) * grid_area
-        
-        if action < total_spatial:
-            head_idx = action // grid_area
-            head_name = action_heads[head_idx]
-            spatial_idx = action % grid_area
-            wx, wy = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(spatial_idx)
-            # logger.debug(f"Unit {unit.tag} ({unit.type_id.name}) -> {head_name} at ({wx:.1f}, {wy:.1f})")
-        else:
-            cat_idx = action - total_spatial
-            cat_heads = self.config.get("env", {}).get("categorical_heads", [])
-            head_name = cat_heads[cat_idx] if cat_idx < len(cat_heads) else "unknown"
-            # logger.debug(f"Unit {unit.tag} ({unit.type_id.name}) -> {head_name} (Categorical)")
-
-    async def apply_action(self, unit, action):
-        grid_area = self.agent_system.grid_size * self.agent_system.grid_size
-        action_heads = self.config.get("env", {}).get("action_heads", ["move"])
-        total_spatial = len(action_heads) * grid_area
-        
-        from sc2.ids.ability_id import AbilityId
-        from sc2.ids.unit_typeid import UnitTypeId
-        if action < total_spatial:
-            head_idx = action // grid_area
-            spatial_idx = action % grid_area
-            head_name = action_heads[head_idx]
-            
-            world_x, world_y = self.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world(spatial_idx)
-            target = Point2((world_x, world_y))
-            
-            # logger.info(f"Applying Action: {head_name} to {target} (Spatial: {spatial_idx})")
-
-            if head_name == "move": 
-                self.do(unit.move(target))
-            elif head_name == "attack": 
-                self.do(unit.attack(target))
-
-            elif head_name == "load":
-                transport_load_mapping = {
-                    UnitTypeId.MEDIVAC: AbilityId.LOAD_MEDIVAC,
-                    UnitTypeId.OVERLORD: AbilityId.LOAD_OVERLORD,
-                    UnitTypeId.WARPPRISM: AbilityId.LOAD_WARPPRISM,
-                    UnitTypeId.WARPPRISMPHASING: AbilityId.LOAD_WARPPRISM,
-                }
-                candidates = self.units.filter(lambda u: u.distance_to(target) < 3.0)
-                if unit.type_id in transport_load_mapping:
-                    loadable = next((u for u in candidates if u.cargo_max == 0), None)
-                    if loadable:
-                        ability = transport_load_mapping[unit.type_id]
-                        self.do(unit(ability, loadable))
-                    else: self.do(unit.move(target))
-                else:
-                    transport = next((u for u in candidates if u.cargo_max > 0), None)
-                    if transport: self.do(unit.smart(transport))
-                    else: self.do(unit.move(target))
-        else:
-            cat_idx = action - total_spatial
-            cat_heads = self.config.get("env", {}).get("categorical_heads", [])
-            action_name = cat_heads[cat_idx]
-            if action_name == "unload":
-                mapping = {
-                    UnitTypeId.MEDIVAC: AbilityId.UNLOADALLAT_MEDIVAC,
-                    UnitTypeId.OVERLORD: AbilityId.UNLOADALLAT_OVERLORD,
-                    UnitTypeId.OVERLORDTRANSPORT: AbilityId.UNLOADALLAT_OVERLORD,
-                    UnitTypeId.WARPPRISM: AbilityId.UNLOADALLAT_WARPPRISM,
-                    UnitTypeId.WARPPRISMPHASING: AbilityId.UNLOADALL_WARPPRISM,
-                }
-                ability = mapping.get(unit.type_id, AbilityId.UNLOADALL)
-                if ability in {AbilityId.UNLOADALLAT_MEDIVAC, AbilityId.UNLOADALLAT_OVERLORD, AbilityId.UNLOADALLAT_WARPPRISM}:
-                    self.do(unit(ability, unit.position))
-                else:
-                    self.do(unit(ability))
 
 class RecordTab(QWidget):
     recording_finished = pyqtSignal()
@@ -877,8 +689,8 @@ class TranslateTab(QWidget):
         filter_layout.addWidget(self.level_selector)
         layout.addLayout(filter_layout)
 
-        self.replay_table = QTableWidget(0, 3)
-        self.replay_table.setHorizontalHeaderLabels(["Name", "Date", "Size"])
+        self.replay_table = QTableWidget(0, 4)
+        self.replay_table.setHorizontalHeaderLabels(["Name", "Date", "Size", "Translated"])
         self.replay_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.replay_table.setSelectionBehavior(QTableWidget.SelectRows)
         
@@ -909,14 +721,26 @@ class TranslateTab(QWidget):
     def refresh_list(self):
         level = self.level_selector.currentText()
         replays = self.replay_manager.list_raw_replays(level)
+        translated_replays = self.replay_manager.list_translated_replays(level)
+        translated_names = {os.path.splitext(r["name"])[0] for r in translated_replays}
         
         self.replay_table.setRowCount(len(replays))
         for i, r in enumerate(replays):
+            name_base = os.path.splitext(r["name"])[0]
+            is_translated = name_base in translated_names
+            
             self.replay_table.setItem(i, 0, QTableWidgetItem(r["name"]))
             # Store the path in user data
             self.replay_table.item(i, 0).setData(Qt.UserRole, r["path"])
             self.replay_table.setItem(i, 1, QTableWidgetItem(r["date"]))
             self.replay_table.setItem(i, 2, QTableWidgetItem(r["size"]))
+            
+            status_item = QTableWidgetItem("Yes" if is_translated else "No")
+            if is_translated:
+                status_item.setForeground(Qt.green)
+            else:
+                status_item.setForeground(Qt.gray)
+            self.replay_table.setItem(i, 3, status_item)
         
         self.translate_all_button.setEnabled(len(replays) > 0)
         self.on_selection_changed()
@@ -953,19 +777,49 @@ class TranslateTab(QWidget):
         selected_items = self.replay_table.selectedItems()
         if not selected_items: return
         
-        row = selected_items[0].row()
-        replay_path = self.replay_table.item(row, 0).data(Qt.UserRole)
+        # Get unique rows
+        selected_rows = sorted(list(set(item.row() for item in selected_items)))
+        
+        replays = []
+        for row in selected_rows:
+            replays.append({
+                "name": self.replay_table.item(row, 0).text(),
+                "path": self.replay_table.item(row, 0).data(Qt.UserRole)
+            })
+            
         level = self.level_selector.currentText()
         config = self.resolver.get_cumulative_config(level)
         
         self.translate_button.setEnabled(False)
         self.translate_all_button.setEnabled(False)
-        self.translate_button.setText("Translating...")
         
-        self.thread = TranslationThread(self.translator, replay_path, level, config)
-        self.thread.finished.connect(self.on_translation_finished)
-        self.thread.error.connect(self.on_translation_error)
+        if len(replays) == 1:
+            self.translate_button.setText("Translating...")
+            self.thread = TranslationThread(self.translator, replays[0]["path"], level, config)
+            self.thread.finished.connect(self.on_translation_finished)
+            self.thread.error.connect(self.on_translation_error)
+        else:
+            self.translate_button.setText("Translating Selected...")
+            self.thread = BatchTranslationThread(self.translator, replays, level, config)
+            self.thread.progress.connect(self.on_batch_progress_selected)
+            self.thread.finished.connect(self.on_batch_finished_selected)
+            self.thread.error.connect(self.on_translation_error)
+            
         self.thread.start()
+
+    def on_batch_progress_selected(self, current, total, name):
+        self.translate_button.setText(f"Translating ({current}/{total}): {name[:20]}...")
+
+    def on_batch_finished_selected(self, total_replays, total_samples):
+        self.translate_button.setEnabled(True)
+        self.translate_all_button.setEnabled(True)
+        self.translate_button.setText("Translate Selected")
+        QMessageBox.information(self, "Success", 
+                                f"Batch translation complete!\n"
+                                f"Processed {total_replays} replays.\n"
+                                f"Generated {total_samples} training examples.")
+        self.refresh_list()
+        self.translation_finished.emit()
 
     def on_translate_all_clicked(self):
         level = self.level_selector.currentText()
@@ -995,6 +849,7 @@ class TranslateTab(QWidget):
                                 f"Batch translation complete!\n"
                                 f"Processed {total_replays} replays.\n"
                                 f"Generated {total_samples} training examples.")
+        self.refresh_list()
         self.translation_finished.emit()
 
     def on_translation_finished(self, count):
@@ -1002,6 +857,7 @@ class TranslateTab(QWidget):
         self.translate_all_button.setEnabled(True)
         self.translate_button.setText("Translate Selected")
         QMessageBox.information(self, "Success", f"Translation complete!\nGenerated {count} training examples.")
+        self.refresh_list()
         self.translation_finished.emit()
 
     def on_translation_error(self, err):

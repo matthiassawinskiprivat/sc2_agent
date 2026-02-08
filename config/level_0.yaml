@@ -2,7 +2,7 @@
 # Configuration for the first level of training.
 
 training:
-  training_steps: 100_000
+  training_steps: 2_000_000
   num_envs: 6
   n_steps: 2048
   batch_size: 256
@@ -10,7 +10,7 @@ training:
   render_beacon: True
   watchdog_timeout: 3600
   imitation_data_percentage: 50
-  imitation_data_max_steps: 50000
+  imitation_data_max_steps: 1_000_000
   imitation_coef: 1.0
 
 # Environment parameters
@@ -49,6 +49,6 @@ model:
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_len_mean"
-    threshold: 150.0
+    threshold: 50.0
     comparison: "<"
     patience: 5

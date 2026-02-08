@@ -403,10 +403,13 @@ class SC2Bot(BotAI):
 
         return np.concatenate(final_masks + [np.array(categorical_masks)])
 
-    def _get_observation(self) -> Tuple[np.ndarray, Dict]:
+    def _get_observation(self, active_unit: Optional[Unit] = None) -> Tuple[np.ndarray, Dict]:
+        """
+        Gathers raw game state and transforms it into the model's pixel observation.
+        """
         self.zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None
         
-        # Flexibly find beacon
+        # 1. Goal Tracking: Flexibly find beacon or target
         self.beacon = None
         if self.units(UnitTypeId.BEACON_TERRANSMALL).exists:
             self.beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first
@@ -419,13 +422,16 @@ class SC2Bot(BotAI):
         elif self.structures(UnitTypeId.PYLON).exists:
              self.beacon = self.structures(UnitTypeId.PYLON).first
 
-        # Initialize previous_distance on first observation if zergling and beacon are present
+        # Initialize distance tracking for rewards
         if self.previous_distance is None and self.zergling and self.beacon:
             self.previous_distance = ((self.zergling.position.x - self.beacon.position.x)**2 + (self.zergling.position.y - self.beacon.position.y)**2)**0.5
 
-        enemies = [self.beacon] if self.beacon else []
+        # 2. Layer Preparation: Beacons must be in 'enemy_units' layer for training parity
+        enemies = list(self.enemy_units)
+        if self.beacon:
+            enemies.append(self.beacon)
         
-        # Unified Observation: command_target is the GOAL (Beacon), not the last action.
+        # command_target is the GOAL (Beacon), not the last action.
         target_pos = self.beacon.position if self.beacon else self.last_target_pos
         
         # Filter allied units to NOT include the beacon if it's owned by the bot
@@ -433,9 +439,12 @@ class SC2Bot(BotAI):
         if self.beacon:
             clean_allied_units = self.units.filter(lambda u: u.tag != self.beacon.tag)
 
+        # 3. Build Raw Observation Dictionary
         raw_obs = {
             'units': clean_allied_units,
             'enemy_units': enemies,
+            'structures': self.structures,
+            'enemy_structures': self.enemy_structures,
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
@@ -443,6 +452,11 @@ class SC2Bot(BotAI):
             'command_target': target_pos
         }
         
+        # 4. Agent Selection (Level 1+): Model sees which specific unit it is commanding
+        if active_unit:
+            raw_obs['selected_units'] = [active_unit]
+        
+        # 5. Transform: pixels!
         processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
         return processed_obs, {}
 

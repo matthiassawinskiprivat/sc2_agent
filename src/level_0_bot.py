@@ -16,7 +16,13 @@ class Level0Bot(SC2Bot):
         Clears the map and spawns a Zergling and a Beacon.
         """
         await super().reset_game_state(verify=verify)
-        
+        await self.setup_scenario()
+
+    async def setup_scenario(self):
+        """
+        Logic to spawn the Level 0 scenario.
+        Shared between training reset and deterministic watch mode.
+        """
         # 1. Determine spawn area
         # We use the playable area from game_info
         area = self.game_info.playable_area
