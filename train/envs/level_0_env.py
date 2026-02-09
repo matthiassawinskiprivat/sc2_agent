@@ -64,6 +64,11 @@ class Level0Env(gym.Env):
                     for k, v in level_conf[section].items():
                         self.training_conf[k] = v
 
+            # Restore Cumulative Config (Prevent overwrite by empty lists in level config)
+            self.training_conf['active_layers'] = self.active_layers
+            self.training_conf['action_heads'] = self.action_heads
+            self.training_conf['categorical_heads'] = self.categorical_heads
+
             if 'env' in level_conf and 'rewards' in level_conf['env']:
                 self.training_conf['rewards'] = level_conf['env']['rewards']
             

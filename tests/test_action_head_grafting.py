@@ -34,24 +34,46 @@ def test_graft_action_heads_upscale():
     # The bias is 1D, so it goes through reshape->interpolate->flatten
     assert abs(new_state_dict["action_net.bias"].mean() - state_dict["action_net.bias"].mean()) < 0.5
 
-def test_graft_action_heads_mismatch_delete():
+def test_graft_action_heads_mismatch_robust_append():
+
     """
-    Test that if dimensions don't look like a spatial grid, the key is deleted
-    to avoid shape mismatch errors during loading.
+
+    Test that if dimensions don't look like a spatial grid, the weights are still
+
+    grafted (appended) instead of being deleted, to preserve some knowledge
+
+    while still allowing the model to load.
+
     """
+
     old_dim = 101 # Not a square
+
     new_dim = 4096
+
     features = 512
-    
+
+
+
     state_dict = {
+
         "action_net.weight": torch.randn(old_dim, features),
+
         "action_net.bias": torch.randn(old_dim),
+
     }
-    
-    new_state_dict = graft_model_weights(state_dict, new_in_channels=4, new_action_dim=new_dim)
-    
-    assert "action_net.weight" not in new_state_dict
-    assert "action_net.bias" not in new_state_dict
+
+
+
+    new_state_dict = graft_model_weights(state_dict, new_in_channels=4, new_action_dim=new_dim)       
+
+
+
+    assert "action_net.weight" in new_state_dict
+
+    assert new_state_dict["action_net.weight"].shape == (new_dim, features)
+
+    assert "action_net.bias" in new_state_dict
+    assert new_state_dict["action_net.bias"].shape == (new_dim,)
 
 def test_graft_input_and_output_simultaneously():
     """

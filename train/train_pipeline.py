@@ -313,12 +313,13 @@ class PipelineManager:
                     state_dict = saved_policy.state_dict()
                     
                     # Handle Mismatches via Smart Grafting
-                    logger.info(f"Performing smart weight transfer (Inputs: {current_obs_shape[0]} ch, Actions: {env.action_space.n})...")
+                    logger.info(f"Performing smart weight transfer (Inputs: {current_obs_shape[0]} ch, Actions: {env.action_space.n}, Grid: {env_params['grid_size']})...")
                     try:
                         state_dict = graft_model_weights(
                             state_dict, 
                             new_in_channels=current_obs_shape[0],
-                            new_action_dim=env.action_space.n
+                            new_action_dim=env.action_space.n,
+                            new_grid_size=env_params["grid_size"]
                         )
                     except Exception as e:
                         logger.error(f"Weight grafting failed: {e}")

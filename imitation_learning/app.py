@@ -29,6 +29,7 @@ from src.ui.ui_manager import UIManager
 from sc2.bot_ai import BotAI
 from sc2.main import run_game
 from sc2.position import Point2
+from sc2.ids.unit_typeid import UnitTypeId
 from sc2 import maps
 from sc2.player import Bot, Computer
 from sc2.data import Difficulty, Race
@@ -435,21 +436,88 @@ class WatchBot(SC2Bot):
         if active_layers:
             self.ui_manager.active_layers = active_layers
 
-    async def _setup_level(self):
-        if self.level_name == "level_0":
-            await self._setup_level_0()
+        # Scenario Setup (Moved to on_start for reliability in non-realtime mode)
+        await self._setup_level()
 
-    async def _setup_level_0(self):
-        # Delegate to Level0Bot implementation for parity
-        from src.level_0_bot import Level0Bot
+    async def _setup_level(self):
+        """
+        Dynamically configures the level scenario based on the environment class.
+        Matches the setup logic used in ReplayObserver for parity.
+        """
+        env_conf = self.config.get("env", {})
+        env_class = env_conf.get("env_class", "Level0Env")
         
-        # 1. Clear Map using base class logic
-        await self.reset_game_state()
-        
-        # 2. Setup scenario using shared logic
-        # We temporarily mock the attributes Level0Bot expects if they differ,
-        # but since we inherit from SC2Bot, we are compatible.
-        await Level0Bot.setup_scenario(self)
+        if env_class == "Level0Env":
+             logger.info(f"WatchBot: Preparing scenario for {self.level_name} (Env: {env_class})...")
+             
+             # Reset internal tracking
+             self.zergling = None
+             self.beacon = None
+             self.previous_distance = None
+
+             # 1. Robust Cleanup (Using SC2Bot's inherited logic with retry)
+             # debug_show_map is called in on_start, but we ensure it here too
+             await self.client.debug_show_map()
+             await self.reset_game_state()
+             
+             await self._refresh_state()
+             for cleanup_attempt in range(3):
+                 if not self.all_units:
+                     break
+                 logger.info(f"WatchBot Cleanup attempt {cleanup_attempt+1} (Units remaining: {self.all_units.amount})")
+                 await self.client.debug_kill_unit(self.all_units.tags)
+                 await self.client.step()
+                 await self._refresh_state()
+
+             # 2. Determine positions
+             area = self.game_info.playable_area
+             margin = 5.0
+             grid = self.game_info.pathing_grid
+             valid_points = []
+             for x in range(int(area.x + margin), int(area.x + area.width - margin), 2):
+                 for y in range(int(area.y + margin), int(area.y + area.height - margin), 2):
+                     if grid[(x, y)] != 0:
+                         valid_points.append(Point2((x, y)))
+
+             logger.info(f"WatchBot: Found {len(valid_points)} valid pathable points.")
+
+             if len(valid_points) < 2:
+                 logger.warning("WatchBot: Not enough valid points found, using center fallback.")
+                 p1 = Point2((area.x + area.width/2, area.y + area.height/2))
+                 p2 = Point2((area.x + area.width/2 + 5, area.y + area.height/2))
+             else:
+                 p1, p2 = random.sample(valid_points, 2)
+                 attempts = 10
+                 while p1.distance_to(p2) < 10.0 and attempts > 0:
+                     p1, p2 = random.sample(valid_points, 2)
+                     attempts -= 1
+
+             # 3. Spawn Units
+             logger.info(f"WatchBot: Spawning Zergling at {p1} (P1) and Beacon at {p2} (P2).")
+             await self.client.debug_create_unit([[UnitTypeId.ZERGLING, 1, p1, 1]])
+             await self.client.debug_create_unit([[UnitTypeId.BEACON_TERRANSMALL, 1, p2, 2]])
+             
+             # Wait for units to spawn and materialize
+             for i in range(3):
+                 await self.client.step()
+                 await self._refresh_state()
+                 logger.info(f"WatchBot: Spawn check {i+1}... Units: {self.all_units.amount}")
+             
+             # Identify units for internal tracking
+             self.zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None
+             self.beacon = self.all_units(UnitTypeId.BEACON_TERRANSMALL).first if self.all_units(UnitTypeId.BEACON_TERRANSMALL).exists else None
+             
+             if self.zergling and self.beacon:
+                 logger.info(f"WatchBot scenario ready. Zergling: {self.zergling.tag}, Beacon: {self.beacon.tag}")
+             else:
+                 # Try harder to find them in all_units
+                 self.zergling = self.all_units(UnitTypeId.ZERGLING).first if self.all_units(UnitTypeId.ZERGLING).exists else None
+                 if self.zergling and self.beacon:
+                      logger.info("WatchBot: Units found in all_units after fallback.")
+                 else:
+                      logger.error(f"WatchBot: FAILED to spawn/detect units. Zergling: {bool(self.zergling)}, Beacon: {bool(self.beacon)}")
+
+             await self.chat_send(f"Watching {self.level_name} (Deterministic mode).")
 
     async def on_step(self, iteration: int):
         """
@@ -460,10 +528,8 @@ class WatchBot(SC2Bot):
             if iteration == 0:
                 with open("debug_watchbot.log", "w") as f:
                     f.write("WatchBot Started\n")
-                await self._setup_level()
                 
-                # Refresh state after setup so iteration 0 prediction is meaningful
-                # We use internal BotAI methods correctly here
+                # Refresh state so iteration 0 prediction is meaningful
                 await self._refresh_state()
             
             # 1. Identify units we control

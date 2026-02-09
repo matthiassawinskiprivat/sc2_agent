@@ -2,12 +2,16 @@
 # Configuration for the second level of training (curriculum learning).
 
 training:
-  training_steps: 125_000
-  num_envs: 1
-  n_steps: 1024
+  training_steps: 300_000
+  num_envs: 6
+  n_steps: 2048
   batch_size: 256
   learning_rate: 0.0003
   render_beacon: True
+  watchdog_timeout: 3600
+  imitation_data_percentage: 50
+  imitation_data_max_steps: 150_000
+  imitation_coef: 1.0
 
 # Environment parameters
 env:
@@ -17,7 +21,7 @@ env:
   maps_dir: "train/maps/level_1"
   rewards:
     success: 20.0
-    step_penalty: -0.05
+    step_penalty: -0.02
     distance_multiplier: 0.5
   active_layers: []
 
@@ -25,16 +29,18 @@ env:
 model:
   policy: "CnnPolicy"
   policy_kwargs:
+    features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
     features_extractor_kwargs:
       features_dim: 512
+      thinking_steps: 1
   gamma: 0.99
-  ent_coef: 0.01
-  n_epochs: 4
+  ent_coef: 0.001
+  n_epochs: 10
 
 # Evaluation parameters
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_len_mean"
-    threshold: 180.0
+    threshold: 80.0
     comparison: "<"
     patience: 5

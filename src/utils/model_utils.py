@@ -52,7 +52,26 @@ def interpolate_spatial_weights(weights: torch.Tensor, old_size: int, new_size: 
     
     return new_weights
 
-def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_action_dim: Optional[int] = None, action_handling_mode: str = "auto") -> Dict[str, Any]:
+def decompose_action_dim(dim: int) -> Tuple[int, int, int]:
+    """
+    Heuristically decomposes an action dimension into (num_spatial_heads, grid_size, num_categorical).
+    Supports common grid sizes: 128, 64, 32.
+    """
+    for g in [128, 64, 32]:
+        g2 = g * g
+        if dim >= g2:
+            n = dim // g2
+            c = dim % g2
+            # Heuristic: if c is small (e.g. < 100), we assume this is the decomposition.
+            # Most categorical head additions are just a few actions (Load, Unload, etc.)
+            if c < 100:
+                return n, g, c
+    
+    # Fallback: Treat as entirely categorical
+    return 0, 0, dim
+
+def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_action_dim: Optional[int] = None, 
+                        action_handling_mode: str = "auto", new_grid_size: Optional[int] = None) -> Dict[str, Any]:
     """
     Adjusts the model weights to match new input channels and/or new action space dimensions.
     
@@ -64,6 +83,7 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
             - "auto": Tries interpolation first (if square), then 2x expansion.
             - "expand": Forces block repetition/randomization (e.g., 1 Head -> 4 Heads).
             - "interpolate": Forces spatial interpolation.
+        new_grid_size: (Optional) The grid size of the target environment.
         
     Returns:
         A new state dictionary with grafted weights.
@@ -71,7 +91,6 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
     new_state_dict = copy.deepcopy(state_dict)
     
     # --- 1. Handle Input Channels (CNN) ---
-    # ... (Same as before) ...
     # Identify input layer keys
     input_keys = [k for k in state_dict.keys() if k.endswith("features_extractor.cnn.0.weight")]
     
@@ -95,7 +114,7 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
 
     # --- 2. Handle Action/Value Heads ---
     if new_action_dim is not None:
-        head_keys = [k for k in state_dict.keys() if "action_net" in k or "value_net" in k]
+        head_keys = [k for k in state_dict.keys() if ("action_net" in k or "value_net" in k) and "mlp_extractor" not in k]
         
         for key in head_keys:
             old_weight = state_dict[key]
@@ -104,10 +123,22 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
             if old_dim == new_action_dim: continue
             if old_dim == 1: continue # Skip scalar heads
 
+            # --- DECOMPOSITION ---
+            n_old, g_old, c_old = decompose_action_dim(old_dim)
+            n_new, g_new, c_new = decompose_action_dim(new_action_dim)
+            
+            # Override with explicit grid size if provided
+            if new_grid_size:
+                g_new = new_grid_size
+                n_new = new_action_dim // (g_new * g_new)
+                c_new = new_action_dim % (g_new * g_new)
+
+            logger.debug(f"Decomposed '{key}': Old({n_old}x{g_old}^2 + {c_old}) -> New({n_new}x{g_new}^2 + {c_new})")
+
             # Check for block expansion (multiples)
             is_expansion = (new_action_dim > old_dim) and (new_action_dim % old_dim == 0)
             
-            # Check for square spatial
+            # Check for pure square spatial (legacy logic check)
             old_grid_float = math.sqrt(old_dim)
             new_grid_float = math.sqrt(new_action_dim)
             is_square_scaling = old_grid_float.is_integer() and new_grid_float.is_integer()
@@ -115,11 +146,15 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
             # Decision Logic
             use_interpolation = False
             use_expansion = False
+            use_hybrid = False # Interpolate spatial, then handle categorical
             
             if action_handling_mode == "interpolate":
                 use_interpolation = True
             elif action_handling_mode == "expand":
                 use_expansion = True
+            elif g_old > 0 and g_new > 0 and g_new != g_old:
+                # Grid size changed! We MUST interpolate the spatial components.
+                use_hybrid = True
             else: # auto
                 if is_square_scaling and not is_expansion:
                     use_interpolation = True
@@ -128,7 +163,7 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                 elif is_square_scaling:
                     use_interpolation = True
             
-            # Execute
+            # --- EXECUTION ---
             if use_interpolation and is_square_scaling:
                 logger.info(f"Interpolating spatial weights for '{key}': {old_dim} -> {new_action_dim}")
                 try:
@@ -140,6 +175,61 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                         new_state_dict[key] = w_interp.view(-1)
                 except Exception as e:
                     logger.error(f"Interpolation failed: {e}")
+                    del new_state_dict[key]
+
+            elif use_hybrid:
+                logger.info(f"Hybrid Grafting for '{key}': Interpolating {n_old} spatial heads ({g_old}->{g_new}) and appending/truncating categorical.")
+                try:
+                    in_feat = old_weight.shape[1] if len(old_weight.shape) == 2 else 1
+                    
+                    # 1. Prepare new weight tensor
+                    if len(old_weight.shape) == 2:
+                        new_w = torch.randn(new_action_dim, in_feat) * 0.01
+                    else:
+                        new_w = torch.randn(new_action_dim) * 0.01
+                    
+                    # 2. Interpolate each spatial head
+                    num_heads_to_transfer = min(n_old, n_new)
+                    if n_old > 0 and n_new > 0:
+                        for i in range(num_heads_to_transfer):
+                            old_start = i * (g_old * g_old)
+                            old_end = old_start + (g_old * g_old)
+                            new_start = i * (g_new * g_new)
+                            new_end = new_start + (g_new * g_new)
+                            
+                            head_weights = old_weight[old_start:old_end]
+                            if len(old_weight.shape) == 1:
+                                head_weights = head_weights.view(-1, 1)
+                                
+                            interp_head = interpolate_spatial_weights(head_weights, g_old, g_new)
+                            
+                            if len(old_weight.shape) == 2:
+                                new_w[new_start:new_end, :] = interp_head
+                            else:
+                                new_w[new_start:new_end] = interp_head.view(-1)
+                                
+                    # 3. Handle Categorical part
+                    # We copy old categorical actions to the end of the new spatial block
+                    old_cat_start = n_old * (g_old * g_old)
+                    new_cat_start = n_new * (g_new * g_new)
+                    
+                    num_cat_to_transfer = min(c_old, c_new)
+                    if num_cat_to_transfer > 0:
+                        if len(old_weight.shape) == 2:
+                            new_w[new_cat_start:new_cat_start+num_cat_to_transfer, :] = old_weight[old_cat_start:old_cat_start+num_cat_to_transfer, :]
+                        else:
+                            new_w[new_cat_start:new_cat_start+num_cat_to_transfer] = old_weight[old_cat_start:old_cat_start+num_cat_to_transfer]
+                    
+                    # 4. Loud Bias for COMPLETELY new actions (categorical or new heads)
+                    if len(old_weight.shape) == 1:
+                        # Find indices that were NOT copied
+                        # We just apply it to everything from new_cat_start + num_cat_to_transfer onwards
+                        new_w[new_cat_start+num_cat_to_transfer:] = 5.0
+                        
+                    new_state_dict[key] = new_w
+                    
+                except Exception as e:
+                    logger.error(f"Hybrid grafting failed for '{key}': {e}")
                     del new_state_dict[key]
                     
             elif use_expansion and is_expansion:
