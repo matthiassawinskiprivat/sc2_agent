@@ -190,7 +190,7 @@ class PipelineManager:
         logger.info(f"No models found for level '{level_name}'. Needs new training session.")
         return "NEEDS_TRAINING", None
 
-    def _train_level(self, level_name, model_path_to_load=None):
+    def _train_level(self, level_name, model_path_to_load=None, reset_timesteps=True):
         """
         Trains a single level.
         This method contains the core logic for setting up the environment,
@@ -406,7 +406,24 @@ class PipelineManager:
                 model = AlgoClass(**model_kwargs)
 
             # 4. Train Model
-            logger.info(f"Training for up to {training_params['training_steps']} timesteps...")
+            # Calculate steps to train
+            total_steps_target = training_params["training_steps"]
+            steps_to_train = total_steps_target
+            
+            if model_path_to_load and not reset_timesteps:
+                # If resuming, we need to account for already trained steps
+                # Note: model.num_timesteps is reliable here because we haven't trained yet in this session
+                steps_already_done = model.num_timesteps
+                steps_to_train = total_steps_target - steps_already_done
+                logger.info(f"Resuming training. Target: {total_steps_target}, Already done: {steps_already_done}, Remaining: {steps_to_train}")
+                
+                if steps_to_train <= 0:
+                    logger.info("Training already reached target steps. Saving and finishing.")
+                    final_model_path = os.path.join(model_dir, "final_model.zip")
+                    model.save(final_model_path)
+                    return final_model_path
+            
+            logger.info(f"Starting training loop for {steps_to_train} timesteps (Reset timesteps: {reset_timesteps})...")
             
             # Watchdog to detect hangs in the training loop
             # Default to 1 hour (3600s) to accommodate slow CPU training optimization phases.
@@ -433,9 +450,9 @@ class PipelineManager:
 
             try:
                 model.learn(
-                    total_timesteps=training_params["training_steps"],
+                    total_timesteps=steps_to_train,
                     callback=CallbackList(callback_list),
-                    reset_num_timesteps=not bool(model_path_to_load)
+                    reset_num_timesteps=reset_timesteps
                 )
             except (EOFError, BrokenPipeError) as e:
                 logger.error(f"FATAL: Worker process crashed during training of level '{level_name}'.")
@@ -489,14 +506,18 @@ class PipelineManager:
             
             # Determine the model to load for curriculum learning
             model_to_load = None
+            reset_timesteps = True
+
             if status == "CONTINUE_TRAINING":
                 model_to_load = model_path # Continue from the checkpoint
+                reset_timesteps = False # Keep the step count
             elif status == "NEEDS_TRAINING":
                 # If it's a new training, try to load the model from the previous level
                 model_to_load = last_final_model_path
+                reset_timesteps = True # Start fresh for this level
             
             # Train the level
-            final_model_path = self._train_level(level_name, model_path_to_load=model_to_load)
+            final_model_path = self._train_level(level_name, model_path_to_load=model_to_load, reset_timesteps=reset_timesteps)
             last_final_model_path = final_model_path
 
         logger.info("Training pipeline finished.")
