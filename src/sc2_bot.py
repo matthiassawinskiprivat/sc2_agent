@@ -410,17 +410,22 @@ class SC2Bot(BotAI):
         self.zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None
         
         # 1. Goal Tracking: Flexibly find beacon or target
+        # For multi-unit levels (Level 3+), we pick the beacon CLOSEST to the active unit.
         self.beacon = None
-        if self.units(UnitTypeId.BEACON_TERRANSMALL).exists:
-            self.beacon = self.units(UnitTypeId.BEACON_TERRANSMALL).first
-        elif self.structures(UnitTypeId.BEACON_TERRANSMALL).exists:
-            self.beacon = self.structures(UnitTypeId.BEACON_TERRANSMALL).first
-        elif self.enemy_units(UnitTypeId.BEACON_TERRANSMALL).exists:
-            self.beacon = self.enemy_units(UnitTypeId.BEACON_TERRANSMALL).first
-        elif self.enemy_structures(UnitTypeId.PYLON).exists:
-            self.beacon = self.enemy_structures(UnitTypeId.PYLON).first
-        elif self.structures(UnitTypeId.PYLON).exists:
-             self.beacon = self.structures(UnitTypeId.PYLON).first
+        
+        # Collect all potential beacons/targets
+        potential_beacons = self.all_units.filter(lambda u: u.type_id in {
+            UnitTypeId.BEACON_TERRANSMALL, UnitTypeId.PYLON
+        })
+        
+        if potential_beacons.exists:
+            if active_unit:
+                self.beacon = potential_beacons.closest_to(active_unit)
+            else:
+                self.beacon = potential_beacons.first
+        elif active_unit and self.enemy_units.exists:
+            # Fallback for combat levels (Level 7+): closest enemy is the objective
+            self.beacon = self.enemy_units.closest_to(active_unit)
 
         # Initialize distance tracking for rewards
         if self.previous_distance is None and self.zergling and self.beacon:
@@ -428,10 +433,10 @@ class SC2Bot(BotAI):
 
         # 2. Layer Preparation: Beacons must be in 'enemy_units' layer for training parity
         enemies = list(self.enemy_units)
-        if self.beacon:
+        if self.beacon and self.beacon not in self.enemy_units:
             enemies.append(self.beacon)
         
-        # command_target is the GOAL (Beacon), not the last action.
+        # command_target is the GOAL (Beacon/Target), not the last action.
         target_pos = self.beacon.position if self.beacon else self.last_target_pos
         
         # Filter allied units to NOT include the beacon if it's owned by the bot

@@ -102,6 +102,91 @@ class ReplayObserver(BotAI):
              
              await self.chat_send(f"Recording started. Reach the beacon and type 'q' to finish.")
 
+        elif env_class == "Level3Env":
+             logger.info(f"Preparing scenario for {self.level_name} (Env: {env_class})...")
+             targets_count = env_conf.get("targets", 1)
+             allied_name = self.config.get("unit_type", env_conf.get("unit_type", "ZERGLING")).upper()
+             allied_unit_type = getattr(UnitTypeId, allied_name, UnitTypeId.ZERGLING)
+             beacon_type = UnitTypeId.BEACON_TERRANSMALL
+
+             # 1. Robust Cleanup
+             await self._refresh_state()
+             for cleanup_attempt in range(3):
+                 if not self.all_units:
+                     break
+                 await self.client.debug_kill_unit(self.all_units.tags)
+                 await self.client.step()
+                 await self._refresh_state()
+
+             # 2. Grid Sampling for Spawns
+             grid = self.game_info.pathing_grid
+             valid_spawn_points = []
+             for x in range(4, grid.width - 4, 4):
+                 for y in range(4, grid.height - 4, 4):
+                     if grid[(x, y)] != 0:
+                         valid_spawn_points.append(Point2((x, y)))
+
+             if len(valid_spawn_points) < targets_count * 2:
+                 w, h = self.game_info.map_size
+                 valid_spawn_points = [Point2((w/2, h/2)) for _ in range(targets_count * 2)]
+
+             # 3. Spawning
+             locations = random.sample(valid_spawn_points, targets_count * 2)
+             for i in range(targets_count):
+                 start = locations[i]
+                 end = locations[targets_count + i]
+                 await self.client.debug_create_unit([[allied_unit_type, 1, start, self.player_id]])
+                 await self.client.debug_create_unit([[beacon_type, 1, end, 2]])
+
+             await self.client.step()
+             await self._refresh_state()
+             await self.chat_send(f"Recording started. Reach all {targets_count} beacons and type 'q' to finish.")
+
+        elif env_class == "Level7Env":
+             logger.info(f"Preparing scenario for {self.level_name} (Env: {env_class})...")
+             targets_count = env_conf.get("targets", 1)
+             allied_name = self.config.get("unit_type", env_conf.get("unit_type", "MARINE")).upper()
+             enemy_name = self.config.get("enemy_type", env_conf.get("enemy_type", "ZERGLING")).upper()
+             allied_unit_type = getattr(UnitTypeId, allied_name, UnitTypeId.MARINE)
+             enemy_unit_type = getattr(UnitTypeId, enemy_name, UnitTypeId.ZERGLING)
+
+             # 1. Robust Cleanup
+             await self._refresh_state()
+             for cleanup_attempt in range(3):
+                 if not self.all_units:
+                     break
+                 await self.client.debug_kill_unit(self.all_units.tags)
+                 await self.client.step()
+                 await self._refresh_state()
+
+             # 2. Grid Sampling for Spawns
+             grid = self.game_info.pathing_grid
+             valid_spawn_points = []
+             for x in range(4, grid.width - 4, 4):
+                 for y in range(4, grid.height - 4, 4):
+                     if grid[(x, y)] != 0:
+                         valid_spawn_points.append(Point2((x, y)))
+
+             if len(valid_spawn_points) < targets_count * 2:
+                 w, h = self.game_info.map_size
+                 valid_spawn_points = [Point2((w/2, h/2)) for _ in range(targets_count * 2)]
+
+             # 3. Spawning
+             locations = random.sample(valid_spawn_points, targets_count * 2)
+             for i in range(targets_count):
+                 start = locations[i]
+                 end = locations[targets_count + i]
+                 await self.client.debug_create_unit([[allied_unit_type, 1, start, self.player_id]])
+                 
+                 enemy_amount = 1
+                 if enemy_unit_type == UnitTypeId.ZERGLING:
+                     enemy_amount = 2
+                 await self.client.debug_create_unit([[enemy_unit_type, enemy_amount, end, 2]])
+
+             await self.client.step()
+             await self._refresh_state()
+             await self.chat_send(f"Recording started. Defeat all enemies and type 'q' to finish.")
+
     async def _refresh_state(self):
         """
         Refreshes the bot's internal state from a new observation.

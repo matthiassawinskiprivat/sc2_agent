@@ -333,28 +333,54 @@ class WatchBot(SC2Bot):
             self.agent_system.current_observation_id = 0
 
     def action_masks(self, unit):
+        if not self.agent_system or "agent_0" not in self.agent_system.unit_agents:
+            return np.ones(self.grid_size * self.grid_size, dtype=bool)
+
         agent = self.agent_system.unit_agents["agent_0"]
         # Use updated config from on_start
         action_heads = self.full_conf.get("action_heads", ["move"])
         
+        # Get base move mask (terrain-based)
+        move_mask = agent.get_action_mask()
+        
+        is_flying = unit.is_flying
+        is_transport_actor = unit.cargo_max > 0
+        cargo_used = getattr(unit, "cargo_used", 0)
+
+        # FLYING UNITS: Move mask should be all True (unrestricted)
+        if is_flying:
+            move_mask = np.ones_like(move_mask, dtype=bool)
+            
+        zero_mask = np.zeros_like(move_mask, dtype=bool)
+        
         masks = []
         for head in action_heads:
             if head == "move":
-                masks.append(agent.get_action_mask())
+                masks.append(move_mask)
             elif head == "attack":
-                # Reuse move mask for attack spatial for now
-                masks.append(agent.get_action_mask()) 
+                # For flyers like Medivacs, 'attack' might be 'heal' but spatial is unrestricted
+                if is_flying:
+                    masks.append(np.ones_like(move_mask, dtype=bool))
+                else:
+                    masks.append(move_mask) 
             elif head == "load":
-                is_transport = unit.type_id in self.TRANSPORT_TYPES
-                masks.append(agent.get_transport_mask(
-                    self.units, 
-                    self.game_info, 
-                    is_transport=is_transport,
-                    active_unit=unit
-                ))
+                # Non-transport flyers cannot load (mimic SC2Bot logic)
+                if is_flying and not is_transport_actor:
+                    masks.append(zero_mask)
+                else:
+                    is_transport = unit.type_id in self.TRANSPORT_TYPES
+                    masks.append(agent.get_transport_mask(
+                        self.units, 
+                        self.game_info, 
+                        is_transport=is_transport,
+                        active_unit=unit
+                    ))
             elif head == "unload":
-                # If unload is configured as spatial
-                masks.append(agent.get_unload_mask(self.units, self.game_info))
+                # Only transports with cargo can unload (mimic SC2Bot logic)
+                if not is_transport_actor or cargo_used == 0:
+                    masks.append(zero_mask)
+                else:
+                    masks.append(agent.get_unload_mask(self.units, self.game_info))
                 
         # Categorical
         cat_heads = self.full_conf.get("categorical_heads", [])
@@ -395,6 +421,10 @@ class WatchBot(SC2Bot):
         self.reset()
         if self.disable_fog:
             await self.client.debug_show_map()
+
+        # Disable strict distribution validation to prevent Simplex constraint crashes
+        # with large action spaces and numerical precision edge cases.
+        torch.distributions.Distribution.set_default_validate_args(False)
 
         # REPLICATE LEVEL0ENV LOGIC EXACTLY
         # Load Additive Configuration using ConfigManager
@@ -455,8 +485,7 @@ class WatchBot(SC2Bot):
              self.beacon = None
              self.previous_distance = None
 
-             # 1. Robust Cleanup (Using SC2Bot's inherited logic with retry)
-             # debug_show_map is called in on_start, but we ensure it here too
+             # 1. Robust Cleanup
              await self.client.debug_show_map()
              await self.reset_game_state()
              
@@ -516,6 +545,101 @@ class WatchBot(SC2Bot):
                       logger.info("WatchBot: Units found in all_units after fallback.")
                  else:
                       logger.error(f"WatchBot: FAILED to spawn/detect units. Zergling: {bool(self.zergling)}, Beacon: {bool(self.beacon)}")
+
+             await self.chat_send(f"Watching {self.level_name} (Deterministic mode).")
+
+        elif env_class == "Level3Env":
+             logger.info(f"WatchBot: Preparing scenario for {self.level_name} (Env: {env_class})...")
+             targets_count = env_conf.get("targets", 1)
+             allied_name = self.config.get("unit_type", env_conf.get("unit_type", "ZERGLING")).upper()
+             allied_unit_type = getattr(UnitTypeId, allied_name, UnitTypeId.ZERGLING)
+             beacon_type = UnitTypeId.BEACON_TERRANSMALL
+
+             # 1. Robust Cleanup
+             await self.client.debug_show_map()
+             await self.reset_game_state()
+             await self._refresh_state()
+             for cleanup_attempt in range(3):
+                 if not self.all_units:
+                     break
+                 await self.client.debug_kill_unit(self.all_units.tags)
+                 await self.client.step()
+                 await self._refresh_state()
+
+             # 2. Grid Sampling for Spawns
+             grid = self.game_info.pathing_grid
+             valid_spawn_points = []
+             for x in range(4, grid.width - 4, 4):
+                 for y in range(4, grid.height - 4, 4):
+                     if grid[(x, y)] != 0:
+                         valid_spawn_points.append(Point2((x, y)))
+
+             if len(valid_spawn_points) < targets_count * 2:
+                 w, h = self.game_info.map_size
+                 valid_spawn_points = [Point2((w/2, h/2)) for _ in range(targets_count * 2)]
+
+             # 3. Spawning
+             locations = random.sample(valid_spawn_points, targets_count * 2)
+             for i in range(targets_count):
+                 start = locations[i]
+                 end = locations[targets_count + i]
+                 await self.client.debug_create_unit([[allied_unit_type, 1, start, 1]])
+                 await self.client.debug_create_unit([[beacon_type, 1, end, 2]])
+
+             # Wait for units to spawn
+             for _ in range(3):
+                 await self.client.step()
+                 await self._refresh_state()
+             
+             await self.chat_send(f"Watching {self.level_name} (Deterministic mode).")
+
+        elif env_class == "Level7Env":
+             logger.info(f"WatchBot: Preparing scenario for {self.level_name} (Env: {env_class})...")
+             targets_count = env_conf.get("targets", 1)
+             allied_name = self.config.get("unit_type", env_conf.get("unit_type", "MARINE")).upper()
+             enemy_name = self.config.get("enemy_type", env_conf.get("enemy_type", "ZERGLING")).upper()
+             allied_unit_type = getattr(UnitTypeId, allied_name, UnitTypeId.MARINE)
+             enemy_unit_type = getattr(UnitTypeId, enemy_name, UnitTypeId.ZERGLING)
+
+             # 1. Robust Cleanup
+             await self.client.debug_show_map()
+             await self.reset_game_state()
+             await self._refresh_state()
+             for cleanup_attempt in range(3):
+                 if not self.all_units:
+                     break
+                 await self.client.debug_kill_unit(self.all_units.tags)
+                 await self.client.step()
+                 await self._refresh_state()
+
+             # 2. Grid Sampling for Spawns
+             grid = self.game_info.pathing_grid
+             valid_spawn_points = []
+             for x in range(4, grid.width - 4, 4):
+                 for y in range(4, grid.height - 4, 4):
+                     if grid[(x, y)] != 0:
+                         valid_spawn_points.append(Point2((x, y)))
+
+             if len(valid_spawn_points) < targets_count * 2:
+                 w, h = self.game_info.map_size
+                 valid_spawn_points = [Point2((w/2, h/2)) for _ in range(targets_count * 2)]
+
+             # 3. Spawning
+             locations = random.sample(valid_spawn_points, targets_count * 2)
+             for i in range(targets_count):
+                 start = locations[i]
+                 end = locations[targets_count + i]
+                 await self.client.debug_create_unit([[allied_unit_type, 1, start, 1]])
+                 
+                 enemy_amount = 1
+                 if enemy_unit_type == UnitTypeId.ZERGLING:
+                     enemy_amount = 2
+                 await self.client.debug_create_unit([[enemy_unit_type, enemy_amount, end, 2]])
+
+             # Wait for units to spawn
+             for _ in range(3):
+                 await self.client.step()
+                 await self._refresh_state()
 
              await self.chat_send(f"Watching {self.level_name} (Deterministic mode).")
 
@@ -583,6 +707,12 @@ class WatchBot(SC2Bot):
             active_unit_arg = unit if self.level_name != "level_0" else None
             processed_obs, _ = self._get_observation(active_unit=active_unit_arg)
             
+            # --- DEFENSIVE: Clean Observation ---
+            # Ensure no NaNs or Infs reach the network, which can cause Simplex errors downstream
+            if not np.isfinite(processed_obs).all():
+                logger.warning("WatchBot: Observation contains non-finite values. Cleaning...")
+                processed_obs = np.nan_to_num(processed_obs, nan=0.0, posinf=1.0, neginf=0.0)
+            
             self.transformed_observation = processed_obs
             self.last_observation = processed_obs
             
@@ -590,8 +720,16 @@ class WatchBot(SC2Bot):
             # deterministic=True ensures the model picks the action with the HIGHEST probability,
             # instead of sampling from the distribution.
             mask = self.action_masks(unit)
+            
+            # --- SAFETY CHECK: Prevent Simplex Constraint Crash ---
+            # If the mask is all-False, SB3-contrib's MaskableCategorical will fail.
+            if not np.any(mask):
+                logger.warning(f"WatchBot: All actions masked for unit {unit.type_id} at {unit.position}. Unmasking all to prevent crash.")
+                mask = np.ones_like(mask, dtype=bool)
+
             is_first_step = (iteration == 0 and unit.tag == self.active_unit_tags[0])
             
+            # Prediction
             action, self.lstm_states = self.model.predict(
                 processed_obs, 
                 state=self.lstm_states, 
@@ -620,7 +758,14 @@ class WatchBot(SC2Bot):
         obs = await self.client.observation()
         from sc2.game_state import GameState
         from src.utils.proto_utils import ProtoWrapper
-        self._prepare_step(GameState(obs.observation), ProtoWrapper(self.game_info._proto))
+        # Use existing game_info._proto if possible
+        proto = getattr(self.game_info, "_proto", None)
+        if not proto:
+            # Fallback to fetching fresh game info if proto is missing
+            game_info = await self.client.get_game_info()
+            proto = game_info._proto
+            
+        self._prepare_step(GameState(obs.observation), ProtoWrapper(proto))
 
 
 class RecordTab(QWidget):
