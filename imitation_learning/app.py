@@ -25,6 +25,7 @@ from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
 from src.agent.maskable_ppo import MaskablePPO
 from src.hierarchical_agent import HierarchicalAgentSystem
 from src.sc2_bot import SC2Bot
+from src.level_3_bot import Level3Bot
 from src.ui.ui_manager import UIManager
 from sc2.bot_ai import BotAI
 from sc2.main import run_game
@@ -280,9 +281,9 @@ class InferenceThread(QThread):
 
 from src.utils.config_manager import ConfigManager
 
-class WatchBot(SC2Bot):
+class WatchBot(Level3Bot):
     def __init__(self, model, config, level_name, disable_fog=False):
-        # Initialize SC2Bot with None for connection since WatchBot runs in-process
+        # Initialize Level3Bot with None for connection since WatchBot runs in-process
         super().__init__(conn=None, training_conf=config)
         self.model = model
         self.config = config
@@ -291,6 +292,13 @@ class WatchBot(SC2Bot):
         self.agent_system = None
         self.unit_command_uses_self_do = True
         
+        # Level3Bot's __init__ might overwrite some things, but we want our values
+        self.targets_count = self.config.get("env", {}).get("targets", 1)
+        
+        # previous_distances is used for legacy reward logging if needed
+        self.previous_distances = {} # Map unit_tag -> distance to assigned beacon
+        self.current_assignments = {} # Map unit_tag -> beacon_tag
+
         # FIX: Enforce level_0 compatibility.
         # Even if the cumulative config says otherwise, level_0 models 
         # are strictly trained on 32x32 (1024 actions).
@@ -591,6 +599,10 @@ class WatchBot(SC2Bot):
                  await self.client.step()
                  await self._refresh_state()
              
+             # INITIALIZE OPTIMAL ASSIGNMENTS
+             self.current_assignments = self.get_optimal_assignments()
+             logger.info(f"WatchBot: Level 3 Assignments: {self.current_assignments}")
+
              await self.chat_send(f"Watching {self.level_name} (Deterministic mode).")
 
         elif env_class == "Level7Env":
@@ -744,6 +756,11 @@ class WatchBot(SC2Bot):
             # This calls the same apply_action logic as the training bot
             self.last_action = action
             await self.apply_action(unit.tag, action)
+            
+            # Match training behavior: check for collections and remove units/beacons
+            if self.level_name != "level_0":
+                 await self.check_collections()
+                 
             self.current_unit_index = (self.current_unit_index + 1) % len(self.active_unit_tags)
             
             # Slow down slightly so humans can see what's happening
