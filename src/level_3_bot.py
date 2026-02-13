@@ -81,7 +81,7 @@ class Level3Bot(SC2Bot):
         (linear sum assignment) to minimize total distance.
         """
         units = self.get_active_zerglings()
-        beacons = self.units(self.beacon_type)
+        beacons = self.all_units(self.beacon_type)
         
         if not units or not beacons.exists:
             return {}
@@ -113,7 +113,7 @@ class Level3Bot(SC2Bot):
         targets its closest beacon.
         """
         units = self.get_active_zerglings()
-        beacons = self.units(self.beacon_type)
+        beacons = self.all_units(self.beacon_type)
         
         if not units or not beacons.exists:
             return {}
@@ -138,7 +138,7 @@ class Level3Bot(SC2Bot):
         distances = {}
         for u_tag, b_tag in self.current_assignments.items():
             unit = self.units.find_by_tag(u_tag)
-            beacon = self.units.find_by_tag(b_tag)
+            beacon = self.all_units.find_by_tag(b_tag)
             if unit and beacon:
                 distances[u_tag] = unit.distance_to(beacon)
         return distances
@@ -205,22 +205,9 @@ class Level3Bot(SC2Bot):
         
         target_beacon = None
         if assigned_beacon_tag:
-            target_beacon = self.units.find_by_tag(assigned_beacon_tag)
+            target_beacon = self.all_units.find_by_tag(assigned_beacon_tag)
             
-        # Temporarily override self.beacon so super()._get_observation uses it
-        # Actually, super()._get_observation recalculates it. 
-        # So we better just implement the logic here or call super with care.
-        
-        # To avoid duplicating SC2Bot._get_observation logic, we can temporarily 
-        # mock self.all_units to only contain the assigned beacon when calling super.
-        # But that's hacky. Let's just use the same logic as get_observation_for_unit.
-        
-        original_beacon = getattr(self, "beacon", None)
-        original_zergling = getattr(self, "zergling", None)
-        
-        self.zergling = active_unit
-        self.beacon = target_beacon
-        
+        # Determine the position the unit should move towards (for the command_target layer)
         target_pos = target_beacon.position if target_beacon else None
 
         raw_obs = {
@@ -239,10 +226,44 @@ class Level3Bot(SC2Bot):
         else:
              processed_obs = np.zeros((1, 64, 64))
              
-        self.beacon = original_beacon
-        self.zergling = original_zergling
-        
         return processed_obs, {}
+
+    def get_global_observation(self, active_unit: Unit = None) -> np.ndarray:
+        """
+        Generates a GLOBAL observation that includes all units and beacons.
+        Useful for UI rendering where we want to see the full state.
+        """
+        all_beacons = list(self.all_units(self.beacon_type))
+        
+        # For the global view, we show the objective of the currently active unit
+        target_pos = None
+        target_unit = active_unit
+        if not target_unit:
+            active_units = self.get_active_zerglings()
+            if active_units:
+                target_unit = active_units[0]
+                
+        if target_unit:
+            b_tag = self.current_assignments.get(target_unit.tag)
+            if b_tag:
+                beacon = self.all_units.find_by_tag(b_tag)
+                if beacon:
+                    target_pos = beacon.position
+
+        raw_obs = {
+            'units': self.units,
+            'selected_units': [target_unit] if target_unit else [],
+            'enemy_units': all_beacons, # All beacons are visible
+            'effects': getattr(self.state, "effects", []),
+            'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
+            'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
+            'creep': getattr(self.state, "creep", None),
+            'command_target': target_pos
+        }
+        
+        if self.agent_system:
+             return self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+        return np.zeros((1, 64, 64))
         
     async def check_collections(self) -> Dict[int, float]:
         """
@@ -268,7 +289,7 @@ class Level3Bot(SC2Bot):
         # We iterate over a copy of items to allow deletion
         for u_tag, b_tag in list(self.current_assignments.items()):
             unit = self.units.find_by_tag(u_tag)
-            beacon = self.units.find_by_tag(b_tag)
+            beacon = self.all_units.find_by_tag(b_tag)
             
             if unit and beacon:
                 dist = unit.distance_to(beacon)

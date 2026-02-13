@@ -750,6 +750,14 @@ class WatchBot(Level3Bot):
                 action_masks=mask
             )
             
+            # --- UI OBSERVATION (GLOBAL) ---
+            # For Level 3+, we want the UI to show ALL beacons, not just the one the agent saw.
+            # This does not affect inference, only rendering.
+            if self.level_name != "level_0":
+                 self.ui_observation = self.get_global_observation(active_unit=unit)
+            else:
+                 self.ui_observation = processed_obs
+            
             # (Logging removed for brevity)
 
             # 6. Apply & Advance index

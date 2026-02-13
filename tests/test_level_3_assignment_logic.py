@@ -88,6 +88,7 @@ def test_bot_get_optimal_assignments():
     mock_beacons.__iter__.return_value = [b1, b2]
     mock_beacons.amount = 2
     bot.units = MagicMock(return_value=mock_beacons)
+    bot.all_units = MagicMock(return_value=mock_beacons)
     bot.beacon_type = UnitTypeId.BEACON_TERRANSMALL
     
     assignments = bot.get_optimal_assignments()
@@ -107,6 +108,7 @@ def test_bot_persistence():
     mock_beacons.__iter__.return_value = [b1, b2]
     mock_beacons.amount = 2
     bot.units = MagicMock(return_value=mock_beacons)
+    bot.all_units = MagicMock(return_value=mock_beacons)
     bot.beacon_type = UnitTypeId.BEACON_TERRANSMALL
     
     # Initialize assignments
@@ -118,6 +120,7 @@ def test_bot_persistence():
     
     # get_assigned_distances should still use original assignments
     bot.units.find_by_tag = MagicMock(side_effect=lambda tag: {1:u1, 2:u2, 101:b1, 102:b2}.get(tag))
+    bot.all_units.find_by_tag = MagicMock(side_effect=lambda tag: {1:u1, 2:u2, 101:b1, 102:b2}.get(tag))
     
     distances = bot.get_assigned_distances()
     assert 1 in distances
@@ -140,7 +143,9 @@ async def test_bot_collection_logic():
     mock_beacons.__iter__.return_value = [b1, b2]
     mock_beacons.amount = 2
     bot.units = MagicMock(return_value=mock_beacons)
+    bot.all_units = MagicMock(return_value=mock_beacons)
     bot.units.find_by_tag = MagicMock(side_effect=lambda tag: {1:u1, 2:u2, 101:b1, 102:b2}.get(tag))
+    bot.all_units.find_by_tag = MagicMock(side_effect=lambda tag: {1:u1, 2:u2, 101:b1, 102:b2}.get(tag))
     bot.beacon_type = UnitTypeId.BEACON_TERRANSMALL
     bot.client = MagicMock()
     bot.client.debug_kill_unit = AsyncMock()
@@ -176,7 +181,9 @@ async def test_bot_no_collection_of_unassigned_beacon():
     # It should NOT collect B2.
     
     bot.units = MagicMock()
+    bot.all_units = MagicMock()
     bot.units.find_by_tag = MagicMock(side_effect=lambda tag: {1:u1, 2:u2, 101:b1, 102:b2}.get(tag))
+    bot.all_units.find_by_tag = MagicMock(side_effect=lambda tag: {1:u1, 2:u2, 101:b1, 102:b2}.get(tag))
     bot.client = MagicMock()
     bot.client.debug_kill_unit = AsyncMock()
     

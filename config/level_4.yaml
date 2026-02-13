@@ -2,7 +2,7 @@
 # Configuration for Level 3: Multi-Zergling Control
 
 training:
-  training_steps: 500_000
+  training_steps: 1_300_000
   num_envs: 6
   n_steps: 2048
   batch_size: 512
@@ -10,7 +10,7 @@ training:
   render_beacon: True
   watchdog_timeout: 3600
   imitation_data_percentage: 50
-  imitation_data_max_steps: 250_000
+  imitation_data_max_steps: 400_000
   imitation_coef: 1.0
 
 # Environment parameters

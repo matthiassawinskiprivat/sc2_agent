@@ -86,7 +86,8 @@ class UIManager:
             try:
                 # Get latest observation from agent
                 with self._observation_lock:
-                    current_obs = self.agent.transformed_observation
+                    # Prefer explicitly prepared UI observation (e.g. global view), fallback to model input
+                    current_obs = getattr(self.agent, "ui_observation", self.agent.transformed_observation)
 
                     if current_obs is not None:
                         # Create UI visualization
