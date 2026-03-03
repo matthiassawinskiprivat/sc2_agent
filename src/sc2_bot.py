@@ -258,7 +258,7 @@ class SC2Bot(BotAI):
             
         self._prepare_step(GameState(obs.observation), ProtoWrapper(proto))
 
-    def action_masks(self) -> np.ndarray:
+    def action_masks(self, curriculum_progress: float = 1.0) -> np.ndarray:
         if not self.agent_system or "agent_0" not in self.agent_system.unit_agents:
              # Determine fallback grid_size
              gs = 128
@@ -283,9 +283,35 @@ class SC2Bot(BotAI):
             if 0 <= idx < len(active_units):
                 active_unit = active_units[idx]
 
+        # --- GUIDANCE CURRICULUM ---
+        guidance_mask = np.ones_like(move_mask, dtype=bool)
+        # We ONLY apply the mask if curriculum is enabled AND we are actually in the curriculum phase (progress < 1.0)
+        if self.training_conf.get("guidance_curriculum", False) and self.beacon and curriculum_progress < 1.0:
+            # 1. Calculate expanding radius in grid units
+            # We start at 10.0 grid pixels as requested.
+            # Max grid distance from a point in a grid_size x grid_size is sqrt(2)*grid_size
+            # We use 1.5 multiplier to ensure full coverage even from corners
+            max_grid_dist = self.grid_size * 1.5
+            grid_radius = 10.0 + (curriculum_progress ** 2.0) * (max_grid_dist - 5.0)
+            
+            # 2. Map beacon position to grid
+            unit_agent = self.agent_system.unit_agents["agent_0"]
+            beacon_grid_idx = unit_agent.get_grid_index_at_world_pos(self.beacon.position)
+            bx = beacon_grid_idx % self.grid_size
+            by = beacon_grid_idx // self.grid_size
+            
+            # 3. Create circle mask
+            Y, X = np.ogrid[:self.grid_size, :self.grid_size]
+            dist_sq = (X - bx)**2 + (Y - by)**2
+            guidance_mask = (dist_sq <= (grid_radius ** 2)).flatten()
+            
+            # Ensure the beacon itself is ALWAYS clickable even at start
+            guidance_mask[beacon_grid_idx] = True
+
         # Debug logging for masking
-        if self.state.game_loop % 100 == 0:
-            logger.debug(f"ActionMask check (Loop {self.state.game_loop}): Unit: {active_unit.type_id if active_unit else 'None'}, MoveMask True: {np.sum(move_mask)}")
+        if hasattr(self, "state") and self.state.game_loop % 100 == 0:
+            b_pos = self.beacon.position if self.beacon else "None"
+            logger.debug(f"ActionMask check (Loop {self.state.game_loop}): Unit: {active_unit.type_id if active_unit else 'None'}, MoveMask True: {np.sum(move_mask)}, Guidance Radius (Grid): {grid_radius if 'grid_radius' in locals() else 'N/A'}, Beacon World: {b_pos}, Beacon Grid: ({bx if 'bx' in locals() else 'N/A'}, {by if 'by' in locals() else 'N/A'})")
 
         is_transport_actor = False
         is_flying = False
@@ -322,7 +348,7 @@ class SC2Bot(BotAI):
         final_masks = []
         for head in self.action_heads:
             if head == "move":
-                final_masks.append(move_mask)
+                final_masks.append(move_mask & guidance_mask)
             elif head == "attack":
                 # Special Case: Medivac 'Attack' is actually 'Heal'
                 if active_unit and active_unit.type_id == UnitTypeId.MEDIVAC:
@@ -390,7 +416,7 @@ class SC2Bot(BotAI):
                         can_unload = bool(full_unload_mask[grid_idx])
                         categorical_masks.append(can_unload)
                         
-                        if self.state.game_loop % 100 == 0:
+                        if hasattr(self, "state") and self.state.game_loop % 100 == 0:
                             logger.debug(f"Advanced Categorical UNLOAD mask for {active_unit.type_id} at index {grid_idx}: {can_unload} (Cargo: {active_unit.cargo_used})")
                     except Exception as e:
                         logger.error(f"Error calculating advanced unload mask: {e}")

@@ -45,6 +45,7 @@ class MockSC2Process:
     def __init__(self, **kwargs):
         self.ws = MagicMock()
         self._ws = self.ws
+        self._port = 5000 # Dummy port
     async def __aenter__(self): return self
     async def __aexit__(self, *args): pass
     def close(self): pass
@@ -61,6 +62,7 @@ class MockClient:
     async def create_game(self, *args, **kwargs): pass
     async def debug_kill_unit(self, *args, **kwargs): pass
     async def debug_create_unit(self, *args, **kwargs): pass
+    async def debug_show_map(self, *args, **kwargs): pass
     async def _send_debug(self): pass
     
     async def get_game_info(self):
@@ -72,6 +74,11 @@ class MockClient:
         class GameInfoMock:
             def __init__(self):
                 self.map_size = MockSize(128, 128)
+                self.playable_area = MagicMock()
+                self.playable_area.x = 0
+                self.playable_area.y = 0
+                self.playable_area.width = 128
+                self.playable_area.height = 128
                 self.player_races = {1: Race.Zerg, 2: Race.Zerg}
                 self._proto = ResponseGameInfo()
             

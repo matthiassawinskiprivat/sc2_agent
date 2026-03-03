@@ -224,14 +224,35 @@ class ObservationTransformer:
                 self._draw_circle_vectorized(layers, idx_sel, px, py, 0, r, 1.0, True)
 
         # Layer 41: COMMAND_OBJECTIVE (Last Target)
-        target = raw_obs.get('command_target')
+        targets = raw_obs.get('command_target')
+        if targets is None:
+             targets = []
+        elif hasattr(targets, "x") or hasattr(targets, "position"):
+             # It's a single Point2 or Unit, wrap it so iteration works correctly
+             # (Prevents Point2-as-tuple from being iterated into floats)
+             targets = [targets]
+        elif not isinstance(targets, (list, tuple, set)):
+             targets = [targets]
+             
         idx_obj = LayerConstants.LAYERS[LayerConstants.COMMAND_OBJECTIVE]
 
-        if target is not None:
-            px, py = self._get_pixel_coords(target)
-            if px is not None:
-                # Draw a crosshair/marker (radius 2 pixels)
-                self._draw_circle_vectorized(layers, idx_obj, px, py, 0, 2, 1.0, False)
+        for target in targets:
+            if target is None: continue
+            
+            # Check if target is a Unit or a Point2
+            if hasattr(target, "position"):
+                pos = target.position
+                # Draw with a larger radius to match beacon size (r=3 in SC2 units is ~4-5 pixels at 128x128)
+                r = int(target.radius * self.scale) if hasattr(target, "radius") else 3
+                px, py = self._get_pixel_coords(pos)
+                if px is not None:
+                    # Draw a solid mark for the specific objective
+                    self._draw_circle_vectorized(layers, idx_obj, px, py, 0, max(3, r), 1.0, False)
+            else:
+                px, py = self._get_pixel_coords(target)
+                if px is not None:
+                    # Draw a solid mark (radius 3 pixels)
+                    self._draw_circle_vectorized(layers, idx_obj, px, py, 0, 3, 1.0, False)
 
     def _draw_terrain_pathing(self, game_info, layers):
         layer_idx = LayerConstants.LAYERS[LayerConstants.TERRAIN_PATHABLE]

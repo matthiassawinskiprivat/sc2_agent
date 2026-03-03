@@ -69,6 +69,7 @@ class MaskablePPO(SB3MaskablePPO):
         imitation_data_max_steps: int = 0,
         imitation_coef: float = 0.5,
         level_name: Optional[str] = None,
+        **kwargs,
     ):
         # FORCE verbose to be an int. If it's a string, we MUST convert it before SB3 sees it.
         try:

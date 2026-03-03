@@ -71,12 +71,13 @@ def decompose_action_dim(dim: int) -> Tuple[int, int, int]:
     return 0, 0, dim
 
 def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_action_dim: Optional[int] = None, 
-                        action_handling_mode: str = "auto", new_grid_size: Optional[int] = None) -> Dict[str, Any]:
+                        action_handling_mode: str = "auto", new_grid_size: Optional[int] = None,
+                        target_state_dict: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Adjusts the model weights to match new input channels and/or new action space dimensions.
     
     Args:
-        state_dict: The model's state dictionary.
+        state_dict: The model's state dictionary from the checkpoint.
         new_in_channels: The target number of input channels for CNN.
         new_action_dim: (Optional) The target number of output actions.
         action_handling_mode: Strategy for action dimension change.
@@ -84,6 +85,7 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
             - "expand": Forces block repetition/randomization (e.g., 1 Head -> 4 Heads).
             - "interpolate": Forces spatial interpolation.
         new_grid_size: (Optional) The grid size of the target environment.
+        target_state_dict: (Optional) The state dictionary of the current (target) model to match shapes.
         
     Returns:
         A new state dictionary with grafted weights.
@@ -113,159 +115,112 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                 new_state_dict[key] = new_weight
 
     # --- 2. Handle Action/Value Heads ---
-    if new_action_dim is not None:
-        head_keys = [k for k in state_dict.keys() if ("action_net" in k or "value_net" in k) and "mlp_extractor" not in k]
+    head_keys = [k for k in state_dict.keys() if ("action_net" in k or "value_net" in k) and "mlp_extractor" not in k]
+    
+    for key in head_keys:
+        old_weight = state_dict[key]
         
-        for key in head_keys:
-            old_weight = state_dict[key]
-            old_dim = old_weight.shape[0]
+        # Determine target shapes if possible
+        target_shape = target_state_dict[key].shape if (target_state_dict and key in target_state_dict) else None
+        
+        # Handle 2D weights [output_dim, input_features]
+        if len(old_weight.shape) == 2:
+            old_out_dim, old_in_feat = old_weight.shape
             
-            if old_dim == new_action_dim: continue
-            if old_dim == 1: continue # Skip scalar heads
-
-            # --- DECOMPOSITION ---
-            n_old, g_old, c_old = decompose_action_dim(old_dim)
-            n_new, g_new, c_new = decompose_action_dim(new_action_dim)
+            target_out_dim = target_shape[0] if target_shape else (new_action_dim if "action_net" in key else old_out_dim)
+            target_in_feat = target_shape[1] if target_shape else old_in_feat
             
-            # Override with explicit grid size if provided
-            if new_grid_size:
-                g_new = new_grid_size
-                n_new = new_action_dim // (g_new * g_new)
-                c_new = new_action_dim % (g_new * g_new)
+            if old_out_dim == target_out_dim and old_in_feat == target_in_feat:
+                continue
 
-            logger.debug(f"Decomposed '{key}': Old({n_old}x{g_old}^2 + {c_old}) -> New({n_new}x{g_new}^2 + {c_new})")
-
-            # Check for block expansion (multiples)
-            is_expansion = (new_action_dim > old_dim) and (new_action_dim % old_dim == 0)
+            logger.info(f"Grafting head weights for '{key}': [{old_out_dim}, {old_in_feat}] -> [{target_out_dim}, {target_in_feat}]")
             
-            # Check for pure square spatial (legacy logic check)
-            old_grid_float = math.sqrt(old_dim)
-            new_grid_float = math.sqrt(new_action_dim)
-            is_square_scaling = old_grid_float.is_integer() and new_grid_float.is_integer()
-
-            # Decision Logic
-            use_interpolation = False
-            use_expansion = False
-            use_hybrid = False # Interpolate spatial, then handle categorical
-            
-            if action_handling_mode == "interpolate":
-                use_interpolation = True
-            elif action_handling_mode == "expand":
-                use_expansion = True
-            elif g_old > 0 and g_new > 0 and g_new != g_old:
-                # Grid size changed! We MUST interpolate the spatial components.
-                use_hybrid = True
-            else: # auto
-                if is_square_scaling and not is_expansion:
-                    use_interpolation = True
-                elif is_expansion:
-                    use_expansion = True # Prefer expansion for clean multiples like 2x, 4x
-                elif is_square_scaling:
-                    use_interpolation = True
-            
-            # --- EXECUTION ---
-            if use_interpolation and is_square_scaling:
-                logger.info(f"Interpolating spatial weights for '{key}': {old_dim} -> {new_action_dim}")
-                try:
-                    if len(old_weight.shape) == 2:
-                        new_state_dict[key] = interpolate_spatial_weights(old_weight, int(old_grid_float), int(new_grid_float))
-                    elif len(old_weight.shape) == 1:
-                        w_reshaped = old_weight.view(-1, 1)
-                        w_interp = interpolate_spatial_weights(w_reshaped, int(old_grid_float), int(new_grid_float))
-                        new_state_dict[key] = w_interp.view(-1)
-                except Exception as e:
-                    logger.error(f"Interpolation failed: {e}")
-                    del new_state_dict[key]
-
-            elif use_hybrid:
-                logger.info(f"Hybrid Grafting for '{key}': Interpolating {n_old} spatial heads ({g_old}->{g_new}) and appending/truncating categorical.")
-                try:
-                    in_feat = old_weight.shape[1] if len(old_weight.shape) == 2 else 1
-                    
-                    # 1. Prepare new weight tensor
-                    if len(old_weight.shape) == 2:
-                        new_w = torch.randn(new_action_dim, in_feat) * 0.01
-                    else:
-                        new_w = torch.randn(new_action_dim) * 0.01
-                    
-                    # 2. Interpolate each spatial head
-                    num_heads_to_transfer = min(n_old, n_new)
-                    if n_old > 0 and n_new > 0:
-                        for i in range(num_heads_to_transfer):
-                            old_start = i * (g_old * g_old)
-                            old_end = old_start + (g_old * g_old)
-                            new_start = i * (g_new * g_new)
-                            new_end = new_start + (g_new * g_new)
-                            
-                            head_weights = old_weight[old_start:old_end]
-                            if len(old_weight.shape) == 1:
-                                head_weights = head_weights.view(-1, 1)
-                                
-                            interp_head = interpolate_spatial_weights(head_weights, g_old, g_new)
-                            
-                            if len(old_weight.shape) == 2:
-                                new_w[new_start:new_end, :] = interp_head
-                            else:
-                                new_w[new_start:new_end] = interp_head.view(-1)
-                                
-                    # 3. Handle Categorical part
-                    # We copy old categorical actions to the end of the new spatial block
-                    old_cat_start = n_old * (g_old * g_old)
-                    new_cat_start = n_new * (g_new * g_new)
-                    
-                    num_cat_to_transfer = min(c_old, c_new)
-                    if num_cat_to_transfer > 0:
-                        if len(old_weight.shape) == 2:
-                            new_w[new_cat_start:new_cat_start+num_cat_to_transfer, :] = old_weight[old_cat_start:old_cat_start+num_cat_to_transfer, :]
-                        else:
-                            new_w[new_cat_start:new_cat_start+num_cat_to_transfer] = old_weight[old_cat_start:old_cat_start+num_cat_to_transfer]
-                    
-                    # 4. Loud Bias for COMPLETELY new actions (categorical or new heads)
-                    if len(old_weight.shape) == 1:
-                        # Find indices that were NOT copied
-                        # We just apply it to everything from new_cat_start + num_cat_to_transfer onwards
-                        new_w[new_cat_start+num_cat_to_transfer:] = 5.0
-                        
-                    new_state_dict[key] = new_w
-                    
-                except Exception as e:
-                    logger.error(f"Hybrid grafting failed for '{key}': {e}")
-                    del new_state_dict[key]
-                    
-            elif use_expansion and is_expansion:
-                logger.info(f"Expanding action blocks for '{key}': {old_dim} -> {new_action_dim}")
-                if len(old_weight.shape) == 2:
-                    _, in_feat = old_weight.shape
-                    new_w = torch.randn(new_action_dim, in_feat) * 0.01
-                    new_w[:old_dim, :] = old_weight # Copy first block
-                    new_state_dict[key] = new_w
-                elif len(old_weight.shape) == 1:
-                    new_b = torch.randn(new_action_dim) * 0.01
-                    new_b[:old_dim] = old_weight
-                    new_state_dict[key] = new_b
+            # --- STEP A: Handle in_features mismatch ---
+            if old_in_feat != target_in_feat:
+                logger.info(f"Resizing in_features for '{key}': {old_in_feat} -> {target_in_feat}")
+                if target_in_feat < old_in_feat:
+                    # Truncate features
+                    temp_weight = old_weight[:, :target_in_feat]
                 else:
-                    del new_state_dict[key]
-
-            elif new_action_dim > old_dim:
-                # CATEGORICAL APPEND: Handle adding categorical heads to existing spatial heads
-                logger.info(f"Appending categorical actions for '{key}': {old_dim} -> {new_action_dim} (Loud Bias: +5.0)")
-                if len(old_weight.shape) == 2:
-                    out_dim, in_feat = old_weight.shape
-                    # For weights, we use small random values for new indices
-                    new_w = torch.randn(new_action_dim, in_feat) * 0.01
-                    new_w[:old_dim, :] = old_weight
-                    new_state_dict[key] = new_w
-                elif len(old_weight.shape) == 1:
-                    # For biases, we use a LOUD (+5.0) value for the new categorical slots
-                    new_b = torch.ones(new_action_dim) * 5.0
-                    new_b[:old_dim] = old_weight
-                    new_state_dict[key] = new_b
-                else:
-                    del new_state_dict[key]
-            
+                    # Pad features with small random values
+                    temp_weight = torch.randn(old_out_dim, target_in_feat) * 0.01
+                    temp_weight[:, :old_in_feat] = old_weight
+                
+                # Update current working weight for next steps
+                current_weight = temp_weight
+                curr_out_dim = old_out_dim
             else:
-                logger.info(f"Dropping incompatible layer '{key}'")
-                del new_state_dict[key]
+                current_weight = old_weight
+                curr_out_dim = old_out_dim
+
+            # --- STEP B: Handle output_dim (Actions) mismatch ---
+            if curr_out_dim != target_out_dim:
+                # Reuse existing spatial handling logic but on current_weight
+                
+                # Check for Pure Square Interpolation
+                n_old, g_old, c_old = decompose_action_dim(curr_out_dim)
+                n_new, g_new, c_new = decompose_action_dim(target_out_dim)
+                if new_grid_size:
+                    g_new = new_grid_size
+                    n_new = target_out_dim // (g_new * g_new)
+                    c_new = target_out_dim % (g_new * g_new)
+
+                # Decision logic simplified for hybrid cases
+                use_interpolation = (g_old > 0 and g_new > 0 and g_new != g_old) or (action_handling_mode == "interpolate")
+                
+                if use_interpolation and g_old > 0:
+                    logger.info(f"Interpolating spatial heads for '{key}': {n_old}x{g_old}^2 -> {n_new}x{g_new}^2")
+                    try:
+                        # 1. Prepare new weight tensor
+                        new_w = torch.randn(target_out_dim, target_in_feat) * 0.01
+                        
+                        # 2. Interpolate each spatial head
+                        num_heads_to_transfer = min(n_old, n_new)
+                        for i in range(num_heads_to_transfer):
+                            o_s, o_e = i * (g_old * g_old), (i + 1) * (g_old * g_old)
+                            n_s, n_e = i * (g_new * g_new), (i + 1) * (g_new * g_new)
+                            
+                            head = current_weight[o_s:o_e]
+                            interp_head = interpolate_spatial_weights(head, g_old, g_new)
+                            new_w[n_s:n_e, :] = interp_head
+                                
+                        # 3. Handle Categorical part
+                        o_cat_s = n_old * (g_old * g_old)
+                        n_cat_s = n_new * (g_new * g_new)
+                        num_cat_to_transfer = min(c_old, c_new)
+                        if num_cat_to_transfer > 0:
+                            new_w[n_cat_s : n_cat_s + num_cat_to_transfer, :] = current_weight[o_cat_s : o_cat_s + num_cat_to_transfer, :]
+                        
+                        new_state_dict[key] = new_w
+                    except Exception as e:
+                        logger.error(f"Hybrid grafting failed for '{key}': {e}")
+                        del new_state_dict[key]
+                else:
+                    # Simple resize (truncate or append)
+                    if target_out_dim < curr_out_dim:
+                        new_state_dict[key] = current_weight[:target_out_dim, :]
+                    else:
+                        new_w = torch.randn(target_out_dim, target_in_feat) * 0.01
+                        new_w[:curr_out_dim, :] = current_weight
+                        new_state_dict[key] = new_w
+            else:
+                new_state_dict[key] = current_weight
+
+        # Handle 1D biases [output_dim]
+        elif len(old_weight.shape) == 1:
+            old_dim = old_weight.shape[0]
+            target_dim = target_shape[0] if target_shape else (new_action_dim if "action_net" in key else old_dim)
+            
+            if old_dim != target_dim:
+                logger.info(f"Grafting head biases for '{key}': {old_dim} -> {target_dim}")
+                if target_dim < old_dim:
+                    new_state_dict[key] = old_weight[:target_dim]
+                else:
+                    new_b = torch.ones(target_dim) * (5.0 if "action_net" in key else 0.0)
+                    new_b[:old_dim] = old_weight
+                    new_state_dict[key] = new_b
+        
+    return new_state_dict
         
     return new_state_dict
 

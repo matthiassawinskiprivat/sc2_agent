@@ -2,18 +2,16 @@
 # Configuration for Level 3: Multi-Zergling Control
 
 training:
-  training_steps: 500_000
+  training_steps: 7_000_000
   num_envs: 6
   n_steps: 2048
-  batch_size: 512
+  batch_size: 1024
   learning_rate: 0.0003
   render_beacon: True
   watchdog_timeout: 3600
-  imitation_data_percentage: 50
-  imitation_data_max_steps: 250_000
-  imitation_coef: 1.0
 
 # Environment parameters
+
 env:
   env_class: "Level3Env"
   targets: 2
@@ -21,29 +19,33 @@ env:
   headless: True
   max_steps: 600
   maps_dir: "train/maps/level_3"
+  guidance_curriculum: False
   rewards:
-    success: 20.0
-    step_penalty: -0.02
-    # distance_multiplier applies to the progress towards optimally assigned beacons
-    distance_multiplier: 0.5
+    success: 50.0
+    step_penalty: -0.1
+    distance_multiplier: 0.1
   active_layers: []
 
 # Model parameters
 model:
-  policy: "CnnPolicy"
+  algorithm: "MaskableRecurrentPPO"
+  policy: "CnnLstmPolicy"
+  rnn_type: "gru"
   policy_kwargs:
     features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
     features_extractor_kwargs:
       features_dim: 512
-      thinking_steps: 1
+      thinking_steps: 3
+    lstm_hidden_size: 512
+    net_arch: []
   gamma: 0.99
   ent_coef: 0.001
-  n_epochs: 10
+  n_epochs: 4
 
 # Evaluation parameters
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_len_mean"
-    threshold: 80.0 # Adjusted for potentially longer episodes
+    threshold: 1.0 # Set to an unreachable value to force full training_steps
     comparison: "<"
     patience: 5

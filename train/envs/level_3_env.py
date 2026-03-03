@@ -37,6 +37,16 @@ class Level3Env(Level0Env):
         # Prefix logs with Level3Env to distinguish
         super()._log(f"[Level3Env] {message}")
 
+    def action_masks(self):
+        if self._bot:
+            # Robust unit identification for masking
+            if hasattr(self, "active_unit_tags") and 0 <= self.current_unit_index < len(self.active_unit_tags):
+                self._bot.active_unit_tag = self.active_unit_tags[self.current_unit_index]
+            else:
+                self._bot.active_unit_tag = None
+            self._bot.current_unit_index = self.current_unit_index
+        return super().action_masks()
+
     async def _setup_game_session(self):
         # Verify connection
         try:
@@ -63,8 +73,6 @@ class Level3Env(Level0Env):
             realtime=self.visualize,
         )
         await self._client.join_game(race=Race.Zerg)
-        # Enable full vision for unit cleanup and observation
-        await self._client.debug_show_map()
         
         self._bot._generated_frame = -1
         game_info = await self._client.get_game_info()
@@ -150,10 +158,35 @@ class Level3Env(Level0Env):
         # Distance Shaping (Progress towards assigned beacon)
         dist_reward = self._bot.calculate_distance_reward(current_tag)
         
-        # Collection Reward (Did this unit reach a beacon?)
-        collection_rewards = await self._bot.check_collections()
-        success_reward = collection_rewards.get(current_tag, 0.0)
+        # Collection Reward (Did ANY unit reach a beacon?)
+        # check_collections now buffers rewards in self._bot.pending_success_rewards
+        await self._bot.check_collections()
         
+        # Attribution: Retrieve THIS unit's buffered success reward
+        success_reward = self._bot.pending_success_rewards.pop(current_tag, 0.0)
+        
+        # If this unit just got its success reward, finalize its removal from the game
+        if success_reward > 0:
+            # Kill unit and its assigned beacon
+            b_tag = self._bot.current_assignments.get(current_tag)
+            tags_to_kill = [current_tag]
+            if b_tag:
+                tags_to_kill.append(b_tag)
+            
+            await self._client.debug_kill_unit(tags_to_kill)
+            
+            # Clean up assignment for THIS unit only
+            if current_tag in self._bot.current_assignments:
+                del self._bot.current_assignments[current_tag]
+            
+            # Note: We NO LONGER delete other assignments to b_tag here.
+            # Level3Bot will dynamically re-assign those units in the next _get_observation.
+            
+            if current_tag in self._bot.completed_tags:
+                self._bot.completed_tags.remove(current_tag)
+            if b_tag in self._bot.completed_tags:
+                self._bot.completed_tags.remove(b_tag)
+
         # Step Penalty (Per action to encourage speed)
         rewards_conf = self.training_conf.get('rewards', {})
         step_penalty = rewards_conf.get('step_penalty', -0.05)

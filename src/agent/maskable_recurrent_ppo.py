@@ -128,13 +128,13 @@ class MaskableRecurrentRolloutBuffer(RecurrentRolloutBuffer):
         else:
              raise NotImplementedError("Only Discrete, MultiDiscrete and MultiBinary action spaces are supported for masking")
              
-        self.action_masks = np.ones((self.buffer_size, self.n_envs, action_dim), dtype=np.float32)
+        self.action_masks = np.ones((self.buffer_size, self.n_envs, action_dim), dtype=bool)
         self.vram_cache: Dict[str, torch.Tensor] = {}
 
     def reset(self):
         super().reset()
         if hasattr(self, "action_masks"):
-            self.action_masks.fill(1.0)
+            self.action_masks.fill(True)
         self.clear_vram_cache()
 
     def clear_vram_cache(self):
@@ -639,17 +639,26 @@ class MaskableRecurrentPPO(RecurrentPPO):
         seed: Optional[int] = None,
         device: Union[torch.device, str] = "auto",
         _init_setup_model: bool = True,
+        # New parameters for recurrent support
+        rnn_type: str = "lstm",
         # New parameters for imitation learning
         imitation_data_percentage: float = 0.0,
         imitation_data_max_steps: int = 0,
         imitation_coef: float = 0.5,
         level_name: Optional[str] = None,
+        **kwargs,
     ):
         # Ensure verbose is an int to prevent TypeErrors in SB3 base class
         try:
             verbose = int(verbose)
         except (ValueError, TypeError):
             verbose = 0
+
+        self.rnn_type = rnn_type.lower()
+        # Ensure rnn_type is passed to policy_kwargs for the policy to use
+        if policy_kwargs is None:
+            policy_kwargs = {}
+        policy_kwargs["rnn_type"] = self.rnn_type
 
         super().__init__(
             policy=policy,
@@ -1105,3 +1114,33 @@ class MaskableRecurrentPPO(RecurrentPPO):
         action_masks: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:
         return self.policy.predict(observation, state, episode_start, deterministic, action_masks=action_masks)
+
+    @classmethod
+    def load(cls, path: str, env: Optional[GymEnv] = None, device: Union[torch.device, str] = "auto", custom_objects: Optional[Dict[str, Any]] = None, **kwargs):
+        """
+        Overridden load to automatically handle architecture mismatches (e.g. Non-Recurrent -> Recurrent).
+        This makes the class a drop-in replacement that fixes loading errors without pipeline changes.
+        """
+        try:
+            # Try standard load first
+            return super().load(path, env=env, device=device, custom_objects=custom_objects, **kwargs)
+        except (RuntimeError, ValueError, TypeError) as e:
+            # If it fails, retry with non-strict parameter loading and no optimizer
+            logger.warning(f"Standard load failed, attempting architecture-agnostic recovery for MaskableRecurrentPPO: {e}")
+            
+            if custom_objects is None:
+                custom_objects = {}
+            
+            # Signal SB3 to skip optimizer loading
+            custom_objects["optimizer"] = None
+            
+            # Temporary monkeypatch to force non-strict loading
+            original_set_params = cls.set_parameters
+            def non_strict_set_params(self, params, exact_match=True, device=None):
+                return original_set_params(self, params, exact_match=False, device=device)
+            
+            try:
+                cls.set_parameters = non_strict_set_params
+                return super().load(path, env=env, device=device, custom_objects=custom_objects, **kwargs)
+            finally:
+                cls.set_parameters = original_set_params

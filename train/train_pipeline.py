@@ -2,6 +2,8 @@ import sys
 import os
 import glob
 import yaml
+import shutil
+import subprocess
 from typing import List, Any
 from loguru import logger
 from stable_baselines3.common.monitor import Monitor
@@ -190,6 +192,47 @@ class PipelineManager:
         logger.info(f"No models found for level '{level_name}'. Needs new training session.")
         return "NEEDS_TRAINING", None
 
+    def _cleanup_logs(self, start_level_name):
+        """
+        Deletes TensorBoard logs for the given level and all subsequent levels
+        defined in the pipeline. This ensures a clean TensorBoard view when
+        re-training from a specific point.
+        """
+        levels = self.pipeline_config.get("levels", [])
+        if start_level_name not in levels:
+            return
+
+        start_idx = levels.index(start_level_name)
+        levels_to_clean = levels[start_idx:]
+
+        for lvl in levels_to_clean:
+            log_dir = os.path.join(self.log_dir_base, lvl)
+            if os.path.exists(log_dir):
+                logger.info(f"Cleaning up logs for level '{lvl}': {log_dir}")
+                try:
+                    shutil.rmtree(log_dir)
+                except Exception as e:
+                    logger.error(f"Failed to delete log directory {log_dir}: {e}")
+
+    def _start_tensorboard(self):
+        """
+        Starts TensorBoard in the background, pointing to the logs directory.
+        """
+        logger.info(f"Starting TensorBoard on log directory: {self.log_dir_base}")
+        try:
+            # On Windows, we use 'start' or 'python -m tensorboard.main'
+            # 'tensorboard' might not be in PATH but 'python -m tensorboard.main' usually works if installed
+            # Using Popen to run it in background
+            cmd = ["python", "-m", "tensorboard.main", "--logdir", self.log_dir_base]
+            
+            # Use DETACHED_PROCESS on Windows to ensure it lives after script exits if needed, 
+            # but usually just Popen is enough for concurrent execution.
+            # redirect stdout/stderr to devnull to avoid cluttering training logs
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False)
+            logger.info("TensorBoard process launched in background (default port 6006).")
+        except Exception as e:
+            logger.error(f"Failed to start TensorBoard: {e}")
+
     def _train_level(self, level_name, model_path_to_load=None, reset_timesteps=True):
         """
         Trains a single level.
@@ -251,15 +294,33 @@ class PipelineManager:
 
         logger.info(f"Selected Environment Class: {EnvClass.__name__}")
 
+        # Combined initial steps for curriculum (extract from checkpoint name if possible)
+        initial_steps = 0
+        if model_path_to_load:
+            # Check for pattern zerg_X_steps.zip
+            filename = os.path.basename(model_path_to_load)
+            if "steps" in filename:
+                try:
+                    parts = filename.split("_")
+                    for p in parts:
+                        if p.isdigit():
+                            initial_steps = int(p)
+                            break
+                    logger.info(f"Resuming level '{level_name}' from global step count: {initial_steps}")
+                except Exception as e:
+                    logger.warning(f"Could not parse step count from checkpoint filename '{filename}': {e}")
+
         # Combine training and env parameters for the environment's view
         combined_conf = training_params.copy()
         combined_conf.update(env_params)
+        combined_conf["is_training"] = True # Enable curriculum progress
 
         # For SubprocVecEnv, we need to pass a list of callables that return the env
         env_fns = [
             EnvFactory(
                 EnvClass, level_name, not headless, env_params["grid_size"], i, num_envs,
-                self.sc2_process_cls, self.client_cls, combined_conf, env_params.get("max_steps", 300)
+                self.sc2_process_cls, self.client_cls, combined_conf, env_params.get("max_steps", 300),
+                initial_steps=initial_steps
             )
             for i in range(num_envs)
         ]
@@ -312,20 +373,7 @@ class PipelineManager:
                     
                     state_dict = saved_policy.state_dict()
                     
-                    # Handle Mismatches via Smart Grafting
-                    logger.info(f"Performing smart weight transfer (Inputs: {current_obs_shape[0]} ch, Actions: {env.action_space.n}, Grid: {env_params['grid_size']})...")
-                    try:
-                        state_dict = graft_model_weights(
-                            state_dict, 
-                            new_in_channels=current_obs_shape[0],
-                            new_action_dim=env.action_space.n,
-                            new_grid_size=env_params["grid_size"]
-                        )
-                    except Exception as e:
-                        logger.error(f"Weight grafting failed: {e}")
-                        raise e
-                    
-                    # Create fresh model
+                    # 1. Create fresh model first to get target state dict for smart grafting
                     model_kwargs = {
                         "policy": model_params["policy"],
                         "env": env,
@@ -349,8 +397,23 @@ class PipelineManager:
                         model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
 
                     model = AlgoClass(**model_kwargs)
+                    target_state_dict = model.policy.state_dict()
+
+                    # 2. Handle Mismatches via Smart Grafting
+                    logger.info(f"Performing smart weight transfer (Inputs: {current_obs_shape[0]} ch, Actions: {env.action_space.n}, Grid: {env_params['grid_size']})...")
+                    try:
+                        state_dict = graft_model_weights(
+                            state_dict, 
+                            new_in_channels=current_obs_shape[0],
+                            new_action_dim=env.action_space.n,
+                            new_grid_size=env_params["grid_size"],
+                            target_state_dict=target_state_dict
+                        )
+                    except Exception as e:
+                        logger.error(f"Weight grafting failed: {e}")
+                        raise e
                     
-                    # Load compatible weights
+                    # 3. Load compatible weights
                     missing, unexpected = model.policy.load_state_dict(state_dict, strict=False)
                     logger.info(f"Weights loaded. Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
                     
@@ -425,6 +488,12 @@ class PipelineManager:
             
             logger.info(f"Starting training loop for {steps_to_train} timesteps (Reset timesteps: {reset_timesteps})...")
             
+            # CRITICAL: Clear the episode info buffer when starting a new level
+            # This prevents metrics from the previous level (e.g., short episode lengths)
+            # from leaking into the new level and triggering early stopping callbacks.
+            if hasattr(model, "ep_info_buffer") and model.ep_info_buffer is not None:
+                model.ep_info_buffer.clear()
+            
             # Watchdog to detect hangs in the training loop
             # Default to 1 hour (3600s) to accommodate slow CPU training optimization phases.
             w_timeout = training_params.get("watchdog_timeout", 3600.0)
@@ -485,6 +554,9 @@ class PipelineManager:
         # Ensure clean state before starting
         kill_switch_sc2()
         
+        # Start TensorBoard automatically
+        self._start_tensorboard()
+        
         last_final_model_path = None
 
         # Find the last completed level to start curriculum from, even across sessions
@@ -515,6 +587,9 @@ class PipelineManager:
                 # If it's a new training, try to load the model from the previous level
                 model_to_load = last_final_model_path
                 reset_timesteps = True # Start fresh for this level
+                
+                # Cleanup logs for this level and all subsequent ones
+                self._cleanup_logs(level_name)
             
             # Train the level
             final_model_path = self._train_level(level_name, model_path_to_load=model_to_load, reset_timesteps=reset_timesteps)

@@ -24,6 +24,11 @@ class UnitControlAgent:
         self._range_x = np.arange(self.cnn_width)
         self._range_y = np.arange(self.cnn_height)
 
+        # Caching
+        self._cached_action_mask = None
+        self._cached_eroded_terrain = None
+        self._cached_grid_id = None
+
     def process_transformed_observation(self, transformed_observation: np.ndarray,
                                       game_info: Any = None) -> np.ndarray:
         self.transformed_observation = transformed_observation
@@ -41,6 +46,12 @@ class UnitControlAgent:
 
         # 1. Get Geometry
         grid = self.last_game_info.pathing_grid
+        grid_id = id(grid)
+        
+        # Cache Check
+        if self._cached_grid_id == grid_id and self._cached_action_mask is not None:
+            return self._cached_action_mask
+
         crop_x, crop_y = 0, 0
         mw, mh = grid.width, grid.height
 
@@ -92,7 +103,9 @@ class UnitControlAgent:
         # Downsample the 128x128 mask to grid_size x grid_size
         resized_mask = cv2.resize(mask_2d, (self.grid_size, self.grid_size), interpolation=cv2.INTER_AREA)
 
-        return (resized_mask.flatten() > 0).astype(bool)
+        self._cached_action_mask = (resized_mask.flatten() > 0).astype(bool)
+        self._cached_grid_id = grid_id
+        return self._cached_action_mask
 
 
     def get_transport_mask(self, units: list, game_info: Any, is_transport: bool = False, active_unit: Any = None, cast_range: float = 4.0) -> np.ndarray:
@@ -217,6 +230,9 @@ class UnitControlAgent:
 
         # 1. Geometry Setup (Same as get_action_mask)
         grid = game_info.pathing_grid
+        grid_id = id(grid)
+        
+        # We need geometry (scale/offset) for the dynamic entity_mask part
         crop_x, crop_y = 0, 0
         mw, mh = grid.width, grid.height
 
@@ -229,42 +245,50 @@ class UnitControlAgent:
         offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
         offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
 
-        # 2. Get Raw Pathing Data
-        raw_data = grid.data_numpy if hasattr(grid, "data_numpy") else np.ones((mw, mh), dtype=np.uint8)
-        total_w = game_info.map_size.width
-        total_h = game_info.map_size.height
-
-        # 3. Create Terrain-Only Mask (Walkable = 255)
-        # Use Inverse Mapping to get pathing into CNN space
-        sc2_x_1d = ((self._range_x - offset_x) / scale) + crop_x
-        y_term = (self.cnn_height - 1) - self._range_y
-        sc2_y_1d = ((y_term - offset_y) / scale) + crop_y
-
-        sc2_x_grid, sc2_y_grid = np.meshgrid(sc2_x_1d.astype(int), sc2_y_1d.astype(int))
-        valid_coords = (sc2_x_grid >= 0) & (sc2_x_grid < total_w) & \
-                       (sc2_y_grid >= 0) & (sc2_y_grid < total_h)
-
-        terrain_mask = np.zeros((self.cnn_height, self.cnn_width), dtype=np.uint8)
-        valid_x = sc2_x_grid[valid_coords]
-        valid_y = sc2_y_grid[valid_coords]
-
-        # Sample from raw_data
-        dim0, dim1 = raw_data.shape
-        if dim0 == total_w and dim1 == total_h:
-            terrain_mask[valid_coords] = (raw_data[valid_y, valid_x] != 0).astype(np.uint8) * 255
-        elif dim0 == total_h and dim1 == total_w:
-            terrain_mask[valid_coords] = (raw_data[valid_y, valid_x] != 0).astype(np.uint8) * 255
+        # --- CACHED TERRAIN PART ---
+        if self._cached_grid_id == grid_id and self._cached_eroded_terrain is not None:
+            eroded_terrain = self._cached_eroded_terrain
         else:
-            cx = np.clip(valid_x, 0, dim1 - 1)
-            cy = np.clip(valid_y, 0, dim0 - 1)
-            terrain_mask[valid_coords] = (raw_data[cy, cx] != 0).astype(np.uint8) * 255
+            # 2. Get Raw Pathing Data
+            raw_data = grid.data_numpy if hasattr(grid, "data_numpy") else np.ones((mw, mh), dtype=np.uint8)
+            total_w = game_info.map_size.width
+            total_h = game_info.map_size.height
 
-        # 4. Erode Terrain Mask (Safety Margin from Cliffs)
-        # 1-pixel erosion (3x3 kernel) to ensure units aren't dropped on the extreme edge
-        kernel = np.ones((3, 3), np.uint8) 
-        eroded_terrain = cv2.erode(terrain_mask, kernel, iterations=1)
+            # 3. Create Terrain-Only Mask (Walkable = 255)
+            # Use Inverse Mapping to get pathing into CNN space
+            sc2_x_1d = ((self._range_x - offset_x) / scale) + crop_x
+            y_term = (self.cnn_height - 1) - self._range_y
+            sc2_y_1d = ((y_term - offset_y) / scale) + crop_y
 
-        # 5. Create Entity Footprint Mask (Blocked = 255)
+            sc2_x_grid, sc2_y_grid = np.meshgrid(sc2_x_1d.astype(int), sc2_y_1d.astype(int))
+            valid_coords = (sc2_x_grid >= 0) & (sc2_x_grid < total_w) & \
+                           (sc2_y_grid >= 0) & (sc2_y_grid < total_h)
+
+            terrain_mask = np.zeros((self.cnn_height, self.cnn_width), dtype=np.uint8)
+            valid_x = sc2_x_grid[valid_coords]
+            valid_y = sc2_y_grid[valid_coords]
+
+            # Sample from raw_data
+            dim0, dim1 = raw_data.shape
+            if dim0 == total_w and dim1 == total_h:
+                terrain_mask[valid_coords] = (raw_data[valid_y, valid_x] != 0).astype(np.uint8) * 255
+            elif dim0 == total_h and dim1 == total_w:
+                terrain_mask[valid_coords] = (raw_data[valid_y, valid_x] != 0).astype(np.uint8) * 255
+            else:
+                cx = np.clip(valid_x, 0, dim1 - 1)
+                cy = np.clip(valid_y, 0, dim0 - 1)
+                terrain_mask[valid_coords] = (raw_data[cy, cx] != 0).astype(np.uint8) * 255
+
+            # 4. Erode Terrain Mask (Safety Margin from Cliffs)
+            # 1-pixel erosion (3x3 kernel) to ensure units aren't dropped on the extreme edge
+            kernel = np.ones((3, 3), np.uint8) 
+            eroded_terrain = cv2.erode(terrain_mask, kernel, iterations=1)
+            
+            # Update Cache
+            self._cached_eroded_terrain = eroded_terrain
+            self._cached_grid_id = grid_id
+
+        # 5. Create Entity Footprint Mask (Blocked = 255) - ALWAYS DYNAMIC
         entity_mask = np.zeros((self.cnn_height, self.cnn_width), dtype=np.uint8)
         
         # Filter for buildings and resources
@@ -391,3 +415,6 @@ class UnitControlAgent:
         self.transformed_observation = None
         self.last_game_info = None
         self.last_action = None
+        self._cached_action_mask = None
+        self._cached_eroded_terrain = None
+        self._cached_grid_id = None

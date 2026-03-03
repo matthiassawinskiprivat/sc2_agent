@@ -1,11 +1,11 @@
-# config/level_3.yaml
-# Configuration for Level 5: Multi-Zergling Control
+# config/level_5.yaml
+# Configuration for Level 5: 6 Zerglings
 
 training:
-  training_steps: 1000_000
+  training_steps: 2_000_000
   num_envs: 6
   n_steps: 2048
-  batch_size: 512
+  batch_size: 1024
   learning_rate: 0.0003
   render_beacon: True
 
@@ -17,27 +17,32 @@ env:
   headless: True
   max_steps: 1000
   maps_dir: "train/maps/level_5"
+  guidance_curriculum: False
   rewards:
-    success: 120.0
+    success: 70.0
     step_penalty: -0.1
-    distance_multiplier: 0.5
+    distance_multiplier: 0.1
 
 # Model parameters
 model:
-  policy: "CnnPolicy"
+  algorithm: "MaskableRecurrentPPO"
+  policy: "CnnLstmPolicy"
+  rnn_type: "gru"
   policy_kwargs:
     features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
     features_extractor_kwargs:
       features_dim: 512
-      thinking_steps: 1
+      thinking_steps: 3
+    lstm_hidden_size: 512
+    net_arch: []
   gamma: 0.99
   ent_coef: 0.001
-  n_epochs: 10
+  n_epochs: 4
 
 # Evaluation parameters
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_len_mean"
-    threshold: 150.0 # Adjusted for potentially longer episodes
+    threshold: 1.0 # Adjusted for 6 units (15 steps per unit)
     comparison: "<"
     patience: 5

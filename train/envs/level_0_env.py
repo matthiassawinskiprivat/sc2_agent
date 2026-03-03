@@ -32,7 +32,7 @@ HARD_RESET_COUNT = 10
 class Level0Env(gym.Env):
     def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1,
                  level_name: str = "level_0", sc2_process_cls=None, client_cls=None, training_conf: Dict = None,
-                 max_steps: int = 300):
+                 max_steps: int = 300, initial_steps: int = 0):
         super(Level0Env, self).__init__()
         self.visualize = visualize
         self.grid_size = grid_size
@@ -115,6 +115,9 @@ class Level0Env(gym.Env):
 
         self.steps = 0
         self.max_steps = max_steps
+        # Initialize total steps from the provided initial_steps (adjusted for per-worker count)
+        self.total_steps_in_level = initial_steps // max(1, self.num_workers)
+        self.training_steps_limit = self.training_conf.get("training_steps", 100_000)
 
     def _discover_maps(self):
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -265,8 +268,6 @@ class Level0Env(gym.Env):
             realtime=self.visualize,
         )
         await self._client.join_game(race=Race.Zerg)
-        # Enable full vision for unit cleanup and observation
-        await self._client.debug_show_map()
         
         self._bot._generated_frame = -1
         game_info = await self._client.get_game_info()
@@ -303,6 +304,7 @@ class Level0Env(gym.Env):
         It bridges the synchronous Gym API with the asynchronous SC2 simulation.
         """
         self.steps += 1
+        self.total_steps_in_level += 1
         try:
             # 1. Run the async logic in our dedicated event loop
             obs, reward, done, truncated, info = self._loop.run_until_complete(self._async_step(action))
@@ -401,7 +403,20 @@ class Level0Env(gym.Env):
     def action_masks(self):
         mask = None
         if self._bot and hasattr(self._bot, "action_masks"):
-            mask = self._bot.action_masks()
+            # Calculate training progress (0.0 to 1.0)
+            # If training_steps_limit is 0 or we are in a non-training context, 
+            # we should default to 1.0 (mask OFF).
+            is_training = self.training_conf.get("is_training", True) # Default to true for model.learn
+            if is_training:
+                # Multiply worker steps by total number of workers to estimate global progress.
+                # This ensures the guidance curriculum mask grows at the expected rate 
+                # even when training is distributed across multiple environments.
+                global_steps_estimate = self.total_steps_in_level * self.num_workers
+                progress = min(1.0, global_steps_estimate / max(1, self.training_steps_limit))
+            else:
+                progress = 1.0
+                
+            mask = self._bot.action_masks(curriculum_progress=progress)
         else:
             mask = np.ones(self.action_space.n, dtype=bool)
         

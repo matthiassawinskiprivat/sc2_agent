@@ -52,7 +52,7 @@ def test_level_3_observation_guidance():
     bot.agent_system.process_observation.return_value = {"agent_0": np.zeros((1, 64, 64))}
     
     # Mock assignments to be deterministic and decoupled from math utils
-    bot._calculate_optimal_assignment = MagicMock(return_value={
+    bot.get_optimal_assignments = MagicMock(return_value={
         u1.tag: b1.tag,
         u2.tag: b2.tag
     })
@@ -65,10 +65,10 @@ def test_level_3_observation_guidance():
     assert call_args is not None
     raw_obs = call_args.kwargs['observation']
     
-    # 1. Verify "Unblinded": All beacons should be in enemy_units
-    assert len(raw_obs['enemy_units']) == 2
+    # 1. Verify Selective Attention: Only the assigned beacon should be in enemy_units
+    assert len(raw_obs['enemy_units']) == 1
     assert b1 in raw_obs['enemy_units']
-    assert b2 in raw_obs['enemy_units']
+    assert b2 not in raw_obs['enemy_units']
     
     # 2. Verify "Guidance": command_target should be B1's position (0, 10)
     assert raw_obs['command_target'] == b1.position
@@ -77,6 +77,10 @@ def test_level_3_observation_guidance():
     bot.get_observation_for_unit(u2.tag)
     call_args = bot.agent_system.process_observation.call_args
     raw_obs = call_args.kwargs['observation']
+    
+    # Verify Selective Attention for U2
+    assert len(raw_obs['enemy_units']) == 1
+    assert b2 in raw_obs['enemy_units']
     
     # Verify Guidance for U2 -> B2 (10, 10)
     assert raw_obs['command_target'] == b2.position

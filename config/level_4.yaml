@@ -1,48 +1,49 @@
-# config/level_3.yaml
-# Configuration for Level 3: Multi-Zergling Control
+# config/level_4.yaml
+# Configuration for Level 4: 4 Zerglings
 
 training:
-  training_steps: 1_300_000
+  training_steps: 8_000_000
   num_envs: 6
   n_steps: 2048
-  batch_size: 512
+  batch_size: 1024
   learning_rate: 0.0003
   render_beacon: True
   watchdog_timeout: 3600
-  imitation_data_percentage: 50
-  imitation_data_max_steps: 400_000
-  imitation_coef: 1.0
 
 # Environment parameters
 env:
   env_class: "Level3Env"
-  targets: 4
+  targets: 3
   grid_size: 128
   headless: True
   max_steps: 800
   maps_dir: "train/maps/level_4"
+  guidance_curriculum: False
   rewards:
-    success: 40.0
-    step_penalty: -0.02
-    distance_multiplier: 0.5
+    success: 50.0
+    step_penalty: -0.1
+    distance_multiplier: 0.1
 
 # Model parameters
 model:
-  policy: "CnnPolicy"
+  algorithm: "MaskableRecurrentPPO"
+  policy: "CnnLstmPolicy"
+  rnn_type: "gru"
   policy_kwargs:
     features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
     features_extractor_kwargs:
       features_dim: 512
-      thinking_steps: 1
+      thinking_steps: 3
+    lstm_hidden_size: 512
+    net_arch: []
   gamma: 0.99
   ent_coef: 0.001
-  n_epochs: 10
-
+  n_epochs: 4
 
 # Evaluation parameters
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_len_mean"
-    threshold: 100.0 # Adjusted for potentially longer episodes
+    threshold: 1.0 # Adjusted for 4 units (15 steps per unit)
     comparison: "<"
     patience: 5

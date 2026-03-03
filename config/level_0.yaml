@@ -2,16 +2,13 @@
 # Configuration for the first level of training.
 
 training:
-  training_steps: 2_000_000
+  training_steps: 3_000_000
   num_envs: 6
   n_steps: 2048
-  batch_size: 256
+  batch_size: 1024
   learning_rate: 0.0003
   render_beacon: True
   watchdog_timeout: 3600
-  imitation_data_percentage: 50
-  imitation_data_max_steps: 1_000_000
-  imitation_coef: 1.0
 
 # Environment parameters
 env:
@@ -20,10 +17,11 @@ env:
   max_steps: 300
   larger_units: False
   maps_dir: "train/maps/level_0"
+  guidance_curriculum: False
   rewards:
-    success: 10.0
-    step_penalty: -0.02
-    distance_multiplier: 0.5
+    success: 50.0
+    step_penalty: -0.1
+    distance_multiplier: 0.1
   active_layers:
     - "allied_unit_density"
     - "enemy_unit_density"
@@ -40,15 +38,15 @@ model:
     features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
     features_extractor_kwargs:
       features_dim: 512
-      thinking_steps: 1
+      thinking_steps: 3
   gamma: 0.99
   ent_coef: 0.001
-  n_epochs: 10
+  n_epochs: 4
 
 # Evaluation parameters
 evaluation:
   stop_on_metric:
     monitor: "rollout/ep_len_mean"
-    threshold: 50.0
+    threshold: 10.0
     comparison: "<"
     patience: 5

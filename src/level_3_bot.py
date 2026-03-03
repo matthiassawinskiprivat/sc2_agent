@@ -36,6 +36,8 @@ class Level3Bot(SC2Bot):
         # previous_distances is used to calculate reward based on progress towards beacons.
         self.previous_distances = {} # Map unit_tag -> distance to assigned beacon
         self.current_assignments = {} # Map unit_tag -> beacon_tag
+        self.pending_success_rewards = {} # unit_tag -> float (buffered rewards)
+        self.completed_tags = set() # tags (units/beacons) that should be removed
 
     async def reset_game_state(self, verify: bool = True):
         """
@@ -44,6 +46,8 @@ class Level3Bot(SC2Bot):
         await super().reset_game_state(verify=verify)
         self.previous_distances = {}
         self.current_assignments = {}
+        self.pending_success_rewards = {}
+        self.completed_tags = set()
         
         # Spawn new units at valid pathable locations
         grid = self.game_info.pathing_grid
@@ -79,6 +83,7 @@ class Level3Bot(SC2Bot):
         """
         Calculates the optimal unit-to-beacon assignment using the Hungarian algorithm
         (linear sum assignment) to minimize total distance.
+        Handles surplus units by assigning them to their closest beacon.
         """
         units = self.get_active_zerglings()
         beacons = self.all_units(self.beacon_type)
@@ -98,12 +103,21 @@ class Level3Bot(SC2Bot):
                 dist_matrix[i, j] = unit.distance_to(beacon)
                 
         # Solve linear sum assignment to minimize total distance
+        # Handles non-square matrices (min(units, beacons) assignments)
         row_ind, col_ind = linear_sum_assignment(dist_matrix)
         
         assignment = {}
         for r, c in zip(row_ind, col_ind):
             # Map unit tag to beacon tag
             assignment[units[r].tag] = beacon_list[c].tag
+            
+        # SURPLUS HANDLING: Ensure EVERY unit has a target if targets exist.
+        if num_units > num_beacons:
+            for unit in units:
+                if unit.tag not in assignment:
+                    # Assign surplus unit to its closest beacon (many-to-one)
+                    closest_beacon = beacons.closest_to(unit)
+                    assignment[unit.tag] = closest_beacon.tag
             
         return assignment
 
@@ -175,6 +189,41 @@ class Level3Bot(SC2Bot):
             
         return total_dist_change * dist_multiplier
 
+    def get_active_units(self):
+        """Returns sorted list of active units for Level 3."""
+        return self.get_active_zerglings()
+
+    def action_masks(self, curriculum_progress: float = 1.0) -> np.ndarray:
+        """
+        Overrides action_masks to ensure the guidance mask uses the 
+        CORRECT assigned beacon for the currently active unit.
+        """
+        # 1. Identify which unit is active (using the same logic as SC2Bot.action_masks)
+        active_unit_tag = getattr(self, "active_unit_tag", None)
+        active_unit = None
+        if active_unit_tag:
+            active_unit = self.all_units.find_by_tag(active_unit_tag)
+        
+        if not active_unit:
+            # Fallback to index-based for legacy support
+            active_units = self.get_active_units()
+            # Level3Env should keep self.current_unit_index in sync on the bot
+            idx = getattr(self, "current_unit_index", 0)
+            if 0 <= idx < len(active_units):
+                active_unit = active_units[idx]
+            
+        # 2. Set self.beacon to the assigned beacon for this unit
+        if active_unit:
+            if not self.current_assignments:
+                self.current_assignments = self.get_optimal_assignments()
+            
+            b_tag = self.current_assignments.get(active_unit.tag)
+            if b_tag:
+                self.beacon = self.all_units.find_by_tag(b_tag)
+        
+        # 3. Call base implementation which now uses the correctly set self.beacon
+        return super().action_masks(curriculum_progress=curriculum_progress)
+
     def get_active_zerglings(self):
         """Returns sorted list of active units."""
         if not hasattr(self, "units"): return []
@@ -192,33 +241,42 @@ class Level3Bot(SC2Bot):
         
     def _get_observation(self, active_unit: Unit = None) -> Tuple[np.ndarray, Dict]:
         """
-        Override to use persistent assignments for beacon targeting.
+        Override to implement selective targeting and handle dynamic re-assignment.
         """
         if active_unit is None:
             return super()._get_observation()
             
-        # Use persistent assignments instead of greedy closest_to
+        # 1. Dynamic Re-assignment: If the assigned beacon is gone, pick a new one
         if not self.current_assignments:
             self.current_assignments = self.get_optimal_assignments()
             
         assigned_beacon_tag = self.current_assignments.get(active_unit.tag)
+        target_beacon = self.all_units.find_by_tag(assigned_beacon_tag) if assigned_beacon_tag else None
+
+        # If the target is missing but beacons still exist, re-calculate
+        if not target_beacon and self.all_units(self.beacon_type).exists:
+            self.current_assignments = self.get_optimal_assignments()
+            assigned_beacon_tag = self.current_assignments.get(active_unit.tag)
+            target_beacon = self.all_units.find_by_tag(assigned_beacon_tag) if assigned_beacon_tag else None
+
+        # 2. Layer Rendering Parity
+        # Show ONLY the assigned beacon to the agent on the COMMAND_OBJECTIVE layer.
+        # This helps the model focus on its specific target in multi-unit scenarios.
+        all_beacons = list(self.all_units(self.beacon_type))
         
-        target_beacon = None
-        if assigned_beacon_tag:
-            target_beacon = self.all_units.find_by_tag(assigned_beacon_tag)
-            
-        # Determine the position the unit should move towards (for the command_target layer)
-        target_pos = target_beacon.position if target_beacon else None
+        # ALLIED UNITS: Should NOT include any beacons.
+        allied_units = self.units.filter(lambda u: u.type_id != self.beacon_type)
 
         raw_obs = {
-            'units': self.units.filter(lambda u: u.tag != (target_beacon.tag if target_beacon else -1)),
+            'units': allied_units,
             'selected_units': [active_unit],
-            'enemy_units': [target_beacon] if target_beacon else [],
+            'enemy_units': all_beacons, # All beacons remain visible in enemy layer
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
-            'command_target': target_pos
+            # Focus COMMAND_OBJECTIVE on the specific assigned target
+            'command_target': [target_beacon] if target_beacon else []
         }
         
         if self.agent_system:
@@ -234,9 +292,10 @@ class Level3Bot(SC2Bot):
         Useful for UI rendering where we want to see the full state.
         """
         all_beacons = list(self.all_units(self.beacon_type))
+        allied_units = self.units.filter(lambda u: u.type_id != self.beacon_type)
         
         # For the global view, we show the objective of the currently active unit
-        target_pos = None
+        target_beacon = None
         target_unit = active_unit
         if not target_unit:
             active_units = self.get_active_zerglings()
@@ -246,19 +305,17 @@ class Level3Bot(SC2Bot):
         if target_unit:
             b_tag = self.current_assignments.get(target_unit.tag)
             if b_tag:
-                beacon = self.all_units.find_by_tag(b_tag)
-                if beacon:
-                    target_pos = beacon.position
+                target_beacon = self.all_units.find_by_tag(b_tag)
 
         raw_obs = {
-            'units': self.units,
+            'units': allied_units,
             'selected_units': [target_unit] if target_unit else [],
             'enemy_units': all_beacons, # All beacons are visible
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
-            'command_target': target_pos
+            'command_target': target_beacon
         }
         
         if self.agent_system:
@@ -267,8 +324,9 @@ class Level3Bot(SC2Bot):
         
     async def check_collections(self) -> Dict[int, float]:
         """
-        Checks for unit-beacon collisions for ASSIGNED pairs and returns rewards.
-        Removes both unit and beacon from the game and the assignment mapping.
+        Checks for unit-beacon collisions for ONLY assigned pairs.
+        This enforces that units follow their assigned objectives.
+        Returns ONLY the rewards for units that JUST reached their beacon this step.
         """
         unit_rewards = {}
         
@@ -283,30 +341,41 @@ class Level3Bot(SC2Bot):
         success_reward_total = rewards_conf.get('success', 100.0)
         success_reward_per_event = success_reward_total / max(1, self.targets_count)
         
-        tags_to_kill = []
-        collected_tags = set()
-        
         # We iterate over a copy of items to allow deletion
         for u_tag, b_tag in list(self.current_assignments.items()):
+            # Skip if already completed but not yet removed from game
+            if u_tag in self.completed_tags:
+                continue
+
             unit = self.units.find_by_tag(u_tag)
             beacon = self.all_units.find_by_tag(b_tag)
             
             if unit and beacon:
-                dist = unit.distance_to(beacon)
+                # Robust distance check
+                try:
+                    dist = unit.distance_to(beacon)
+                    if not isinstance(dist, (int, float, np.number)):
+                         dist = ((unit.position.x - beacon.position.x)**2 + (unit.position.y - beacon.position.y)**2)**0.5
+                except:
+                    dist = 999.0
+                
                 if dist < 2.0:
                     logger.info(f"Collection! Unit {u_tag} reached assigned Beacon {b_tag}")
-                    tags_to_kill.append(u_tag)
-                    tags_to_kill.append(b_tag)
-                    collected_tags.add(u_tag)
+                    # Mark for deletion
+                    self.completed_tags.add(u_tag)
+                    self.completed_tags.add(b_tag)
+                    
+                    # Buffer reward
+                    self.pending_success_rewards[u_tag] = self.pending_success_rewards.get(u_tag, 0.0) + success_reward_per_event
                     unit_rewards[u_tag] = success_reward_per_event
-                    # Persistent assignment ends when collected
-                    del self.current_assignments[u_tag]
+                    
+                    # Cleanup assignments targeting these entities
+                    # We do NOT delete from current_assignments yet, to keep the 'target' visible
+                    # until the unit is actually killed in its turn.
             elif not unit or not beacon:
                  # Clean up assignments if units/beacons are gone for other reasons
                  if u_tag in self.current_assignments:
                      del self.current_assignments[u_tag]
         
-        if tags_to_kill:
-            await self.client.debug_kill_unit(tags_to_kill)
-            
         return unit_rewards
+

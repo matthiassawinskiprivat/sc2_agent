@@ -11,7 +11,7 @@ class EnvFactory:
     Picklable factory for environment creation, necessary for SubprocVecEnv on Windows.
     """
     def __init__(self, env_class, level_name, visualize, grid_size, rank, num_envs, 
-                 sc2_process_cls, client_cls, training_conf, max_steps):
+                 sc2_process_cls, client_cls, training_conf, max_steps, initial_steps=0):
         self.env_class = env_class
         self.level_name = level_name
         self.visualize = visualize
@@ -22,6 +22,7 @@ class EnvFactory:
         self.client_cls = client_cls
         self.training_conf = training_conf
         self.max_steps = max_steps
+        self.initial_steps = initial_steps
 
     def __call__(self):
         env = self.env_class(
@@ -33,7 +34,8 @@ class EnvFactory:
             sc2_process_cls=self.sc2_process_cls,
             client_cls=self.client_cls,
             training_conf=self.training_conf,
-            max_steps=self.max_steps
+            max_steps=self.max_steps,
+            initial_steps=self.initial_steps
         )
         # Wrap with Monitor first, then ActionMasker
         env = Monitor(env)
