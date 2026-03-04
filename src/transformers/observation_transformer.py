@@ -31,6 +31,20 @@ class ObservationTransformer:
         # Layer Pruning
         self.active_layers = self.training_conf.get('active_layers', [])
         self.num_active_layers = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
+        
+        # Optimization: Pre-calculate active indices for fast lookup in drawing methods
+        self.active_indices = set()
+        if self.active_layers:
+            self.active_indices = {LayerConstants.LAYERS[ln] for ln in self.active_layers if ln in LayerConstants.LAYERS}
+        else:
+            self.active_indices = set(range(LayerConstants.get_num_layers()))
+        
+        # Optimization: Pre-calculate active indices for fast lookup in drawing methods
+        self.active_indices = set()
+        if self.active_layers:
+            self.active_indices = {LayerConstants.LAYERS[ln] for ln in self.active_layers if ln in LayerConstants.LAYERS}
+        else:
+            self.active_indices = set(range(LayerConstants.get_num_layers()))
 
         # Transformation State
         self.scale = 1.0
@@ -764,6 +778,10 @@ class ObservationTransformer:
 
     def _draw_circle_vectorized(self, layers, layer_idx, cx, cy, radius_game, radius_px_override=None, value=1.0,
                                 accumulate=False):
+        # Optimization: Check if layer is active before doing any math
+        if hasattr(self, "active_indices") and layer_idx not in self.active_indices:
+            return
+
         if radius_px_override is not None:
             r = int(radius_px_override)
         else:
