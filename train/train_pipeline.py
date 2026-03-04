@@ -17,6 +17,10 @@ import torch
 # caused by numerical precision issues when masking logits with -1e8
 torch.distributions.Distribution.set_default_validate_args(False)
 
+# Optimization: Limit PyTorch CPU threads to reduce orchestration overhead
+# and context switching during the training phase.
+torch.set_num_threads(8)
+
 # Add path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
