@@ -41,7 +41,7 @@ class ReplayTranslatorBot(BotAI):
         # Ensure agent system has the latest game info
         self.agent_system.unit_agents["agent_0"].last_game_info = self.game_info
         
-        move_mask = self.agent_system.unit_agents["agent_0"].get_action_mask()
+        move_mask = self.agent_system.unit_agents["agent_0"].get_action_mask([unit])
         
         is_transport_actor = unit.cargo_max > 0
         is_flying = unit.is_flying

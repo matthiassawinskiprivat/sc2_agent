@@ -268,7 +268,7 @@ class SC2Bot(BotAI):
                  gs = self.agent_system.grid_size
              return np.ones(gs * gs, dtype=bool)
 
-        move_mask = self.agent_system.unit_agents["agent_0"].get_action_mask()
+        move_mask = self.agent_system.unit_agents["agent_0"].get_action_mask(self.all_units)
         
         # Robust Unit Identification
         active_unit_tag = getattr(self, "active_unit_tag", None)

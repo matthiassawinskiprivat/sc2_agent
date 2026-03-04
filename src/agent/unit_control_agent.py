@@ -8,7 +8,7 @@ Includes:
 
 import numpy as np
 import cv2
-from typing import Any, Tuple, Dict
+from typing import Any, Tuple, Dict, Optional, List
 
 class UnitControlAgent:
     def __init__(self, cnn_input_size: Tuple[int, int] = (128, 128), grid_size: int = 128, dilation_size: int = 3):
@@ -28,6 +28,7 @@ class UnitControlAgent:
         self._cached_action_mask = None
         self._cached_eroded_terrain = None
         self._cached_grid_id = None
+        self._cached_structure_count = 0
 
     def process_transformed_observation(self, transformed_observation: np.ndarray,
                                       game_info: Any = None) -> np.ndarray:
@@ -36,7 +37,7 @@ class UnitControlAgent:
             self.last_game_info = game_info
         return transformed_observation
 
-    def get_action_mask(self) -> np.ndarray:
+    def get_action_mask(self, units: Optional[list] = None) -> np.ndarray:
         """
         Generates a boolean mask using Inverse Mapping.
         True = Valid Action (Walkable), False = Invalid (Wall/Void).
@@ -48,9 +49,19 @@ class UnitControlAgent:
         grid = self.last_game_info.pathing_grid
         grid_id = id(grid)
         
-        # Cache Check
-        if self._cached_grid_id == grid_id and self._cached_action_mask is not None:
+        # Calculate structure count for invalidation
+        struct_count = 0
+        if units:
+            struct_count = sum(1 for u in units if getattr(u, "is_structure", False))
+
+        # Cache Check: Invalidate if map changes OR structure count changes
+        if (self._cached_grid_id == grid_id and 
+            self._cached_action_mask is not None and 
+            self._cached_structure_count == struct_count):
             return self._cached_action_mask
+
+        # Update Tracking
+        self._cached_structure_count = struct_count
 
         crop_x, crop_y = 0, 0
         mw, mh = grid.width, grid.height
@@ -418,3 +429,4 @@ class UnitControlAgent:
         self._cached_action_mask = None
         self._cached_eroded_terrain = None
         self._cached_grid_id = None
+        self._cached_structure_count = 0

@@ -42,6 +42,7 @@ class ObservationTransformer:
         # Caching
         self._terrain_cache = None
         self._last_map_name = None
+        self._last_structure_count = 0
 
         # Pre-allocated grids
         self._grid_y = np.arange(self.feature_map_height).reshape(-1, 1)
@@ -117,7 +118,8 @@ class ObservationTransformer:
         # ------------------------------------------------------------------
         # 2. Draw Environment
         # ------------------------------------------------------------------
-        self._draw_terrain_pathing(game_info, layers)
+        current_struct_count = len(allied_structures) + len(enemy_structures)
+        self._draw_terrain_pathing(game_info, layers, current_struct_count)
         self._draw_terrain_creep(raw_obs, layers)
 
         # ------------------------------------------------------------------
@@ -254,16 +256,24 @@ class ObservationTransformer:
                     # Draw a solid mark (radius 3 pixels)
                     self._draw_circle_vectorized(layers, idx_obj, px, py, 0, 3, 1.0, False)
 
-    def _draw_terrain_pathing(self, game_info, layers):
+    def _draw_terrain_pathing(self, game_info, layers, current_structure_count=0):
         layer_idx = LayerConstants.LAYERS[LayerConstants.TERRAIN_PATHABLE]
         current_map_name = getattr(game_info, 'map_name', '')
 
-        if self._terrain_cache is not None and self._last_map_name == current_map_name:
+        # Invalidate cache if map changes OR if buildings are built/destroyed
+        if (self._terrain_cache is not None and 
+            self._last_map_name == current_map_name and 
+            self._last_structure_count == current_structure_count):
             layers[layer_idx] = self._terrain_cache
             return
 
         if not hasattr(game_info, 'pathing_grid') or not hasattr(game_info, 'terrain_height'):
             return
+
+        # Update tracking
+        self._last_map_name = current_map_name
+        self._last_structure_count = current_structure_count
+
 
         path_data = self._get_numpy_data(game_info.pathing_grid)
         height_data = self._get_numpy_data(game_info.terrain_height)
