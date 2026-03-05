@@ -6,7 +6,17 @@ from loguru import logger
 def kill_switch_sc2():
     """
     Finds and kills all StarCraft II processes aggressively.
+    Can be skipped by setting environment variable SC2_SKIP_KILL_SWITCH=1
     """
+    if os.environ.get("SC2_SKIP_KILL_SWITCH") == "1":
+        logger.info("SC2_SKIP_KILL_SWITCH is set. Skipping global process termination.")
+        # We still clear the internal list to be safe
+        try:
+            from sc2.sc2process import SC2Process
+            SC2Process.procs = []
+        except: pass
+        return 0
+
     logger.info("Executing SC2 kill switch...")
     
     # 1. Use taskkill on Windows for maximum aggression

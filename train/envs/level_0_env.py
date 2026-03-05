@@ -43,22 +43,20 @@ class Level0Env(gym.Env):
         self.training_conf = training_conf or {}
         
         # Load Additive Configuration
-        # We assume 'config' directory is in the root of the project
         try:
-            self.config_manager = ConfigManager("config")
+            config_dir = self.training_conf.get("config_dir", "config")
+            self.config_manager = ConfigManager(config_dir)
+            
+            # Cumulative configs
             self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
-            self.training_conf['active_layers'] = self.active_layers
-            
             self.action_heads = self.config_manager.get_cumulative_action_heads(self.level_name)
-            self.training_conf['action_heads'] = self.action_heads
-            
             self.categorical_heads = self.config_manager.get_cumulative_categorical_heads(self.level_name)
-            self.training_conf['categorical_heads'] = self.categorical_heads
+            self.agent_architecture = self.config_manager.get_agent_architecture()
             
-            # Load rewards from level config
+            # Load level-specific config for rewards and other params
             level_conf = self.config_manager.get_level_config(self.level_name)
             
-            # FLAT CONFIG: Move training/env flags to root for ObservationTransformer
+            # FLAT CONFIG: Move training/env flags to root for ObservationTransformer and bot
             for section in ["training", "env"]:
                 if section in level_conf:
                     for k, v in level_conf[section].items():
@@ -68,6 +66,7 @@ class Level0Env(gym.Env):
             self.training_conf['active_layers'] = self.active_layers
             self.training_conf['action_heads'] = self.action_heads
             self.training_conf['categorical_heads'] = self.categorical_heads
+            self.training_conf['agent_architecture'] = self.agent_architecture
 
             if 'env' in level_conf and 'rewards' in level_conf['env']:
                 self.training_conf['rewards'] = level_conf['env']['rewards']
@@ -80,14 +79,24 @@ class Level0Env(gym.Env):
             # Inject into training_conf for bot/agent visibility
             self.training_conf['imitation_data_percentage'] = self.imitation_data_percentage
             self.imitation_data_max_steps = self.imitation_data_max_steps
+            
         except Exception as e:
             print(f"Warning: Failed to load config for {self.level_name}: {e}")
             self.active_layers = []
-            self.action_heads = ["move"] # Default
+            self.action_heads = ["move"] 
             self.categorical_heads = []
+            self.agent_architecture = "original"
 
         # Dependency Injection for testing
         self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
+        
+        # Branch Bot class by architecture
+        if self.agent_architecture == "universal":
+            from src.sc2_bot_universal import SC2BotUniversal
+            self._bot_cls = SC2BotUniversal
+        else:
+            self._bot_cls = SC2Bot
+            
         self._client_cls = client_cls if client_cls else Client
 
         self.map_list = self._discover_maps()
@@ -101,11 +110,23 @@ class Level0Env(gym.Env):
         self._log(f"Initialized Worker {self.worker_id} (Index: {self.worker_index}) with map {self.map_name}")
 
         num_channels = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_channels, 128, 128), dtype=np.float32)
         
-        spatial_size = len(self.action_heads) * self.grid_size * self.grid_size
-        categorical_size = len(self.categorical_heads)
-        self.action_space = spaces.Discrete(spatial_size + categorical_size)
+        # New Dict Observation Space
+        self.observation_space = spaces.Dict({
+            "map": spaces.Box(low=0.0, high=1.0, shape=(num_channels, 128, 128), dtype=np.float32),
+            "command": spaces.Box(low=0.0, high=1.0, shape=(10,), dtype=np.float32)
+        })
+        
+        if self.agent_architecture == "universal":
+            # Universal: MultiDiscrete([N_Commands, Spatial_Resolution^2])
+            n_heads = len(self.action_heads)
+            spatial_res = self.training_conf.get("spatial_resolution", 16)
+            self.action_space = spaces.MultiDiscrete([n_heads, spatial_res * spatial_res])
+        else:
+            # ORIGINAL FLAT DISCRETE SPACE
+            spatial_size = len(self.action_heads) * self.grid_size * self.grid_size
+            categorical_size = len(self.categorical_heads)
+            self.action_space = spaces.Discrete(spatial_size + categorical_size)
 
         self._sc2_process = None
         self._client = None
@@ -121,7 +142,18 @@ class Level0Env(gym.Env):
 
     def _discover_maps(self):
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        maps_dir = Path(current_dir).parent / "maps" / self.level_name
+        
+        # Priority: 1. training_conf['maps_dir'], 2. standard level_name path
+        config_maps_dir = self.training_conf.get("maps_dir")
+        if config_maps_dir:
+            # If absolute or relative to project root
+            maps_dir = Path(config_maps_dir)
+            if not maps_dir.is_absolute():
+                # Assume relative to project root (which is parent of train/)
+                maps_dir = Path(current_dir).parent.parent / config_maps_dir
+        else:
+            maps_dir = Path(current_dir).parent / "maps" / self.level_name
+            
         if not maps_dir.exists():
             return []
         map_files = [f.stem for f in maps_dir.glob("*.SC2Map")]
@@ -395,7 +427,16 @@ class Level0Env(gym.Env):
         self._log("close() complete.")
 
     def _resolve_map(self, map_name):
-        map_path = Path(__file__).resolve().parent.parent / "maps" / self.level_name / f"{map_name}.SC2Map"
+        config_maps_dir = self.training_conf.get("maps_dir")
+        if config_maps_dir:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            maps_dir = Path(config_maps_dir)
+            if not maps_dir.is_absolute():
+                maps_dir = Path(current_dir).parent.parent / config_maps_dir
+            map_path = maps_dir / f"{map_name}.SC2Map"
+        else:
+            map_path = Path(__file__).resolve().parent.parent / "maps" / self.level_name / f"{map_name}.SC2Map"
+            
         if not map_path.exists():
             raise FileNotFoundError(f"Map not found: {map_path}")
         return Map(map_path)
@@ -403,14 +444,9 @@ class Level0Env(gym.Env):
     def action_masks(self):
         mask = None
         if self._bot and hasattr(self._bot, "action_masks"):
-            # Calculate training progress (0.0 to 1.0)
-            # If training_steps_limit is 0 or we are in a non-training context, 
-            # we should default to 1.0 (mask OFF).
-            is_training = self.training_conf.get("is_training", True) # Default to true for model.learn
+            # Calculate training progress
+            is_training = self.training_conf.get("is_training", True)
             if is_training:
-                # Multiply worker steps by total number of workers to estimate global progress.
-                # This ensures the guidance curriculum mask grows at the expected rate 
-                # even when training is distributed across multiple environments.
                 global_steps_estimate = self.total_steps_in_level * self.num_workers
                 progress = min(1.0, global_steps_estimate / max(1, self.training_steps_limit))
             else:
@@ -418,13 +454,27 @@ class Level0Env(gym.Env):
                 
             mask = self._bot.action_masks(curriculum_progress=progress)
         else:
-            mask = np.ones(self.action_space.n, dtype=bool)
+            # MultiDiscrete or Discrete fallback
+            if isinstance(self.action_space, spaces.MultiDiscrete):
+                mask = [np.ones(dim, dtype=bool) for dim in self.action_space.nvec]
+            else:
+                mask = np.ones(self.action_space.n, dtype=bool)
         
         # Validation logging and fallback
-        mask_sum = np.sum(mask)
+        # Handle both list of arrays (MultiDiscrete) and single array (Discrete)
+        if isinstance(mask, list):
+            mask_sum = sum(np.sum(m) for m in mask)
+            total_size = sum(m.size for m in mask)
+        else:
+            mask_sum = np.sum(mask)
+            total_size = mask.size
+
         if mask_sum == 0:
-            self._log(f"CRITICAL: All actions masked! (size {mask.size}). Falling back to all-True.")
-            mask = np.ones(mask.size, dtype=bool)
+            self._log(f"CRITICAL: All actions masked! (size {total_size}). Falling back to all-True.")
+            if isinstance(mask, list):
+                mask = [np.ones(m.size, dtype=bool) for m in mask]
+            else:
+                mask = np.ones(total_size, dtype=bool)
         
         return mask
 

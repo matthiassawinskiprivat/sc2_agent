@@ -1,17 +1,30 @@
 from src.level_3_bot import Level3Bot
+from src.sc2_bot_universal import SC2BotUniversal
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from sc2.unit import Unit
 import random
 import numpy as np
 from loguru import logger
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Any
 
 class Level7Bot(Level3Bot):
     """
     Level 7 Bot: Combat Basics (Move vs Attack).
     Controls a specific unit type against an enemy unit type.
     """
+    def action_masks(self, curriculum_progress: float = 1.0) -> Any:
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            return SC2BotUniversal.action_masks(self, curriculum_progress)
+        return super().action_masks(curriculum_progress)
+
+    async def apply_action(self, unit_tag, action):
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            return await SC2BotUniversal.apply_action(self, unit_tag, action)
+        return await super().apply_action(unit_tag, action)
+
     def __init__(self, conn, training_conf=None):
         super().__init__(conn, training_conf)
         self.previous_health = {} # tag -> health (enemy)

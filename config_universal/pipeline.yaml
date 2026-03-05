@@ -1,0 +1,5 @@
+# config/pipeline.yaml
+# Defines the sequence of training levels.
+agent_architecture: universal
+levels:
+  - "level_move_single"

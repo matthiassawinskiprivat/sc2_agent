@@ -98,7 +98,12 @@ class ImitationReplayBuffer:
             if len(obs) < sequence_length:
                 pad_len = sequence_length - len(obs)
                 obs = np.concatenate([obs, np.tile(obs[-1:], (pad_len, 1, 1, 1))], axis=0)
-                acts = np.concatenate([acts, np.tile(acts[-1:], (pad_len,))], axis=0)
+                
+                # Robust padding for actions (handles both scalars and MultiDiscrete vectors)
+                last_act = acts[-1:]
+                act_pad_shape = [pad_len] + [1] * (len(last_act.shape) - 1)
+                acts = np.concatenate([acts, np.tile(last_act, tuple(act_pad_shape))], axis=0)
+                
                 starts = np.concatenate([starts, np.zeros(pad_len, dtype=bool)], axis=0)
                 if masks is not None:
                     masks = np.concatenate([masks, np.tile(masks[-1:], (pad_len, 1))], axis=0)

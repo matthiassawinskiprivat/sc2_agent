@@ -1,11 +1,12 @@
 from src.sc2_bot import SC2Bot
+from src.sc2_bot_universal import SC2BotUniversal
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from sc2.unit import Unit
 import random
 import numpy as np
 from loguru import logger
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Any
 from scipy.optimize import linear_sum_assignment
 
 
@@ -15,6 +16,18 @@ class Level3Bot(SC2Bot):
     It implements a cycle-based control where each unit gets an observation
     and takes an action sequentially within a single game step.
     """
+    def action_masks(self, curriculum_progress: float = 1.0) -> Any:
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            return SC2BotUniversal.action_masks(self, curriculum_progress)
+        return super().action_masks(curriculum_progress)
+
+    async def apply_action(self, unit_tag, action):
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            return await SC2BotUniversal.apply_action(self, unit_tag, action)
+        return await super().apply_action(unit_tag, action)
+
     def __init__(self, conn, training_conf=None):
         super().__init__(conn, training_conf)
         self.targets_count = self.training_conf.get("targets", 1)

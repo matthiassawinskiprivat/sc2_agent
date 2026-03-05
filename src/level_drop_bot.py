@@ -1,8 +1,9 @@
 from src.level_7_bot import Level7Bot
+from src.sc2_bot_universal import SC2BotUniversal
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from loguru import logger
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Any
 import numpy as np
 
 class LevelDropBot(Level7Bot):
@@ -11,6 +12,18 @@ class LevelDropBot(Level7Bot):
     Focus: Loading, Moving, Unloading.
     Supports Terran (Medivac/Marine), Zerg (Overlord/Zergling), and Protoss (WarpPrism/Zealot).
     """
+    def action_masks(self, curriculum_progress: float = 1.0) -> Any:
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            return SC2BotUniversal.action_masks(self, curriculum_progress)
+        return super().action_masks(curriculum_progress)
+
+    async def apply_action(self, unit_tag, action):
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            return await SC2BotUniversal.apply_action(self, unit_tag, action)
+        return await super().apply_action(unit_tag, action)
+
     TRANSPORT_TYPES = {
         UnitTypeId.MEDIVAC, 
         UnitTypeId.OVERLORD, 

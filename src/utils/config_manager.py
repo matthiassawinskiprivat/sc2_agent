@@ -6,10 +6,14 @@ class ConfigManager:
     """
     Manages loading and merging of level configurations, specifically for additive properties.
     """
-    def __init__(self, config_dir: str):
+    def __init__(self, config_dir: str = "config"):
         self.config_dir = config_dir
         self.pipeline_config = self._load_yaml("pipeline.yaml")
         self.levels = self.pipeline_config.get("levels", [])
+
+    def get_agent_architecture(self) -> str:
+        """Returns the agent architecture from pipeline config, default 'original'."""
+        return self.pipeline_config.get("agent_architecture", "original")
 
     def _load_yaml(self, filename: str) -> Dict[str, Any]:
         path = os.path.join(self.config_dir, filename)

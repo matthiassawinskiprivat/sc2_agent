@@ -332,7 +332,7 @@ class UnitControlAgent:
         
         return (resized_mask.flatten() > 0).astype(bool)
 
-    def convert_spatial_action_to_world(self, action_idx: int) -> Tuple[float, float]:
+    def convert_spatial_action_to_world(self, action_idx: int, head_name: str = None, active_unit: Any = None) -> Tuple[float, float]:
         """
         CONVERSION: Model Index -> Game World Position
         This is the most critical function for the agent's spatial awareness.

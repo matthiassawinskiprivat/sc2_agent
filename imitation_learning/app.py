@@ -19,6 +19,7 @@ from imitation_learning.config_resolver import ConfigResolver
 from imitation_learning.recorder import Recorder
 from imitation_learning.replay_manager import ReplayManager
 from imitation_learning.translator import ReplayTranslator
+from imitation_learning.universal_translator import UniversalReplayTranslator
 from imitation_learning.validator import Validator
 from src.ui.debug_ui import DebugUI
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
@@ -1242,10 +1243,15 @@ class VerifyTab(QWidget):
 class ImitationLearningWorkstation(QMainWindow):
     def __init__(self, project_root: str = "."):
         super().__init__()
+        self.project_root = project_root
         self.resolver = ConfigResolver(project_root)
         self.recorder = Recorder(project_root)
         self.replay_manager = ReplayManager(project_root)
+        
+        # We start with the original translator as default
         self.translator = ReplayTranslator(project_root)
+        self.universal_translator = UniversalReplayTranslator(project_root)
+        
         self.validator = Validator(project_root)
         
         self.setWindowTitle("SC2 Imitation Learning Workstation")
@@ -1259,12 +1265,28 @@ class ImitationLearningWorkstation(QMainWindow):
         self.verify_tab = VerifyTab(self.resolver, self.replay_manager, self.validator)
         
         # Connect signals
+        self.record_tab.level_selector.currentTextChanged.connect(self.on_level_changed)
         self.record_tab.recording_finished.connect(self.translate_tab.refresh_list)
         self.translate_tab.translation_finished.connect(self.verify_tab.refresh_list)
         
         self.tabs.addTab(self.record_tab, "Record")
         self.tabs.addTab(self.translate_tab, "Translate")
         self.tabs.addTab(self.verify_tab, "Verify")
+
+    def on_level_changed(self, level_name):
+        """Dynamically switches translators based on level architecture."""
+        config = self.resolver.get_cumulative_config(level_name)
+        arch = config.get("agent_architecture", "original")
+        
+        if arch == "universal":
+            logger.info(f"Switching to UniversalReplayTranslator for level {level_name}")
+            active_translator = self.universal_translator
+        else:
+            logger.info(f"Using original ReplayTranslator for level {level_name}")
+            active_translator = self.translator
+            
+        # Update the translate tab to use the correct instance
+        self.translate_tab.translator = active_translator
 
 def main():
     app = QApplication(sys.argv)

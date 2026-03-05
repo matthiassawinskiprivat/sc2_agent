@@ -16,21 +16,33 @@ class HierarchicalAgentSystem:
     def __init__(self, map_size: Tuple[int, int] = (128, 128),
                  grid_size: int = 128,
                  unit_data_file: str = None, training_conf: Dict = None):
+        self.training_conf = training_conf or {}
         self.shared_transformer = SharedObservationTransformer(
             map_size=map_size,
             unit_data_file=unit_data_file,
-            training_conf=training_conf
+            training_conf=self.training_conf
         )
         self.unit_agents = {}
         self.current_observation_id = 0
         self.grid_size = grid_size
 
     def create_unit_agent(self, agent_id: str, cnn_input_size: Tuple[int, int] = (128, 128), dilation_size: int = 3) -> UnitControlAgent:
-        agent = UnitControlAgent(
-            cnn_input_size=cnn_input_size,
-            grid_size=self.grid_size,
-            dilation_size=dilation_size
-        )
+        arch = self.training_conf.get("agent_architecture", "original")
+        
+        if arch == "universal":
+            from src.agent.universal_unit_control_agent import UniversalUnitControlAgent
+            agent = UniversalUnitControlAgent(
+                cnn_input_size=cnn_input_size,
+                grid_size=self.grid_size,
+                dilation_size=dilation_size,
+                spatial_resolution=self.training_conf.get("spatial_resolution", 16)
+            )
+        else:
+            agent = UnitControlAgent(
+                cnn_input_size=cnn_input_size,
+                grid_size=self.grid_size,
+                dilation_size=dilation_size
+            )
         self.unit_agents[agent_id] = agent
         return agent
 

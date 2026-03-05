@@ -504,7 +504,13 @@ class PipelineManager:
             watchdog = Watchdog(timeout=w_timeout, recurring=True)
             watchdog.start()
 
-            checkpoint_callback = CheckpointCallback(save_freq=5000, save_path=model_dir, name_prefix="zerg")
+            # Calculate save frequency to be exactly 50,000 global steps
+            # save_freq in SB3 is per vectorized step (n_calls)
+            save_freq_steps = 50000
+            save_freq_calls = max(1, save_freq_steps // num_envs)
+            
+            checkpoint_callback = CheckpointCallback(save_freq=save_freq_calls, save_path=model_dir, name_prefix=level_name)
+
             diagnostics_callback = DiagnosticsCallback(check_freq=1024, watchdog=watchdog)
             
             callback_list = [checkpoint_callback, diagnostics_callback]
@@ -557,9 +563,6 @@ class PipelineManager:
         
         # Ensure clean state before starting
         kill_switch_sc2()
-        
-        # Start TensorBoard automatically
-        self._start_tensorboard()
         
         last_final_model_path = None
 

@@ -20,6 +20,7 @@ from sc2.ids.effect_id import EffectId
 
 # Project Constants
 from src.utils.layer_constants import LayerConstants
+from src.utils.command_constants import CommandConstants
 
 
 class ObservationTransformer:
@@ -86,10 +87,25 @@ class ObservationTransformer:
             return grid_obj.data_numpy
         return grid_obj
 
-    def transform(self, raw_obs: Dict[str, Any]) -> np.ndarray:
-
+    def transform(self, raw_obs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Transforms raw SC2 observation into:
+        1. Multi-layer pixel map (CNN input)
+        2. One-hot command vector (MLP input)
+        """
         total_layers = LayerConstants.get_num_layers()
         layers = np.zeros((total_layers, self.feature_map_height, self.feature_map_width), dtype=np.float32)
+
+        # Handle Command Vector (One-hot of size 10)
+        raw_cmd = raw_obs.get('high_level_command', 0)
+        cmd_idx = CommandConstants.get_index(raw_cmd)
+        
+        command_vector = np.zeros(10, dtype=np.float32)
+        if 0 <= cmd_idx < 10:
+            command_vector[cmd_idx] = 1.0
+        else:
+            logger.warning(f"Invalid command index {cmd_idx}, using index 0")
+            command_vector[0] = 1.0
 
         allied_units = raw_obs.get('units') or []
         enemy_units = raw_obs.get('enemy_units') or []
@@ -193,16 +209,22 @@ class ObservationTransformer:
         layers[0:dps_start] = np.log1p(layers[0:dps_start])
 
         # Centralized Scaling: Transform float32 [0, 1+] to float32 [0, 1]
-        # We clip to [0, 1] for layers that should be normalized.
-        # Changing to float32 [0, 1] avoids SB3's expensive is_image_space check on uint8 arrays.
         layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
 
         if self.active_layers:
-            # Extract indices for active layers
             indices = [LayerConstants.LAYERS[layer_name] for layer_name in self.active_layers]
-            return layers[indices]
+            map_data = layers[indices]
+        else:
+            map_data = layers
 
-        return layers
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            return {
+                "map": map_data,
+                "command": command_vector
+            }
+
+        return map_data
 
     def _get_pixel_coords(self, position) -> tuple:
         if position is None: return None, None

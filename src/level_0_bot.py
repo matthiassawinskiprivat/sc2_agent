@@ -1,16 +1,41 @@
 
 import random
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from loguru import logger
 from src.sc2_bot import SC2Bot
+from src.sc2_bot_universal import SC2BotUniversal
 
 class Level0Bot(SC2Bot):
     """
     Bot specifically for Level 0 (Collect the Beacon).
     Handles spawning of a Zergling and a Beacon.
     """
+    def action_masks(self, curriculum_progress: float = 1.0) -> Any:
+        """
+        Specialized override: If architecture is universal, delegate to the 
+        universal masking logic to avoid shape mismatches.
+        """
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            # MultiDiscrete expects a LIST of masks or a specific flat concatenation.
+            # We use the SC2BotUniversal implementation.
+            return SC2BotUniversal.action_masks(self, curriculum_progress)
+        
+        # Fallback to original SC2Bot logic
+        return super().action_masks(curriculum_progress)
+
+    async def apply_action(self, unit_tag, action):
+        """
+        Specialized override: Correctly handles MultiDiscrete unpacking for Universal.
+        """
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            return await SC2BotUniversal.apply_action(self, unit_tag, action)
+        
+        return await super().apply_action(unit_tag, action)
+
     async def reset_game_state(self, verify: bool = True):
         """
         Clears the map and spawns a Zergling and a Beacon.
