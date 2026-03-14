@@ -159,6 +159,19 @@ class LayerConstants:
         TRANSPORT_SLOTS: 42, PASSENGER_DENSITY: 43
     }
 
+    # Reduced set for tactical/micro view
+    TACTICAL_LAYERS = {
+        ALLIED_UNIT_DENSITY: 0,
+        ENEMY_UNIT_DENSITY: 1,
+        TERRAIN_PATHABLE: 2,
+        COMMAND_ASSIGNMENT: 3,
+        COMMAND_OBJECTIVE: 4
+    }
+
     @classmethod
     def get_num_layers(cls) -> int:
         return 44
+
+    @classmethod
+    def get_num_tactical_layers(cls) -> int:
+        return 5

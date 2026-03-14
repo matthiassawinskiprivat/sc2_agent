@@ -14,3 +14,5 @@ train/envs/__pycache__
 __pycache__
 temp_config/
 temp_logs/
+/models_universal/
+/logs_universal/

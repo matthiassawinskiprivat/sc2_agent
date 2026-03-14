@@ -40,6 +40,7 @@ class UIManager:
 
         # Robustly load layers directly from the dictionary keys
         self.enabled_layers = list(LayerConstants.LAYERS.keys())
+        self.enabled_tactical_layers = list(LayerConstants.TACTICAL_LAYERS.keys())
 
         # Threading
         self.update_queue = queue.Queue(maxsize=10)
@@ -87,26 +88,46 @@ class UIManager:
                 # Get latest observation from agent
                 with self._observation_lock:
                     # Prefer explicitly prepared UI observation (e.g. global view), fallback to model input
-                    current_obs = getattr(self.agent, "ui_observation", self.agent.transformed_observation)
+                    global_obs = getattr(self.agent, "ui_observation", self.agent.transformed_observation)
+                    tactical_obs = getattr(self.agent, "tactical_observation", None)
 
-                    if current_obs is not None:
-                        # Create UI visualization
-                        # The UI Transformer internally handles the resizing from Obs Size -> display_size
-                        # using Nearest Neighbor to keep it crisp.
-                        frame = self.ui_transformer.update_display(
-                            current_obs,
+                    if global_obs is not None:
+                        # Create UI visualization for global map
+                        global_frame = self.ui_transformer.update_display(
+                            global_obs,
                             self.enabled_layers,
                             fps=self.current_fps,
-                            active_layers=self.active_layers
+                            active_layers=getattr(self.agent, "active_layers", self.active_layers)
                         )
+                        
+                        # Create UI visualization for tactical map (if available)
+                        tactical_frame = None
+                        if tactical_obs is not None:
+                            # Pruned tactical observations MUST have their layer names provided
+                            # to correctly map indices back to UI colors.
+                            tact_active = getattr(self.agent, "active_tactical_layers", None)
+                            if tact_active is None:
+                                # Default tactical view uses TACTICAL_LAYERS order
+                                tact_active = sorted(LayerConstants.TACTICAL_LAYERS.keys(), 
+                                                   key=lambda k: LayerConstants.TACTICAL_LAYERS[k])
+                                                   
+                            tactical_frame = self.ui_transformer.update_display(
+                                tactical_obs,
+                                self.enabled_tactical_layers,
+                                active_layers=tact_active
+                            )
 
-                        if frame is not None:
+                        if global_frame is not None:
+                            combined_data = {
+                                "global": global_frame,
+                                "tactical": tactical_frame
+                            }
                             try:
-                                self.ui_queue.put_nowait(frame)
+                                self.ui_queue.put_nowait(combined_data)
                             except queue.Full:
                                 try:
                                     self.ui_queue.get_nowait()
-                                    self.ui_queue.put_nowait(frame)
+                                    self.ui_queue.put_nowait(combined_data)
                                 except queue.Empty:
                                     pass
 
@@ -135,30 +156,36 @@ class UIManager:
         except queue.Empty:
             return None
 
-    def set_layer_visibility(self, layer_name: str, visible: bool):
+    def set_layer_visibility(self, layer_name: str, visible: bool, is_tactical: bool = False):
         """Set visibility of a specific layer"""
-        if layer_name in self.enabled_layers:
+        target_list = self.enabled_tactical_layers if is_tactical else self.enabled_layers
+        valid_map = LayerConstants.TACTICAL_LAYERS if is_tactical else LayerConstants.LAYERS
+
+        if layer_name in target_list:
             if not visible:
-                self.enabled_layers.remove(layer_name)
+                target_list.remove(layer_name)
         else:
-            if visible and layer_name in LayerConstants.LAYERS:
-                self.enabled_layers.append(layer_name)
+            if visible and layer_name in valid_map:
+                target_list.append(layer_name)
 
-    def toggle_layer_visibility(self, layer_name: str):
+    def toggle_layer_visibility(self, layer_name: str, is_tactical: bool = False):
         """Toggle visibility of a specific layer"""
-        if layer_name in self.enabled_layers:
-            self.enabled_layers.remove(layer_name)
+        target_list = self.enabled_tactical_layers if is_tactical else self.enabled_layers
+        if layer_name in target_list:
+            target_list.remove(layer_name)
         else:
-            self.enabled_layers.append(layer_name)
+            target_list.append(layer_name)
 
-    def get_layer_info(self) -> List[Dict[str, Any]]:
-        """Get information about all available layers"""
+    def get_layer_info(self, is_tactical: bool = False) -> List[Dict[str, Any]]:
+        """Get information about available layers"""
         layer_info = []
+        target_map = LayerConstants.TACTICAL_LAYERS if is_tactical else LayerConstants.LAYERS
+        enabled_list = self.enabled_tactical_layers if is_tactical else self.enabled_layers
 
-        for layer_name in LayerConstants.LAYERS:
+        for layer_name in target_map:
             info = {
                 'name': layer_name,
-                'enabled': layer_name in self.enabled_layers,
+                'enabled': layer_name in enabled_list,
                 'color': self.ui_transformer.layer_colors.get(layer_name, [1.0, 1.0, 1.0]),
                 'description': ""
             }
@@ -203,8 +230,9 @@ class SimpleUIManager:
     def get_latest_ui_frame(self):
         return None
 
-    def set_layer_visibility(self, layer_name: str, visible: bool):
+    def set_layer_visibility(self, layer_name: str, visible: bool, is_tactical: bool = False):
         pass
 
-    def get_layer_info(self):
-        return [{'name': name, 'enabled': True} for name in LayerConstants.LAYERS]
+    def get_layer_info(self, is_tactical: bool = False):
+        target_map = LayerConstants.TACTICAL_LAYERS if is_tactical else LayerConstants.LAYERS
+        return [{'name': name, 'enabled': True} for name in target_map]

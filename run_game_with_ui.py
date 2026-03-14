@@ -27,7 +27,8 @@ from src.ui.ui_manager import UIManager
 
 # --- Configuration ---
 # Change this to "Zerg_Lower_Left" to test your training map
-MAP_NAME = "06_32x32_Left"
+MAP_NAME = "08_128x128_Full"
+# MAP_NAME = "PersephoneAIE_v4"
 BOT_RACE = Race.Terran
 OPPONENT_RACE = Race.Zerg
 DIFFICULTY = Difficulty.Easy
@@ -105,7 +106,13 @@ class SC2Visualizer:
         print("[Main] Initializing Agent System...")
 
         # 1. Init Agent System
-        self.system = HierarchicalAgentSystem(map_size=(128, 128), training_conf={'render_beacon': True, 'larger_units': False})
+        training_conf = {
+            'agent_architecture': 'universal',
+            'render_beacon': True, 
+            'larger_units': False,
+            'action_heads': ['move_global', 'move_local']
+        }
+        self.system = HierarchicalAgentSystem(map_size=(128, 128), training_conf=training_conf)
         self.agent_id = "main_agent"
         self.main_agent = self.system.create_unit_agent(self.agent_id, dilation_size=0)
 

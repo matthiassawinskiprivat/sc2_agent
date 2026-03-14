@@ -27,6 +27,7 @@ from src.agent.maskable_ppo import MaskablePPO
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
 from src.agent.models.unit_control_network import UnitControlNetwork
 from src.agent.models.universal_policy import UniversalActorCriticPolicy
+from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from src.utils.watchdog import Watchdog
@@ -79,12 +80,28 @@ class UniversalPipelineManager(PipelineManager):
         combined_conf["is_training"] = True
         combined_conf["agent_architecture"] = "universal"
         combined_conf["config_dir"] = self.config_dir 
-        combined_conf["spatial_resolution"] = env_params.get("spatial_resolution", 16)
+        combined_conf["spatial_resolution"] = 32
+
+        # Combined initial steps for curriculum (extract from checkpoint name if possible)
+        initial_steps = 0
+        if model_path_to_load:
+            filename = os.path.basename(model_path_to_load)
+            if "steps" in filename:
+                try:
+                    parts = filename.split("_")
+                    for p in parts:
+                        if p.isdigit():
+                            initial_steps = int(p)
+                            break
+                    logger.info(f"Resuming level '{level_name}' from global step count: {initial_steps}")
+                except Exception as e:
+                    logger.warning(f"Could not parse step count from checkpoint filename '{filename}': {e}")
 
         env_fns = [
             EnvFactory(
                 EnvClass, level_name, not headless, env_params["grid_size"], i, num_envs,
-                self.sc2_process_cls, self.client_cls, combined_conf, env_params.get("max_steps", 300)
+                self.sc2_process_cls, self.client_cls, combined_conf, env_params.get("max_steps", 300),
+                initial_steps=initial_steps
             )
             for i in range(num_envs)
         ]
@@ -95,13 +112,14 @@ class UniversalPipelineManager(PipelineManager):
             # 3. Setup Model
             algo_name = model_params.get("algorithm", "MaskablePPO")
             AlgoClass = MaskableRecurrentPPO if algo_name == "MaskableRecurrentPPO" else MaskablePPO
+            PolicyClass = UniversalRecurrentPolicy if AlgoClass == MaskableRecurrentPPO else UniversalActorCriticPolicy
             
             # Universal-specific Policy kwargs
             policy_kwargs = {**model_params.get("policy_kwargs", {}), "normalize_images": False}
             policy_kwargs["spatial_resolution"] = combined_conf["spatial_resolution"]
             
             model_kwargs = {
-                "policy": UniversalActorCriticPolicy,
+                "policy": PolicyClass,
                 "env": env,
                 "verbose": 1,
                 "tensorboard_log": log_dir,
@@ -130,6 +148,19 @@ class UniversalPipelineManager(PipelineManager):
 
             # 4. Train
             total_steps_target = training_params["training_steps"]
+            steps_to_train = total_steps_target
+            
+            if model_path_to_load and not reset_timesteps:
+                steps_already_done = model.num_timesteps
+                steps_to_train = total_steps_target - steps_already_done
+                logger.info(f"Resuming training. Target: {total_steps_target}, Already done: {steps_already_done}, Remaining: {steps_to_train}")
+                
+                if steps_to_train <= 0:
+                    logger.info("Training already reached target steps. Saving and finishing.")
+                    final_model_path = os.path.join(model_dir, "final_model.zip")
+                    model.save(final_model_path)
+                    return final_model_path
+
             watchdog = Watchdog(timeout=training_params.get("watchdog_timeout", 3600.0), recurring=True)
             watchdog.start()
 
@@ -141,7 +172,7 @@ class UniversalPipelineManager(PipelineManager):
             diagnostics_callback = DiagnosticsCallback(check_freq=1024, watchdog=watchdog)
             
             model.learn(
-                total_timesteps=total_steps_target,
+                total_timesteps=steps_to_train,
                 callback=CallbackList([checkpoint_callback, diagnostics_callback]),
                 reset_num_timesteps=reset_timesteps
             )

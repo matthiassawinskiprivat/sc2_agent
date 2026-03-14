@@ -754,9 +754,13 @@ class WatchBot(Level3Bot):
             # --- UI OBSERVATION (GLOBAL) ---
             # For Level 3+, we want the UI to show ALL beacons, not just the one the agent saw.
             # This does not affect inference, only rendering.
+            agent_0 = self.agent_system.unit_agents["agent_0"]
             if self.level_name != "level_0":
-                 self.ui_observation = self.get_global_observation(active_unit=unit)
+                 ui_obs = self.get_global_observation(active_unit=unit)
+                 agent_0.ui_observation = ui_obs
+                 self.ui_observation = ui_obs
             else:
+                 agent_0.ui_observation = processed_obs
                  self.ui_observation = processed_obs
             
             # (Logging removed for brevity)

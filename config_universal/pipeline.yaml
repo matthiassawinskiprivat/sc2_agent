@@ -2,4 +2,11 @@
 # Defines the sequence of training levels.
 agent_architecture: universal
 levels:
-  - "level_move_single"
+  - "level_move_single_0"
+  - "level_move_single_1"
+  - "level_move_single_2"
+  - "level_move_multi_0"
+  - "level_move_multi_1"
+  - "level_move_multi_2"
+  - "level_move_multi_3"
+  - "level_move_multi_4"

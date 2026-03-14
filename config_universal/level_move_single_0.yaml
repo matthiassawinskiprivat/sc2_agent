@@ -1,27 +1,25 @@
 # config_hybrid/level_move_single.yaml
-# Optimized starting level for Hybrid Agent (128x128 maps)
 
 training:
-  training_steps: 8_000_000
-  num_envs: 3
+  training_steps: 1_500_000
+  num_envs: 6
   n_steps: 2048
   batch_size: 4096
-  learning_rate: 0.0003
+  learning_rate: 0.0005
   render_beacon: True
   watchdog_timeout: 3600
 
 # Environment parameters
 env:
   grid_size: 128
-  spatial_resolution: 16
   headless: True
-  max_steps: 500
-  maps_dir: "train/maps/level_2"
+  max_steps: 100
+  maps_dir: "train/maps/level_0"
   high_level_command: "scout"
   guidance_curriculum: False
   rewards:
-    success: 50.0
-    step_penalty: -0.1
+    success: 20.0
+    step_penalty: -0.01
     distance_multiplier: 0.1
   active_layers:
     - "allied_unit_density"
@@ -29,6 +27,12 @@ env:
     - "terrain_pathable"
     - "command_objective"
     - "command_assignment"
+  active_tactical_layers:
+    - "allied_unit_density"
+    - "enemy_unit_density"
+    - "command_objective"
+    - "command_assignment"
+    - "terrain_pathable"
   action_heads:
     - "move_global"
     - "move_local"

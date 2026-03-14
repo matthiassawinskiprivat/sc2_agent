@@ -31,12 +31,16 @@ class SC2BotUniversal(BotAI):
         self.beacon: Optional[Unit] = None
         self.previous_distance = None
         self.last_target_pos: Optional[Point2] = None
+        self._game_state_initialized = False
         
-        # Load Action Heads
-        env_conf = self.training_conf.get("env", {})
-        self.action_heads = env_conf.get("action_heads", ["move_global"])
-        self.categorical_heads = env_conf.get("categorical_heads", [])
-        self.spatial_res = env_conf.get("spatial_resolution", 16) # Initialize early
+        # Load Action Heads (Robustly handle flattened or nested config)
+        self.action_heads = self.training_conf.get("action_heads") or \
+                           self.training_conf.get("env", {}).get("action_heads", ["move_global"])
+        
+        self.categorical_heads = self.training_conf.get("categorical_heads") or \
+                                self.training_conf.get("env", {}).get("categorical_heads", [])
+        
+        self.spatial_res = 32
 
         self._enemy_race = Race.Random
         self._initialize_variables()
@@ -56,11 +60,15 @@ class SC2BotUniversal(BotAI):
             # INITIALIZATION
             self.agent_system = HierarchicalAgentSystem(
                 map_size=(128, 128),
-                grid_size=128, # CNN sees full 128x128
+                grid_size=32, # Matches Universal Agent Action Space
                 training_conf=self.training_conf
             )
             self.agent_system.create_unit_agent("agent_0")
-            await self.reset_game_state()
+            
+            if not self._game_state_initialized:
+                await self.reset_game_state()
+                self._game_state_initialized = True
+            
             obs, info = self._get_observation()
             self.conn.send((obs, info))
 
@@ -136,14 +144,35 @@ class SC2BotUniversal(BotAI):
 
     async def reset_game_state(self, verify: bool = True):
         self.previous_distance = None
+        
+        # Clear local unit lists
+        from sc2.units import Units
+        self.units = Units([], self)
+        self.structures = Units([], self)
+        self.enemy_units = Units([], self)
+        self.enemy_structures = Units([], self)
+        self.all_units = Units([], self)
+
         await self.client.debug_show_map()
         await self.client.step()
         await self._refresh_state()
-        for _ in range(3):
-            if not self.all_units: break
-            await self.client.debug_kill_unit([u.tag for u in self.all_units])
+        
+        # Robust Cleanup
+        max_cleanup_attempts = 5
+        from sc2.data import Alliance
+        for attempt in range(max_cleanup_attempts):
+            killable_units = self.all_units.filter(lambda u: u.alliance != Alliance.Neutral)
+            if not killable_units:
+                break
+                
+            logger.info(f"Universal Cleanup attempt {attempt+1}: Killing {killable_units.amount} units.")
+            await self.client.debug_kill_unit([u.tag for u in killable_units])
             await self.client.step()
             await self._refresh_state()
+            
+            killable_units = self.all_units.filter(lambda u: u.alliance != Alliance.Neutral)
+            if not killable_units:
+                break
 
     async def _refresh_state(self):
         obs = await self.client.observation()
@@ -163,7 +192,7 @@ class SC2BotUniversal(BotAI):
         """
         # Robust resolution discovery for delegation
         action_heads = getattr(self, "action_heads", [])
-        spatial_res = getattr(self, "spatial_res", 16)
+        spatial_res = 32
 
         n_cmds = len(action_heads)
         n_spatial = spatial_res * spatial_res
@@ -186,7 +215,7 @@ class SC2BotUniversal(BotAI):
         if self.beacon and self.beacon not in self.enemy_units: enemies.append(self.beacon)
 
         raw_obs = {
-            'units': self.units.filter(lambda u: not self.beacon or u.tag != self.beacon.tag),
+            'units': self.units.filter(lambda u: "BEACON" not in getattr(u.type_id, "name", "").upper() and u.type_id != UnitTypeId.PYLON),
             'enemy_units': enemies,
             'structures': self.structures,
             'enemy_structures': self.enemy_structures,
@@ -195,9 +224,14 @@ class SC2BotUniversal(BotAI):
             'game_data': self.game_data,
             'creep': getattr(self.state, "creep", None),
             'command_target': target_pos,
-            'high_level_command': self.training_conf.get('high_level_command', 0)
+            'high_level_command': self.training_conf.get('high_level_command', 0),
+            'selected_units': [active_unit] if active_unit else ([self.zergling] if self.zergling else [])
         }
-        processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+        # Default active unit for tactical view
+        if active_unit is None:
+            active_unit = self.zergling
+            
+        processed_obs = self.agent_system.process_observation(observation=raw_obs, active_unit=active_unit)["agent_0"]
         return processed_obs, {}
 
     def _calculate_reward(self) -> Tuple[float, bool]:

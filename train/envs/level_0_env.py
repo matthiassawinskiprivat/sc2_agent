@@ -27,7 +27,7 @@ from src.utils.config_manager import ConfigManager
 from src.utils.layer_constants import LayerConstants
 from src.utils.proto_utils import ProtoWrapper
 
-HARD_RESET_COUNT = 10
+HARD_RESET_COUNT = 100
 
 class Level0Env(gym.Env):
     def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1,
@@ -47,11 +47,21 @@ class Level0Env(gym.Env):
             config_dir = self.training_conf.get("config_dir", "config")
             self.config_manager = ConfigManager(config_dir)
             
-            # Cumulative configs
+            # CUMULATIVE CONFIGS
             self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
+            self.active_tactical_layers = self.config_manager.get_cumulative_active_tactical_layers(self.level_name)
             self.action_heads = self.config_manager.get_cumulative_action_heads(self.level_name)
             self.categorical_heads = self.config_manager.get_cumulative_categorical_heads(self.level_name)
             self.agent_architecture = self.config_manager.get_agent_architecture()
+
+            # SENSIBLE DEFAULTS for Universal Architecture
+            if self.agent_architecture == "universal":
+                if not self.active_layers:
+                    self.active_layers = ["allied_unit_density", "enemy_unit_density", "terrain_pathable", "command_objective", "command_assignment"]
+                if not self.active_tactical_layers:
+                    self.active_tactical_layers = self.active_layers
+                if not self.action_heads:
+                    self.action_heads = ["move_global", "move_local"]
             
             # Load level-specific config for rewards and other params
             level_conf = self.config_manager.get_level_config(self.level_name)
@@ -62,8 +72,9 @@ class Level0Env(gym.Env):
                     for k, v in level_conf[section].items():
                         self.training_conf[k] = v
 
-            # Restore Cumulative Config (Prevent overwrite by empty lists in level config)
+            # Ensure training_conf has the cumulative lists so the Bot can use them
             self.training_conf['active_layers'] = self.active_layers
+            self.training_conf['active_tactical_layers'] = self.active_tactical_layers
             self.training_conf['action_heads'] = self.action_heads
             self.training_conf['categorical_heads'] = self.categorical_heads
             self.training_conf['agent_architecture'] = self.agent_architecture
@@ -112,15 +123,25 @@ class Level0Env(gym.Env):
         num_channels = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
         
         # New Dict Observation Space
-        self.observation_space = spaces.Dict({
+        obs_dict = {
             "map": spaces.Box(low=0.0, high=1.0, shape=(num_channels, 128, 128), dtype=np.float32),
             "command": spaces.Box(low=0.0, high=1.0, shape=(10,), dtype=np.float32)
-        })
+        }
+        
+        if self.agent_architecture == "universal":
+            self.active_tactical_layers = self.config_manager.get_cumulative_active_tactical_layers(self.level_name)
+            if not self.active_tactical_layers:
+                self.active_tactical_layers = self.active_layers
+            self.training_conf['active_tactical_layers'] = self.active_tactical_layers
+            n_tactical = len(self.active_tactical_layers) if self.active_tactical_layers else num_channels
+            obs_dict["tactical"] = spaces.Box(low=0.0, high=1.0, shape=(n_tactical, 32, 32), dtype=np.float32)
+
+        self.observation_space = spaces.Dict(obs_dict)
         
         if self.agent_architecture == "universal":
             # Universal: MultiDiscrete([N_Commands, Spatial_Resolution^2])
             n_heads = len(self.action_heads)
-            spatial_res = self.training_conf.get("spatial_resolution", 16)
+            spatial_res = 32
             self.action_space = spaces.MultiDiscrete([n_heads, spatial_res * spatial_res])
         else:
             # ORIGINAL FLAT DISCRETE SPACE
@@ -285,18 +306,39 @@ class Level0Env(gym.Env):
 
         game_map = self._resolve_map(self.map_name)
         if self._bot is None:
-            self._log("Creating Level0Bot...")
+            self._log(f"Creating {self._bot_cls.__name__}...")
             class DummyConn:
                 def send(self, data): pass
                 def recv(self): return "continue", None
-            self._bot = Level0Bot(conn=DummyConn(), training_conf=self.training_conf)
+            self._bot = self._bot_cls(conn=DummyConn(), training_conf=self.training_conf)
             self._bot.distance_calculation_method = 2
             self._bot.grid_size = self.grid_size
 
         self._log("Creating game...")
+        
+        # Determine if we need a second player (Computer)
+        # Movement-based levels should NOT have a computer because it might kill our units/beacons
+        movement_levels = ["level_0", "level_1", "level_2", "level_3", "level_move_"]
+        is_movement_level = any(self.level_name.startswith(p) for p in movement_levels)
+        
+        # Priority: training_conf['env']['use_computer'] > is_movement_level
+        use_computer = self.training_conf.get("env", {}).get("use_computer", not is_movement_level)
+        
+        players = [Bot(Race.Zerg, self._bot)]
+        if use_computer:
+            difficulty_name = self.training_conf.get("env", {}).get("difficulty", "Easy")
+            try:
+                difficulty = getattr(Difficulty, difficulty_name)
+            except AttributeError:
+                difficulty = Difficulty.Easy
+            players.append(Computer(Race.Zerg, difficulty))
+            self._log(f"Starting game with Computer ({difficulty_name})")
+        else:
+            self._log("Starting game WITHOUT Computer (Movement Level)")
+
         await self._controller.create_game(
             game_map,
-            [Bot(Race.Zerg, self._bot), Computer(Race.Zerg, Difficulty.Easy)],
+            players,
             realtime=self.visualize,
         )
         await self._client.join_game(race=Race.Zerg)
@@ -342,14 +384,21 @@ class Level0Env(gym.Env):
             obs, reward, done, truncated, info = self._loop.run_until_complete(self._async_step(action))
         except (ProtocolError, ConnectionAlreadyClosed) as e:
             self._log(f"Connection to game lost: {e}")
-            obs, reward, done, truncated, info = np.zeros(self.observation_space.shape, dtype=np.uint8), 0, True, True, {}
+            # Robust dummy observation for Dict spaces
+            dummy_obs = {}
+            if isinstance(self.observation_space, spaces.Dict):
+                for k, v in self.observation_space.spaces.items():
+                    dummy_obs[k] = np.zeros(v.shape, dtype=v.dtype)
+            else:
+                dummy_obs = np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype)
+            obs, reward, done, truncated, info = dummy_obs, 0, True, True, {}
         
-        # 2. Handle Episode Termination (Max Steps)
-        if self.steps >= self.max_steps:
+        # 2. Handle Episode Truncation (Max Steps reached without target)
+        if self.steps >= self.max_steps and not done:
             truncated = True
-            if not done:
-                done = True
-                reward = -10 # Penalty for timing out
+            # We don't set done=True or apply a penalty here. 
+            # This allows PPO to bootstrap the value from the last state, 
+            # effectively telling the agent: "You were on the right track, just ran out of time."
         
         return obs, reward, done, truncated, info
 

@@ -11,8 +11,9 @@ class UniversalActorCriticPolicy(MaskableActorCriticPolicy):
     """
     def __init__(self, observation_space: gym.spaces.Space, action_space: gym.spaces.Space, 
                  lr_schedule: Any, *args, **kwargs):
-        # Universal grid size (e.g. 16x16)
-        self.spatial_resolution = kwargs.pop("spatial_resolution", 16)
+        # Universal grid size (e.g. 32x32)
+        self.spatial_resolution = 32
+        kwargs.pop("spatial_resolution", None)
         super().__init__(observation_space, action_space, lr_schedule, *args, **kwargs)
 
     def _build_action_net(self) -> None:

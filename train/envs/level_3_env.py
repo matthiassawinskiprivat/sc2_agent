@@ -102,6 +102,13 @@ class Level3Env(Level0Env):
             self._log(f"Error in on_step(0): {e}")
             raise
 
+    def _get_zero_observation(self):
+        """Returns a properly shaped zero observation matching the space (Dict or Discrete)."""
+        from gymnasium import spaces
+        if isinstance(self.observation_space, spaces.Dict):
+             return {k: np.zeros(v.shape, dtype=v.dtype) for k, v in self.observation_space.spaces.items()}
+        return np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype)
+
     def reset(self, seed=None, options=None):
         self.current_unit_index = 0
         obs, info = super().reset(seed, options)
@@ -113,6 +120,9 @@ class Level3Env(Level0Env):
                  obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
         else:
              self.active_unit_tags = []
+             # Ensure obs matches space even if bot setup fails early
+             if not isinstance(obs, dict) and isinstance(self.observation_space, spaces.Dict):
+                 obs = self._get_zero_observation()
              
         return obs, info
 
@@ -128,7 +138,7 @@ class Level3Env(Level0Env):
         
         if not self.active_unit_tags:
              # If no units are left, the episode is over.
-             return np.zeros(self.observation_space.shape), 0, True, False, {}
+             return self._get_zero_observation(), 0, True, False, {}
              
         current_tag = self.active_unit_tags[self.current_unit_index]
         
@@ -209,7 +219,7 @@ class Level3Env(Level0Env):
             
         # Determine the next observation
         if done:
-            obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
+            obs = self._get_zero_observation()
             self.current_unit_index = 0
             self.active_unit_tags = all_active_tags
         elif self.current_unit_index < len(self.active_unit_tags):
@@ -231,7 +241,7 @@ class Level3Env(Level0Env):
                 if self.active_unit_tags:
                     obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
                 else:
-                    obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
+                    obs = self._get_zero_observation()
                     done = True
         else:
             # End of cycle reached normally
@@ -240,10 +250,11 @@ class Level3Env(Level0Env):
             if self.active_unit_tags:
                 obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
             else:
-                obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
+                obs = self._get_zero_observation()
                 done = True
 
         return obs, total_reward, done, False, {}
+
 
 
 

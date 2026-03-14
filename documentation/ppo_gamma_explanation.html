@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reinforcement Learning: The Impact of Gamma (&gamma;)</title>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 0 20px;
+            background-color: #f8f9fa;
+        }
+        .card {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1, h2, h3 { color: #2c3e50; }
+        .math-block {
+            background: #f1f3f5;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        .comparison-table th, .comparison-table td {
+            padding: 12px;
+            border: 1px solid #dee2e6;
+            text-align: left;
+        }
+        .comparison-table th { background-color: #e9ecef; }
+        .highlight { color: #e67e22; font-weight: bold; }
+        .success { color: #27ae60; font-weight: bold; }
+        .danger { color: #c0392b; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h1>Understanding \(\gamma\) (Gamma) in PPO</h1>
+    <p>In Reinforcement Learning, the <strong>Discount Factor</strong> (\(\gamma\)) determines how much the agent values future rewards compared to immediate ones.</p>
+</div>
+
+<div class="card" style="background-color: #e3f2fd; border-left: 5px solid #2196f3;">
+    <h2>Symbol Reference Guide</h2>
+    <table class="comparison-table" style="background: white;">
+        <tr>
+            <th>Symbol</th>
+            <th>Name</th>
+            <th>Project Usage</th>
+        </tr>
+        <tr>
+            <td>\(\gamma\)</td>
+            <td><strong>Gamma</strong></td>
+            <td><strong>Discount Factor:</strong> Controls how far the agent "looks ahead." (0.9 = short, 0.99 = long).</td>
+        </tr>
+        <tr>
+            <td>\(r_t\)</td>
+            <td><strong>Reward</strong></td>
+            <td>The immediate points (e.g., +20 for beacon, -0.01 for step penalty).</td>
+        </tr>
+        <tr>
+            <td>\(G_t\)</td>
+            <td><strong>Return</strong></td>
+            <td>The total sum of all future rewards, discounted by Gamma.</td>
+        </tr>
+        <tr>
+            <td>\(\delta_t\)</td>
+            <td><strong>Delta</strong></td>
+            <td><strong>TD-Error:</strong> The difference between what we expected and what happened.</td>
+        </tr>
+        <tr>
+            <td>\(\lambda\)</td>
+            <td><strong>Lambda</strong></td>
+            <td><strong>GAE Factor:</strong> A smoothing parameter (usually 0.95) used to calculate the Advantage reliably.</td>
+        </tr>
+        <tr>
+            <td>\(H\)</td>
+            <td><strong>Horizon</strong></td>
+            <td>The effective distance (in steps) the agent can "see."</td>
+        </tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>1. The Goal: Maximizing Expected Return</h2>
+    <p>The agent's goal is to maximize the <strong>Discounted Return</strong> (\(G_t\)) at each time step \(t\):</p>
+    <div class="math-block">
+        \[G_t = r_t + \gamma r_{t+1} + \gamma^2 r_{t+2} + \gamma^3 r_{t+3} + \dots = \sum_{k=0}^{\infty} \gamma^k r_{t+k}\]
+    </div>
+    <p>As \(k\) (the number of steps into the future) increases, the reward \(r_{t+k}\) is multiplied by \(\gamma^k\). If \(\gamma\) is small, distant rewards vanish mathematically.</p>
+</div>
+
+<div class="card">
+    <h2>2. The "Effective Horizon"</h2>
+    <p>A useful rule of thumb is the <strong>Effective Horizon</strong> (\(H\)), which represents roughly how many steps into the future the agent "looks":</p>
+    <div class="math-block">
+        \[H \approx \frac{1}{1 - \gamma}\]
+    </div>
+
+    <table class="comparison-table">
+        <tr>
+            <th>Gamma (\(\gamma\))</th>
+            <th>Effective Horizon (\(H\))</th>
+            <th>Value after 50 steps (\(\gamma^{50}\))</th>
+        </tr>
+        <tr>
+            <td class="danger">0.9</td>
+            <td>~10 steps</td>
+            <td>\(\approx 0.005\) (Ignored)</td>
+        </tr>
+        <tr>
+            <td class="success">0.99</td>
+            <td>~100 steps</td>
+            <td>\(\approx 0.605\) (Visible)</td>
+        </tr>
+        <tr>
+            <td class="success">0.995</td>
+            <td>~200 steps</td>
+            <td>\(\approx 0.778\) (Strong)</td>
+        </tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>3. Impact on PPO and Advantage Calculation</h2>
+    <p>PPO uses <strong>Generalized Advantage Estimation (GAE)</strong> to decide if an action was "good." The Advantage (\(A_t\)) depends on the TD-error (\(\delta_t\)):</p>
+    <div class="math-block">
+        \[\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)\]
+        \[\hat{A}_t = \delta_t + (\gamma\lambda)\delta_{t+1} + (\gamma\lambda)^2\delta_{t+2} + \dots\]
+    </div>
+    <p>If \(\gamma = 0.9\), the Advantage calculation <strong>cuts off</strong> information from the future very quickly. If your agent needs to walk for 50 steps to reach a beacon, the "Value" of the first step will be 0 because the beacon reward is so heavily discounted that it doesn't "leak back" to the start.</p>
+</div>
+
+<div class="card">
+    <h2>4. The "Goldfish Effect": Credit Assignment</h2>
+    <p>Your intuition is exactly correct: with a low \(\gamma\), the agent might reach the goal, but it won't <strong>"know how it got there."</strong> This is known as the <strong>Credit Assignment Problem</strong>.</p>
+    
+    <p>Imagine the agent takes 50 steps to reach a beacon and gets a reward of \(+1.0\). Let's see how much of that "success signal" reaches the first action taken at Step 1:</p>
+    
+    <div class="math-block">
+        \[\text{Signal at Step 50} = 1.0\]
+        \[\text{Signal at Step 1 (with } \gamma=0.9) = 0.9^{49} \approx \mathbf{0.005} \text{ (Vanished)}\]
+        \[\text{Signal at Step 1 (with } \gamma=0.99) = 0.99^{49} \approx \mathbf{0.611} \text{ (Strong)}\]
+    </div>
+
+    <p><strong>What happens during training:</strong></p>
+    <ul>
+        <li><strong>At Step 1:</strong> The PPO update multiplies the gradient by the <strong>Advantage</strong>. If the Advantage is \(0.005\), the update is effectively zero. The agent learns <em>nothing</em> from that successful episode.</li>
+        <li><strong>At Step 45:</strong> The signal is still \(\approx 0.59\). The agent learns that actions taken <em>very close</em> to the beacon are good.</li>
+    </ul>
+    <p><strong>The result:</strong> The agent becomes a "Goldfish." It only learns to navigate if it "accidently" starts very close to the goal. It will never learn to cross a map to find a distant objective.</p>
+</div>
+
+<div class="card">
+    <h2>5. Choosing Hyperparameters for SC2</h2>
+    <p>To choose the right values, you should calculate the <strong>Optimal Path Time</strong> (\(T_{opt}\)) for your map.</p>
+    
+    <h3>Heuristic 1: The Gamma Rule</h3>
+    <p>The Effective Horizon (\(H\)) should be <strong>at least as long</strong> as the optimal path to the goal.</p>
+    <div class="math-block">
+        \[H \geq T_{opt} \implies \gamma \geq 1 - \frac{1}{T_{opt}}\]
+    </div>
+
+    <h3>Heuristic 2: The Max Steps Rule</h3>
+    <p>Max steps should be <strong>3x to 5x</strong> the optimal path time. This gives the agent room to explore without wasting time in "dead-end" episodes.</p>
+
+    <table class="comparison-table">
+        <tr>
+            <th>Map Size</th>
+            <th>Optimal Steps (\(T_{opt}\))</th>
+            <th>Suggested \(\gamma\)</th>
+            <th>Suggested Max Steps</th>
+        </tr>
+        <tr>
+            <td>64x64</td>
+            <td>~80 steps</td>
+            <td class="success">0.99 (H=100)</td>
+            <td class="success">250</td>
+        </tr>
+        <tr>
+            <td>128x128</td>
+            <td>~160 steps</td>
+            <td class="success">0.995 (H=200)</td>
+            <td class="success">500</td>
+        </tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>6. Conclusion for StarCraft II</h2>
+    <p>StarCraft II is a high-frequency environment. 10 steps (\(\gamma=0.9\)) is often less than 2 seconds of game time. For any navigation task, this is too short.</p>
+    <ul>
+        <li><span class="danger">Low Gamma (0.9):</span> The agent is "short-sighted." It only cares about what happens in the next 2-3 seconds.</li>
+        <li><span class="success">High Gamma (0.99+):</span> The agent is "strategic." It can value a long path that leads to a reward 20-30 seconds later.</li>
+    </ul>
+    <p><strong>Recommendation:</strong> Use <span class="success">0.99</span> or <span class="success">0.995</span> for navigation and unit control.</p>
+</div>
+
+</body>
+</html>

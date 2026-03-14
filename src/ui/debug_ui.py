@@ -2,6 +2,7 @@ import sys
 import os
 import numpy as np
 import cv2
+from typing import Dict
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QGridLayout, QLabel, QPushButton, QGroupBox, QCheckBox)
 from PyQt5.QtCore import Qt, QTimer
@@ -53,16 +54,31 @@ class DebugUI(QMainWindow):
         main_layout = QHBoxLayout(central_widget)
 
         # Left panel - Display area
-        self.display_label = QLabel("Waiting for game data...")
+        display_panel = QWidget()
+        display_layout = QVBoxLayout(display_panel)
+        
+        self.display_label = QLabel("Waiting for global data...")
         self.display_label.setAlignment(Qt.AlignCenter)
         self.display_label.setFixedSize(512, 512)
         self.display_label.setStyleSheet("background-color: black; border: 2px solid gray;")
         self.display_label.setScaledContents(True)
+        
+        self.tactical_label = QLabel("Waiting for tactical data...")
+        self.tactical_label.setAlignment(Qt.AlignCenter)
+        self.tactical_label.setFixedSize(512, 512)
+        self.tactical_label.setStyleSheet("background-color: black; border: 2px solid gray;")
+        self.tactical_label.setScaledContents(True)
+
+        display_layout.addWidget(QLabel("<b>Global View (128x128)</b>"))
+        display_layout.addWidget(self.display_label)
+        display_layout.addWidget(QLabel("<b>Tactical View (32x32)</b>"))
+        display_layout.addWidget(self.tactical_label)
+        display_layout.addStretch()
 
         # Right panel - Controls
         control_panel = self.create_control_panel()
 
-        main_layout.addWidget(self.display_label)
+        main_layout.addWidget(display_panel)
         main_layout.addWidget(control_panel, stretch=1)
 
     def create_control_panel(self):
@@ -72,7 +88,7 @@ class DebugUI(QMainWindow):
         layout = QVBoxLayout(panel)
 
         # Layer controls
-        layer_group = QGroupBox("Layer Controls")
+        layer_group = QGroupBox("Global View Layers")
 
         # Grid Layout
         layer_layout = QGridLayout(layer_group)
@@ -82,6 +98,7 @@ class DebugUI(QMainWindow):
         layer_layout.setColumnStretch(1, 1)
 
         self.layer_checkboxes = {}
+        self.tactical_layer_checkboxes = {}
 
         all_layers = list(LayerConstants.LAYERS.keys())
         self.allied_layer_names = [n for n in all_layers if n.startswith("allied") or n.startswith("command")]
@@ -133,6 +150,22 @@ class DebugUI(QMainWindow):
             layer_layout.addWidget(make_cb(name), row, col)
 
         layout.addWidget(layer_group)
+
+        # Tactical Layer controls
+        tactical_group = QGroupBox("Tactical View Layers")
+        tactical_layout = QGridLayout(tactical_group)
+        tactical_layers = list(LayerConstants.TACTICAL_LAYERS.keys())
+        
+        for i, name in enumerate(tactical_layers):
+            cb = QCheckBox(name)
+            cb.setChecked(True)
+            cb.setStyleSheet("font-size: 10px;")
+            cb.stateChanged.connect(lambda state, n=name: 
+                                    self.ui_manager.set_layer_visibility(n, state == Qt.Checked, is_tactical=True))
+            self.tactical_layer_checkboxes[name] = cb
+            tactical_layout.addWidget(cb, i // 2, i % 2)
+        
+        layout.addWidget(tactical_group)
 
         # Overlay Controls
         overlay_group = QGroupBox("Overlays")
@@ -200,63 +233,102 @@ class DebugUI(QMainWindow):
         except Exception as e:
             print(f"DebugUI poll error: {e}")
 
-    def update_display(self, frame: np.ndarray):
-        if frame is None: return
+    def update_display(self, data: Dict[str, np.ndarray]):
+        if data is None: return
 
         try:
-            # frame is 512x512 BGR (from UI Transformer)
-            display_h, display_w, _ = frame.shape
+            global_frame = data.get("global")
+            tactical_frame = data.get("tactical")
 
-            # 1. Overlay Action Mask
-            if self.show_mask:
-                mask_flat = self.agent.get_action_mask()
-                if mask_flat is not None and mask_flat.size == (128 * 128):
-                    mask_2d = mask_flat.reshape((128, 128))
-                    # Upscale to 512x512 Nearest Neighbor
-                    mask_resized = cv2.resize(mask_2d.astype(np.uint8), (display_w, display_h),
-                                              interpolation=cv2.INTER_NEAREST)
-
-                    # Tint Invalid Areas Red
-                    invalid_area = (mask_resized == 0)
-                    # Mix existing color with Red: (0.7 * Original) + (0.3 * Red)
-                    # Or simpler: Max Red channel, zero others for strong indicator
-                    # Let's do a semi-transparent red overlay
-
-                    overlay = frame.copy()
-                    overlay[invalid_area] = [0, 0, 200]  # BGR Red
-                    cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
-
-            # 2. Overlay Last Click
-            if self.show_clicks and self.agent.last_action is not None:
-                idx = self.agent.last_action
-                
-                # Dynamic grid size (e.g. 32 or 128)
-                grid_size = getattr(self.agent, 'grid_size', 128)
-                
-                # Convert 1D index to 2D
-                y_grid, x_grid = divmod(idx, grid_size)
-
-                # Scale up to 512x512
-                scale = display_w / float(grid_size)
-                cx = int(x_grid * scale + scale / 2)
-                cy = int(y_grid * scale + scale / 2)
-
-                # Draw Crosshair (Green)
-                color = (0, 255, 0)  # BGR
-                cv2.line(frame, (cx - 10, cy), (cx + 10, cy), color, 2)
-                cv2.line(frame, (cx, cy - 10), (cx, cy + 10), color, 2)
-                # Small white dot in exact center
-                cv2.circle(frame, (cx, cy), 1, (255, 255, 255), -1)
-
-            # Convert to QImage
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            q_image = QImage(rgb_frame.data, display_w, display_h, 3 * display_w, QImage.Format_RGB888).copy()
-
-            self.display_label.setPixmap(QPixmap.fromImage(q_image))
-            self.current_frame = frame
+            if global_frame is not None:
+                self._render_to_label(global_frame, self.display_label, is_tactical=False)
+            
+            if tactical_frame is not None:
+                self._render_to_label(tactical_frame, self.tactical_label, is_tactical=True)
+            else:
+                self.tactical_label.setText("Tactical view not active (No unit selected)")
 
         except Exception as e:
             print(f"Display update error: {e}")
+
+    def _render_to_label(self, frame: np.ndarray, label: QLabel, is_tactical: bool = False):
+        # frame is 512x512 BGR (from UI Transformer)
+        display_h, display_w, _ = frame.shape
+        
+        # Create a copy for overlays
+        rendered_frame = frame.copy()
+
+        # 1. Overlay Action Mask (Global only for now, or adapted if needed)
+        if not is_tactical and self.show_mask:
+            mask_flat = self.agent.get_action_mask()
+            if mask_flat is not None and mask_flat.size == (128 * 128):
+                mask_2d = mask_flat.reshape((128, 128))
+                mask_resized = cv2.resize(mask_2d.astype(np.uint8), (display_w, display_h),
+                                          interpolation=cv2.INTER_NEAREST)
+                invalid_area = (mask_resized == 0)
+                overlay = rendered_frame.copy()
+                overlay[invalid_area] = [0, 0, 200]  # BGR Red
+                cv2.addWeighted(overlay, 0.4, rendered_frame, 0.6, 0, rendered_frame)
+
+        # 2. Overlay Last Click
+        if self.show_clicks and self.agent.last_action is not None:
+            # Universal architecture uses MultiDiscrete [command, spatial]
+            # but debug_ui currently expects Discrete index. 
+            # If agent.last_action is a list/tuple, it's Universal.
+            action = self.agent.last_action
+            
+            if isinstance(action, (list, tuple, np.ndarray)):
+                # Universal: [head_idx, spatial_idx]
+                spatial_idx = int(action[1])
+                head_idx = int(action[0])
+                
+                # Check if this action matches the view type
+                is_local_head = False
+                if hasattr(self.agent, "training_conf"):
+                    heads = self.agent.training_conf.get("action_heads", [])
+                    if head_idx < len(heads):
+                        is_local_head = "_local" in heads[head_idx]
+                
+                # Draw on the correct view
+                should_draw = (is_tactical and is_local_head) or (not is_tactical and not is_local_head)
+                
+                if should_draw:
+                    # Universal architecture uses 32x32 for BOTH local and global heads.
+                    # Original architecture uses 128x128 for global.
+                    is_universal = hasattr(self.agent, "spatial_resolution")
+                    
+                    if is_universal:
+                        grid_size = 32
+                    else:
+                        grid_size = 32 if is_tactical else 128
+                    
+                    y_grid, x_grid = divmod(spatial_idx, grid_size)
+                    
+                    scale = display_w / float(grid_size)
+                    cx = int(x_grid * scale + scale / 2)
+                    cy = int(y_grid * scale + scale / 2)
+                    
+                    color = (0, 255, 0)
+                    cv2.line(rendered_frame, (cx - 10, cy), (cx + 10, cy), color, 2)
+                    cv2.line(rendered_frame, (cx, cy - 10), (cx, cy + 10), color, 2)
+                    cv2.circle(rendered_frame, (cx, cy), 1, (255, 255, 255), -1)
+            else:
+                # Original architecture
+                if not is_tactical:
+                    grid_size = getattr(self.agent, 'grid_size', 128)
+                    y_grid, x_grid = divmod(action, grid_size)
+                    scale = display_w / float(grid_size)
+                    cx = int(x_grid * scale + scale / 2)
+                    cy = int(y_grid * scale + scale / 2)
+                    color = (0, 255, 0)
+                    cv2.line(rendered_frame, (cx - 10, cy), (cx + 10, cy), color, 2)
+                    cv2.line(rendered_frame, (cx, cy - 10), (cx, cy + 10), color, 2)
+                    cv2.circle(rendered_frame, (cx, cy), 1, (255, 255, 255), -1)
+
+        # Convert to QImage
+        rgb_frame = cv2.cvtColor(rendered_frame, cv2.COLOR_BGR2RGB)
+        q_image = QImage(rgb_frame.data, display_w, display_h, 3 * display_w, QImage.Format_RGB888).copy()
+        label.setPixmap(QPixmap.fromImage(q_image))
 
     def update_statistics_display(self):
         try:

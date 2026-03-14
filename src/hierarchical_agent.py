@@ -34,8 +34,7 @@ class HierarchicalAgentSystem:
             agent = UniversalUnitControlAgent(
                 cnn_input_size=cnn_input_size,
                 grid_size=self.grid_size,
-                dilation_size=dilation_size,
-                spatial_resolution=self.training_conf.get("spatial_resolution", 16)
+                dilation_size=dilation_size
             )
         else:
             agent = UnitControlAgent(
@@ -46,21 +45,28 @@ class HierarchicalAgentSystem:
         self.unit_agents[agent_id] = agent
         return agent
 
-    def process_observation(self, observation: Dict[str, Any], player_id: int = 1) -> Dict[str, np.ndarray]:
+    def process_observation(self, observation: Dict[str, Any], player_id: int = 1, active_unit: Any = None) -> Dict[str, np.ndarray]:
         """
         Process observation through the hierarchical system
         """
         # Transform observation once
         obs_id = f"obs_{self.current_observation_id}"
         full_transformed = self.shared_transformer.transform_observation(
-            observation, player_id=player_id, observation_id=obs_id
+            observation, player_id=player_id, observation_id=obs_id,
+            active_unit=active_unit
         )
 
         # Extract Game Info for agents (Critical for Coordinate Mapping)
         game_info = observation.get('game_info')
+        
+        # Propagate layer metadata for UI/Pruning support
+        active_layers = getattr(self.shared_transformer.transformer, "active_layers", None)
+        active_tactical_layers = getattr(self.shared_transformer.transformer, "active_tactical_layers", None)
 
         results = {}
         for agent_id, agent in self.unit_agents.items():
+            agent.active_layers = active_layers
+            agent.active_tactical_layers = active_tactical_layers
             # Pass game_info so agent can calculate masks and coordinates
             processed = agent.process_transformed_observation(full_transformed, game_info=game_info)
             results[agent_id] = processed

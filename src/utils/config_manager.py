@@ -56,6 +56,33 @@ class ConfigManager:
 
         return accumulated_layers
 
+    def get_cumulative_active_tactical_layers(self, target_level: str) -> List[str]:
+        """
+        Returns the cumulative list of active tactical layers up to the target level.
+        Iterates through the levels defined in pipeline.yaml.
+        """
+        accumulated_layers = []
+        found_target = False
+        
+        for level in self.levels:
+            level_conf = self._load_yaml(f"{level}.yaml")
+            new_layers = level_conf.get("env", {}).get("active_tactical_layers", [])
+            
+            if new_layers:
+                for layer in new_layers:
+                    if layer not in accumulated_layers:
+                        accumulated_layers.append(layer)
+            
+            if level == target_level:
+                found_target = True
+                break
+        
+        if not found_target:
+            level_conf = self._load_yaml(f"{target_level}.yaml")
+            accumulated_layers = level_conf.get("env", {}).get("active_tactical_layers", [])
+
+        return accumulated_layers
+
     def get_cumulative_categorical_heads(self, target_level: str) -> List[str]:
         """
         Returns the cumulative list of categorical heads up to the target level.

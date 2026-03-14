@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PPO Interactive Lab: 10x10 Grid Edition</title>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; background: #f0f2f5; margin: 0; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .container { display: flex; gap: 20px; max-width: 1200px; width: 100%; }
+        .panel { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        .grid-container { display: grid; grid-template-columns: repeat(10, 40px); grid-template-rows: repeat(10, 40px); gap: 2px; background: #ccc; border: 2px solid #333; }
+        .cell { width: 40px; height: 40px; background: white; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #666; position: relative; }
+        .cell.target { background: #ffeb3b !important; border: 2px solid #fbc02d; }
+        .cell.agent { position: relative; z-index: 10; font-size: 20px; }
+        .buffer-panel { flex: 1; overflow-y: auto; max-height: 500px; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+        th { background: #f8f9fa; }
+        .controls { margin-top: 20px; display: flex; gap: 10px; }
+        button { padding: 10px 20px; border-radius: 6px; border: none; background: #3498db; color: white; cursor: pointer; font-weight: bold; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        button.train { background: #2ecc71; }
+        .math-overlay { background: #fffde7; border-left: 5px solid #fbc02d; padding: 15px; margin-top: 15px; font-family: monospace; }
+        .value-text { position: absolute; bottom: 2px; right: 2px; font-size: 8px; }
+    </style>
+</head>
+<body>
+
+<h1>PPO Training Lab (10x10 Grid)</h1>
+<p>Move the Marine (M) to the Beacon (B). Max 10 steps. Then click <strong>Train</strong> to see the math.</p>
+
+<div class="container">
+    <div class="panel">
+        <div id="grid" class="grid-container"></div>
+        <div class="controls">
+            <button onclick="move('up')">↑ Up</button>
+            <button onclick="move('down')">↓ Down</button>
+            <button onclick="move('left')">← Left</button>
+            <button onclick="move('right')">→ Right</button>
+            <button class="train" id="trainBtn" onclick="train()" disabled>Train Brain</button>
+            <button onclick="reset()">Reset</button>
+        </div>
+        <div id="status" style="margin-top: 10px; font-weight: bold;">Steps: 0/10</div>
+        <div id="mathConsole" class="math-overlay" style="display:none;"></div>
+    </div>
+
+    <div class="panel buffer-panel">
+        <h3>Memory Buffer (The "Old Brain" Snapshot)</h3>
+        <table id="bufferTable">
+            <thead>
+                <tr>
+                    <th>Step</th>
+                    <th>Pos</th>
+                    <th>Act</th>
+                    <th>R</th>
+                    <th>V(s)</th>
+                    <th>LogProb</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    const GRID_SIZE = 10;
+    const MAX_STEPS = 10;
+    const GAMMA = 0.99;
+    
+    let agentPos = { x: 0, y: 0 };
+    let targetPos = { x: 8, y: 8 };
+    let steps = [];
+    let valueMap = Array(GRID_SIZE * GRID_SIZE).fill(0).map(() => Math.random() * 2);
+    let policyMap = Array(GRID_SIZE * GRID_SIZE).fill(0).map(() => ({ up: 0.25, down: 0.25, left: 0.25, right: 0.25 }));
+
+    function initGrid() {
+        const grid = document.getElementById('grid');
+        grid.innerHTML = '';
+        for (let i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            const x = i % GRID_SIZE;
+            const y = Math.floor(i / GRID_SIZE);
+            
+            // Color by Value
+            const val = valueMap[i];
+            const intensity = Math.min(255, Math.max(200, 255 - (val * 10)));
+            cell.style.backgroundColor = `rgb(${intensity}, ${intensity}, 255)`;
+            
+            if (x === agentPos.x && y === agentPos.y) {
+                cell.innerText = 'M';
+                cell.classList.add('agent');
+            } else if (x === targetPos.x && y === targetPos.y) {
+                cell.innerText = 'B';
+                cell.classList.add('target');
+            }
+            
+            const vText = document.createElement('span');
+            vText.className = 'value-text';
+            vText.innerText = val.toFixed(1);
+            cell.appendChild(vText);
+            grid.appendChild(cell);
+        }
+    }
+
+    function move(dir) {
+        if (steps.length >= MAX_STEPS) return;
+        
+        const oldX = agentPos.x;
+        const oldY = agentPos.y;
+        const stateIdx = oldY * GRID_SIZE + oldX;
+        
+        if (dir === 'up' && agentPos.y > 0) agentPos.y--;
+        if (dir === 'down' && agentPos.y < GRID_SIZE - 1) agentPos.y++;
+        if (dir === 'left' && agentPos.x > 0) agentPos.x--;
+        if (dir === 'right' && agentPos.x < GRID_SIZE - 1) agentPos.x++;
+        
+        const reward = (agentPos.x === targetPos.x && agentPos.y === targetPos.y) ? 20 : -0.1;
+        const value = valueMap[stateIdx];
+        const logProb = policyMap[stateIdx][dir];
+        
+        steps.push({ step: steps.length + 1, x: oldX, y: oldY, act: dir, r: reward, v: value, prob: logProb });
+        
+        updateUI();
+        if (agentPos.x === targetPos.x && agentPos.y === targetPos.y || steps.length >= MAX_STEPS) {
+            document.getElementById('trainBtn').disabled = false;
+        }
+    }
+
+    function updateUI() {
+        initGrid();
+        document.getElementById('status').innerText = `Steps: ${steps.length}/${MAX_STEPS}`;
+        const tbody = document.querySelector('#bufferTable tbody');
+        tbody.innerHTML = '';
+        steps.forEach(s => {
+            const row = tbody.insertRow();
+            row.innerHTML = `<td>${s.step}</td><td>${s.x},${s.y}</td><td>${s.act}</td><td>${s.r}</td><td>${s.v.toFixed(2)}</td><td>${s.prob.toFixed(2)}</td>`;
+        });
+    }
+
+    function train() {
+        const console = document.getElementById('mathConsole');
+        console.style.display = 'block';
+        console.innerHTML = '<h3>Updating Brain...</h3>';
+        
+        // 1. Calculate Returns (Reverse sum)
+        let returns = Array(steps.length).fill(0);
+        let g = 0;
+        for (let i = steps.length - 1; i >= 0; i--) {
+            g = steps[i].r + GAMMA * g;
+            returns[i] = g;
+        }
+
+        // 2. Step through buffer and show math
+        let i = 0;
+        const interval = setInterval(() => {
+            if (i >= steps.length) {
+                clearInterval(interval);
+                console.innerHTML += '<br><strong>Training Complete! Value Map Updated.</strong>';
+                initGrid();
+                return;
+            }
+            
+            const s = steps[i];
+            const ret = returns[i];
+            const adv = ret - s.v;
+            
+            // Simulate New Brain Nudge
+            const newProb = adv > 0 ? Math.min(1.0, s.prob * 1.1) : s.prob * 0.9;
+            const ratio = newProb / s.prob;
+            const clipped = Math.min(Math.max(ratio, 0.8), 1.2);
+            
+            console.innerHTML += `Step ${s.step}: Rtn=${ret.toFixed(1)}, Adv=${adv.toFixed(1)}, Ratio=${ratio.toFixed(2)} -> Clip=${clipped.toFixed(2)}<br>`;
+            
+            // Apply Update to maps
+            const idx = s.y * GRID_SIZE + s.x;
+            valueMap[idx] += 0.5 * adv; // Simple Value Update
+            policyMap[idx][s.act] = newProb; // Simple Policy Update
+            
+            i++;
+        }, 300);
+    }
+
+    function reset() {
+        agentPos = { x: 0, y: 0 };
+        steps = [];
+        document.getElementById('trainBtn').disabled = true;
+        document.getElementById('mathConsole').style.display = 'none';
+        updateUI();
+    }
+
+    initGrid();
+</script>
+
+</body>
+</html>

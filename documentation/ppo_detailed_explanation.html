@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deep Dive: How PPO Works (SC2 Edition)</title>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6; color: #333; max-width: 1600px; margin: 40px auto; padding: 0 20px; background-color: #f0f2f5;
+        }
+        .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 25px; border-left: 5px solid #3498db; }
+        .card.math { border-left-color: #9b59b6; }
+        .card.example { border-left-color: #2ecc71; }
+        .card.lab { border-left-color: #f1c40f; width: 100%; box-sizing: border-box; }
+        
+        h1, h2, h3 { color: #2c3e50; margin-top: 0; }
+        .math-block { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; border: 1px solid #e9ecef; font-size: 1.1em; }
+        .concept-tag { display: inline-block; background: #3498db; color: white; padding: 2px 10px; border-radius: 20px; font-size: 0.85em; margin-bottom: 10px; }
+        
+        /* Symbol Table */
+        .symbol-table { width: 100%; border-collapse: collapse; margin: 10px 0; background: white; }
+        .symbol-table th, .symbol-table td { border: 1px solid #dee2e6; padding: 12px; text-align: left; }
+        .symbol-table th { background: #e9ecef; }
+
+        /* Lab Layout Styles */
+        .lab-header { background: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #eee; margin-bottom: 25px; }
+        .status-bar { font-weight: bold; color: #2c3e50; font-size: 1.2em; border-left: 4px solid #3498db; padding-left: 15px; margin-bottom: 15px; }
+        
+        .controls-row { display: flex; align-items: center; gap: 40px; }
+        .d-pad { display: grid; grid-template-areas: ". up ." "left . right" ". down ."; gap: 5px; }
+        .d-pad button { width: 45px; height: 45px; padding: 0; display: flex; align-items: center; justify-content: center; font-size: 20px; border-radius: 6px; border: 1px solid #ccc; background: white; cursor: pointer; }
+        .d-pad button:hover { background: #eee; }
+        .btn-up { grid-area: up; } .btn-down { grid-area: down; } .btn-left { grid-area: left; } .btn-right { grid-area: right; }
+        
+        .action-btns { display: flex; gap: 12px; }
+        .action-btns button { padding: 12px 20px; border-radius: 8px; border: none; background: #3498db; color: white; cursor: pointer; font-weight: bold; }
+        .action-btns button.train { background: #2ecc71; }
+        .action-btns button:disabled { background: #ccc; cursor: not-allowed; }
+
+        .lab-main-area { display: flex; gap: 30px; align-items: flex-start; margin-bottom: 20px; }
+        .maps-col { flex: 0 0 1060px; display: flex; gap: 20px; }
+        .grid-wrapper { flex: 1; display: flex; flex-direction: column; align-items: center; }
+        .grid-title { font-weight: bold; margin-bottom: 10px; color: #555; text-transform: uppercase; font-size: 0.9em; }
+
+        .grid-container { display: grid; grid-template-columns: repeat(5, 100px); grid-template-rows: repeat(5, 100px); gap: 4px; background: #bbb; border: 3px solid #333; padding: 4px; border-radius: 8px; }
+        .cell { width: 100px; height: 100px; background: white; display: flex; align-items: center; justify-content: center; position: relative; border-radius: 4px; border: 3px solid transparent; transition: all 0.2s; }
+        .cell.target { background: #ffeb3b !important; border-color: #fbc02d; }
+        .cell.agent { font-size: 32px; font-weight: bold; color: #27ae60; z-index: 10; text-shadow: 0 0 10px rgba(255,255,255,0.9); }
+        .value-text { position: absolute; top: 2px; left: 2px; font-size: 10px; font-weight: bold; background: rgba(255,255,255,0.6); padding: 1px 3px; border-radius: 2px; }
+        
+        .arrow-container { position: absolute; display: flex; flex-direction: column; align-items: center; pointer-events: none; }
+        .arrow-up { top: 2px; left: 50%; transform: translateX(-50%); }
+        .arrow-down { bottom: 2px; left: 50%; transform: translateX(-50%); }
+        .arrow-left { left: 2px; top: 50%; transform: translateY(-50%); }
+        .arrow-right { right: 2px; top: 50%; transform: translateY(-50%); }
+        .arrow-sym { color: #3498db; line-height: 1; }
+        .prob-val { font-size: 8px; font-weight: bold; color: #666; margin-top: -2px; }
+
+        .buffer-col { flex: 1; min-width: 350px; }
+        .buffer-scroll { max-height: 500px; overflow-y: auto; border: 1px solid #ddd; border-radius: 8px; background: white; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th, td { border: 1px solid #eee; padding: 8px; text-align: center; }
+        th { background: #f8f9fa; position: sticky; top: 0; }
+
+        .math-overlay { background: #fffde7; border-left: 5px solid #fbc02d; padding: 25px; margin-top: 30px; font-family: 'Courier New', monospace; border-radius: 12px; border: 1px solid #ffe57f; max-height: 600px; overflow-y: auto; }
+        .math-step { margin-bottom: 20px; padding: 15px; border-bottom: 1px solid #eee; border-radius: 6px; transition: background 0.2s; position: relative; }
+        .math-step:hover { background: #f1f2f6; cursor: help; }
+        
+        /* Tooltip style */
+        .math-step .tooltip-content { display: none; position: absolute; bottom: 100%; left: 0; background: #2c3e50; color: white; padding: 15px; border-radius: 8px; font-size: 13px; min-width: 450px; z-index: 100; box-shadow: 0 5px 15px rgba(0,0,0,0.3); border: 1px solid #1a252f; margin-bottom: 10px; pointer-events: none; }
+        .math-step:hover .tooltip-content { display: block; }
+        .tooltip-formula { color: #3498db; font-weight: bold; display: block; margin-bottom: 8px; border-bottom: 1px solid #444; padding-bottom: 5px; }
+        .tooltip-values { color: #ecf0f1; display: block; line-height: 1.4; font-family: monospace; }
+
+        .highlight-cell { border: 3px solid #e74c3c !important; box-shadow: 0 0 15px rgba(231, 76, 60, 0.6); z-index: 20; }
+        .highlight-row { background-color: #ffeaa7 !important; outline: 2px solid #fab1a0; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h1>Proximal Policy Optimization (PPO) Explained</h1>
+    <p>PPO is an "Actor-Critic" algorithm. Think of it as two brains working together to control your SC2 Marine:</p>
+    <ul>
+        <li><strong>The Actor (Policy \(\pi\)):</strong> Decides <em>which way to move</em> (North, South, East, West).</li>
+        <li><strong>The Critic (Value Function \(V\)):</strong> Predicts <em>how good the current spot is</em> (The "Score" of the position).</li>
+    </ul>
+</div>
+
+<div class="card" style="background-color: #e3f2fd; border-left: 5px solid #2196f3;">
+    <h2>Symbol Reference Guide</h2>
+    <table class="symbol-table">
+        <tr><th>Symbol</th><th>Name</th><th>Project Usage</th></tr>
+        <tr><td>\(\pi\)</td><td><strong>Pi</strong></td><td><strong>Policy:</strong> The Actor (Probability of actions).</td></tr>
+        <tr><td>\(V(s)\)</td><td><strong>Value</strong></td><td><strong>State Value:</strong> The Critic's score for a spot.</td></tr>
+        <tr><td>\(A_t\)</td><td><strong>Advantage</strong></td><td>How much better an action was than average (\(Q - V\)).</td></tr>
+        <tr><td>\(\delta_t\)</td><td><strong>Delta</strong></td><td><strong>TD-Error:</strong> The "surprise" after taking a step.</td></tr>
+        <tr><td>\(\gamma\)</td><td><strong>Gamma</strong></td><td><strong>Discount Factor:</strong> How far we care about (0.99).</td></tr>
+        <tr><td>\(\lambda\)</td><td><strong>Lambda</strong></td><td><strong>GAE Factor:</strong> Smoothing factor for Advantage.</td></tr>
+    </table>
+</div>
+
+<div class="card math">
+    <span class="concept-tag">Concept 1</span>
+    <h2>The Critic: V(s) vs Q(s, a)</h2>
+    <p>To understand Advantage, we first need to distinguish between the <strong>State Value</strong> and the <strong>Action Value</strong>.</p>
+    <div class="math-block">
+        <strong>V(s) - The State Value:</strong> "How good is this spot?" Average expected success from here.<br>
+        <strong>Q(s, a) - The Action Value:</strong> "How good is this specific move?" Expected success if you move now.
+    </div>
+    <div class="math-block">
+        \[A(s, a) = Q(s, a) - V(s)\]
+        \[\text{Advantage} = \text{Specific Action Quality} - \text{Average Quality of the Spot}\]
+    </div>
+</div>
+
+<div class="card math">
+    <span class="concept-tag">Concept 2</span>
+    <h2>Temporal Difference (TD) Error (\(\delta_t\))</h2>
+    <p>This is the "Reality Check." It's the difference between what the Critic expected and what actually happened after one step.</p>
+    <div class="math-block">
+        \[\delta_t = \underbrace{r_t}_{\text{Reward received}} + \underbrace{\gamma V(s_{t+1})}_{\text{New predicted value}} - \underbrace{V(s_t)}_{\text{Old predicted value}}\]
+    </div>
+</div>
+
+<div class="card math">
+    <span class="concept-tag">Concept 3</span>
+    <h2>The Advantage (\(A_t\))</h2>
+    <p>In PPO, we use <strong>GAE (Generalized Advantage Estimation)</strong>, which is a smoothed version of TD Errors:</p>
+    <div class="math-block">
+        \[\hat{A}_t = \delta_t + (\gamma\lambda)\delta_{t+1} + (\gamma\lambda)^2\delta_{t+2} + \dots\]
+    </div>
+</div>
+
+<div class="card example">
+    <h2>The "GPS Signal" Analogy (Bellman Equation)</h2>
+    <div class="math-block">\[V(s) = r + \gamma V(s')\]</div>
+    <p>Imagine your Marine is lost. The Beacon is a <strong>Radio Tower</strong> broadcasting a signal (20.0). Every step away, the signal drops by \(\gamma\) (0.99). The Marine simply follows the increasing signal strength (Advantage).</p>
+</div>
+
+<div class="card" style="border-left-color: #e74c3c;">
+    <span class="concept-tag" style="background:#e74c3c;">Pro Tip</span>
+    <h2>The Edge Struggle: Why agents hate boundaries</h2>
+    <p>Convolutional Neural Networks (CNNs) "see" the map through kernels. At the <strong>Edge</strong>, the kernel has fewer neighbors to learn from (padding). This makes edges "lower resolution" than the center, often causing the Marine to stall or circle near map boundaries.</p>
+</div>
+
+<div class="card">
+    <h2>The Time-Travel Trick: The PPO Ratio</h2>
+    <p>The <strong>Ratio</strong> measures how much more likely the move is now compared to the old brain snapshot:</p>
+    <div class="math-block">\[\text{ratio} = \frac{\pi_{new}(a|s)}{\pi_{old}(a|s)}\]</div>
+    <p>If the ratio > 1.2, <strong>Clipping</strong> kicks in to prevent the brain from changing too fast. This keeps training stable.</p>
+</div>
+
+<div class="card lab">
+    <span class="concept-tag" style="background:#f1c40f; color:#333;">Interactive Lab</span>
+    <h2>PPO Multi-Episode Training Lab</h2>
+    <p>Play multiple episodes. Click <strong>Train Batch</strong> to see the brain update. 
+    Hover over math steps to see the formulas and highlight data sources.</p>
+    
+    <div class="lab-header">
+        <div id="status" class="status-bar">Steps: 0/10 | Buffer: 0 steps</div>
+        <div class="controls-row">
+            <div class="d-pad">
+                <button class="btn-up" onclick="move('up')">↑</button>
+                <button class="btn-left" onclick="move('left')">←</button>
+                <button class="btn-right" onclick="move('right')">→</button>
+                <button class="btn-down" onclick="move('down')">↓</button>
+            </div>
+            <div class="action-btns">
+                <button class="train" id="trainBtn" onclick="train()" disabled>Train Batch</button>
+                <button onclick="resetLab()" id="resetBtn">Commit & Next Episode</button>
+                <button onclick="newTarget()" style="background: #e67e22;">New Target & Clear All</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="lab-main-area">
+        <div class="maps-col">
+            <div class="grid-wrapper">
+                <div class="grid-title">Current Brain (Frozen)</div>
+                <div id="grid" class="grid-container"></div>
+            </div>
+            <div class="grid-wrapper" id="afterWrapper" style="opacity: 0.3;">
+                <div class="grid-title">Updated Brain (Preview)</div>
+                <div id="afterGrid" class="grid-container"></div>
+            </div>
+        </div>
+        <div class="buffer-col">
+            <h3 style="margin-top:0;">Memory Buffer</h3>
+            <div class="buffer-scroll">
+                <table id="bufferTable">
+                    <thead>
+                        <tr><th>#</th><th>Pos</th><th>Act</th><th>R</th><th>V(s)</th><th>Prob</th></tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="mathConsole" class="math-overlay" style="display:none;"></div>
+</div>
+
+<script>
+    const GRID_SIZE = 5;
+    const MAX_STEPS = 10;
+    const GAMMA = 0.99;
+    
+    let agentPos = { x: 0, y: 0 };
+    let targetPos = { x: 4, y: 4 };
+    let steps = [];
+    let currentEpisodeSteps = 0;
+    
+    let valueMap = Array(GRID_SIZE * GRID_SIZE).fill(0).map(() => Math.random() * 2);
+    let policyMap = Array(GRID_SIZE * GRID_SIZE).fill(0).map(() => {
+        const weights = [Math.random(), Math.random(), Math.random(), Math.random()];
+        const sum = weights.reduce((a, b) => a + b, 0);
+        return { up: weights[0]/sum, down: weights[1]/sum, left: weights[2]/sum, right: weights[3]/sum };
+    });
+
+    let trainedValueMap = [...valueMap];
+    let trainedPolicyMap = policyMap.map(p => ({...p}));
+    let hasPendingUpdate = false;
+
+    function randomizePositions() {
+        agentPos.x = Math.floor(Math.random() * GRID_SIZE);
+        agentPos.y = Math.floor(Math.random() * GRID_SIZE);
+        do {
+            targetPos.x = Math.floor(Math.random() * GRID_SIZE);
+            targetPos.y = Math.floor(Math.random() * GRID_SIZE);
+        } while (targetPos.x === agentPos.x && targetPos.y === agentPos.y);
+    }
+
+    function renderGrid(id, mapV, mapP, showAgent=true) {
+        const grid = document.getElementById(id);
+        if (!grid) return;
+        grid.innerHTML = '';
+        for (let i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            cell.id = `${id}-cell-${i}`;
+            const x = i % GRID_SIZE;
+            const y = Math.floor(i / GRID_SIZE);
+            const val = mapV[i];
+            const intensity = Math.min(255, Math.max(180, 255 - (val * 15)));
+            cell.style.backgroundColor = `rgb(${intensity}, ${intensity}, 255)`;
+            if (showAgent && (i === agentPos.y * GRID_SIZE + agentPos.x)) {
+                cell.innerHTML = 'M';
+                cell.classList.add('agent');
+            } else if (i === targetPos.y * GRID_SIZE + targetPos.x) {
+                cell.classList.add('target');
+            }
+            const vText = document.createElement('span');
+            vText.className = 'value-text';
+            vText.innerText = val.toFixed(1);
+            cell.appendChild(vText);
+            const p = mapP[i];
+            const dirs = [{d:'up',s:'▲',c:'arrow-up'},{d:'down',s:'▼',c:'arrow-down'},{d:'left',s:'◀',c:'arrow-left'},{d:'right',s:'▶',c:'arrow-right'}];
+            dirs.forEach(a => {
+                const container = document.createElement('div');
+                container.className = 'arrow-container ' + a.c;
+                const prob = p[a.d];
+                const fontSize = 10 + (prob * 15);
+                const sym = document.createElement('span');
+                sym.className = 'arrow-sym';
+                sym.innerText = a.s;
+                sym.style.fontSize = fontSize + 'px';
+                sym.style.opacity = Math.max(0.2, prob * 2.5);
+                if (prob > 0.4) sym.style.color = '#e74c3c';
+                const valSpan = document.createElement('span');
+                valSpan.className = 'prob-val';
+                valSpan.innerText = prob.toFixed(2);
+                container.appendChild(sym);
+                container.appendChild(valSpan);
+                cell.appendChild(container);
+            });
+            grid.appendChild(cell);
+        }
+    }
+
+    function highlightData(stepIdx, cellIdx) {
+        const row = document.getElementById(`row-${stepIdx}`);
+        if (row) row.classList.add('highlight-row');
+        document.getElementById(`grid-cell-${cellIdx}`)?.classList.add('highlight-cell');
+        document.getElementById(`afterGrid-cell-${cellIdx}`)?.classList.add('highlight-cell');
+    }
+
+    function clearHighlight() {
+        document.querySelectorAll('.highlight-row').forEach(el => el.classList.remove('highlight-row'));
+        document.querySelectorAll('.highlight-cell').forEach(el => el.classList.remove('highlight-cell'));
+    }
+
+    function move(dir) {
+        if (currentEpisodeSteps >= MAX_STEPS) return;
+        if (agentPos.x === targetPos.x && agentPos.y === targetPos.y) return;
+        const oldX = agentPos.x;
+        const oldY = agentPos.y;
+        const oldDist = Math.sqrt(Math.pow(oldX - targetPos.x, 2) + Math.pow(oldY - targetPos.y, 2));
+        if (dir === 'up' && agentPos.y > 0) agentPos.y--;
+        else if (dir === 'down' && agentPos.y < GRID_SIZE - 1) agentPos.y++;
+        else if (dir === 'left' && agentPos.x > 0) agentPos.x--;
+        else if (dir === 'right' && agentPos.x < GRID_SIZE - 1) agentPos.x++;
+        const newDist = Math.sqrt(Math.pow(agentPos.x - targetPos.x, 2) + Math.pow(agentPos.y - targetPos.y, 2));
+        let reward = -0.01;
+        if (newDist < oldDist) reward += 0.1;
+        else if (newDist > oldDist) reward -= 0.1;
+        let reached = (agentPos.x === targetPos.x && agentPos.y === targetPos.y);
+        if (reached) reward += 20;
+        else if (currentEpisodeSteps + 1 >= MAX_STEPS) reward -= 10;
+        const stateIdx = oldY * GRID_SIZE + oldX;
+        const isTerminal = reached || (currentEpisodeSteps + 1 >= MAX_STEPS);
+        steps.push({ step: steps.length, x: oldX, y: oldY, act: dir, r: reward, v: valueMap[stateIdx], prob: policyMap[stateIdx][dir], terminal: isTerminal, stateIdx: stateIdx });
+        currentEpisodeSteps++;
+        updateUI(reached);
+        if (isTerminal) document.getElementById('trainBtn').disabled = false;
+    }
+
+    function updateUI(reached) {
+        renderGrid('grid', valueMap, policyMap);
+        let statusText = `Steps: ${currentEpisodeSteps}/${MAX_STEPS} | Buffer: ${steps.length} steps`;
+        if (reached) statusText += " - SUCCESS!";
+        else if (currentEpisodeSteps >= MAX_STEPS) statusText += " - FAILED";
+        document.getElementById('status').innerText = statusText;
+        const tbody = document.querySelector('#bufferTable tbody');
+        tbody.innerHTML = '';
+        steps.forEach((s, idx) => {
+            const row = tbody.insertRow();
+            row.id = `row-${idx}`;
+            if (s.terminal) row.style.borderBottom = "2px solid #333";
+            row.innerHTML = `<td>${s.step+1}</td><td>${s.x},${s.y}</td><td>${s.act}</td><td>${s.r.toFixed(2)}</td><td>${s.v.toFixed(2)}</td><td>${s.prob.toFixed(2)}</td>`;
+        });
+    }
+
+    function train() {
+        const consoleEl = document.getElementById('mathConsole');
+        const afterWrapper = document.getElementById('afterWrapper');
+        afterWrapper.style.opacity = "1.0";
+        consoleEl.style.display = 'block';
+        consoleEl.innerHTML = '';
+
+        let returns = Array(steps.length).fill(0);
+        let g = 0;
+        for (let i = steps.length - 1; i >= 0; i--) { 
+            if (steps[i].terminal) g = 0;
+            g = steps[i].r + GAMMA * g; 
+            returns[i] = g; 
+        }
+        trainedValueMap = [...valueMap];
+        trainedPolicyMap = policyMap.map(p => ({...p}));
+        const valueChanges = Array(GRID_SIZE * GRID_SIZE).fill(0);
+        const maxInfluence = Array(GRID_SIZE * GRID_SIZE).fill(0);
+        steps.forEach((s, i) => {
+            const adv = returns[i] - s.v;
+            for (let y = 0; y < GRID_SIZE; y++) {
+                for (let x = 0; x < GRID_SIZE; x++) {
+                    const distSq = Math.pow(x - s.x, 2) + Math.pow(y - s.y, 2);
+                    const influence = Math.exp(-distSq / 1.5);
+                    const idx = y * GRID_SIZE + x;
+                    if (influence > maxInfluence[idx]) {
+                        valueChanges[idx] = 0.3 * adv * influence;
+                        maxInfluence[idx] = influence;
+                    }
+                    if (influence > 0.6) {
+                        const factor = adv > 0 ? 1.15 : 0.85;
+                        trainedPolicyMap[idx][s.act] = Math.min(0.9, trainedPolicyMap[idx][s.act] * factor);
+                        const others = ['up','down','left','right'].filter(d => d !== s.act);
+                        const remainder = 1.0 - trainedPolicyMap[idx][s.act];
+                        others.forEach(d => trainedPolicyMap[idx][d] = remainder / 3);
+                    }
+                }
+            }
+        });
+        for(let j=0; j<trainedValueMap.length; j++) trainedValueMap[j] += valueChanges[j];
+        let i = 0;
+        const interval = setInterval(() => {
+            if (i >= steps.length) {
+                clearInterval(interval);
+                consoleEl.innerHTML += '<br><div style="color:#2ecc71; font-weight:bold;">BATCH COMPLETE! Review and Commit.</div>';
+                renderGrid('afterGrid', trainedValueMap, trainedPolicyMap, false);
+                hasPendingUpdate = true;
+                return;
+            }
+            const s = steps[i];
+            const ret = returns[i];
+            const adv = ret - s.v;
+            const factor = adv > 0 ? 1.15 : 0.85;
+            const newProb = Math.min(0.9, s.prob * factor);
+            const ratio = newProb / s.prob;
+            const clipped = Math.min(Math.max(ratio, 0.8), 1.2);
+            const nextG = (i < steps.length - 1 && !s.terminal) ? returns[i+1] : 0;
+
+            let html = `<div class="math-step" onmouseover="highlightData(${i}, ${s.stateIdx})" onmouseout="clearHighlight()">`;
+            html += `<div class="tooltip-content">`;
+            html += `<span class="tooltip-formula">1. Return: G_t = r_t + γ * G_{t+1}</span>`;
+            html += `<span class="tooltip-values">G = ${s.r.toFixed(4)} + ${GAMMA} * ${nextG.toFixed(4)} = ${ret.toFixed(4)}</span>`;
+            html += `<span class="tooltip-formula">2. Advantage: A_t = G_t - V(s_t)</span>`;
+            html += `<span class="tooltip-values">A = ${ret.toFixed(4)} - ${s.v.toFixed(4)} = ${adv.toFixed(4)}</span>`;
+            html += `<span class="tooltip-formula">3. Ratio: r_t = π_new / π_old</span>`;
+            html += `<span class="tooltip-values">r = ${newProb.toFixed(4)} / ${s.prob.toFixed(4)} = ${ratio.toFixed(4)}</span>`;
+            html += `<span class="tooltip-formula">4. Objective: L = min(r*A, clip(r, 0.8, 1.2)*A)</span>`;
+            html += `<span class="tooltip-values">L = min(${(ratio*adv).toFixed(4)}, ${(clipped*adv).toFixed(4)}) = ${(clipped*adv).toFixed(4)}</span>`;
+            html += `</div>`;
+
+            html += `<strong>Step ${s.step + 1} at (${s.x},${s.y})${s.terminal ? ' [TERM]' : ''}</strong><br>`;
+            html += `<code style="color:#2980b9;">G = ${s.r.toFixed(2)} + ${GAMMA} * ${nextG.toFixed(2)} = <strong>${ret.toFixed(2)}</strong></code><br>`;
+            html += `<code style="color:#8e44ad;">A = ${ret.toFixed(2)} - ${s.v.toFixed(2)} = <strong>${adv.toFixed(2)}</strong></code><br>`;
+            html += `<code style="color:#d35400;">r = ${newProb.toFixed(3)} / ${s.prob.toFixed(3)} = <strong>${ratio.toFixed(2)}</strong></code><br>`;
+            html += `<code style="color:#c0392b;">L = min(${(ratio*adv).toFixed(2)}, ${(clipped*adv).toFixed(2)}) = <strong>${(clipped * adv).toFixed(2)}</strong></code>`;
+            html += `</div>`;
+            consoleEl.innerHTML += html;
+            i++;
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }, 200);
+    }
+
+    function resetLab() {
+        if (hasPendingUpdate) {
+            valueMap = [...trainedValueMap];
+            policyMap = trainedPolicyMap.map(p => ({...p}));
+            hasPendingUpdate = false;
+            steps = []; 
+        }
+        randomizePositions();
+        currentEpisodeSteps = 0;
+        document.getElementById('trainBtn').disabled = steps.length === 0;
+        document.getElementById('mathConsole').style.display = 'none';
+        document.getElementById('afterWrapper').style.opacity = "0.3";
+        updateUI(false);
+    }
+
+    function newTarget() {
+        randomizePositions();
+        valueMap = Array(GRID_SIZE * GRID_SIZE).fill(0).map(() => Math.random() * 2);
+        policyMap = Array(GRID_SIZE * GRID_SIZE).fill(0).map(() => {
+            const weights = [Math.random(), Math.random(), Math.random(), Math.random()];
+            const sum = weights.reduce((a, b) => a + b, 0);
+            return { up: weights[0]/sum, down: weights[1]/sum, left: weights[2]/sum, right: weights[3]/sum };
+        });
+        hasPendingUpdate = false;
+        steps = [];
+        resetLab();
+    }
+
+    randomizePositions();
+    renderGrid('grid', valueMap, policyMap);
+</script>
+
+</body>
+</html>

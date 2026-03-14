@@ -339,9 +339,17 @@ class MaskablePPO(SB3MaskablePPO):
         Overridden load to automatically handle architecture mismatches (e.g. Recurrent -> Non-Recurrent).
         This makes the class a drop-in replacement that fixes loading errors without pipeline changes.
         """
+        tb_log = kwargs.pop("tensorboard_log", None)
+        
         try:
             # Try standard load first
-            return super().load(path, env=env, device=device, custom_objects=custom_objects, **kwargs)
+            model = super().load(path, env=env, device=device, custom_objects=custom_objects, **kwargs)
+            if tb_log is not None:
+                model.tensorboard_log = tb_log
+                from stable_baselines3.common.logger import configure
+                new_logger = configure(tb_log, ["stdout", "tensorboard"])
+                model.set_logger(new_logger)
+            return model
         except (RuntimeError, ValueError, TypeError) as e:
             # If it fails, retry with non-strict parameter loading and no optimizer
             logger.warning(f"Standard load failed, attempting architecture-agnostic recovery: {e}")
@@ -359,6 +367,12 @@ class MaskablePPO(SB3MaskablePPO):
             
             try:
                 cls.set_parameters = non_strict_set_params
-                return super().load(path, env=env, device=device, custom_objects=custom_objects, **kwargs)
+                model = super().load(path, env=env, device=device, custom_objects=custom_objects, **kwargs)
+                if tb_log is not None:
+                    model.tensorboard_log = tb_log
+                    from stable_baselines3.common.logger import configure
+                    new_logger = configure(tb_log, ["stdout", "tensorboard"])
+                    model.set_logger(new_logger)
+                return model
             finally:
                 cls.set_parameters = original_set_params

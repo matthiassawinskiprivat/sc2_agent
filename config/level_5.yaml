@@ -2,17 +2,18 @@
 # Configuration for Level 5: 6 Zerglings
 
 training:
-  training_steps: 2_000_000
-  num_envs: 6
+  training_steps: 8_000_000
+  num_envs: 3
   n_steps: 2048
-  batch_size: 1024
+  batch_size: 4096
   learning_rate: 0.0003
   render_beacon: True
+  watchdog_timeout: 3600
 
 # Environment parameters
 env:
   env_class: "Level3Env"
-  targets: 6
+  targets: 4
   grid_size: 128
   headless: True
   max_steps: 1000

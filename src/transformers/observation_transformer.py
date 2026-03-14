@@ -3,6 +3,10 @@ Professional Observation Transformer
 Fixed:
 1. COMMAND_ASSIGNMENT now draws ALL allied units (Bots don't 'select' units).
 2. Preserved scaling/cropping logic.
+3. Added Tactical Fovea (32x32 zoom centered on active unit).
+4. Fixed Scale collision on small maps (e.g. 32x32).
+5. Fixed Regressions: Beacon layers, Tactical Command Assignment, Terrain rendering.
+6. Restored: Effects, Creep, Transport, and DPS drawing logic.
 """
 
 import numpy as np
@@ -17,6 +21,7 @@ from sc2.unit import Unit
 from sc2.game_data import GameData
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.ids.effect_id import EffectId
+from sc2.ids.ability_id import AbilityId
 
 # Project Constants
 from src.utils.layer_constants import LayerConstants
@@ -29,24 +34,6 @@ class ObservationTransformer:
         self.feature_map_height = map_size[1]
         self.training_conf = training_conf if training_conf is not None else {}
 
-        # Layer Pruning
-        self.active_layers = self.training_conf.get('active_layers', [])
-        self.num_active_layers = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
-        
-        # Optimization: Pre-calculate active indices for fast lookup in drawing methods
-        self.active_indices = set()
-        if self.active_layers:
-            self.active_indices = {LayerConstants.LAYERS[ln] for ln in self.active_layers if ln in LayerConstants.LAYERS}
-        else:
-            self.active_indices = set(range(LayerConstants.get_num_layers()))
-        
-        # Optimization: Pre-calculate active indices for fast lookup in drawing methods
-        self.active_indices = set()
-        if self.active_layers:
-            self.active_indices = {LayerConstants.LAYERS[ln] for ln in self.active_layers if ln in LayerConstants.LAYERS}
-        else:
-            self.active_indices = set(range(LayerConstants.get_num_layers()))
-
         # Transformation State
         self.scale = 1.0
         self.offset_x = 0.0
@@ -54,10 +41,39 @@ class ObservationTransformer:
         self.crop_x = 0.0
         self.crop_y = 0.0
 
+        # Layer Map Selection
+        self.current_layer_map = LayerConstants.LAYERS
+        self.is_tactical_mode = False
+
+        # Optimization: Pre-calculate active indices for fast lookup
+        self.active_layers = self.training_conf.get('active_layers', [])
+        arch = self.training_conf.get("agent_architecture", "original")
+        
+        # CRITICAL FIX: Default to 5 tactical layers for Universal if empty
+        if not self.active_layers and arch == "universal":
+            self.active_layers = [
+                LayerConstants.ALLIED_UNIT_DENSITY,
+                LayerConstants.ENEMY_UNIT_DENSITY,
+                LayerConstants.TERRAIN_PATHABLE,
+                LayerConstants.COMMAND_OBJECTIVE,
+                LayerConstants.COMMAND_ASSIGNMENT
+            ]
+            
+        self.active_tactical_layers = self.training_conf.get("active_tactical_layers", [])
+        if not self.active_tactical_layers:
+            self.active_tactical_layers = self.active_layers
+
+        from loguru import logger
+        logger.debug(f"ObservationTransformer init: Arch={arch}, ActiveLayers={len(self.active_layers)}, TacticalLayers={len(self.active_tactical_layers)}")
+
+        self._update_active_indices()
+
         # Caching
         self._terrain_cache = None
         self._last_map_name = None
         self._last_structure_count = 0
+        self._h_min = None
+        self._h_max = None
 
         # Pre-allocated grids
         self._grid_y = np.arange(self.feature_map_height).reshape(-1, 1)
@@ -71,6 +87,13 @@ class ObservationTransformer:
             unit_data_file = os.path.join(base_dir, "data", "unit_data.json")
 
         self.fallback_db = self._load_fallback_db(unit_data_file)
+
+    def _update_active_indices(self):
+        """Updates active indices based on current layer map and pruning config."""
+        if self.active_layers:
+            self.active_indices = {self.current_layer_map[ln] for ln in self.active_layers if ln in self.current_layer_map}
+        else:
+            self.active_indices = set(range(len(self.current_layer_map)))
 
     def _load_fallback_db(self, path: str) -> Dict:
         try:
@@ -87,128 +110,153 @@ class ObservationTransformer:
             return grid_obj.data_numpy
         return grid_obj
 
+    def transform_tactical(self, raw_obs: Dict[str, Any], active_unit: Unit) -> np.ndarray:
+        """
+        Creates a 32x32 tactical zoom centered on active_unit.
+        Uses TACTICAL_LAYERS for reduced state space.
+        """
+        if active_unit is None:
+            num_channels = LayerConstants.get_num_tactical_layers()
+            return np.zeros((num_channels, 32, 32), dtype=np.float32)
+
+        total_layers = LayerConstants.get_num_tactical_layers()
+        layers = np.zeros((total_layers, 32, 32), dtype=np.float32)
+        
+        # Save original state
+        old_state = (self.scale, self.offset_x, self.offset_y, self.crop_x, self.crop_y, 
+                     self.feature_map_width, self.feature_map_height, 
+                     self.current_layer_map, self.is_tactical_mode,
+                     self._grid_x, self._grid_y)
+        
+        # Tactical setup (32x32 centered on unit)
+        self.scale = 1.0
+        self.feature_map_width = 32
+        self.feature_map_height = 32
+        self.crop_x = active_unit.position.x - 16.0
+        self.crop_y = active_unit.position.y - 16.0
+        self.offset_x = 0
+        self.offset_y = 0
+        self.current_layer_map = LayerConstants.TACTICAL_LAYERS
+        self.is_tactical_mode = True
+        self._update_active_indices()
+
+        self._grid_x = np.arange(32).reshape(1, -1)
+        self._grid_y = np.arange(32).reshape(-1, 1)
+
+        try:
+            game_info = raw_obs.get('game_info')
+            allied_units = raw_obs.get('units') or []
+            enemy_units = raw_obs.get('enemy_units') or []
+            allied_structures = raw_obs.get('structures') or []
+            enemy_structures = raw_obs.get('enemy_structures') or []
+            game_data = raw_obs.get('game_data')
+            effects = raw_obs.get('effects') or []
+            
+            # Draw
+            self._draw_terrain_pathing(game_info, layers)
+            
+            # Allied
+            for unit in list(allied_units) + list(allied_structures):
+                if abs(unit.position.x - active_unit.position.x) > 17 or abs(unit.position.y - active_unit.position.y) > 17:
+                    continue
+                self._process_single_unit(unit, layers, False, 32, 32, game_data)
+
+            # Enemy
+            for unit in list(enemy_units) + list(enemy_structures):
+                if abs(unit.position.x - active_unit.position.x) > 17 or abs(unit.position.y - active_unit.position.y) > 17:
+                    continue
+                self._process_single_unit(unit, layers, True, 32, 32, game_data)
+
+            # Draw Command Info (High-priority markers)
+            tactical_raw_obs = raw_obs.copy()
+            tactical_raw_obs['selected_units'] = [active_unit]
+            self._draw_command_info(tactical_raw_obs, layers)
+
+            if effects: self._draw_effects(effects, layers)
+
+            # Normalize & Clip
+            layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
+            tactical_data = layers
+        finally:
+            # Restore state
+            (self.scale, self.offset_x, self.offset_y, self.crop_x, self.crop_y, 
+             self.feature_map_width, self.feature_map_height, 
+             self.current_layer_map, self.is_tactical_mode,
+             self._grid_x, self._grid_y) = old_state
+            self._update_active_indices()
+
+        return tactical_data
+
     def transform(self, raw_obs: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Transforms raw SC2 observation into:
-        1. Multi-layer pixel map (CNN input)
-        2. One-hot command vector (MLP input)
-        """
+        """Global transformation (128x128)."""
         total_layers = LayerConstants.get_num_layers()
         layers = np.zeros((total_layers, self.feature_map_height, self.feature_map_width), dtype=np.float32)
 
-        # Handle Command Vector (One-hot of size 10)
+        # Setup Command Vector
         raw_cmd = raw_obs.get('high_level_command', 0)
         cmd_idx = CommandConstants.get_index(raw_cmd)
-        
         command_vector = np.zeros(10, dtype=np.float32)
-        if 0 <= cmd_idx < 10:
-            command_vector[cmd_idx] = 1.0
-        else:
-            logger.warning(f"Invalid command index {cmd_idx}, using index 0")
-            command_vector[0] = 1.0
+        if 0 <= cmd_idx < 10: command_vector[cmd_idx] = 1.0
+        else: command_vector[0] = 1.0
+
+        # Setup Drawing State
+        self.current_layer_map = LayerConstants.LAYERS
+        self.is_tactical_mode = False
+        self._update_active_indices()
 
         allied_units = raw_obs.get('units') or []
         enemy_units = raw_obs.get('enemy_units') or []
         allied_structures = raw_obs.get('structures') or []
         enemy_structures = raw_obs.get('enemy_structures') or []
         effects = raw_obs.get('effects') or []
-        
         game_info = raw_obs.get('game_info')
         game_data = raw_obs.get('game_data')
 
-        # ------------------------------------------------------------------
-        # 1. Calculate Scale & Crop (Focus on Playable Area)
-        # ------------------------------------------------------------------
+        # 1. Scaling
         if game_info:
-            if hasattr(game_info, 'playable_area'):
-                area = game_info.playable_area
-                self.crop_x = area.x
-                self.crop_y = area.y
-                mw = area.width
-                mh = area.height
-            elif hasattr(game_info, 'map_size'):
-                self.crop_x = 0
-                self.crop_y = 0
-                mw = game_info.map_size.width
-                mh = game_info.map_size.height
+            area = getattr(game_info, 'playable_area', None)
+            if area:
+                self.crop_x, self.crop_y, mw, mh = area.x, area.y, area.width, area.height
             else:
-                self.crop_x, self.crop_y, mw, mh = 0, 0, 200, 200
+                self.crop_x, self.crop_y = 0, 0
+                mw, mh = game_info.map_size.width, game_info.map_size.height
         else:
             self.crop_x, self.crop_y, mw, mh = 0, 0, 200, 200
 
         self.scale = min(self.feature_map_width / max(mw, 1), self.feature_map_height / max(mh, 1))
-        # Removed min(1.0) clamp to allow upscaling on small maps
-        self.scale = self.scale
+        self.offset_x = max(0, (self.feature_map_width - int(mw * self.scale)) // 2)
+        self.offset_y = max(0, (self.feature_map_height - int(mh * self.scale)) // 2)
 
-        scaled_w = int(mw * self.scale)
-        scaled_h = int(mh * self.scale)
-        self.offset_x = max(0, (self.feature_map_width - scaled_w) // 2)
-        self.offset_y = max(0, (self.feature_map_height - scaled_h) // 2)
-
-        # ------------------------------------------------------------------
-        # 2. Draw Environment
-        # ------------------------------------------------------------------
+        # 2. Draw
         current_struct_count = len(allied_structures) + len(enemy_structures)
         self._draw_terrain_pathing(game_info, layers, current_struct_count)
         self._draw_terrain_creep(raw_obs, layers)
 
-        # ------------------------------------------------------------------
-        # 3. Draw Units & Structures
-        # ------------------------------------------------------------------
         self._liberator_positions = {'allied': [], 'enemy': []}
-
         lib_enum = getattr(UnitTypeId, 'LIBERATORAG', 154)
         lib_val = lib_enum.value if hasattr(lib_enum, "value") else 154
 
-        # Allied Units + Structures
         for unit in list(allied_units) + list(allied_structures):
-            u_name = getattr(unit.type_id, "name", None)
-            if u_name and "MINERAL" in u_name.upper(): continue
-
+            if "MINERAL" in getattr(unit.type_id, "name", "").upper(): continue
             self._process_single_unit(unit, layers, False, mw, mh, game_data)
-
-            u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
-            if u_id == lib_val:
+            if (unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id) == lib_val:
                 self._liberator_positions['allied'].append(unit.position)
 
-        # Enemy Units + Structures
         for unit in list(enemy_units) + list(enemy_structures):
-            u_name = getattr(unit.type_id, "name", None)
-            if u_name and "MINERAL" in u_name.upper(): continue
-
+            if "MINERAL" in getattr(unit.type_id, "name", "").upper(): continue
             self._process_single_unit(unit, layers, True, mw, mh, game_data)
-
-            u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
-            if u_id == lib_val:
+            if (unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id) == lib_val:
                 self._liberator_positions['enemy'].append(unit.position)
 
-        # ------------------------------------------------------------------
-        # 4. Draw Effects
-        # ------------------------------------------------------------------
-        if effects:
-            self._draw_effects(effects, layers)
-
-        # ------------------------------------------------------------------
-        # 5. Draw Command/State
-        # ------------------------------------------------------------------
+        if effects: self._draw_effects(effects, layers)
         self._draw_command_info(raw_obs, layers)
-        
-        # ------------------------------------------------------------------
-        # 5.5 Draw Transport Info
-        # ------------------------------------------------------------------
         self._draw_transport_info(raw_obs, layers)
 
-        # ------------------------------------------------------------------
-        # 6. Normalize & Scale to uint8 [0, 255]
-        # ------------------------------------------------------------------
+        # 3. Post-processing
         dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
-
-        # Apply non-linear compression to intensities
         layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
         layers[0:dps_start] = np.log1p(layers[0:dps_start])
-
-        # Centralized Scaling: Transform float32 [0, 1+] to float32 [0, 1]
         layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
 
         if self.active_layers:
@@ -217,626 +265,321 @@ class ObservationTransformer:
         else:
             map_data = layers
 
-        arch = self.training_conf.get("agent_architecture", "original")
-        if arch == "universal":
-            return {
-                "map": map_data,
-                "command": command_vector
-            }
-
-        return map_data
+        # ALWAYS return Dict to match the gymnasium.spaces.Dict in Level0Env
+        return {"map": map_data, "command": command_vector}
 
     def _get_pixel_coords(self, position) -> tuple:
         if position is None: return None, None
-
-        rel_x = position.x - self.crop_x
-        rel_y = position.y - self.crop_y
-
-        px = int(rel_x * self.scale + self.offset_x)
-        py = int(self.feature_map_height - 1 - (rel_y * self.scale + self.offset_y))
-
+        px = int((position.x - self.crop_x) * self.scale + self.offset_x)
+        py = int(self.feature_map_height - 1 - ((position.y - self.crop_y) * self.scale + self.offset_y))
         if 0 <= px < self.feature_map_width and 0 <= py < self.feature_map_height:
             return px, py
         return None, None
-
-    def _draw_command_info(self, raw_obs, layers):
-        """Draws Selected Units and Last Action Target."""
-
-        # Layer 40: COMMAND_ASSIGNMENT
-        # Priority: 'selected_units' > 'units' (fallback for backward compatibility)
-        units = raw_obs.get('selected_units')
-        if units is None:
-            # FIX: Draw ALL allied units.
-            # 'raw_obs["units"]' already contains only our own units (filtered in sc2_bot.py).
-            units = raw_obs.get('units', [])
-
-        idx_sel = LayerConstants.LAYERS[LayerConstants.COMMAND_ASSIGNMENT]
-
-        for unit in units:
-            px, py = self._get_pixel_coords(unit.position)
-            if px is not None:
-                # Use scaled radius
-                r = int(unit.radius * self.scale)
-                if r < 1: r = 1
-                # Draw solid circle
-                self._draw_circle_vectorized(layers, idx_sel, px, py, 0, r, 1.0, True)
-
-        # Layer 41: COMMAND_OBJECTIVE (Last Target)
-        targets = raw_obs.get('command_target')
-        if targets is None:
-             targets = []
-        elif hasattr(targets, "x") or hasattr(targets, "position"):
-             # It's a single Point2 or Unit, wrap it so iteration works correctly
-             # (Prevents Point2-as-tuple from being iterated into floats)
-             targets = [targets]
-        elif not isinstance(targets, (list, tuple, set)):
-             targets = [targets]
-             
-        idx_obj = LayerConstants.LAYERS[LayerConstants.COMMAND_OBJECTIVE]
-
-        for target in targets:
-            if target is None: continue
-            
-            # Check if target is a Unit or a Point2
-            if hasattr(target, "position"):
-                pos = target.position
-                # Draw with a larger radius to match beacon size (r=3 in SC2 units is ~4-5 pixels at 128x128)
-                r = int(target.radius * self.scale) if hasattr(target, "radius") else 3
-                px, py = self._get_pixel_coords(pos)
-                if px is not None:
-                    # Draw a solid mark for the specific objective
-                    self._draw_circle_vectorized(layers, idx_obj, px, py, 0, max(3, r), 1.0, False)
-            else:
-                px, py = self._get_pixel_coords(target)
-                if px is not None:
-                    # Draw a solid mark (radius 3 pixels)
-                    self._draw_circle_vectorized(layers, idx_obj, px, py, 0, 3, 1.0, False)
-
-    def _draw_terrain_pathing(self, game_info, layers, current_structure_count=0):
-        layer_idx = LayerConstants.LAYERS[LayerConstants.TERRAIN_PATHABLE]
-        current_map_name = getattr(game_info, 'map_name', '')
-
-        # Invalidate cache if map changes OR if buildings are built/destroyed
-        if (self._terrain_cache is not None and 
-            self._last_map_name == current_map_name and 
-            self._last_structure_count == current_structure_count):
-            layers[layer_idx] = self._terrain_cache
-            return
-
-        if not hasattr(game_info, 'pathing_grid') or not hasattr(game_info, 'terrain_height'):
-            return
-
-        # Update tracking
-        self._last_map_name = current_map_name
-        self._last_structure_count = current_structure_count
-
-
-        path_data = self._get_numpy_data(game_info.pathing_grid)
-        height_data = self._get_numpy_data(game_info.terrain_height)
-
-        if path_data is None or path_data.size == 0:
-            return
-
-        dim0, dim1 = path_data.shape
-        total_w = game_info.map_size.width
-        total_h = game_info.map_size.height
-
-        x_indices = np.arange(self.feature_map_width)
-        y_indices = np.arange(self.feature_map_height)
-
-        sc2_x = ((x_indices - self.offset_x) / self.scale) + self.crop_x
-        sc2_x = sc2_x.astype(int)
-
-        sc2_y = ((self.feature_map_height - 1 - y_indices) - self.offset_y) / self.scale
-        sc2_y = (sc2_y + self.crop_y).astype(int)
-
-        X_map, Y_map = np.meshgrid(sc2_x, sc2_y)
-        valid_mask = (X_map >= 0) & (X_map < total_w) & (Y_map >= 0) & (Y_map < total_h)
-
-        valid_sc2_x = X_map[valid_mask]
-        valid_sc2_y = Y_map[valid_mask]
-
-        sampled_path = None
-        sampled_height = None
-
-        if dim0 == total_h and dim1 == total_w:
-            # Standard SC2 Grid: (height, width) -> (y, x)
-            if np.all(valid_sc2_y < dim0) and np.all(valid_sc2_x < dim1):
-                sampled_path = path_data[valid_sc2_y, valid_sc2_x]
-                sampled_height = height_data[valid_sc2_y, valid_sc2_x]
-        elif dim0 == total_w and dim1 == total_h:
-            # Transposed Grid: (width, height) -> (x, y)
-            if np.all(valid_sc2_x < dim0) and np.all(valid_sc2_y < dim1):
-                sampled_path = path_data[valid_sc2_x, valid_sc2_y]
-                sampled_height = height_data[valid_sc2_x, valid_sc2_y]
-
-        if sampled_path is None:
-            cx = np.clip(valid_sc2_x, 0, dim0 - 1)
-            cy = np.clip(valid_sc2_y, 0, dim1 - 1)
-            sampled_path = path_data[cx, cy]
-            sampled_height = height_data[cx, cy]
-
-        height_layer = np.zeros((self.feature_map_height, self.feature_map_width), dtype=np.float32)
-        valid_pathable = sampled_path != 0
-
-        if np.any(valid_pathable):
-             h_vals = sampled_height[valid_pathable]
-             if h_vals.size > 0:
-                 min_h, max_h = h_vals.min(), h_vals.max()
-                 h_range = max(max_h - min_h, 1.0)
-                 normalized_all = 0.2 + ((sampled_height - min_h) / h_range) * 0.8
-                 height_layer[valid_mask] = normalized_all * (sampled_path > 0).astype(np.float32)
-
-        layers[layer_idx] = height_layer
-        self._terrain_cache = layers[layer_idx].copy()
-        self._last_map_name = current_map_name
-
-    def _draw_terrain_creep(self, raw_obs, layers):
-        layer_idx = LayerConstants.LAYERS[LayerConstants.TERRAIN_CREEP]
-        creep_map = raw_obs.get('creep')
-        if not creep_map: return
-
-        creep_data = self._get_numpy_data(creep_map)
-        if creep_data is None or creep_data.size == 0:
-            return
-
-        dim0, dim1 = creep_data.shape
-        game_info = raw_obs.get('game_info')
-        total_w, total_h = 200, 200
-        if game_info and hasattr(game_info, 'map_size'):
-            total_w = game_info.map_size.width
-            total_h = game_info.map_size.height
-
-        x_indices = np.arange(self.feature_map_width)
-        y_indices = np.arange(self.feature_map_height)
-
-        sc2_x = ((x_indices - self.offset_x) / self.scale) + self.crop_x
-        sc2_x = sc2_x.astype(int)
-
-        sc2_y = ((self.feature_map_height - 1 - y_indices) - self.offset_y) / self.scale
-        sc2_y = (sc2_y + self.crop_y).astype(int)
-
-        X_map, Y_map = np.meshgrid(sc2_x, sc2_y)
-        valid_mask = (X_map >= 0) & (X_map < total_w) & (Y_map >= 0) & (Y_map < total_h)
-
-        if not np.any(valid_mask): return
-
-        valid_sc2_x = X_map[valid_mask]
-        valid_sc2_y = Y_map[valid_mask]
-        sampled_creep = None
-
-        if dim0 == total_h and dim1 == total_w:
-            # Standard SC2 Grid: (height, width) -> (y, x)
-            if np.all(valid_sc2_y < dim0) and np.all(valid_sc2_x < dim1):
-                sampled_creep = creep_data[valid_sc2_y, valid_sc2_x]
-        elif dim0 == total_w and dim1 == total_h:
-            # Transposed Grid: (width, height) -> (x, y)
-            if np.all(valid_sc2_x < dim0) and np.all(valid_sc2_y < dim1):
-                sampled_creep = creep_data[valid_sc2_x, valid_sc2_y]
-
-        if sampled_creep is None:
-            cx = np.clip(valid_sc2_x, 0, dim0 - 1)
-            cy = np.clip(valid_sc2_y, 0, dim1 - 1)
-            if dim0 >= total_w:
-                 sampled_creep = creep_data[cx, cy]
-            else:
-                 sampled_creep = creep_data[cy, cx]
-
-        if sampled_creep is not None:
-            layers[layer_idx][valid_mask] = sampled_creep
 
     def _process_single_unit(self, unit: Unit, layers: np.ndarray, is_enemy: bool,
                              map_w: int, map_h: int, game_data: GameData):
         px, py = self._get_pixel_coords(unit.position)
         if px is None: return
 
-        if is_enemy and unit.is_cloaked and not unit.is_detected:
-            is_snapshot = unit.is_snapshot if hasattr(unit, "is_snapshot") else False
-            if not is_snapshot: return
-
-        scan_enum = getattr(UnitTypeId, 'SCANNERSWEEP', 170)
         u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
-        ex_val = scan_enum.value if hasattr(scan_enum, "value") else scan_enum
+        u_name = getattr(unit.type_id, "name", "").upper()
+        is_beacon = "BEACON" in u_name
 
-        if u_id == ex_val or u_id == 170:
-            prefix = "enemy" if is_enemy else "allied"
-            idx_det = LayerConstants.LAYERS[f"{prefix}_detection"]
-            self._draw_circle_vectorized(layers, idx_det, px, py, 13.0, None, 1.0)
+        # BEACON logic: Render ONLY to ENEMY_UNIT_DENSITY (and Command Objective later)
+        if is_beacon:
+            idx = self.current_layer_map.get(LayerConstants.ENEMY_UNIT_DENSITY)
+            if idx is not None:
+                r = max(1, int(1.5 * self.scale))
+                self._draw_circle_vectorized(layers, idx, px, py, 0, r, 20.0, True)
             return
 
-        ff_id = getattr(UnitTypeId, 'FORCEFIELD', 135)
-        ff_val = ff_id.value if hasattr(ff_id, "value") else 135
-        if u_id == ff_val or u_id == 135:
-            idx_path = LayerConstants.LAYERS[LayerConstants.TERRAIN_PATHABLE]
-            self._draw_circle_vectorized(layers, idx_path, px, py, 1.5, None, 0.0, accumulate=False)
-            prefix = "enemy" if is_enemy else "allied"
-            idx_den = LayerConstants.LAYERS[f"{prefix}_unit_density"]
-            self._draw_circle_vectorized(layers, idx_den, px, py, 0, 0, 1.0, accumulate=True)
+        # Normal Units
+        if is_enemy and unit.is_cloaked and not unit.is_detected:
+            if not getattr(unit, "is_snapshot", False): return
+
+        if u_id == 170: # ScannerSweep
+            idx = self.current_layer_map.get(LayerConstants.ENEMY_DETECTION if is_enemy else LayerConstants.ALLIED_DETECTION)
+            if idx is not None: self._draw_circle_vectorized(layers, idx, px, py, 13.0, None, 1.0)
             return
 
-        if hasattr(unit, "is_blip") and unit.is_blip:
-            if is_enemy:
-                idx_den = LayerConstants.LAYERS[LayerConstants.ENEMY_UNIT_DENSITY]
-                self._draw_circle_vectorized(layers, idx_den, px, py, 0, 0, 0.5, True)
+        if u_id == 135: # ForceField
+            idx_p = self.current_layer_map.get(LayerConstants.TERRAIN_PATHABLE)
+            if idx_p is not None: self._draw_circle_vectorized(layers, idx_p, px, py, 1.5, None, 0.0, False)
+            idx_d = self.current_layer_map.get(LayerConstants.ENEMY_UNIT_DENSITY if is_enemy else LayerConstants.ALLIED_UNIT_DENSITY)
+            if idx_d is not None: self._draw_circle_vectorized(layers, idx_d, px, py, 0, 0, 1.0, True)
             return
 
         self._draw_unit_body(unit, layers, is_enemy, px, py)
-        self._draw_unit_vitals(unit, layers, is_enemy, px, py)
-        self._draw_unit_detection(unit, layers, is_enemy, px, py)
-        self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
-        self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
+        if not self.is_tactical_mode:
+            self._draw_unit_vitals(unit, layers, is_enemy, px, py)
+            self._draw_unit_detection(unit, layers, is_enemy, px, py)
+            self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
+            self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
 
     def _draw_unit_body(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
         prefix = "enemy" if is_enemy else "allied"
-        idx_den = LayerConstants.LAYERS[f"{prefix}_unit_density"]
+        idx_den = self.current_layer_map.get(f"{prefix}_unit_density")
+        if idx_den is None: return
+
+        # Radius Logic: Tactical/Universal uses r=0 (Single Pixel)
+        is_universal = self.training_conf.get("agent_architecture") == "universal"
+        if self.is_tactical_mode or is_universal:
+            r = 0
+        else:
+            r = int(unit.radius * self.scale) if unit.is_structure else 0
 
         val = 1.0
-        r = 0
-
-        # --- Training-Specific Rendering ---
-        u_name = getattr(unit.type_id, "name", "")
-        render_beacon = self.training_conf.get('render_beacon', False)
-        larger_units = self.training_conf.get('larger_units', False)
-
-        if "BEACON" in u_name.upper():
-            # If a beacon is explicitly passed to the transformer (especially in enemy_units),
-            # we SHOULD render it. The 'render_beacon' flag in training was to force
-            # visibility even if it wasn't strictly in the enemy list.
-            # In WatchBot/Level0Bot, we explicitly add it to enemy_units.
-            val = 20.0
-            r = 3  # Make beacon visible for training
-        elif unit.is_structure:
-            r = int(unit.radius * self.scale)
-        elif larger_units and not is_enemy and not unit.is_structure:
-            # Make our controlled unit larger for training
-            r = 2
-
         if not is_enemy and not unit.is_structure:
             cd = getattr(unit, 'weapon_cooldown', 0.0)
-            norm_cd = min(cd, 60.0) / 60.0
-            val = 1.0 - (0.7 * norm_cd)
+            val = 1.0 - (0.7 * (min(cd, 60.0) / 60.0))
 
         self._draw_circle_vectorized(layers, idx_den, px, py, 0, r, val, True)
 
-        if unit.is_biological:
-            self._draw_circle_vectorized(layers, LayerConstants.LAYERS[f"{prefix}_unit_biological"], px, py, 0, r, 1.0, True)
-        if unit.is_mechanical:
-            self._draw_circle_vectorized(layers, LayerConstants.LAYERS[f"{prefix}_unit_mechanical"], px, py, 0, r, 1.0, True)
-        if unit.is_armored:
-            self._draw_circle_vectorized(layers, LayerConstants.LAYERS[f"{prefix}_unit_armored"], px, py, 0, r, 1.0, True)
-        if unit.is_massive:
-            self._draw_circle_vectorized(layers, LayerConstants.LAYERS[f"{prefix}_unit_massive"], px, py, 0, r, 1.0, True)
-        if unit.is_flying or unit.type_id == UnitTypeId.COLOSSUS:
-            self._draw_circle_vectorized(layers, LayerConstants.LAYERS[f"{prefix}_unit_flying"], px, py, 0, r, 1.0, True)
+        if not self.is_tactical_mode:
+            # Attribute Layers (Not in tactical)
+            for attr in ["biological", "mechanical", "armored", "massive", "flying"]:
+                idx = self.current_layer_map.get(f"{prefix}_unit_{attr}")
+                if idx is not None and getattr(unit, f"is_{attr}", False):
+                    self._draw_circle_vectorized(layers, idx, px, py, 0, r, 1.0, True)
 
-        idx_clk = LayerConstants.LAYERS[f"{prefix}_unit_cloak"]
-        if unit.is_cloaked:
-            self._draw_circle_vectorized(layers, idx_clk, px, py, 0, r, 1.0, True)
-        elif unit.type_id in [UnitTypeId.GHOST, UnitTypeId.BANSHEE, UnitTypeId.DARKTEMPLAR]:
-            self._draw_circle_vectorized(layers, idx_clk, px, py, 0, r, 0.5, True)
+    def _draw_command_info(self, raw_obs, layers):
+        idx_sel = self.current_layer_map.get(LayerConstants.COMMAND_ASSIGNMENT)
+        if idx_sel is not None:
+            units = raw_obs.get('selected_units') or raw_obs.get('units', [])
+            for unit in units:
+                if "BEACON" in getattr(unit.type_id, "name", "").upper(): continue
+                px, py = self._get_pixel_coords(unit.position)
+                if px is not None:
+                    r = 0 if self.is_tactical_mode else max(1, int(unit.radius * self.scale))
+                    self._draw_circle_vectorized(layers, idx_sel, px, py, 0, r, 1.0, True)
 
-    def _draw_unit_vitals(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
+        idx_obj = self.current_layer_map.get(LayerConstants.COMMAND_OBJECTIVE)
+        if idx_obj is not None:
+            targets = raw_obs.get('command_target')
+            if targets is None: 
+                targets = []
+            elif hasattr(targets, "x") or hasattr(targets, "position"):
+                # Single target (Point2 or Unit), wrap it
+                targets = [targets]
+            elif not isinstance(targets, (list, tuple, set)): 
+                targets = [targets]
+
+            for target in targets:
+                if target is None: continue
+                val, r = 1.0, 3
+                
+                # Check if it's a beacon
+                is_beacon = False
+                u_id = getattr(target, "type_id", None)
+                if u_id:
+                    u_name = getattr(u_id, "name", str(u_id)).upper()
+                    if "BEACON" in u_name:
+                        is_beacon = True
+                
+                if is_beacon:
+                    val, r = 20.0, max(1, int(1.5 * self.scale))
+
+                pos = getattr(target, "position", target)
+                px, py = self._get_pixel_coords(pos)
+                if px is not None:
+                    self._draw_circle_vectorized(layers, idx_obj, px, py, 0, r, val, False)
+
+    def _draw_terrain_pathing(self, game_info, layers, current_structure_count=0):
+        layer_idx = self.current_layer_map.get(LayerConstants.TERRAIN_PATHABLE)
+        if layer_idx is None: return
+
+        current_map_name = getattr(game_info, 'map_name', '')
+        # Global View Cache (Only if not in tactical mode)
+        if not self.is_tactical_mode:
+            if (self._terrain_cache is not None and
+                self._last_map_name == current_map_name and
+                self._last_structure_count == current_structure_count):
+                layers[layer_idx] = self._terrain_cache
+                return
+
+        if not hasattr(game_info, 'pathing_grid') or not hasattr(game_info, 'terrain_height'):
+            return
+
+        path_data = self._get_numpy_data(game_info.pathing_grid)
+        height_data = self._get_numpy_data(game_info.terrain_height)
+        
+        # Calculate Global Walkable Range once for consistency
+        if self._h_min is None or self._h_max is None:
+            walkable_mask = path_data > 0
+            if np.any(walkable_mask):
+                walkable_heights = height_data[walkable_mask]
+                self._h_min = walkable_heights.min()
+                self._h_max = walkable_heights.max()
+            else:
+                self._h_min = height_data.min()
+                self._h_max = height_data.max()
+
+        total_w = game_info.map_size.width
+        total_h = game_info.map_size.height
+
+        x_indices = np.arange(self.feature_map_width)
+        y_indices = np.arange(self.feature_map_height)
+        sc2_x = ((x_indices - self.offset_x) / self.scale) + self.crop_x
+        sc2_y = ((self.feature_map_height - 1 - y_indices) - self.offset_y) / self.scale + self.crop_y
+
+        X_map, Y_map = np.meshgrid(sc2_x.astype(int), sc2_y.astype(int))
+        valid_mask = (X_map >= 0) & (X_map < total_w) & (Y_map >= 0) & (Y_map < total_h)
+        
+        if np.any(valid_mask):
+            v_x, v_y = X_map[valid_mask], Y_map[valid_mask]
+            sampled_path = path_data[v_y, v_x]
+            sampled_height = height_data[v_y, v_x]
+            
+            h_range = max(self._h_max - self._h_min, 1.0)
+            # Base value 0.2 to 1.0 for better visibility in UI and Agent
+            norm_height = 0.2 + ((sampled_height - self._h_min) / h_range) * 0.8
+            
+            res = np.zeros((self.feature_map_height, self.feature_map_width), dtype=np.float32)
+            res[valid_mask] = norm_height * (sampled_path > 0).astype(np.float32)
+            layers[layer_idx] = res
+
+            if not self.is_tactical_mode:
+                self._terrain_cache = res.copy()
+                self._last_map_name = current_map_name
+                self._last_structure_count = current_structure_count
+
+    def _draw_terrain_creep(self, raw_obs, layers):
+        idx = self.current_layer_map.get(LayerConstants.TERRAIN_CREEP)
+        creep_map = raw_obs.get('creep')
+        if idx is None or not creep_map: return
+        data = self._get_numpy_data(creep_map)
+        game_info = raw_obs.get('game_info')
+        total_w, total_h = game_info.map_size.width, game_info.map_size.height
+        
+        x_indices = np.arange(self.feature_map_width)
+        y_indices = np.arange(self.feature_map_height)
+        sc2_x = ((x_indices - self.offset_x) / self.scale) + self.crop_x
+        sc2_y = ((self.feature_map_height - 1 - y_indices) - self.offset_y) / self.scale + self.crop_y
+        X_map, Y_map = np.meshgrid(sc2_x.astype(int), sc2_y.astype(int))
+        valid_mask = (X_map >= 0) & (X_map < total_w) & (Y_map >= 0) & (Y_map < total_h)
+        if np.any(valid_mask):
+            layers[idx][valid_mask] = data[Y_map[valid_mask], X_map[valid_mask]]
+
+    def _draw_circle_vectorized(self, layers, idx, cx, cy, radius_game, radius_px_override=None, value=1.0, accumulate=False):
+        if idx not in self.active_indices: return
+        r = int(radius_px_override) if radius_px_override is not None else max(1, int(radius_game * self.scale))
+        if r == 0:
+            if accumulate: layers[idx, cy, cx] += value
+            else: layers[idx, cy, cx] = value
+            return
+        r_sq = r**2
+        x_min, x_max = max(0, cx-r), min(self.feature_map_width, cx+r+1)
+        y_min, y_max = max(0, cy-r), min(self.feature_map_height, cy+r+1)
+        if x_min >= x_max or y_min >= y_max: return
+        Y, X = self._grid_y[y_min:y_max, :], self._grid_x[:, x_min:x_max]
+        mask = ((X - cx)**2 + (Y - cy)**2) <= r_sq
+        if accumulate: layers[idx, y_min:y_max, x_min:x_max][mask] += value
+        else: layers[idx, y_min:y_max, x_min:x_max][mask] = value
+
+    def _draw_unit_vitals(self, unit, layers, is_enemy, px, py):
         prefix = "enemy" if is_enemy else "allied"
+        idx_hp = self.current_layer_map.get(f"{prefix}_health")
+        if idx_hp is not None:
+            max_hp = (unit.health_max + unit.shield_max) or 1
+            self._draw_circle_vectorized(layers, idx_hp, px, py, 0, 0, (unit.health+unit.shield)/max_hp, True)
+        idx_nrg = self.current_layer_map.get(f"{prefix}_energy")
+        if idx_nrg is not None and unit.energy_max > 0:
+            self._draw_circle_vectorized(layers, idx_nrg, px, py, 0, 0, unit.energy/unit.energy_max, True)
 
-        r = 0
-        if unit.is_structure:
-            r = int(unit.radius * self.scale)
-
-        idx_hp = LayerConstants.LAYERS[f"{prefix}_health"]
-        max_hp = (unit.health_max + unit.shield_max) or 1
-        current_hp = unit.health + unit.shield
-        self._draw_circle_vectorized(layers, idx_hp, px, py, 0, r, current_hp / max_hp, True)
-
-        if unit.energy_max > 0:
-            idx_nrg = LayerConstants.LAYERS[f"{prefix}_energy"]
-            self._draw_circle_vectorized(layers, idx_nrg, px, py, 0, r, unit.energy / unit.energy_max, True)
-
-    def _draw_unit_detection(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
-        is_ready = unit.is_ready if hasattr(unit, "is_ready") else (unit.build_progress == 1.0)
-        if not is_ready: return
+    def _draw_unit_detection(self, unit, layers, is_enemy, px, py):
         prefix = "enemy" if is_enemy else "allied"
-        idx_det = LayerConstants.LAYERS[f"{prefix}_detection"]
-        radius = unit.detect_range
-        if radius > 0:
-            self._draw_circle_vectorized(layers, idx_det, px, py, radius, None, 1.0, False)
+        idx = self.current_layer_map.get(f"{prefix}_detection")
+        if idx is not None and unit.detect_range > 0:
+            self._draw_circle_vectorized(layers, idx, px, py, unit.detect_range, None, 1.0, False)
 
-    def _draw_unit_healing(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int, game_data: Any = None):
+    def _draw_unit_healing(self, unit, layers, is_enemy, px, py, game_data):
         prefix = "enemy" if is_enemy else "allied"
-        layer_idx = LayerConstants.LAYERS[f"{prefix}_hps_field"]
-        hps = 0.0
-        rng = 0.0
-        is_ready = unit.is_ready if hasattr(unit, "is_ready") else (unit.build_progress == 1.0)
-        if is_ready:
-            uid = unit.type_id
-            if uid == UnitTypeId.MEDIVAC and unit.energy > 5:
-                hps, rng = 12.6, 4.0
-                if game_data and hasattr(game_data, "abilities"):
-                    # Dynamically retrieve range from game data if possible
-                    try:
-                        val = game_data.abilities[AbilityId.MEDIVACHEAL_HEAL.value]._proto.cast_range
-                        if val > 0: rng = val
-                    except:
-                        pass
-            elif uid == UnitTypeId.SHIELDBATTERY and unit.energy > 3:
-                hps, rng = 50.4, 6.0
-                if game_data and hasattr(game_data, "abilities"):
-                    try:
-                        val = game_data.abilities[AbilityId.SHIELDBATTERYRECHARGE_EXOTICSHIELDBATTERYRECHARGE.value]._proto.cast_range
-                        if val > 0: rng = val
-                    except:
-                        pass
-            elif uid == UnitTypeId.QUEEN and unit.energy >= 50:
-                hps, rng = 25.0, 7.0
-                if game_data and hasattr(game_data, "abilities"):
-                    try:
-                        val = game_data.abilities[AbilityId.TRANSFUSION_TRANSFUSION.value]._proto.cast_range
-                        if val > 0: rng = val
-                    except:
-                        pass
-        if hps > 0:
-            self._draw_circle_vectorized(layers, layer_idx, px, py, rng, None, hps, accumulate=True)
+        idx = self.current_layer_map.get(f"{prefix}_hps_field")
+        if idx is None: return
+        hps, rng = 0.0, 0.0
+        if unit.type_id == UnitTypeId.MEDIVAC and unit.energy > 5: hps, rng = 12.6, 4.0
+        elif unit.type_id == UnitTypeId.SHIELDBATTERY and unit.energy > 3: hps, rng = 50.4, 6.0
+        if hps > 0: self._draw_circle_vectorized(layers, idx, px, py, rng, None, hps, True)
 
     def _draw_unit_dps(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int, game_data: GameData):
         if unit.type_id in [UnitTypeId.LIBERATORAG, UnitTypeId.CARRIER, UnitTypeId.LURKERMP,
                             UnitTypeId.MEDIVAC, UnitTypeId.WARPPRISM, UnitTypeId.OBSERVER,
-                            UnitTypeId.OVERLORD, UnitTypeId.OVERSEER]:
-            return
+                            UnitTypeId.OVERLORD, UnitTypeId.OVERSEER]: return
         if unit.is_hallucination: return
-        is_ready = unit.is_ready if hasattr(unit, "is_ready") else (unit.build_progress == 1.0)
-        if not is_ready: return
 
         weapon_stats = []
         uid = unit.type_id
-        is_override = False
-
         if uid == UnitTypeId.WIDOWMINEBURROWED:
-            is_override = True
-            max_cd = 29.0 * 22.4
-            cd = getattr(unit, 'weapon_cooldown', 0)
-            ratio = max(0.0, 1.0 - (cd / max_cd))
-            weapon_stats = [{'base': 80.0 * ratio, 'b_l': 0, 'b_a': 0, 'b_m': 0, 'rng': 5.0, 'typ': 3}]
+            weapon_stats = [{'base': 80.0 * max(0.0, 1.0 - (getattr(unit, 'weapon_cooldown', 0) / (29.0 * 22.4))), 'rng': 5.0, 'typ': 3}]
         elif uid == UnitTypeId.BANELING:
-            is_override = True
-            weapon_stats = [{'base': 20.0, 'b_l': 15.0, 'b_a': 0, 'b_m': 0, 'rng': 2.2, 'typ': 1}]
-        elif uid == UnitTypeId.ORACLE:
-            is_override = True
-            if unit.energy >= 25:
-                weapon_stats = [{'base': 24.6, 'b_l': 16.4, 'b_a': 0, 'b_m': 0, 'rng': 4.0, 'typ': 1}]
-        elif uid == UnitTypeId.TEMPEST:
-            is_override = True
-            upg = getattr(unit, "attack_upgrade_level", 0)
-            d_a = (30 + 3 * upg) / 2.36
-            d_g = (40 + 4 * upg) / 2.36
-            weapon_stats = [
-                {'base': d_a, 'b_l': 0, 'b_a': 0, 'b_m': (22 / 2.36), 'rng': 14.0, 'typ': 2},
-                {'base': d_g, 'b_l': 0, 'b_a': 0, 'b_m': 0, 'rng': 10.0, 'typ': 1}
-            ]
-
-        if not is_override:
+            weapon_stats = [{'base': 20.0, 'rng': 2.2, 'typ': 1}]
+        elif uid == UnitTypeId.ORACLE and unit.energy >= 25:
+            weapon_stats = [{'base': 24.6, 'rng': 4.0, 'typ': 1}]
+        else:
             u_name = getattr(unit.type_id, "name", None)
             if u_name:
                 db = self._get_unit_data_from_json(u_name)
                 if db:
-                    upg = getattr(unit, "attack_upgrade_level", 0)
                     for w in db.get('weapons', []):
-                        base = w['damage'] + (w.get('upgrade_bonus', 0) * upg)
-                        period = w['period'] or 1.0
-                        dps = (base * w['attacks']) / period
-                        b_l, b_a, b_m = 0.0, 0.0, 0.0
-                        for b in w.get('bonuses', []):
-                            val = (b['bonus'] * w['attacks']) / period
-                            if b['type'] == 1:
-                                b_l += val
-                            elif b['type'] == 2:
-                                b_a += val
-                            elif b['type'] == 7:
-                                b_m += val
-                        weapon_stats.append({
-                            'base': dps, 'b_l': b_l, 'b_a': b_a, 'b_m': b_m,
-                            'rng': w['range'] + unit.radius, 'typ': w['type']
-                        })
+                        dps = (w['damage'] * w['attacks']) / (w['period'] or 1.0)
+                        weapon_stats.append({'base': dps, 'rng': w['range'] + unit.radius, 'typ': w['type']})
 
         for w in weapon_stats:
-            self._draw_dps_circle(layers, is_enemy, px, py, w['rng'], w)
-
-    def _draw_dps_circle(self, layers, is_enemy, cx, cy, radius_game, w_stats):
-        if not is_enemy:
-            idx_g = [LayerConstants.LAYERS[k] for k in [
-                LayerConstants.ALLIED_G_DPS_BASE, LayerConstants.ALLIED_G_DPS_LIGHT,
-                LayerConstants.ALLIED_G_DPS_ARMOR, LayerConstants.ALLIED_G_DPS_MASSIVE]]
-            idx_a = [LayerConstants.LAYERS[k] for k in [
-                LayerConstants.ALLIED_A_DPS_BASE, LayerConstants.ALLIED_A_DPS_LIGHT,
-                LayerConstants.ALLIED_A_DPS_ARMOR, LayerConstants.ALLIED_A_DPS_MASSIVE]]
-        else:
-            idx_g = [LayerConstants.LAYERS[k] for k in [
-                LayerConstants.ENEMY_G_DPS_BASE, LayerConstants.ENEMY_G_DPS_LIGHT,
-                LayerConstants.ENEMY_G_DPS_ARMOR, LayerConstants.ENEMY_G_DPS_MASSIVE]]
-            idx_a = [LayerConstants.LAYERS[k] for k in [
-                LayerConstants.ENEMY_A_DPS_BASE, LayerConstants.ENEMY_A_DPS_LIGHT,
-                LayerConstants.ENEMY_A_DPS_ARMOR, LayerConstants.ENEMY_A_DPS_MASSIVE]]
-
-        vals = [w_stats['base'], w_stats['b_l'], w_stats['b_a'], w_stats['b_m']]
-        typ = w_stats['typ']
-
-        if typ == 1 or typ == 3:
-            for i in range(4):
-                if vals[i] > 0:
-                    self._draw_circle_vectorized(layers, idx_g[i], cx, cy, radius_game, None, vals[i], True)
-
-        if typ == 2 or typ == 3:
-            for i in range(4):
-                if vals[i] > 0:
-                    self._draw_circle_vectorized(layers, idx_a[i], cx, cy, radius_game, None, vals[i], True)
+            p = "enemy" if is_enemy else "allied"
+            idx_g = self.current_layer_map.get(f"{p}_g_dps_base")
+            idx_a = self.current_layer_map.get(f"{p}_a_dps_base")
+            if w['typ'] in [1, 3] and idx_g is not None:
+                self._draw_circle_vectorized(layers, idx_g, px, py, w['rng'], None, w['base'], True)
+            if w['typ'] in [2, 3] and idx_a is not None:
+                self._draw_circle_vectorized(layers, idx_a, px, py, w['rng'], None, w['base'], True)
 
     def _draw_effects(self, effects, layers):
         for effect in effects:
-            eid = effect.id
-            if hasattr(eid, "value"): eid = eid.value
-
-            dps, radius = 0.0, 0.0
-            is_ally = False
-            hits_air = False
-
-            def get_val(enum_attr, default):
-                v = getattr(EffectId, enum_attr, default)
-                return v.value if hasattr(v, "value") else v
-
-            lib_delay = get_val('LIBERATORTARGETMORPHDELAYPERSISTENT', 82)
-            lib_morph = get_val('LIBERATORTARGETMORPHPERSISTENT', 83)
-            psi_storm = get_val('PSISTORMPERSISTENT', 1)
-            nuke = get_val('NUKEPERSISTENT', 11)
-            bile = get_val('RAVAGERCORROSIVEBILECP', 12)
-            scan = get_val('SCANNERSWEEP', 6)
-
-            if eid in [lib_delay, lib_morph]:
+            eid = getattr(effect.id, "value", effect.id)
+            dps, radius, hits_air, is_ally = 0.0, 0.0, False, False
+            if eid in [82, 83]: # Liberator
                 dps, radius = 85.0, 5.0
                 for pos in effect.positions:
-                    p_x, p_y = self._get_pixel_coords(pos)
-                    if p_x is None: continue
-                    min_ally = 999.0
-                    for p in self._liberator_positions['allied']:
-                        dist = math.hypot(p.x - pos.x, p.y - pos.y)
-                        if dist < min_ally: min_ally = dist
-
-                    min_enemy = 999.0
-                    for p in self._liberator_positions['enemy']:
-                        dist = math.hypot(p.x - pos.x, p.y - pos.y)
-                        if dist < min_enemy: min_enemy = dist
-
-                    if min_ally < min_enemy and min_ally < 16.0:
-                        is_ally = True
-
-            elif eid == psi_storm:
-                dps, radius = 28.0, 1.5
-            elif eid == nuke:
-                dps, radius = 300.0, 8.0
-                hits_air = True
-            elif eid == bile:
-                dps, radius = 200.0, 2.0
-                hits_air = True
-            elif eid == scan:
-                dps, radius = 0.0, 13.0
-                idx = LayerConstants.LAYERS[LayerConstants.ENEMY_DETECTION]
-                for pos in effect.positions:
-                    px, py = self._get_pixel_coords(pos)
-                    if px is None: continue
-                    self._draw_circle_vectorized(layers, idx, px, py, radius, None, 1.0, False)
+                    dist_a = min([math.hypot(p.x-pos.x, p.y-pos.y) for p in self._liberator_positions['allied']] + [999])
+                    dist_e = min([math.hypot(p.x-pos.x, p.y-pos.y) for p in self._liberator_positions['enemy']] + [999])
+                    if dist_a < dist_e and dist_a < 16.0: is_ally = True
+            elif eid == 1: dps, radius = 28.0, 1.5 # Storm
+            elif eid == 11: dps, radius, hits_air = 300.0, 8.0, True # Nuke
+            elif eid == 12: dps, radius, hits_air = 200.0, 2.0, True # Bile
+            elif eid == 6: # Scan
+                idx = self.current_layer_map.get(LayerConstants.ENEMY_DETECTION)
+                if idx is not None:
+                    for pos in effect.positions:
+                        px, py = self._get_pixel_coords(pos)
+                        if px is not None: self._draw_circle_vectorized(layers, idx, px, py, 13.0, None, 1.0, False)
                 continue
-            else:
-                continue
-
             if dps > 0:
-                target_layer = LayerConstants.ALLIED_G_DPS_BASE if is_ally else LayerConstants.ENEMY_G_DPS_BASE
-                idx = LayerConstants.LAYERS[target_layer]
-
-                idx_air = None
-                if hits_air:
-                    air_target = LayerConstants.ALLIED_A_DPS_BASE if is_ally else LayerConstants.ENEMY_A_DPS_BASE
-                    idx_air = LayerConstants.LAYERS[air_target]
-
-                for pos in effect.positions:
-                    px, py = self._get_pixel_coords(pos)
-                    if px is None: continue
-                    self._draw_circle_vectorized(layers, idx, px, py, radius, None, dps, True)
-                    if idx_air is not None:
-                        self._draw_circle_vectorized(layers, idx_air, px, py, radius, None, dps, True)
+                p = "allied" if is_ally else "enemy"
+                idx = self.current_layer_map.get(f"{p}_g_dps_base")
+                if idx is not None:
+                    for pos in effect.positions:
+                        px, py = self._get_pixel_coords(pos)
+                        if px is not None:
+                            self._draw_circle_vectorized(layers, idx, px, py, radius, None, dps, True)
+                            if hits_air:
+                                idx_a = self.current_layer_map.get(f"{p}_a_dps_base")
+                                if idx_a is not None: self._draw_circle_vectorized(layers, idx_a, px, py, radius, None, dps, True)
 
     def _draw_transport_info(self, raw_obs, layers):
-        """
-        Draws Transport Slots and Passenger Density.
-        Transport Slots: 0.5 = Available, 1.0 = Full.
-        Passenger Density: Count of passengers at transport location.
-        """
-        units = raw_obs.get('units')
-        if not units: return
-
-        idx_slots = LayerConstants.LAYERS.get(LayerConstants.TRANSPORT_SLOTS)
-        idx_pass = LayerConstants.LAYERS.get(LayerConstants.PASSENGER_DENSITY)
-
-        if idx_slots is None and idx_pass is None:
-            return
-
-        # Transport Type IDs
-        transport_ids = {
-            UnitTypeId.MEDIVAC.value, UnitTypeId.MEDIVAC.value, # Handle both enum/int
-            UnitTypeId.OVERLORDTRANSPORT.value,
-            UnitTypeId.WARPPRISM.value, UnitTypeId.WARPPRISMPHASING.value,
-            UnitTypeId.BUNKER.value # Bunkers are technically transports
-        }
-        
-        # Add standard Overlord just in case, though it needs upgrade to transport
-        transport_ids.add(UnitTypeId.OVERLORD.value)
-
+        units = raw_obs.get('units') or []
+        idx_slots = self.current_layer_map.get(LayerConstants.TRANSPORT_SLOTS)
+        idx_pass = self.current_layer_map.get(LayerConstants.PASSENGER_DENSITY)
+        if idx_slots is None and idx_pass is None: return
+        t_ids = {UnitTypeId.MEDIVAC.value, UnitTypeId.OVERLORD.value, UnitTypeId.OVERLORDTRANSPORT.value, UnitTypeId.WARPPRISM.value, UnitTypeId.WARPPRISMPHASING.value, UnitTypeId.BUNKER.value}
         for unit in units:
-            u_id = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
-            
-            if u_id not in transport_ids:
-                continue
-                
+            u_id = getattr(unit.type_id, "value", unit.type_id)
+            if u_id not in t_ids: continue
             px, py = self._get_pixel_coords(unit.position)
             if px is None: continue
-
-            # Check cargo
-            cargo_used = getattr(unit, "cargo_used", 0)
-            cargo_max = getattr(unit, "cargo_max", 0)
-            
-            if cargo_max > 0:
-                # Draw Slot Status
-                if idx_slots is not None:
-                    val = 0.5 # Available
-                    if cargo_used >= cargo_max:
-                        val = 1.0 # Full
-                    
-                    # Radius slightly larger than unit to be visible
-                    r = int(unit.radius * self.scale) + 1
-                    self._draw_circle_vectorized(layers, idx_slots, px, py, 0, r, val, False)
-
-                # Draw Passenger Density
-                if idx_pass is not None and cargo_used > 0:
-                    # Normalize by 8 (standard max cargo) to fit 0-1 range
-                    # 1 marine = 1/8 = 0.125
-                    norm_val = min(float(cargo_used) / 8.0, 1.0)
-                    self._draw_circle_vectorized(layers, idx_pass, px, py, 0, r, norm_val, True)
-
-    def _draw_circle_vectorized(self, layers, layer_idx, cx, cy, radius_game, radius_px_override=None, value=1.0,
-                                accumulate=False):
-        # Optimization: Check if layer is active before doing any math
-        if hasattr(self, "active_indices") and layer_idx not in self.active_indices:
-            return
-
-        if radius_px_override is not None:
-            r = int(radius_px_override)
-        else:
-            r = max(1, int(radius_game * self.scale))
-
-        if r == 0:
-            if accumulate:
-                layers[layer_idx, cy, cx] += value
-            else:
-                layers[layer_idx, cy, cx] = value
-            return
-
-        r_sq = r ** 2
-        x_min = max(0, cx - r)
-        x_max = min(self.feature_map_width, cx + r + 1)
-        y_min = max(0, cy - r)
-        y_max = min(self.feature_map_height, cy + r + 1)
-
-        if x_min >= x_max or y_min >= y_max: return
-
-        Y = self._grid_y[y_min:y_max, :]
-        X = self._grid_x[:, x_min:x_max]
-        mask = ((X - cx) ** 2 + (Y - cy) ** 2) <= r_sq
-
-        if accumulate:
-            layers[layer_idx, y_min:y_max, x_min:x_max][mask] += value
-        else:
-            layers[layer_idx, y_min:y_max, x_min:x_max][mask] = value
+            if unit.cargo_max > 0:
+                r = int(unit.radius * self.scale) + 1
+                if idx_slots: self._draw_circle_vectorized(layers, idx_slots, px, py, 0, r, 0.5 if unit.cargo_used < unit.cargo_max else 1.0, False)
+                if idx_pass and unit.cargo_used > 0: self._draw_circle_vectorized(layers, idx_pass, px, py, 0, r, min(float(unit.cargo_used)/8.0, 1.0), True)
 
     def get_config(self):
-        return {
-            "map_size": (self.feature_map_width, self.feature_map_height),
-            "scale": self.scale,
-            "offset": (self.offset_x, self.offset_y),
-            "crop": (self.crop_x, self.crop_y)
-        }
+        return {"map_size": (self.feature_map_width, self.feature_map_height), "scale": self.scale}

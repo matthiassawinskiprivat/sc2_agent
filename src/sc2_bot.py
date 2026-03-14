@@ -31,6 +31,7 @@ class SC2Bot(BotAI):
         self.beacon: Optional[Unit] = None
         self.previous_distance = None
         self.last_target_pos: Optional[Point2] = None
+        self._game_state_initialized = False
         
         # Load Action Heads
         env_conf = self.training_conf.get("env", {})
@@ -83,7 +84,9 @@ class SC2Bot(BotAI):
             self.agent_system.create_unit_agent("agent_0")
 
             # Setup the specific scenario (e.g., spawn Zergling/Beacon)
-            await self.reset_game_state()
+            if not self._game_state_initialized:
+                await self.reset_game_state()
+                self._game_state_initialized = True
             
             # Send initial observation back to the Environment process
             obs, info = self._get_observation()
@@ -213,6 +216,14 @@ class SC2Bot(BotAI):
         self.previous_distance = None
         self.unit_tags_received_action.clear()
         
+        # Clear local unit lists to avoid using stale data before next refresh
+        from sc2.units import Units
+        self.units = Units([], self)
+        self.structures = Units([], self)
+        self.enemy_units = Units([], self)
+        self.enemy_structures = Units([], self)
+        self.all_units = Units([], self)
+
         # 1. Guarantee Vision
         # We step after debug_show_map to ensure it's applied before we look for units to kill
         await self.client.debug_show_map()
@@ -222,21 +233,28 @@ class SC2Bot(BotAI):
         # 2. Robust Cleanup Loop
         # We keep killing until the map is actually empty
         max_cleanup_attempts = 5
+        from sc2.data import Alliance
         for attempt in range(max_cleanup_attempts):
-            all_units = self.all_units
-            if not all_units:
+            # IMPORTANT: We only try to kill units that ARE killable.
+            # Neutral units (minerals, etc) cannot be killed and will cause the loop to fail if we include them.
+            killable_units = self.all_units.filter(lambda u: u.alliance != Alliance.Neutral)
+            
+            if not killable_units:
                 break
                 
-            logger.info(f"Cleanup attempt {attempt+1}: Killing {all_units.amount} units.")
-            await self.client.debug_kill_unit([u.tag for u in all_units])
+            logger.info(f"Cleanup attempt {attempt+1}: Killing {killable_units.amount} units.")
+            await self.client.debug_kill_unit([u.tag for u in killable_units])
             await self.client.step()
             await self._refresh_state()
             
-            if not self.all_units:
+            # Re-check killable units
+            killable_units = self.all_units.filter(lambda u: u.alliance != Alliance.Neutral)
+            if not killable_units:
                 break
         
-        if self.all_units:
-            logger.error(f"Failed to clear map after {max_cleanup_attempts} cleanup attempts. Remaining: {self.all_units.amount}")
+        remaining_killable = self.all_units.filter(lambda u: u.alliance != Alliance.Neutral)
+        if remaining_killable:
+            logger.error(f"Failed to clear map after {max_cleanup_attempts} cleanup attempts. Remaining: {remaining_killable.amount}")
 
     def get_active_units(self):
         """Returns active allied units. Default implementation for single-unit bots."""
@@ -488,7 +506,7 @@ class SC2Bot(BotAI):
             raw_obs['selected_units'] = [active_unit]
         
         # 5. Transform: pixels!
-        processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+        processed_obs = self.agent_system.process_observation(observation=raw_obs, active_unit=active_unit)["agent_0"]
         return processed_obs, {}
 
     def _calculate_reward(self) -> Tuple[float, bool]:
@@ -545,21 +563,51 @@ class UnitControlBot(BotAI):
         
     async def on_step(self, iteration: int):
         # 1. Capture Raw Observation components
+        beacon = None
+        potential_beacons = self.all_units.filter(lambda u: u.type_id in {
+            UnitTypeId.BEACON_TERRANSMALL, UnitTypeId.PYLON,
+            UnitTypeId.BEACON_TERRAN, UnitTypeId.BEACON_PROTOSS, UnitTypeId.BEACON_ZERG
+        })
+        if potential_beacons.exists:
+            # If multiple, find the one closest to our first unit
+            if self.units.exists:
+                beacon = potential_beacons.closest_to(self.units.first)
+            else:
+                beacon = potential_beacons.first
+
+        # Ensure beacon is in enemy_units list for rendering on enemy_unit_density
+        enemy_units = list(self.enemy_units)
+        if beacon and beacon not in self.enemy_units:
+            enemy_units.append(beacon)
+
         raw_obs = {
             'units': self.units,
-            'enemy_units': self.enemy_units,
+            'enemy_units': enemy_units,
             'structures': self.structures,
             'enemy_structures': self.enemy_structures,
             'effects': self.state.effects,
             'game_info': self.game_info,
             'game_data': self.game_data,
             'creep': self.state.creep,
-            'command_target': None # Optional: Set to current objective if known
+            'command_target': beacon # Set to beacon so it shows on COMMAND_OBJECTIVE
         }
         
         # 2. Process with Hierarchical System
         # This also updates the agent's internal state for UI visualization
-        results = self.agent_system.process_observation(raw_obs, player_id=1)
+        
+        # FIX: Ensure a stable unit selection for the tactical view
+        if not hasattr(self, "_active_unit_tag"):
+            self._active_unit_tag = None
+
+        active_unit = None
+        if self._active_unit_tag:
+            active_unit = self.units.find_by_tag(self._active_unit_tag)
+        
+        if not active_unit and self.units.exists:
+            active_unit = self.units.first
+            self._active_unit_tag = active_unit.tag
+
+        results = self.agent_system.process_observation(raw_obs, player_id=1, active_unit=active_unit)
         
         # 3. (Optional) Here you would get action from model
         # For now, this bot just allows the UI to visualize what the agent sees

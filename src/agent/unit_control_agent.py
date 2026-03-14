@@ -8,7 +8,7 @@ Includes:
 
 import numpy as np
 import cv2
-from typing import Any, Tuple, Dict, Optional, List
+from typing import Any, Tuple, Dict, Optional, List, Union
 
 class UnitControlAgent:
     def __init__(self, cnn_input_size: Tuple[int, int] = (128, 128), grid_size: int = 128, dilation_size: int = 3):
@@ -16,6 +16,9 @@ class UnitControlAgent:
         self.grid_size = grid_size
         self.dilation_size = dilation_size
         self.transformed_observation = None
+        self.tactical_observation = None
+        self.active_layers = None
+        self.active_tactical_layers = None
         self.last_game_info = None
         self.last_action = None
         self.frame_count = 0
@@ -30,9 +33,15 @@ class UnitControlAgent:
         self._cached_grid_id = None
         self._cached_structure_count = 0
 
-    def process_transformed_observation(self, transformed_observation: np.ndarray,
-                                      game_info: Any = None) -> np.ndarray:
-        self.transformed_observation = transformed_observation
+    def process_transformed_observation(self, transformed_observation: Union[np.ndarray, Dict[str, np.ndarray]],
+                                      game_info: Any = None) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        if isinstance(transformed_observation, dict):
+            self.transformed_observation = transformed_observation.get("map")
+            self.tactical_observation = transformed_observation.get("tactical")
+        else:
+            self.transformed_observation = transformed_observation
+            self.tactical_observation = None
+            
         if game_info:
             self.last_game_info = game_info
         return transformed_observation

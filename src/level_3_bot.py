@@ -19,8 +19,33 @@ class Level3Bot(SC2Bot):
     def action_masks(self, curriculum_progress: float = 1.0) -> Any:
         arch = self.training_conf.get("agent_architecture", "original")
         if arch == "universal":
+            # Universal MultiDiscrete masking
             return SC2BotUniversal.action_masks(self, curriculum_progress)
-        return super().action_masks(curriculum_progress)
+        
+        # ORIGINAL FLAT DISCRETE SPACE MASKING
+        # 1. Identify which unit is active
+        active_unit_tag = getattr(self, "active_unit_tag", None)
+        active_unit = None
+        if active_unit_tag:
+            active_unit = self.all_units.find_by_tag(active_unit_tag)
+        
+        if not active_unit:
+            active_units = self.get_active_units()
+            idx = getattr(self, "current_unit_index", 0)
+            if 0 <= idx < len(active_units):
+                active_unit = active_units[idx]
+            
+        # 2. Set self.beacon to the assigned beacon for this unit
+        if active_unit:
+            if not self.current_assignments:
+                self.current_assignments = self.get_optimal_assignments()
+            
+            b_tag = self.current_assignments.get(active_unit.tag)
+            if b_tag:
+                self.beacon = self.all_units.find_by_tag(b_tag)
+        
+        # 3. Call base implementation which now uses the correctly set self.beacon
+        return super().action_masks(curriculum_progress=curriculum_progress)
 
     async def apply_action(self, unit_tag, action):
         arch = self.training_conf.get("agent_architecture", "original")
@@ -120,9 +145,13 @@ class Level3Bot(SC2Bot):
         row_ind, col_ind = linear_sum_assignment(dist_matrix)
         
         assignment = {}
+        assigned_beacons = set()
         for r, c in zip(row_ind, col_ind):
             # Map unit tag to beacon tag
-            assignment[units[r].tag] = beacon_list[c].tag
+            u_tag = units[r].tag
+            b_tag = beacon_list[c].tag
+            assignment[u_tag] = b_tag
+            assigned_beacons.add(b_tag)
             
         # SURPLUS HANDLING: Ensure EVERY unit has a target if targets exist.
         if num_units > num_beacons:
@@ -131,6 +160,30 @@ class Level3Bot(SC2Bot):
                     # Assign surplus unit to its closest beacon (many-to-one)
                     closest_beacon = beacons.closest_to(unit)
                     assignment[unit.tag] = closest_beacon.tag
+        
+        # TARGET SURPLUS HANDLING: Ensure EVERY beacon has at least one unit assigned.
+        # This prevents "orphaned" beacons if some units die.
+        if num_beacons > num_units:
+            unassigned_beacons = [b for b in beacon_list if b.tag not in assigned_beacons]
+            for beacon in unassigned_beacons:
+                # Assign this beacon to its closest unit (many-to-one)
+                closest_unit = units[0] # Fallback
+                min_dist = float('inf')
+                for unit in units:
+                    d = unit.distance_to(beacon)
+                    if d < min_dist:
+                        min_dist = d
+                        closest_unit = unit
+                
+                # We can only store ONE assignment per unit in the current Dict structure.
+                # However, Level 3 cycle logic processes one unit at a time.
+                # To handle multiple beacons per unit, we would need a list.
+                # BUT: The environment only asks for ONE action per unit.
+                # DECISION: We stick to 1-target-per-unit, but re-calculate if target is gone.
+                # Since we already have dynamic re-assignment in _get_observation, 
+                # any unit whose target is collected will automatically pick up one of the 
+                # remaining (previously "unassigned") beacons in the next step.
+                pass
             
         return assignment
 
@@ -206,57 +259,44 @@ class Level3Bot(SC2Bot):
         """Returns sorted list of active units for Level 3."""
         return self.get_active_zerglings()
 
-    def action_masks(self, curriculum_progress: float = 1.0) -> np.ndarray:
-        """
-        Overrides action_masks to ensure the guidance mask uses the 
-        CORRECT assigned beacon for the currently active unit.
-        """
-        # 1. Identify which unit is active (using the same logic as SC2Bot.action_masks)
-        active_unit_tag = getattr(self, "active_unit_tag", None)
-        active_unit = None
-        if active_unit_tag:
-            active_unit = self.all_units.find_by_tag(active_unit_tag)
-        
-        if not active_unit:
-            # Fallback to index-based for legacy support
-            active_units = self.get_active_units()
-            # Level3Env should keep self.current_unit_index in sync on the bot
-            idx = getattr(self, "current_unit_index", 0)
-            if 0 <= idx < len(active_units):
-                active_unit = active_units[idx]
-            
-        # 2. Set self.beacon to the assigned beacon for this unit
-        if active_unit:
-            if not self.current_assignments:
-                self.current_assignments = self.get_optimal_assignments()
-            
-            b_tag = self.current_assignments.get(active_unit.tag)
-            if b_tag:
-                self.beacon = self.all_units.find_by_tag(b_tag)
-        
-        # 3. Call base implementation which now uses the correctly set self.beacon
-        return super().action_masks(curriculum_progress=curriculum_progress)
-
     def get_active_zerglings(self):
         """Returns sorted list of active units."""
         if not hasattr(self, "units"): return []
         return sorted(self.units(self.allied_unit_type), key=lambda u: u.tag)
 
-    def get_observation_for_unit(self, unit_tag) -> Tuple[np.ndarray, Dict]:
+    def _get_zero_observation(self) -> np.ndarray:
+        """Returns a zero observation matching the current architecture's shape."""
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            # Return Dict for Universal
+            num_layers = len(self.training_conf.get("active_layers", [])) or 30 # Fallback
+            tactical_layers = len(self.training_conf.get("active_tactical_layers", [])) or num_layers
+            return {
+                "map": np.zeros((num_layers, 128, 128), dtype=np.float32),
+                "tactical": np.zeros((tactical_layers, 32, 32), dtype=np.float32),
+                "command": np.zeros(10, dtype=np.float32)
+            }
+        # Return Array for Original
+        return np.zeros((1, 64, 64), dtype=np.float32)
+
+    def get_observation_for_unit(self, unit_tag) -> Tuple[Any, Dict]:
         """
         Generates centered observation for specific unit.
         """
         unit = self.units.find_by_tag(unit_tag)
         if not unit:
-            return np.zeros((1, 1, 1)), {} 
+            return self._get_zero_observation(), {} 
             
         return self._get_observation(active_unit=unit)
         
-    def _get_observation(self, active_unit: Unit = None) -> Tuple[np.ndarray, Dict]:
+    def _get_observation(self, active_unit: Unit = None) -> Tuple[Any, Dict]:
         """
         Override to implement selective targeting and handle dynamic re-assignment.
         """
         if active_unit is None:
+            # Fallback to base SC2Bot if no unit specified
+            if not self.agent_system:
+                return self._get_zero_observation(), {}
             return super()._get_observation()
             
         # 1. Dynamic Re-assignment: If the assigned beacon is gone, pick a new one
@@ -293,11 +333,12 @@ class Level3Bot(SC2Bot):
         }
         
         if self.agent_system:
-             processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+             processed_obs = self.agent_system.process_observation(observation=raw_obs, active_unit=active_unit)["agent_0"]
         else:
-             processed_obs = np.zeros((1, 64, 64))
+             processed_obs = self._get_zero_observation()
              
         return processed_obs, {}
+
 
     def get_global_observation(self, active_unit: Unit = None) -> np.ndarray:
         """
@@ -332,7 +373,7 @@ class Level3Bot(SC2Bot):
         }
         
         if self.agent_system:
-             return self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+             return self.agent_system.process_observation(observation=raw_obs, active_unit=target_unit)["agent_0"]
         return np.zeros((1, 64, 64))
         
     async def check_collections(self) -> Dict[int, float]:
@@ -391,4 +432,3 @@ class Level3Bot(SC2Bot):
                      del self.current_assignments[u_tag]
         
         return unit_rewards
-

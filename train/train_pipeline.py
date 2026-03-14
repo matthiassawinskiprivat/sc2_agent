@@ -187,7 +187,7 @@ class PipelineManager:
             logger.info(f"Level '{level_name}' is already completed. Found final model: {final_model_path}")
             return "COMPLETED", final_model_path
 
-        checkpoints = glob.glob(os.path.join(model_dir, "zerg_*_steps.zip"))
+        checkpoints = glob.glob(os.path.join(model_dir, "*_steps.zip"))
         if checkpoints:
             latest_checkpoint = max(checkpoints, key=os.path.getmtime)
             logger.info(f"Found checkpoint for level '{level_name}'. Resuming training from: {latest_checkpoint}")

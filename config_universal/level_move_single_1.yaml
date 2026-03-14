@@ -1,0 +1,47 @@
+# config_hybrid/level_move_single.yaml
+
+training:
+  training_steps: 1_500_000
+  num_envs: 6
+  n_steps: 2048
+  batch_size: 4096
+  learning_rate: 0.0005
+  render_beacon: True
+  watchdog_timeout: 3600
+
+# Environment parameters
+env:
+  grid_size: 128
+  headless: True
+  max_steps: 250
+  maps_dir: "train/maps/level_1"
+  high_level_command: "scout"
+  guidance_curriculum: False
+  rewards:
+    success: 20.0
+    step_penalty: -0.01
+    distance_multiplier: 0.1
+  active_tactical_layers: []
+  action_heads:
+    - "move_global"
+    - "move_local"
+
+# Model parameters
+model:
+  policy: "CnnPolicy"
+  policy_kwargs:
+    features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
+    features_extractor_kwargs:
+      features_dim: 512
+      thinking_steps: 3
+  gamma: 0.99
+  ent_coef: 0.001
+  n_epochs: 4
+
+# Evaluation parameters
+evaluation:
+  stop_on_metric:
+    monitor: "rollout/ep_len_mean"
+    threshold: 10.0
+    comparison: "<"
+    patience: 5

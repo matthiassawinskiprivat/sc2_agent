@@ -4,7 +4,7 @@ Transforms SC2 observations once and shares among all agents
 """
 
 import numpy as np
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from .observation_transformer import ObservationTransformer
 
 
@@ -32,26 +32,34 @@ class SharedObservationTransformer:
         self.last_observation_id = None
 
     def transform_observation(self, observation: Dict[str, Any],
-                              observation_id: Any = None, player_id: int = 1) -> np.ndarray:
+                              observation_id: Any = None, player_id: int = 1,
+                              active_unit: Any = None) -> Union[np.ndarray, Dict[str, np.ndarray]]:
         """
         Transform observation if it's new, otherwise return cached result
-        
-        Args:
-            observation: Raw SC2 observation
-            observation_id: Unique identifier for the observation (for caching)
-            
-        Returns:
-            Transformed observation [NxHxW] for configured layers
         """
         # Check if this is a new observation
         if observation_id is not None and observation_id == self.last_observation_id:
-            return self.transformed_observation
+            # Multi-agent cache: if we have a cached dict, we check if the active_unit is the same.
+            # However, for UI and simple cases, just returning the cache is better.
+            if self.transformed_observation is not None:
+                return self.transformed_observation
 
         # Transform the observation
         self.current_observation = observation
-        self.transformed_observation = self.transformer.transform(observation)
+        global_result = self.transformer.transform(observation)
+        
+        if isinstance(global_result, dict):
+            # Universal Architecture: Add tactical stream
+            tactical_obs = self.transformer.transform_tactical(observation, active_unit)
+            self.transformed_observation = {
+                "map": global_result["map"],
+                "tactical": tactical_obs,
+                "command": global_result["command"]
+            }
+        else:
+            self.transformed_observation = global_result
+            
         self.last_observation_id = observation_id
-
         return self.transformed_observation
 
     def get_full_layer_stack(self) -> Optional[np.ndarray]:
