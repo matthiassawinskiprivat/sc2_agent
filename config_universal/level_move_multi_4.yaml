@@ -1,10 +1,7 @@
-# config_universal/level_move_multi_3.yaml
-# Multi-unit movement level for Universal Architecture (8 targets)
-
 training:
   training_steps: 5_000_000
-  num_envs: 6
-  n_steps: 2048
+  num_envs: 2
+  n_steps: 6144
   batch_size: 4096
   learning_rate: 0.0003
   render_beacon: True
@@ -13,7 +10,7 @@ training:
 # Environment parameters
 env:
   env_class: "Level3Env"
-  targets: 16
+  targets: 32
   grid_size: 128
   headless: True
   max_steps: 1000
@@ -21,7 +18,7 @@ env:
   high_level_command: "scout"
   guidance_curriculum: False
   rewards:
-    success: 480.0
+    success: 640.0
     step_penalty: -0.01
     distance_multiplier: 0.1
   action_heads:
@@ -41,7 +38,7 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.9995
   ent_coef: 0.001
   n_epochs: 4
 
