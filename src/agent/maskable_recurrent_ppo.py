@@ -487,32 +487,63 @@ class MaskableRecurrentActorCriticPolicy(RecurrentActorCriticPolicy):
             if self.enable_critic_lstm: self.lstm_critic = nn.GRU(self.features_dim, self.lstm_output_dim, num_layers=kwargs.get("n_lstm_layers", 1))
 
     def _process_sequence(self, features, rnn_states, episode_starts, rnn):
-        n_seq = rnn_states[0].shape[1]
+        # FIX: n_seq is always the second dimension of the hidden state tensor(s)
+        # For LSTM, rnn_states is ((n_layers, n_seq, dim), (n_layers, n_seq, dim))
+        # For GRU, rnn_states is (n_layers, n_seq, dim) or ((n_layers, n_seq, dim),)
+        if isinstance(rnn_states, tuple):
+            n_seq = rnn_states[0].shape[1]
+        else:
+            n_seq = rnn_states.shape[1]
+            
         features_sequence = features.reshape((n_seq, -1, rnn.input_size)).swapaxes(0, 1)
         episode_starts = episode_starts.reshape((n_seq, -1)).swapaxes(0, 1)
         reset_indices = torch.where(episode_starts.any(dim=1))[0].cpu().numpy()
+        
+        # Unwrap GRU states (h,) -> h for the internal rnn module
+        state_input = rnn_states[0] if self.rnn_type == "gru" and isinstance(rnn_states, tuple) else rnn_states
+        
+        # DEBUG PRINTS
+        # logger.debug(f"features_sequence shape: {features_sequence.shape}")
+        # logger.debug(f"state_input shape initially: {state_input.shape}")
+        
+        if len(state_input.shape) != 3:
+            logger.error(f"CRITICAL SHAPE ERROR! Expected 3D state_input, got {state_input.shape}")
+            # Attempt auto-correction if it somehow lost the num_layers dimension
+            if len(state_input.shape) == 2:
+                state_input = state_input.unsqueeze(0)
+        
         if len(reset_indices) == 0:
-            state_input = rnn_states if self.rnn_type == "lstm" else rnn_states[0]
             out, r_new = rnn(features_sequence, state_input)
-            if self.rnn_type == "gru": r_new = (r_new,)
+            if self.rnn_type == "gru" and not isinstance(r_new, tuple): r_new = (r_new,)
             return torch.flatten(out.transpose(0, 1), start_dim=0, end_dim=1), r_new
+            
         outputs, current_idx = [], 0
         for next_reset in np.concatenate([reset_indices, [len(episode_starts)]]):
             if next_reset > current_idx:
-                state_input = rnn_states if self.rnn_type == "lstm" else rnn_states[0]
+                if not isinstance(state_input, tuple) and state_input.dim() != 3:
+                    logger.error(f"Shape became {state_input.shape} before rnn call!")
+                    state_input = state_input.unsqueeze(0)
                 out, r_new = rnn(features_sequence[current_idx:next_reset], state_input)
-                if self.rnn_type == "gru": r_new = (r_new,)
-                rnn_states, current_idx = r_new, next_reset
+                state_input, current_idx = r_new, next_reset
                 outputs.append(out)
             if current_idx < len(episode_starts):
                 mask = (1.0 - episode_starts[current_idx]).view(1, n_seq, 1)
-                rnn_states = tuple(s * mask for s in rnn_states)
-                state_input = rnn_states if self.rnn_type == "lstm" else rnn_states[0]
+                if isinstance(state_input, tuple):
+                    state_input = tuple(s * mask for s in state_input)
+                else:
+                    state_input = state_input * mask
+                    
+                if not isinstance(state_input, tuple) and state_input.dim() != 3:
+                    logger.error(f"Shape became {state_input.shape} after mask!")
+                    state_input = state_input.unsqueeze(0)
                 out, r_new = rnn(features_sequence[current_idx:current_idx+1], state_input)
-                if self.rnn_type == "gru": r_new = (r_new,)
-                rnn_states, current_idx = r_new, current_idx + 1
+                state_input, current_idx = r_new, current_idx + 1
                 outputs.append(out)
-        return torch.flatten(torch.cat(outputs, dim=0).transpose(0, 1), start_dim=0, end_dim=1), rnn_states
+                
+        if self.rnn_type == "gru" and not isinstance(state_input, tuple): 
+            state_input = (state_input,)
+            
+        return torch.flatten(torch.cat(outputs, dim=0).transpose(0, 1), start_dim=0, end_dim=1), state_input
 
     def forward(self, obs, lstm_states, episode_starts, action_masks=None, deterministic=False):
         features = self.extract_features(obs)
@@ -553,7 +584,15 @@ class MaskableRecurrentActorCriticPolicy(RecurrentActorCriticPolicy):
     def predict(self, observation, state=None, episode_start=None, deterministic=False, action_masks=None):
         self.set_training_mode(False)
         obs_t, vectorized = self.obs_to_tensor(observation)
-        n_envs = obs_t.shape[0]
+        
+        # FIX: Handle Dict observation spaces
+        if isinstance(obs_t, dict):
+            # Take the first available tensor to determine the number of environments
+            first_key = next(iter(obs_t))
+            n_envs = obs_t[first_key].shape[0]
+        else:
+            n_envs = obs_t.shape[0]
+
         if state is None:
             h = np.zeros((self.lstm_actor.num_layers, n_envs, self.lstm_actor.hidden_size))
             state = ((h, h), (h, h)) if self.rnn_type == "lstm" else ((h,), (h,))
@@ -685,7 +724,7 @@ class MaskableRecurrentPPO(RecurrentPPO):
         c_r = self.clip_range(self._current_progress_remaining)
         c_r_vf = self.clip_range_vf(self._current_progress_remaining) if self.clip_range_vf is not None else None
         
-        ent_ls, pg_ls, v_ls, kl_divs, clip_frs, imitation_losses, loss_ls = [], [], [], [], [], [], []
+        entropy_losses, pg_losses, value_losses, approx_kls, clip_fractions, imitation_losses, loss_ls = [], [], [], [], [], [], []
         
         continue_training = True
         for epoch in range(self.n_epochs):
@@ -704,10 +743,10 @@ class MaskableRecurrentPPO(RecurrentPPO):
                 pg_1 = adv * ratio
                 pg_2 = adv * torch.clamp(ratio, 1 - c_r, 1 + c_r)
                 policy_loss = -torch.mean(torch.min(pg_1, pg_2)[mask])
-                pg_ls.append(policy_loss.item())
+                pg_losses.append(policy_loss.item())
                 
                 # Clip fraction
-                clip_frs.append(torch.mean((torch.abs(ratio - 1) > c_r).float()[mask]).item())
+                clip_fractions.append(torch.mean((torch.abs(ratio - 1) > c_r).float()[mask]).item())
 
                 # Value loss
                 if c_r_vf is None:
@@ -716,16 +755,16 @@ class MaskableRecurrentPPO(RecurrentPPO):
                     v_pred = r_data.old_values + torch.clamp(vals.flatten() - r_data.old_values, -c_r_vf, c_r_vf)
                 
                 value_loss = torch.mean(((r_data.returns - v_pred)**2)[mask])
-                v_ls.append(value_loss.item())
+                value_losses.append(value_loss.item())
                 
                 # Entropy loss
                 entropy_loss = -torch.mean(entropy[mask])
-                ent_ls.append(entropy_loss.item())
+                entropy_losses.append(entropy_loss.item())
 
                 with torch.no_grad():
                     log_ratio = log_p - r_data.old_log_prob
                     approx_kl_div = torch.mean(((torch.exp(log_ratio) - 1) - log_ratio)[mask]).cpu().numpy()
-                    kl_divs.append(approx_kl_div)
+                    approx_kls.append(approx_kl_div)
 
                 if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
                     continue_training = False
@@ -774,28 +813,23 @@ class MaskableRecurrentPPO(RecurrentPPO):
         self._n_updates += self.n_epochs
         
         # Calculate explained variance (only for valid steps)
-        # We need to filter out padded regions from the buffer
         v_true = self.rollout_buffer.returns.flatten()
         v_pred = self.rollout_buffer.values.flatten()
-        
-        # Simple approach: since we are on-policy and just filled the buffer, 
-        # all steps in the buffer should be valid environment steps.
-        # The padding only happens INSIDE the 'get()' generator for RNN processing.
         expl_var = explained_variance(v_pred, v_true)
 
-        # Record metrics
-        self.logger.record("train/entropy_loss", np.mean(ent_ls))
-        self.logger.record("train/policy_gradient_loss", np.mean(pg_ls))
-        self.logger.record("train/value_loss", np.mean(v_ls))
-        self.logger.record("train/approx_kl", np.mean(kl_divs))
-        self.logger.record("train/clip_fraction", np.mean(clip_frs))
+        # LOG ALL METRICS
+        self.logger.record("train/entropy_loss", np.mean(entropy_losses))
+        self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
+        self.logger.record("train/value_loss", np.mean(value_losses))
+        self.logger.record("train/approx_kl", np.mean(approx_kls))
+        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", np.mean(loss_ls))
         self.logger.record("train/explained_variance", expl_var)
-        if imitation_losses:
+        if len(imitation_losses) > 0:
             self.logger.record("train/imitation_loss", np.mean(imitation_losses))
-        
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        self.logger.record("train/clip_range", c_r)
+        self.logger.record("train/clip_range", self.clip_range(self._current_progress_remaining))
+        self.logger.record("train/learning_rate", self.learning_rate)
         if c_r_vf is not None:
             self.logger.record("train/clip_range_vf", c_r_vf)
 
@@ -807,14 +841,26 @@ class MaskableRecurrentPPO(RecurrentPPO):
         if custom_objects is None: custom_objects = {}
         from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
         custom_objects.setdefault("policy_class", UniversalRecurrentPolicy)
-        custom_objects.setdefault("policy_kwargs", {}).setdefault("lstm_hidden_size", 512)
-        custom_objects["optimizer"] = None
         
-        # SB3.load often ignores tensorboard_log in kwargs if it's in the saved model.
-        # We'll handle it manually after loading.
+        # Pop architecture info from kwargs to avoid conflicts with explicit arguments later
+        pk_override = kwargs.pop("policy_kwargs", {})
+        if pk_override:
+            if "policy_kwargs" not in custom_objects: custom_objects["policy_kwargs"] = {}
+            custom_objects["policy_kwargs"].update(pk_override)
+        
+        custom_objects.setdefault("policy_kwargs", {}).setdefault("lstm_hidden_size", 512)
+        
+        rnn_override = kwargs.pop("rnn_type", None)
+        if rnn_override:
+            custom_objects["rnn_type"] = rnn_override
+            if "policy_kwargs" not in custom_objects: custom_objects["policy_kwargs"] = {}
+            custom_objects["policy_kwargs"]["rnn_type"] = rnn_override
+            
+        custom_objects["optimizer"] = None
         tb_log = kwargs.pop("tensorboard_log", None)
         
         try: 
+            # Try normal load first
             model = super().load(path, env, device, custom_objects, **kwargs)
             if tb_log is not None:
                 model.tensorboard_log = tb_log
@@ -827,16 +873,28 @@ class MaskableRecurrentPPO(RecurrentPPO):
             from stable_baselines3.common.save_util import load_from_zip_file
             data, params, _ = load_from_zip_file(path, device, custom_objects)
             data["policy_class"] = custom_objects["policy_class"]
-            data.get("policy_kwargs", {}).update(custom_objects["policy_kwargs"])
             
-            # Use tb_log if provided
+            # Ensure policy_kwargs in data is updated with our overrides
+            if "policy_kwargs" not in data: data["policy_kwargs"] = {}
+            data["policy_kwargs"].update(custom_objects.get("policy_kwargs", {}))
+            
             if tb_log is not None:
                 data["tensorboard_log"] = tb_log
 
-            model = cls(policy=data["policy_class"], env=env, device=device, _init_setup_model=False, **kwargs)
+            # Reconstruct with the best available information
+            rnn_type = custom_objects.get("rnn_type") or data.get("rnn_type", "lstm")
+            
+            # Ensure rnn_type is also in data for model persistence
+            data["rnn_type"] = rnn_type
+            data["policy_kwargs"]["rnn_type"] = rnn_type
+
+            # Create model instance - kwargs no longer contains rnn_type or policy_kwargs
+            model = cls(policy=data["policy_class"], env=env, device=device, _init_setup_model=False, rnn_type=rnn_type, **kwargs)
+            
             if isinstance(model.observation_space, gym.spaces.Dict):
                 from src.agent.models.unit_control_network import UnitControlNetwork
                 data.get("policy_kwargs", {})["features_extractor_class"] = UnitControlNetwork
+            
             model.__dict__.update(data)
             
             if tb_log is not None:
@@ -860,7 +918,14 @@ class MaskableRecurrentPPO(RecurrentPPO):
                             logger.info(f"Expanding Linear input features for {tk}: {v.shape[1]} -> {c_sd[tk].shape[1]}")
                             exp = c_sd[tk].clone(); exp[:, :v.shape[1]] = v; new_sd[tk] = exp
                         elif "action_net" in tk:
-                            logger.warning(f"Partial action head load for {tk}"); exp = c_sd[tk].clone(); mi = min(v.shape[0], c_sd[tk].shape[0]); exp[:mi, :] = v[:mi, :]; new_sd[tk] = exp
+                            if v.shape[1] == c_sd[tk].shape[1]:
+                                logger.warning(f"Partial action head load for {tk}")
+                                exp = c_sd[tk].clone()
+                                mi = min(v.shape[0], c_sd[tk].shape[0])
+                                exp[:mi, :] = v[:mi, :]
+                                new_sd[tk] = exp
+                            else:
+                                logger.error(f"Cannot surgically load {tk} due to hidden size mismatch: {v.shape[1]} vs {c_sd[tk].shape[1]}")
             model.policy.load_state_dict(new_sd, strict=False)
             model._setup_lr_schedule()
             model.policy.optimizer = model.policy.optimizer_class(model.policy.parameters(), lr=model.learning_rate, **model.policy.optimizer_kwargs)

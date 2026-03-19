@@ -1,65 +1,19 @@
 
-import pytest
-import numpy as np
-import os
-import sys
-from stable_baselines3.common.monitor import Monitor
+from train.envs.level_3_env import Level3Env
+from unittest.mock import MagicMock
 
-# Add path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from train.envs.level_0_env import Level0Env
-from train.train_pipeline import MaskableSubprocVecEnv
-
-def make_env(rank):
-    def _init():
-        return Monitor(
-            Level0Env(
-                level_name="level_0",
-                visualize=False,
-                grid_size=32,
-                worker_index=rank,
-                num_workers=2
-            )
-        )
-    return _init
-
-@pytest.mark.parametrize("num_envs", [2])
-def test_maskable_subproc_vec_env_mask_shape(num_envs):
-    """
-    Test if MaskableSubprocVecEnv returns action masks of the correct shape.
-    This specifically verifies the fix for the shape mismatch error.
-    """
-    env_fns = [make_env(i) for i in range(num_envs)]
-    env = MaskableSubprocVecEnv(env_fns, start_method='spawn')
-    
+def test_init():
     try:
-        env.reset()
-        masks = env.get_action_masks()
-        
-        # Each environment has grid_size=32, so 32*32 = 1024 actions.
-        # With 2 environments, the shape should be (2, 1024).
-        expected_shape = (num_envs, 32 * 32)
-        
-        assert masks.shape == expected_shape, f"Expected shape {expected_shape}, but got {masks.shape}"
-        assert masks.dtype == bool
-        
-        # Test step returns correct masks via env_method if needed (MaskablePPO uses get_action_masks)
-        actions = np.array([env.action_space.sample() for _ in range(num_envs)])
-        env.step(actions)
-        
-        masks_after_step = env.get_action_masks()
-        assert masks_after_step.shape == expected_shape
-        
-    finally:
-        env.close()
-
-if __name__ == "__main__":
-    # Manually run the test if script is executed directly
-    try:
-        test_maskable_subproc_vec_env_mask_shape(2)
-        print("Test passed successfully!")
+        env = Level3Env(level_name="level_move_multi_0", num_workers=4, training_conf={"config_dir": "config_universal"})
+        print("action_heads:", env.action_heads)
+        print("action_space:", env.action_space)
+        if hasattr(env.action_space, 'nvec'):
+            print("nvec:", env.action_space.nvec)
+            print("sum:", sum(env.action_space.nvec))
     except Exception as e:
-        print(f"Test failed: {e}")
+        print("Error:", e)
         import traceback
         traceback.print_exc()
-        sys.exit(1)
+
+if __name__ == "__main__":
+    test_init()

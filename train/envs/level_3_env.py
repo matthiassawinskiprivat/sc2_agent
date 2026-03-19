@@ -61,8 +61,35 @@ class Level3Env(Level0Env):
             class DummyConn:
                 def send(self, data): pass
                 def recv(self): return "continue", None
-            # Use Level3Bot instead of SC2Bot
-            self._bot = Level3Bot(conn=DummyConn(), training_conf=self.training_conf)
+            
+            if self.agent_architecture == "universal":
+                from src.sc2_bot_universal import SC2BotUniversal
+                # Inherit from Level3Bot only, but delegate key universal methods
+                class UniversalLevel3Bot(Level3Bot):
+                    def __init__(self, conn, training_conf=None):
+                        super().__init__(conn, training_conf)
+                        # Manually trigger SC2BotUniversal's logic if needed
+                        # But SC2BotUniversal.__init__ just sets up agent_system
+                        # which is already handled by SC2Bot base class.
+                    
+                    def action_masks(self, curriculum_progress=1.0):
+                        return SC2BotUniversal.action_masks(self, curriculum_progress)
+
+                    async def apply_action(self, unit_tag, action):
+                        return await SC2BotUniversal.apply_action(self, unit_tag, action)
+
+                    def _get_zero_observation(self):
+                        return SC2BotUniversal._get_zero_observation(self)
+
+                    def _get_observation(self, active_unit=None):
+                        # Use Level3Bot's logic but it will call its own _get_observation
+                        # which we need to make sure uses the universal processing
+                        return Level3Bot._get_observation(self, active_unit=active_unit)
+                
+                self._bot = UniversalLevel3Bot(conn=DummyConn(), training_conf=self.training_conf)
+            else:
+                self._bot = Level3Bot(conn=DummyConn(), training_conf=self.training_conf)
+                
             self._bot.distance_calculation_method = 2
             self._bot.grid_size = self.grid_size
 

@@ -227,6 +227,31 @@ class Level3Bot(SC2Bot):
         """
         Calculates the distance-based shaping reward for a specific unit or all units.
         """
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+             # SC2BotUniversal uses a simpler single-unit reward based on self.zergling/beacon
+             # We need to bridge this for Level 3's multi-unit attribution.
+             if unit_tag is not None:
+                 unit = self.units.find_by_tag(unit_tag)
+                 # Find assigned beacon
+                 b_tag = self.current_assignments.get(unit_tag)
+                 beacon = self.all_units.find_by_tag(b_tag) if b_tag else None
+                 
+                 if not unit or not beacon:
+                     return 0.0
+                     
+                 current_dist = unit.distance_to(beacon)
+                 prev_dist = self.previous_distances.get(unit_tag)
+                 
+                 reward = 0.0
+                 if prev_dist is not None:
+                     dist_multiplier = self.training_conf.get('rewards', {}).get('distance_multiplier', 1.0)
+                     reward = (prev_dist - current_dist) * dist_multiplier
+                     
+                 self.previous_distances[unit_tag] = current_dist
+                 return reward
+             return 0.0
+
         rewards_conf = self.training_conf.get('rewards', {})
         dist_multiplier = rewards_conf.get('distance_multiplier', 0.1)
         
@@ -413,8 +438,11 @@ class Level3Bot(SC2Bot):
                 except:
                     dist = 999.0
                 
+                # [DEBUG] Trace distances
+                logger.debug(f"check_collections [Unit {u_tag} -> Beacon {b_tag}]: dist={dist:.2f}")
+
                 if dist < 2.0:
-                    logger.info(f"Collection! Unit {u_tag} reached assigned Beacon {b_tag}")
+                    logger.info(f"Collection! Unit {u_tag} reached assigned Beacon {b_tag} (dist: {dist:.2f})")
                     # Mark for deletion
                     self.completed_tags.add(u_tag)
                     self.completed_tags.add(b_tag)
@@ -427,7 +455,21 @@ class Level3Bot(SC2Bot):
                     # We do NOT delete from current_assignments yet, to keep the 'target' visible
                     # until the unit is actually killed in its turn.
             elif not unit or not beacon:
-                 # Clean up assignments if units/beacons are gone for other reasons
+                 # Map triggers often delete the beacon (or unit) immediately upon collision.
+                 # If they suddenly disappeared, check if they were close in the last frame.
+                 prev_dist = self.previous_distances.get(u_tag, 999.0)
+                 
+                 logger.debug(f"check_collections: Missing entity. Unit {u_tag} exists: {bool(unit)}, Beacon {b_tag} exists: {bool(beacon)}. prev_dist={prev_dist:.2f}")
+                 
+                 if prev_dist < 4.0: # Threshold accounts for Zergling movement speed per frame
+                     logger.info(f"Collection inferred (Map Trigger)! Unit {u_tag} reached assigned Beacon {b_tag} (prev_dist: {prev_dist:.2f})")
+                     self.completed_tags.add(u_tag)
+                     self.completed_tags.add(b_tag)
+                     
+                     self.pending_success_rewards[u_tag] = self.pending_success_rewards.get(u_tag, 0.0) + success_reward_per_event
+                     unit_rewards[u_tag] = success_reward_per_event
+                     
+                 # Clean up assignments if units/beacons are gone
                  if u_tag in self.current_assignments:
                      del self.current_assignments[u_tag]
         

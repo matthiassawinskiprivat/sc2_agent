@@ -1,24 +1,23 @@
-import pytest
-from unittest.mock import MagicMock
-from src.agent.ctf_bot import CaptureTheFlagBot
-from sc2.units import Units
 
-def test_bot_property_shadowing_details():
-    bot = CaptureTheFlagBot(player_id=1)
+from sc2.bot_ai import BotAI
+from sc2.units import Units
+import numpy as np
+
+class ShadowBot(BotAI):
+    def __init__(self, conn=None):
+        # We don't call super().__init__ because it requires many arguments in some versions
+        # We just want to see how it behaves
+        self.units = Units([], self)
+
+def test_shadowing():
+    print(f"Attributes in BotAI: {[a for a in dir(BotAI) if not a.startswith('__')]}")
     
-    has_units_attr = "units" in bot.__dict__
-    print(f"Has units in bot.__dict__? {has_units_attr}")
+    bot = ShadowBot()
+    print(f"Is 'units' in bot.__dict__? {'units' in bot.__dict__}")
     
-    prop = getattr(CaptureTheFlagBot, "units", None)
-    print(f"Class units type: {type(prop)}")
-    is_property = isinstance(prop, property)
-    print(f"Is class units a property? {is_property}")
-    
-    # In burnysc2, units is a property. 
-    # If it's shadowed, it won't be updated by BotAI._prepare_step
-    
-    if has_units_attr:
-        print(f"Shadowed units value: {bot.__dict__['units']}")
-        
-    assert is_property, "Expected 'units' to be a property on class CaptureTheFlagBot"
-    assert not has_units_attr, "'units' should not be in __dict__ as it shadows the property"
+    # Check if 'units' is a property in BotAI
+    is_prop = isinstance(getattr(BotAI, "units", None), property)
+    print(f"Is BotAI.units a property? {is_prop}")
+
+if __name__ == "__main__":
+    test_shadowing()

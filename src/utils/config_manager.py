@@ -29,30 +29,35 @@ class ConfigManager:
         """
         accumulated_layers = []
         
-        # Determine if we should process levels strictly from pipeline list
-        # or just try to load the target level if not in pipeline.
-        
+        # Start with layers from pipeline root
+        root_layers = self.pipeline_config.get("active_layers", [])
+        for layer in root_layers:
+            ln = layer.lower()
+            if ln not in accumulated_layers:
+                accumulated_layers.append(ln)
+
         found_target = False
-        
         for level in self.levels:
             level_conf = self._load_yaml(f"{level}.yaml")
             new_layers = level_conf.get("env", {}).get("active_layers", [])
             
             if new_layers:
                 for layer in new_layers:
-                    if layer not in accumulated_layers:
-                        accumulated_layers.append(layer)
+                    ln = layer.lower()
+                    if ln not in accumulated_layers:
+                        accumulated_layers.append(ln)
             
             if level == target_level:
                 found_target = True
                 break
         
         if not found_target:
-            # If target level is not in pipeline list, try to load it directly
-            # but we can't do accumulation effectively without knowing its predecessors.
-            # We assume it has no predecessors in this case or is standalone.
             level_conf = self._load_yaml(f"{target_level}.yaml")
-            accumulated_layers = level_conf.get("env", {}).get("active_layers", [])
+            new_layers = level_conf.get("env", {}).get("active_layers", [])
+            for layer in new_layers:
+                ln = layer.lower()
+                if ln not in accumulated_layers:
+                    accumulated_layers.append(ln)
 
         return accumulated_layers
 
@@ -62,16 +67,24 @@ class ConfigManager:
         Iterates through the levels defined in pipeline.yaml.
         """
         accumulated_layers = []
-        found_target = False
         
+        # Start with tactical layers from pipeline root
+        root_layers = self.pipeline_config.get("active_tactical_layers", [])
+        for layer in root_layers:
+            ln = layer.lower()
+            if ln not in accumulated_layers:
+                accumulated_layers.append(ln)
+
+        found_target = False
         for level in self.levels:
             level_conf = self._load_yaml(f"{level}.yaml")
             new_layers = level_conf.get("env", {}).get("active_tactical_layers", [])
             
             if new_layers:
                 for layer in new_layers:
-                    if layer not in accumulated_layers:
-                        accumulated_layers.append(layer)
+                    ln = layer.lower()
+                    if ln not in accumulated_layers:
+                        accumulated_layers.append(ln)
             
             if level == target_level:
                 found_target = True
@@ -79,7 +92,11 @@ class ConfigManager:
         
         if not found_target:
             level_conf = self._load_yaml(f"{target_level}.yaml")
-            accumulated_layers = level_conf.get("env", {}).get("active_tactical_layers", [])
+            new_layers = level_conf.get("env", {}).get("active_tactical_layers", [])
+            for layer in new_layers:
+                ln = layer.lower()
+                if ln not in accumulated_layers:
+                    accumulated_layers.append(ln)
 
         return accumulated_layers
 
@@ -89,16 +106,24 @@ class ConfigManager:
         Iterates through the levels defined in pipeline.yaml.
         """
         accumulated_heads = []
-        found_target = False
         
+        # Start with heads from pipeline root
+        root_heads = self.pipeline_config.get("categorical_heads", [])
+        for head in root_heads:
+            hn = head.lower()
+            if hn not in accumulated_heads:
+                accumulated_heads.append(hn)
+
+        found_target = False
         for level in self.levels:
             level_conf = self._load_yaml(f"{level}.yaml")
             new_heads = level_conf.get("env", {}).get("categorical_heads", [])
             
             if new_heads:
                 for head in new_heads:
-                    if head not in accumulated_heads:
-                        accumulated_heads.append(head)
+                    hn = head.lower()
+                    if hn not in accumulated_heads:
+                        accumulated_heads.append(hn)
             
             if level == target_level:
                 found_target = True
@@ -109,8 +134,9 @@ class ConfigManager:
             new_heads = level_conf.get("env", {}).get("categorical_heads", [])
             if new_heads:
                 for head in new_heads:
-                    if head not in accumulated_heads:
-                        accumulated_heads.append(head)
+                    hn = head.lower()
+                    if hn not in accumulated_heads:
+                        accumulated_heads.append(hn)
 
         return accumulated_heads
 
@@ -121,31 +147,38 @@ class ConfigManager:
         If target_level is not in pipeline, it assumes it follows the entire pipeline.
         """
         accumulated_heads = []
-        found_target = False
         
+        # Start with heads from pipeline root
+        root_heads = self.pipeline_config.get("action_heads", [])
+        for head in root_heads:
+            hn = head.lower()
+            if hn not in accumulated_heads:
+                accumulated_heads.append(hn)
+
+        found_target = False
         for level in self.levels:
             level_conf = self._load_yaml(f"{level}.yaml")
             new_heads = level_conf.get("env", {}).get("action_heads", [])
             
             if new_heads:
                 for head in new_heads:
-                    if head not in accumulated_heads:
-                        accumulated_heads.append(head)
+                    hn = head.lower()
+                    if hn not in accumulated_heads:
+                        accumulated_heads.append(hn)
             
             if level == target_level:
                 found_target = True
                 break
         
         if not found_target:
-            # If target level is not in pipeline list, try to load it directly
-            # and append its heads to the accumulated list (assuming it follows pipeline)
             level_conf = self._load_yaml(f"{target_level}.yaml")
             new_heads = level_conf.get("env", {}).get("action_heads", [])
             
             if new_heads:
                 for head in new_heads:
-                    if head not in accumulated_heads:
-                        accumulated_heads.append(head)
+                    hn = head.lower()
+                    if hn not in accumulated_heads:
+                        accumulated_heads.append(hn)
 
         return accumulated_heads
 

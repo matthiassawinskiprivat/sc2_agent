@@ -2,11 +2,11 @@
 # Multi-unit movement level for Universal Architecture (3 targets)
 
 training:
-  training_steps: 3_000_000
-  num_envs: 6
-  n_steps: 2048
-  batch_size: 4096
-  learning_rate: 0.0003
+  training_steps: 5_000_000
+  num_envs: 4
+  n_steps: 8192
+  batch_size: 2048
+  learning_rate: 0.0002
   render_beacon: True
   watchdog_timeout: 3600
 
@@ -23,12 +23,7 @@ env:
   rewards:
     success: 80.0
     step_penalty: -0.1
-    distance_multiplier: 0.1
-  action_heads:
-    - "move_global"
-    - "move_local"
-
-
+    distance_multiplier: 1.0
 # Model parameters
 model:
   algorithm: "MaskableRecurrentPPO"
@@ -41,7 +36,7 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.9983 # horizon 588
   ent_coef: 0.001
   n_epochs: 4
 

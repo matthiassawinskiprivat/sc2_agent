@@ -28,6 +28,7 @@ from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
 from src.agent.models.unit_control_network import UnitControlNetwork
 from src.agent.models.universal_policy import UniversalActorCriticPolicy
 from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
+from src.agent.utils.disk_buffer import DiskDictRolloutBuffer
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from src.utils.watchdog import Watchdog
@@ -132,6 +133,8 @@ class UniversalPipelineManager(PipelineManager):
                 "policy_kwargs": policy_kwargs,
                 "device": "cuda" if torch.cuda.is_available() else "cpu",
                 "level_name": level_name,
+                "rollout_buffer_class": DiskDictRolloutBuffer,
+                "rollout_buffer_kwargs": {"temp_dir": "C:/temp/sc2_buffer_cache"}
             }
             if AlgoClass == MaskableRecurrentPPO:
                 model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
@@ -186,11 +189,19 @@ class UniversalPipelineManager(PipelineManager):
             env.close()
 
     def run(self):
-        """Executes the entire universal training pipeline."""
+        """Executes the entire universal training pipeline with additive configuration."""
         logger.info(f"Starting universal training pipeline for levels: {self.pipeline_config['levels']}")
         kill_switch_sc2()
         
         last_final_model_path = None
+        # Initialize base_config with pipeline-level settings
+        self.cumulative_config = {
+            "agent_architecture": "universal",
+            "active_layers": [],
+            "active_tactical_layers": []
+        }
+
+        # Find the last completed level to start curriculum from
         for i in range(len(self.pipeline_config['levels']) -1, -1, -1):
             level = self.pipeline_config['levels'][i]
             status, path = self.get_level_status(level)
@@ -200,6 +211,28 @@ class UniversalPipelineManager(PipelineManager):
 
         for level_name in self.pipeline_config["levels"]:
             logger.info(f"--- Processing Level: {level_name} ---")
+            
+            # Load level config and update cumulative state
+            with open(os.path.join(self.config_dir, f"{level_name}.yaml"), 'r') as f:
+                level_config = yaml.safe_load(f)
+            
+            # ADDITIVE LOGIC: Merge level config into cumulative config
+            # This ensures subsequent levels 'inherit' layers from previous ones
+            if "active_layers" in level_config:
+                # Add any new layers that aren't already there
+                for layer in level_config["active_layers"]:
+                    if layer not in self.cumulative_config["active_layers"]:
+                        self.cumulative_config["active_layers"].append(layer)
+            
+            if "active_tactical_layers" in level_config:
+                for layer in level_config["active_tactical_layers"]:
+                    if layer not in self.cumulative_config["active_tactical_layers"]:
+                        self.cumulative_config["active_tactical_layers"].append(layer)
+
+            # Store the current state for this training session
+            level_config["active_layers"] = self.cumulative_config["active_layers"].copy()
+            level_config["active_tactical_layers"] = self.cumulative_config["active_tactical_layers"].copy()
+            
             status, model_path = self.get_level_status(level_name)
             if status == "COMPLETED":
                 last_final_model_path = model_path
@@ -209,7 +242,8 @@ class UniversalPipelineManager(PipelineManager):
             reset_timesteps = status != "CONTINUE_TRAINING"
             if status == "NEEDS_TRAINING": self._cleanup_logs(level_name)
             
-            final_model_path = self._train_level(level_name, model_path_to_load=model_to_load, reset_timesteps=reset_timesteps)
+            # Pass the merged config to train_level
+            final_model_path = self._train_level(level_name, model_path_to_load=model_to_load, reset_timesteps=reset_timesteps, merged_config=level_config)
             last_final_model_path = final_model_path
 
         logger.info("Universal Training pipeline finished.")

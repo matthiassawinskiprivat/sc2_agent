@@ -3,9 +3,9 @@
 
 training:
   training_steps: 6_000_000
-  num_envs: 6
-  n_steps: 2048
-  batch_size: 4096
+  num_envs: 4
+  n_steps: 4096
+  batch_size: 1024
   learning_rate: 0.0003
   render_beacon: True
   watchdog_timeout: 3600
@@ -15,17 +15,13 @@ env:
   grid_size: 128
   headless: True
   max_steps: 400
-  maps_dir: "train/maps/level_2"
+  maps_dir: "train/maps/128x128"
   high_level_command: "scout"
   guidance_curriculum: False
   rewards:
     success: 30.0
-    step_penalty: -0.01
-    distance_multiplier: 0.1
-  active_tactical_layers: []
-  action_heads:
-    - "move_global"
-    - "move_local"
+    step_penalty: -0.1
+    distance_multiplier: 1.0
 
 # Model parameters
 model:
@@ -35,7 +31,7 @@ model:
     features_extractor_kwargs:
       features_dim: 512
       thinking_steps: 3
-  gamma: 0.995
+  gamma: 0.9975 # horizon 400
   ent_coef: 0.001
   n_epochs: 4
 

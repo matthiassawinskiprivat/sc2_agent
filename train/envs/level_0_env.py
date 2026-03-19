@@ -54,6 +54,8 @@ class Level0Env(gym.Env):
             self.categorical_heads = self.config_manager.get_cumulative_categorical_heads(self.level_name)
             self.agent_architecture = self.config_manager.get_agent_architecture()
 
+            print(f"DEBUG [{self.level_name}]: action_heads={self.action_heads}, categorical_heads={self.categorical_heads}, arch={self.agent_architecture}")
+
             # SENSIBLE DEFAULTS for Universal Architecture
             if self.agent_architecture == "universal":
                 if not self.active_layers:

@@ -4,9 +4,9 @@
 training:
   training_steps: 5_000_000
   num_envs: 3
-  n_steps: 4096
-  batch_size: 4096
-  learning_rate: 0.0003
+  n_steps: 8192
+  batch_size: 2048
+  learning_rate: 0.0002
   render_beacon: True
   watchdog_timeout: 3600
 
@@ -16,19 +16,14 @@ env:
   targets: 8
   grid_size: 128
   headless: True
-  max_steps: 800
+  max_steps: 700
   maps_dir: "train/maps/128x128"
   high_level_command: "scout"
   guidance_curriculum: False
   rewards:
     success: 160.0
-    step_penalty: -0.01
-    distance_multiplier: 0.1
-  action_heads:
-    - "move_global"
-    - "move_local"
-
-
+    step_penalty: -0.1
+    distance_multiplier: 1.0
 # Model parameters
 model:
   algorithm: "MaskableRecurrentPPO"
@@ -41,7 +36,7 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.998
+  gamma: 0.9985 # horizon 666
   ent_coef: 0.001
   n_epochs: 4
 

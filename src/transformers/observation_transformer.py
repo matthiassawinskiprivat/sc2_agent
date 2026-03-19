@@ -91,7 +91,7 @@ class ObservationTransformer:
     def _update_active_indices(self):
         """Updates active indices based on current layer map and pruning config."""
         if self.active_layers:
-            self.active_indices = {self.current_layer_map[ln] for ln in self.active_layers if ln in self.current_layer_map}
+            self.active_indices = {self.current_layer_map[ln.lower()] for ln in self.active_layers if ln.lower() in self.current_layer_map}
         else:
             self.active_indices = set(range(len(self.current_layer_map)))
 
@@ -260,7 +260,7 @@ class ObservationTransformer:
         layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
 
         if self.active_layers:
-            indices = [LayerConstants.LAYERS[layer_name] for layer_name in self.active_layers]
+            indices = [LayerConstants.LAYERS[layer_name.lower()] for layer_name in self.active_layers if layer_name.lower() in LayerConstants.LAYERS]
             map_data = layers[indices]
         else:
             map_data = layers

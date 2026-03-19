@@ -6,7 +6,60 @@ def get_action_masks(env):
     """Picklable action mask getter."""
     return env.unwrapped.action_masks()
 
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+
+def create_dummy_env_from_config(config: dict):
+    """
+    Creates a mock Gymnasium environment with only spaces defined.
+    Used by the Async Learner to initialize models without launching SC2.
+    """
+    env_params = config.get("env", {})
+    grid_size = env_params.get("grid_size", 128)
+    spatial_res = 32
+    
+    # Matches Universal Architecture spaces
+    # Default to 30 layers if not specified
+    num_layers = 30
+    
+    # Try to refine channel counts from config if available
+    # Check both root level and nested 'env' level just in case
+    active_layers = config.get("active_layers") or config.get("env", {}).get("active_layers", [])
+    
+    if active_layers:
+        num_layers = len(active_layers)
+        
+    print(f"DEBUG: create_dummy_env_from_config -> num_layers = {num_layers}. active_layers = {active_layers}")
+        
+    obs_dict = {
+        "map": spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32),
+        "tactical": spaces.Box(low=0.0, high=1.0, shape=(num_layers, 32, 32), dtype=np.float32),
+        "command": spaces.Box(low=0.0, high=1.0, shape=(10,), dtype=np.float32)
+    }
+
+    class DummyEnv(gym.Env):
+        def __init__(self):
+            super().__init__()
+            self.observation_space = spaces.Dict(obs_dict)
+            
+            # Use action_heads from config, fallback to default if missing OR empty
+            self.action_heads = config.get("action_heads")
+            if not self.action_heads:
+                self.action_heads = ["move_global", "move_local"]
+                
+            self.action_space = spaces.MultiDiscrete([len(self.action_heads), spatial_res * spatial_res])
+
+        def reset(self, seed=None, options=None):
+            return self.observation_space.sample(), {}
+
+        def step(self, action):
+            return self.observation_space.sample(), 0.0, False, False, {}
+
+    return ActionMasker(DummyEnv(), lambda e: [np.ones(d, dtype=bool) for d in e.action_space.nvec])
+
 class EnvFactory:
+
     """
     Picklable factory for environment creation, necessary for SubprocVecEnv on Windows.
     """

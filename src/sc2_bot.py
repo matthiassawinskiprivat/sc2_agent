@@ -44,12 +44,6 @@ class SC2Bot(BotAI):
         
         # Satisfaction for BotAI initialization
         self._initialize_variables()
-        from sc2.units import Units
-        self.units = Units([], self)
-        self.structures = Units([], self)
-        self.enemy_units = Units([], self)
-        self.enemy_structures = Units([], self)
-        self.all_units = Units([], self)
         
         self.unit_command_uses_self_do = False
         self.actions = []
@@ -216,14 +210,6 @@ class SC2Bot(BotAI):
         self.previous_distance = None
         self.unit_tags_received_action.clear()
         
-        # Clear local unit lists to avoid using stale data before next refresh
-        from sc2.units import Units
-        self.units = Units([], self)
-        self.structures = Units([], self)
-        self.enemy_units = Units([], self)
-        self.enemy_structures = Units([], self)
-        self.all_units = Units([], self)
-
         # 1. Guarantee Vision
         # We step after debug_show_map to ensure it's applied before we look for units to kill
         await self.client.debug_show_map()

@@ -14,6 +14,14 @@ class UniversalActorCriticPolicy(MaskableActorCriticPolicy):
         # Universal grid size (e.g. 32x32)
         self.spatial_resolution = 32
         kwargs.pop("spatial_resolution", None)
+        # Non-recurrent policies must ignore recurrent-only kwargs.
+        # Some training pipelines inject `rnn_type` unconditionally; `MaskableActorCriticPolicy`
+        # (sb3_contrib) does not accept it.
+        kwargs.pop("rnn_type", None)
+        kwargs.pop("lstm_hidden_size", None)
+        kwargs.pop("n_lstm_layers", None)
+        kwargs.pop("shared_lstm", None)
+        kwargs.pop("enable_critic_lstm", None)
         super().__init__(observation_space, action_space, lr_schedule, *args, **kwargs)
 
     def _build_action_net(self) -> None:
