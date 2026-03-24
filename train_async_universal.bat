@@ -4,4 +4,4 @@ echo Offloading large observation layers to C:/temp/sc2_async_buffer...
 set PYTHONPATH=%PYTHONPATH%;%CD%
 set SC2_SKIP_KILL_SWITCH=1
 python train/async_train_universal.py
-pause
+if errorlevel 1 pause

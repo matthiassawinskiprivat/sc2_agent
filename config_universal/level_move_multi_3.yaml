@@ -14,7 +14,6 @@ training:
 env:
   env_class: "Level3Env"
   targets: 16
-  grid_size: 128
   headless: True
   max_steps: 800
   maps_dir: "train/maps/ladder/no_trigger"

@@ -14,7 +14,6 @@ training:
 env:
   env_class: "Level3Env"
   targets: 8
-  grid_size: 128
   headless: True
   max_steps: 700
   maps_dir: "train/maps/128x128"

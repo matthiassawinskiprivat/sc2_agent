@@ -60,12 +60,21 @@ class AsyncCollector(mp.Process):
     PRODUCER: Plays StarCraft II and streams data to the disk buffer.
     It never stops unless the Learner is too slow.
     """
-    def __init__(self, level_name, config, stop_event, model_path=None):
+    def __init__(
+        self,
+        level_name,
+        config,
+        stop_event,
+        model_path=None,
+        resume_timesteps_from_save=False,
+    ):
         super().__init__()
         self.level_name = level_name
         self.config = config
         self.stop_event = stop_event
         self.model_path = model_path
+        # True only for same-level checkpoint resume; False for fresh start or curriculum (prior level weights).
+        self.resume_timesteps_from_save = resume_timesteps_from_save
 
     def run(self):
         logger.info(f"Collector started for level: {self.level_name}")
@@ -86,14 +95,20 @@ class AsyncCollector(mp.Process):
         from train.train_pipeline import ENV_REGISTRY
         
         EnvClass = ENV_REGISTRY.get(env_params.get("env_class", "Level0Env"))
+        # Default 32 matches universal MultiDiscrete spatial resolution; key optional in YAML.
+        _grid = env_params.get("grid_size", 32)
         env_fns = [
             EnvFactory(
-                EnvClass, self.level_name, False, env_params["grid_size"], i, num_envs,
+                EnvClass, self.level_name, False, _grid, i, num_envs,
                 None, None, self.config, env_params.get("max_steps", 300)
             )
             for i in range(num_envs)
         ]
-        vec_env = MaskableSubprocVecEnv(env_fns) if num_envs > 1 else MaskableSyncVecEnv(env_fns)
+        vec_env = (
+            MaskableSubprocVecEnv(env_fns, start_method="spawn")
+            if num_envs > 1
+            else MaskableSyncVecEnv(env_fns)
+        )
 
         # 2. Setup Policy
         model_params = self.config.get("model", {})
@@ -134,7 +149,10 @@ class AsyncCollector(mp.Process):
             if AlgoClass == MaskableRecurrentPPO:
                 algo_kwargs["rnn_type"] = rnn_type
             model = AlgoClass(**algo_kwargs)
-            
+
+        if self.model_path and not self.resume_timesteps_from_save:
+            model.num_timesteps = 0
+
         # Diagnostic Log
         obs_shape = model.policy.features_extractor.cnn[0].weight.shape
         logger.info(f"Collector Model initialized with CNN input shape: {obs_shape}")
@@ -222,7 +240,10 @@ class AsyncCollector(mp.Process):
 
             # FILL BUFFER
             current_buffer.reset()
-            is_recurrent = hasattr(model, "_last_lstm_states")
+            # Use class-based detection instead of attribute presence:
+            # some model objects may carry compatibility attributes even when
+            # running non-recurrent PPO.
+            is_recurrent = isinstance(model, MaskableRecurrentPPO)
             for step in range(training_params["n_steps"]):
                 # Get actions, values, and log_probs from model
                 # We need torch tensors for the policy.forward call
@@ -348,9 +369,10 @@ class AsyncLearner:
     """
     CONSUMER: Watches for ready buffers and performs GPU updates.
     """
-    def __init__(self, level_name, config):
+    def __init__(self, level_name, config, resume_timesteps_from_save=False):
         self.level_name = level_name
         self.config = config
+        self.resume_timesteps_from_save = resume_timesteps_from_save
         self.latest_model_path = os.path.join(TEMP_DIR, "latest_learner_model.zip")
         # Ensure log directory exists
         self.log_dir = os.path.join("logs_universal", level_name, "async")
@@ -412,17 +434,23 @@ class AsyncLearner:
             if os.path.exists(initial_path):
                 try:
                     model.set_parameters(initial_path)
-                    
-                    # Also extract the starting timesteps from the zip metadata
+
                     import zipfile
                     with zipfile.ZipFile(initial_path, 'r') as archive:
-                        if 'data' in archive.namelist():
+                        if self.resume_timesteps_from_save and 'data' in archive.namelist():
                             data_content = archive.read('data').decode('utf-8')
                             model_data = json.loads(data_content)
                             total_steps_trained = model_data.get("num_timesteps", 0)
                             logger.info(f"Learner: Resuming from {total_steps_trained} timesteps.")
-                    
-                    logger.info("Learner: Synchronized initial weights and timesteps with Collector.")
+                        else:
+                            total_steps_trained = 0
+                            model.num_timesteps = 0
+                            logger.info(
+                                "Learner: Timestep counter at 0 for this level "
+                                "(matches sync train_universal reset_num_timesteps on curriculum / fresh start)."
+                            )
+
+                    logger.info("Learner: Synchronized initial weights with Collector.")
                     break
                 except Exception as e:
                     logger.warning(f"Learner failed to load initial weights: {e}")
@@ -613,85 +641,165 @@ class AsyncLearner:
             if not found_buffer:
                 time.sleep(1)
 
-def main():
-    # Load pipeline to get level sequence
-    config_dir = "config_universal"
-    manager = UniversalPipelineManager(config_dir=config_dir)
-    
-    with open(os.path.join(config_dir, "pipeline.yaml"), "r") as f:
-        pipeline_config = yaml.safe_load(f)
-    
-    # 1. FIND TARGET LEVEL
-    # Use override if you want to force a specific level
-    override_level = None # Change this to "level_move_multi_0" if you want to force it
-    
-    level_name = None
-    model_to_load = None
-    
-    if override_level:
-        level_name = override_level
-        _, model_to_load = manager.get_level_status(level_name)
-    else:
-        # Find first incomplete level
-        for lvl in pipeline_config["levels"]:
-            status, model_path = manager.get_level_status(lvl)
-            if status != "COMPLETED":
-                level_name = lvl
-                model_to_load = model_path
-                break
-    
-    if not level_name:
-        logger.info("All levels completed! Nothing to train.")
-        return
 
-    logger.info(f"--- [ASYNC] Target Level Identified: {level_name} ---")
+def run_single_async_training_session(
+    level_name,
+    config,
+    model_to_load,
+    resume_timesteps_from_save,
+    collector_join_timeout=30.0,
+):
+    """
+    One full async train (collector + learner) until training_steps for this level.
+    Matches one call to sync UniversalPipelineManager._train_level for a single stage.
+    """
+    logger.info(f"--- [ASYNC] Target level: {level_name} ---")
     if model_to_load:
-        logger.info(f"--- [ASYNC] Resuming from existing model: {model_to_load} ---")
-    
-    # Use the official ConfigManager to get the exact cumulative configuration
-    # This guarantees the Learner and Collector agree on the observation space
-    from src.utils.config_manager import ConfigManager
-    cm = ConfigManager(config_dir)
-    config = cm.get_level_config(level_name)
-    if not config:
-        logger.error(f"Could not load config for {level_name}")
-        return
-        
-    config["active_layers"] = cm.get_cumulative_active_layers(level_name)
-    config["active_tactical_layers"] = cm.get_cumulative_active_tactical_layers(level_name)
-    config["action_heads"] = cm.get_cumulative_action_heads(level_name)
-    config["categorical_heads"] = cm.get_cumulative_categorical_heads(level_name)
-    config['config_dir'] = config_dir
-    
-    # ENSURE CLEAN START
+        logger.info(f"--- [ASYNC] Loading weights from: {model_to_load} ---")
+
     force_kill_sc2()
     clear_temp_dir()
-    
-    # Remove stale model file specifically
+
     stale_model = os.path.join(TEMP_DIR, "latest_learner_model.zip")
     if os.path.exists(stale_model):
-        try: os.remove(stale_model)
-        except: logger.warning(f"Could not remove stale model: {stale_model}")
-    
+        try:
+            os.remove(stale_model)
+        except OSError:
+            logger.warning(f"Could not remove stale model: {stale_model}")
+
     stop_event = mp.Event()
-    collector = AsyncCollector(level_name, config, stop_event, model_path=model_to_load)
+    collector = AsyncCollector(
+        level_name,
+        config,
+        stop_event,
+        model_path=model_to_load,
+        resume_timesteps_from_save=resume_timesteps_from_save,
+    )
     collector.start()
-    
-    # CRITICAL: Learner must also use the MERGED config to match observation shapes
-    # The config passed to main() is already merged, so we just pass it along
-    learner = AsyncLearner(level_name, config)
+
+    learner = AsyncLearner(
+        level_name, config, resume_timesteps_from_save=resume_timesteps_from_save
+    )
     try:
         learner.run()
     except KeyboardInterrupt:
         logger.info("Shutdown signaled...")
+        raise
     finally:
         stop_event.set()
         collector.terminate()
-        collector.join(timeout=5)
-        # Final cleanup attempt
+        collector.join(timeout=collector_join_timeout)
+        if collector.is_alive():
+            logger.warning("Collector did not exit in time; terminating.")
+            try:
+                collector.kill()
+            except OSError:
+                pass
         from src.utils.sc2_cleanup import kill_switch_sc2
-        kill_switch_sc2()
-        # clear_temp_dir() # Optional: keep it for debugging or wipe it
+        kill_switch_sc2(force=True)
+
+
+def main():
+    config_dir = "config_universal"
+    manager = UniversalPipelineManager(config_dir=config_dir)
+
+    with open(os.path.join(config_dir, "pipeline.yaml"), "r") as f:
+        pipeline_config = yaml.safe_load(f)
+
+    from src.utils.config_manager import ConfigManager
+    cm = ConfigManager(config_dir)
+
+    # Set to a level name to train only that stage (single run), e.g. "level_move_multi_0"
+    override_level = None
+
+    def build_config_for_level(level_name: str):
+        cfg = cm.get_level_config(level_name)
+        if not cfg:
+            return None
+        cfg["active_layers"] = cm.get_cumulative_active_layers(level_name)
+        cfg["active_tactical_layers"] = cm.get_cumulative_active_tactical_layers(level_name)
+        cfg["action_heads"] = cm.get_cumulative_action_heads(level_name)
+        cfg["categorical_heads"] = cm.get_cumulative_categorical_heads(level_name)
+        cfg["config_dir"] = config_dir
+        return cfg
+
+    if override_level:
+        level_name = override_level
+        status, model_path = manager.get_level_status(level_name)
+        if status == "COMPLETED":
+            logger.info(f"Override level '{level_name}' already has final_model. Nothing to do.")
+            return
+        resume_timesteps = status == "CONTINUE_TRAINING"
+        if status == "CONTINUE_TRAINING":
+            model_to_load = model_path
+        elif status == "NEEDS_TRAINING":
+            prev_final = None
+            for lvl in pipeline_config["levels"]:
+                if lvl == level_name:
+                    model_to_load = prev_final
+                    break
+                st, pth = manager.get_level_status(lvl)
+                if st == "COMPLETED":
+                    prev_final = pth
+        else:
+            logger.error(f"Unexpected status for override level: {status}")
+            sys.exit(1)
+
+        config = build_config_for_level(level_name)
+        if not config:
+            logger.error(f"Could not load config for {level_name}")
+            sys.exit(1)
+        try:
+            run_single_async_training_session(
+                level_name, config, model_to_load, resume_timesteps
+            )
+        except KeyboardInterrupt:
+            pass
+        return
+
+    # Full pipeline: same order as UniversalPipelineManager.run() (sync train_universal.py)
+    last_final_model_path = None
+    for i in range(len(pipeline_config["levels"]) - 1, -1, -1):
+        level = pipeline_config["levels"][i]
+        status, path = manager.get_level_status(level)
+        if status == "COMPLETED":
+            last_final_model_path = path
+            break
+
+    for level_name in pipeline_config["levels"]:
+        status, model_path = manager.get_level_status(level_name)
+        if status == "COMPLETED":
+            last_final_model_path = model_path
+            continue
+
+        model_to_load = model_path if status == "CONTINUE_TRAINING" else last_final_model_path
+        resume_timesteps = status == "CONTINUE_TRAINING"
+        if status == "NEEDS_TRAINING":
+            manager._cleanup_logs(level_name)
+
+        config = build_config_for_level(level_name)
+        if not config:
+            logger.error(f"Could not load config for {level_name}")
+            sys.exit(1)
+
+        logger.info(
+            f"--- [ASYNC] Pipeline stage '{level_name}' "
+            f"(status={status}, resume_ckpt_timesteps={resume_timesteps}) ---"
+        )
+        try:
+            run_single_async_training_session(
+                level_name, config, model_to_load, resume_timesteps
+            )
+        except KeyboardInterrupt:
+            logger.info("Pipeline interrupted by user.")
+            break
+
+        last_final_model_path = os.path.join(
+            manager.model_dir_base, level_name, "final_model.zip"
+        )
+
+    logger.info("Universal async pipeline finished (or stopped early).")
+
 
 if __name__ == "__main__":
     main()

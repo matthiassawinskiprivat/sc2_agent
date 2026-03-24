@@ -1,7 +1,7 @@
 # config_hybrid/level_move_single.yaml
 
 training:
-  training_steps: 1_500_000
+  training_steps: 3_000_000
   num_envs: 4
   n_steps: 4096
   batch_size: 1024
@@ -11,17 +11,16 @@ training:
 
 # Environment parameters
 env:
-  grid_size: 128
   headless: True
-  max_steps: 250
-  maps_dir: "train/maps/level_1"
+  max_steps: 150
+  maps_dir: "train/maps/64x64"
   high_level_command: "scout"
   guidance_curriculum: False
   rewards:
     success: 20.0
     step_penalty: -0.1
     distance_multiplier: 1.0
-  active_tactical_layers: []
+
 # Model parameters
 model:
   policy: "CnnPolicy"
@@ -30,7 +29,7 @@ model:
     features_extractor_kwargs:
       features_dim: 512
       thinking_steps: 3
-  gamma: 0.9955 # horizon 222
+  gamma: 0.992 # horizon 125
   ent_coef: 0.001
   n_epochs: 4
 

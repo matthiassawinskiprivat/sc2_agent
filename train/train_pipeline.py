@@ -95,8 +95,11 @@ class MaskableSubprocVecEnv(SyncVecEnv):
 
 # Re-defining more cleanly:
 from stable_baselines3.common.vec_env import SubprocVecEnv
+from train.sb3_subproc_worker_safe import apply_sb3_subproc_worker_patch
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvStepReturn
 import numpy as np
+
+apply_sb3_subproc_worker_patch()
 
 class MaskableSubprocVecEnv(SubprocVecEnv):
     def get_action_masks(self) -> np.ndarray:
@@ -137,6 +140,56 @@ class MaskableSubprocVecEnv(SubprocVecEnv):
             # We don't re-raise here if we want the higher level to handle it, 
             # but usually it's better to re-raise with a better message.
             raise e
+
+    def close(self) -> None:
+        """
+        Shutdown worker processes without leaving zombie SC2 workers or broken pipes.
+        SB3's default close() joins forever; if a worker is stuck in env.reset() after
+        a terminal step or in env.close(), the next level can start while old workers
+        still hit BrokenPipeError on send. We drain/ignore pipe errors, then join with
+        a timeout and terminate stuck processes (important on Windows).
+        """
+        if self.closed:
+            return
+        join_timeout = float(os.environ.get("SB3_SUBPROC_JOIN_TIMEOUT", "120"))
+        recv_drain_s = float(os.environ.get("SB3_SUBPROC_RECV_DRAIN_TIMEOUT", "30"))
+        try:
+            if self.waiting:
+                # Never block forever: SB3 can leave waiting=True if step_wait never ran (e.g. crash),
+                # or a worker can be stuck in env.reset() inside the step handler before sending.
+                for idx, remote in enumerate(self.remotes):
+                    try:
+                        if hasattr(remote, "poll") and not remote.poll(recv_drain_s):
+                            logger.warning(
+                                f"MaskableSubprocVecEnv: no step reply from worker {idx} within {recv_drain_s}s; "
+                                "skipping recv (worker likely stuck in SC2 reset/close)."
+                            )
+                            continue
+                        remote.recv()
+                    except (EOFError, BrokenPipeError, OSError):
+                        pass
+                self.waiting = False
+            for remote in self.remotes:
+                try:
+                    remote.send(("close", None))
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
+            for process in self.processes:
+                process.join(timeout=join_timeout)
+                if process.is_alive():
+                    logger.warning(
+                        f"MaskableSubprocVecEnv: worker pid={process.pid} did not exit after {join_timeout}s; terminating."
+                    )
+                    process.terminate()
+                    process.join(timeout=30)
+                    if process.is_alive():
+                        try:
+                            process.kill()
+                        except AttributeError:
+                            pass
+                        process.join(timeout=10)
+        finally:
+            self.closed = True
 
 class MaskableSyncVecEnv(SyncVecEnv):
     def get_action_masks(self) -> np.ndarray:

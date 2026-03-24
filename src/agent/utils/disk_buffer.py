@@ -88,14 +88,61 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
             self.action_masks[self.pos] = action_masks.copy()
         
         if lstm_states is not None:
-            # pi: (n_layers, n_envs, dim)
-            self.hidden_states_pi[self.pos] = lstm_states.pi[0].detach().cpu().numpy().reshape(1, self.n_envs, self.hidden_size)
-            self.hidden_states_vf[self.pos] = lstm_states.vf[0].detach().cpu().numpy().reshape(1, self.n_envs, self.hidden_size)
+            # Robustly normalize incoming RNN states to (1, n_envs, hidden_size).
+            # In async collectors, state tensors may occasionally come in as single-env
+            # tensors (e.g. (1, 1, hidden) or (hidden,)); broadcast when needed.
+            self.hidden_states_pi[self.pos] = self._normalize_rnn_state(lstm_states.pi[0], "pi_h")
+            self.hidden_states_vf[self.pos] = self._normalize_rnn_state(lstm_states.vf[0], "vf_h")
             if self.rnn_type == "lstm" and len(lstm_states.pi) > 1:
-                self.cell_states_pi[self.pos] = lstm_states.pi[1].detach().cpu().numpy().reshape(1, self.n_envs, self.hidden_size)
-                self.cell_states_vf[self.pos] = lstm_states.vf[1].detach().cpu().numpy().reshape(1, self.n_envs, self.hidden_size)
+                self.cell_states_pi[self.pos] = self._normalize_rnn_state(lstm_states.pi[1], "pi_c")
+                self.cell_states_vf[self.pos] = self._normalize_rnn_state(lstm_states.vf[1], "vf_c")
 
         super().add(obs, action, reward, episode_start, value, log_prob)
+
+    def _normalize_rnn_state(self, state_tensor: torch.Tensor, name: str) -> np.ndarray:
+        """
+        Normalize an RNN state tensor to shape (1, n_envs, hidden_size).
+        Accepts common variants from recurrent SB3 policies and async workers.
+        """
+        arr = state_tensor.detach().cpu().numpy()
+
+        # Expected format from SB3 recurrent policies.
+        if arr.ndim == 3:
+            # (n_layers, n_envs, hidden)
+            if arr.shape[0] != 1:
+                arr = arr[:1]
+            if arr.shape[2] != self.hidden_size:
+                arr = arr.reshape(1, -1, self.hidden_size)
+            if arr.shape[1] == self.n_envs:
+                return arr.astype(np.float32, copy=False)
+            if arr.shape[1] == 1 and self.n_envs > 1:
+                return np.repeat(arr, self.n_envs, axis=1).astype(np.float32, copy=False)
+
+        # (n_envs, hidden) or (1, hidden)
+        if arr.ndim == 2 and arr.shape[1] == self.hidden_size:
+            if arr.shape[0] == self.n_envs:
+                return arr[None, :, :].astype(np.float32, copy=False)
+            if arr.shape[0] == 1:
+                return np.repeat(arr[None, :, :], self.n_envs, axis=1).astype(np.float32, copy=False)
+
+        # (hidden,) single state
+        if arr.ndim == 1 and arr.shape[0] == self.hidden_size:
+            base = arr.reshape(1, 1, self.hidden_size)
+            return np.repeat(base, self.n_envs, axis=1).astype(np.float32, copy=False)
+
+        # Last resort: try to coerce by total size.
+        try:
+            coerced = arr.reshape(1, -1, self.hidden_size)
+            if coerced.shape[1] == 1 and self.n_envs > 1:
+                coerced = np.repeat(coerced, self.n_envs, axis=1)
+            elif coerced.shape[1] != self.n_envs:
+                raise ValueError(f"{name}: invalid env dim {coerced.shape[1]}, expected {self.n_envs}")
+            return coerced.astype(np.float32, copy=False)
+        except Exception as exc:
+            raise ValueError(
+                f"Failed to normalize RNN state '{name}': got shape {arr.shape}, "
+                f"expected compatible with (1, {self.n_envs}, {self.hidden_size})"
+            ) from exc
 
     def get(self, batch_size: Optional[int] = None) -> Generator[MaskableRecurrentRolloutBufferSamples, None, None]:
         """

@@ -1,5 +1,6 @@
 import sys
 import os
+import copy
 import glob
 import yaml
 import shutil
@@ -42,12 +43,15 @@ class UniversalPipelineManager(PipelineManager):
         self.agent_architecture = "universal"
         logger.info(f"UniversalPipelineManager initialized (Targeting {config_dir})")
 
-    def _train_level(self, level_name, model_path_to_load=None, reset_timesteps=True):
+    def _train_level(self, level_name, model_path_to_load=None, reset_timesteps=True, merged_config=None):
         logger.info(f"--- [UNIVERSAL] Starting Training for Level: {level_name} ---")
         
-        # 1. Load Level Configuration
-        with open(os.path.join(self.config_dir, f"{level_name}.yaml"), 'r') as f:
-            level_config = yaml.safe_load(f)
+        # 1. Load Level Configuration (use pipeline-merged config when provided — cumulative layers, etc.)
+        if merged_config is not None:
+            level_config = copy.deepcopy(merged_config)
+        else:
+            with open(os.path.join(self.config_dir, f"{level_name}.yaml"), 'r') as f:
+                level_config = yaml.safe_load(f)
 
         training_params = level_config["training"]
         env_params = level_config["env"]
@@ -98,16 +102,26 @@ class UniversalPipelineManager(PipelineManager):
                 except Exception as e:
                     logger.warning(f"Could not parse step count from checkpoint filename '{filename}': {e}")
 
+        # Universal spatial policy is 32×32; env.grid_size is legacy (bot/env bookkeeping only).
+        _grid = env_params.get("grid_size", 32)
         env_fns = [
             EnvFactory(
-                EnvClass, level_name, not headless, env_params["grid_size"], i, num_envs,
+                EnvClass, level_name, not headless, _grid, i, num_envs,
                 self.sc2_process_cls, self.client_cls, combined_conf, env_params.get("max_steps", 300),
                 initial_steps=initial_steps
             )
             for i in range(num_envs)
         ]
         
-        env = vec_env_cls(env_fns)
+        logger.info(
+            f"Creating {num_envs} env(s) with {vec_env_cls.__name__} for '{level_name}' "
+            f"(Subproc join timeout {os.environ.get('SB3_SUBPROC_JOIN_TIMEOUT', '120')}s)..."
+        )
+        if vec_env_cls is MaskableSyncVecEnv:
+            env = vec_env_cls(env_fns)
+        else:
+            env = vec_env_cls(env_fns, start_method="spawn")
+        logger.info(f"Vectorized environment ready for '{level_name}'.")
 
         try:
             # 3. Setup Model
@@ -185,8 +199,14 @@ class UniversalPipelineManager(PipelineManager):
             return final_model_path
 
         finally:
-            if 'watchdog' in locals(): watchdog.stop()
+            if 'watchdog' in locals():
+                watchdog.stop()
+            logger.info(
+                f"[{level_name}] Closing vectorized env (drain timeout "
+                f"{os.environ.get('SB3_SUBPROC_RECV_DRAIN_TIMEOUT', '30')}s per worker)..."
+            )
             env.close()
+            logger.info(f"[{level_name}] Vectorized env closed.")
 
     def run(self):
         """Executes the entire universal training pipeline with additive configuration."""
@@ -245,6 +265,11 @@ class UniversalPipelineManager(PipelineManager):
             # Pass the merged config to train_level
             final_model_path = self._train_level(level_name, model_path_to_load=model_to_load, reset_timesteps=reset_timesteps, merged_config=level_config)
             last_final_model_path = final_model_path
+            # Orphan SC2 instances (common with SC2_SKIP_KILL_SWITCH=1) hold ports and cause the next
+            # level's SubprocVecEnv workers to hang in launch. Force kill between levels unless opted out.
+            if os.environ.get("SC2_SKIP_KILL_BETWEEN_LEVELS", "0") != "1":
+                logger.info(f"SC2 cleanup after level '{level_name}' (before next curriculum stage)...")
+                kill_switch_sc2(force=True)
 
         logger.info("Universal Training pipeline finished.")
         kill_switch_sc2()

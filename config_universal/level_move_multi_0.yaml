@@ -14,9 +14,8 @@ training:
 env:
   env_class: "Level3Env"
   targets: 2
-  grid_size: 128
   headless: True
-  max_steps: 500
+  max_steps: 180
   maps_dir: "train/maps/64x64"
   high_level_command: "scout"
   guidance_curriculum: False
@@ -36,7 +35,7 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.998 # horizon 500
+  gamma: 0.994 # horizon 167
   ent_coef: 0.001
   n_epochs: 4
 

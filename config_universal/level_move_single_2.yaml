@@ -2,7 +2,7 @@
 # Optimized starting level for Hybrid Agent (128x128 maps)
 
 training:
-  training_steps: 6_000_000
+  training_steps: 3_500_000
   num_envs: 4
   n_steps: 4096
   batch_size: 1024
@@ -12,9 +12,8 @@ training:
 
 # Environment parameters
 env:
-  grid_size: 128
   headless: True
-  max_steps: 400
+  max_steps: 250
   maps_dir: "train/maps/128x128"
   high_level_command: "scout"
   guidance_curriculum: False
@@ -31,8 +30,8 @@ model:
     features_extractor_kwargs:
       features_dim: 512
       thinking_steps: 3
-  gamma: 0.9975 # horizon 400
-  ent_coef: 0.001
+  gamma: 0.995 # horizon 200
+  ent_coef: 0.0015
   n_epochs: 4
 
 # Evaluation parameters

@@ -3,12 +3,16 @@ import subprocess
 import os
 from loguru import logger
 
-def kill_switch_sc2():
+def kill_switch_sc2(force: bool = False):
     """
     Finds and kills all StarCraft II processes aggressively.
     Can be skipped by setting environment variable SC2_SKIP_KILL_SWITCH=1
+
+    :param force: If True, run taskkill/psutil cleanup even when SC2_SKIP_KILL_SWITCH=1.
+                  Used between universal curriculum levels so the next level can bind ports.
+                  Opt out of between-level kills with SC2_SKIP_KILL_BETWEEN_LEVELS=1 (see train_universal).
     """
-    if os.environ.get("SC2_SKIP_KILL_SWITCH") == "1":
+    if not force and os.environ.get("SC2_SKIP_KILL_SWITCH") == "1":
         logger.info("SC2_SKIP_KILL_SWITCH is set. Skipping global process termination.")
         # We still clear the internal list to be safe
         try:
@@ -16,6 +20,9 @@ def kill_switch_sc2():
             SC2Process.procs = []
         except: pass
         return 0
+
+    if force and os.environ.get("SC2_SKIP_KILL_SWITCH") == "1":
+        logger.info("SC2 kill switch (force=True): running cleanup despite SC2_SKIP_KILL_SWITCH.")
 
     logger.info("Executing SC2 kill switch...")
     
