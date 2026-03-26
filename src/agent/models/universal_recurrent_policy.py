@@ -1,54 +1,68 @@
+from functools import partial
 import torch
 import torch.nn as nn
 import gymnasium as gym
-from typing import Dict, List, Any, Optional, Union, Type, Tuple
+from typing import Dict, List, Any, Optional, Union, Tuple
+from stable_baselines3.common.type_aliases import Schedule
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentActorCriticPolicy
 from sb3_contrib.common.recurrent.type_aliases import RNNStates
 from src.agent.models.unit_control_network import UnitControlNetwork
+from src.agent.models.spatial_decoder import SpatialDecoder
 
 class UniversalRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
     """
     A custom Maskable Recurrent policy for the Universal architecture.
-    Combines LSTM/GRU with the shared spatial head.
+    Combines LSTM/GRU with a spatial decoder for the shared 32x32 head.
     """
     def __init__(self, observation_space: gym.spaces.Space, action_space: gym.spaces.Space, 
                  lr_schedule: Any, *args, **kwargs):
         # Universal grid size (e.g. 32x32)
         self.spatial_resolution = 32
-        # Remove from kwargs to avoid conflicts with parent __init__
         kwargs.pop("spatial_resolution", None)
-        
-        # Default lstm_hidden_size to 512 to match previous feature_dim
+
         if "lstm_hidden_size" not in kwargs:
             kwargs["lstm_hidden_size"] = 512
-            
-        # Ensure shared features extractor to match previous stages
+
         if "share_features_extractor" not in kwargs:
             kwargs["share_features_extractor"] = True
-            
-        # Force UnitControlNetwork for Dict spaces if not specified
+
         if "features_extractor_class" not in kwargs and isinstance(observation_space, gym.spaces.Dict):
             kwargs["features_extractor_class"] = UnitControlNetwork
-            
+
+        fe_kw = dict(kwargs.get("features_extractor_kwargs") or {})
+        fe_kw["agent_architecture"] = "universal"
+        kwargs["features_extractor_kwargs"] = fe_kw
+
         super().__init__(observation_space, action_space, lr_schedule, *args, **kwargs)
 
-    def _build_action_net(self) -> None:
-        """
-        Overrides the action_net with a single flat linear layer.
-        SB3's MultiDiscrete distribution will slice this automatically.
-        The input features come from the LSTM/GRU output (self.lstm_output_dim).
-        """
-        # MultiDiscrete([n_commands, 1024]) requires sum([n_cmds, 1024]) logits
-        total_logits = sum(self.action_space.nvec)
-        self.action_net = nn.Linear(self.lstm_output_dim, total_logits)
-        
+    def _build(self, lr_schedule: Schedule) -> None:
+        super()._build(lr_schedule)
+        latent_dim_pi = self.mlp_extractor.latent_dim_pi
+        n_cmds = int(self.action_space.nvec[0])
+        assert int(self.action_space.nvec[1]) == self.spatial_resolution ** 2
+        self.command_head = nn.Linear(latent_dim_pi, n_cmds)
+        self.spatial_decoder = SpatialDecoder(
+            latent_dim_pi,
+            fused_channels=128,
+            spatial_resolution=self.spatial_resolution,
+        )
+        delattr(self, "action_net")
+        if self.ortho_init:
+            self.command_head.apply(partial(self.init_weights, gain=0.01))
+            self.spatial_decoder.apply(partial(self.init_weights, gain=0.01))
+        self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
+
     def _get_action_dist_from_latent(self, latent_pi: torch.Tensor):
-        """
-        Standard MultiDiscrete distribution creation.
-        Note: MaskableRecurrentActorCriticPolicy uses MaskableDistribution 
-        which handles MultiDiscrete correctly if configured in _setup_model.
-        """
-        action_logits = self.action_net(latent_pi)
+        fe = self.features_extractor
+        fused = getattr(fe, "_spatial_fused", None)
+        if fused is None:
+            fused = torch.zeros(
+                latent_pi.shape[0], 128, 16, 16,
+                device=latent_pi.device, dtype=latent_pi.dtype,
+            )
+        spatial_logits = self.spatial_decoder(latent_pi, fused)
+        cmd_logits = self.command_head(latent_pi)
+        action_logits = torch.cat([cmd_logits, spatial_logits], dim=-1)
         return self.action_dist.proba_distribution(action_logits=action_logits)
 
     def _disable_spatial_mask(self, action_masks: Optional[torch.Tensor]) -> Optional[torch.Tensor]:

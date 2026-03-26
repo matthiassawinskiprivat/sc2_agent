@@ -1,7 +1,7 @@
 # config_hybrid/level_move_single.yaml
 
 training:
-  training_steps: 2_000_000
+  training_steps: 500_000
   num_envs: 4
   n_steps: 4096
   batch_size: 1024

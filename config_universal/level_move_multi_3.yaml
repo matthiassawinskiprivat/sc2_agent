@@ -2,7 +2,7 @@
 # Multi-unit movement level for Universal Architecture (16 targets)
 
 training:
-  training_steps: 5_000_000
+  training_steps: 2_000_000
   num_envs: 4
   n_steps: 8192
   batch_size: 2048
@@ -15,7 +15,7 @@ env:
   env_class: "Level3Env"
   targets: 16
   headless: True
-  max_steps: 800
+  max_steps: 300
   maps_dir: "train/maps/ladder/no_trigger"
   high_level_command: "scout"
   guidance_curriculum: False
@@ -35,7 +35,7 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.9987 # horizon 769
+  gamma: 0.996 # horizon 250
   ent_coef: 0.001
   n_epochs: 4
 

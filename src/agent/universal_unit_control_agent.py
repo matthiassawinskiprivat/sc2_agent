@@ -19,7 +19,7 @@ class UniversalUnitControlAgent(UnitControlAgent):
 
     def get_action_mask(self, head_names: Optional[List[str]] = None) -> np.ndarray:
         """
-        Universal Masking: 
+        Universal Masking:
         1. Command Selector Mask (Always all True for now)
         2. Shared Spatial Mask (Always all True for speed)
         Returns a flat mask of size: len(head_names) + spatial_resolution^2
@@ -27,7 +27,7 @@ class UniversalUnitControlAgent(UnitControlAgent):
         n_spatial = self.spatial_resolution ** 2
         if head_names is None:
             return np.ones(n_spatial, dtype=bool)
-            
+
         n_cmds = len(head_names)
         return np.concatenate([
             np.ones(n_cmds, dtype=bool),
@@ -55,10 +55,23 @@ class UniversalUnitControlAgent(UnitControlAgent):
             world_x = active_unit.position.x + world_dx
             world_y = active_unit.position.y + world_dy
 
-            # Clamp to map bounds
+            # Clamp to playable bounds (preferred) to avoid targeting void.
             if self.last_game_info:
-                world_x = max(0, min(world_x, self.last_game_info.map_size.width))
-                world_y = max(0, min(world_y, self.last_game_info.map_size.height))
+                eps = 1e-3
+                if hasattr(self.last_game_info, "playable_area") and self.last_game_info.playable_area is not None:
+                    area = self.last_game_info.playable_area
+                    min_x = float(area.x)
+                    min_y = float(area.y)
+                    max_x = float(area.x + area.width) - eps
+                    max_y = float(area.y + area.height) - eps
+                else:
+                    min_x = 0.0
+                    min_y = 0.0
+                    max_x = float(self.last_game_info.map_size.width) - eps
+                    max_y = float(self.last_game_info.map_size.height) - eps
+
+                world_x = max(min_x, min(float(world_x), max_x))
+                world_y = max(min_y, min(float(world_y), max_y))
             return float(world_x), float(world_y)
             
         # 2. Case B: GLOBAL Navigation (Whole map)

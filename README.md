@@ -73,9 +73,51 @@ Universal training uses **`config_universal/`**, writes under `models_universal/
 
 Each **level file** (e.g. `level_0.yaml`, `level_move_single_0.yaml`) typically contains:
 
-- **`training`** — steps, vec env count, PPO hyperparameters, watchdog, etc.
+- **`training`** — steps, vec env count, PPO hyperparameters, watchdog, etc. Optional **`tensorboard_subdir`**: subdirectory under `logs_universal/<level>/` for TensorBoard and CSV (async defaults to `"async"`; set e.g. `async_spatial16` for a new experiment so prior runs stay separate).
 - **`env`** — `grid_size`, `max_steps`, `maps_dir`, rewards, and the additive lists below.
 - **`model`** — policy class kwargs, `features_extractor_class`, algorithm choice.
+
+### Universal policy (spatial fusion + decoder)
+
+For `agent_architecture: universal`, `UnitControlNetwork` keeps **global** and **tactical** CNN features at **16×16**, concatenates them into `_spatial_fused`, and uses global-average-pooled vectors plus `command` for the reasoning trunk. `UniversalRecurrentPolicy` / `UniversalActorCriticPolicy` split the actor head into **`command_head`** (verb logits) and **`SpatialDecoder`** (32×32 spatial logits from fused maps + GRU/MLP latent), instead of a single large linear over 1024 cells.
+
+```mermaid
+flowchart TB
+  subgraph enc [UnitControlNetwork]
+    map["map"]
+    tac["tactical 32x32"]
+    cmd["command"]
+    gcn["Global CNN trunk"]
+    pool["AdaptiveAvgPool2d 16x16"]
+    tcn["Tactical CNN to 16x16"]
+    fuse["Concat channels"]
+    gap["GAP plus command"]
+    lin["Linear plus ReasoningCore"]
+    thought["thought features"]
+    map --> gcn --> pool
+    tac --> tcn
+    pool --> fuse
+    tcn --> fuse
+    fuse --> stash["_spatial_fused"]
+    pool --> gap
+    tcn --> gap
+    cmd --> gap
+    gap --> lin --> thought
+  end
+  subgraph pol [Policy]
+    rnn["RNN or MLP actor"]
+    latent["latent_pi"]
+    ch["command_head"]
+    dec["SpatialDecoder"]
+    logits["MultiDiscrete logits"]
+    thought --> rnn --> latent
+    stash --> dec
+    latent --> ch
+    latent --> dec
+    ch --> logits
+    dec --> logits
+  end
+```
 
 Environments receive a merged **`training_conf`** dict: `Level0Env` flattens `training` and `env` sections into `training_conf` so bots and `ObservationTransformer` see a single flat config.
 

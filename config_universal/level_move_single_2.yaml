@@ -2,7 +2,7 @@
 # Optimized starting level for Hybrid Agent (128x128 maps)
 
 training:
-  training_steps: 3_500_000
+  training_steps: 3_000_000
   num_envs: 4
   n_steps: 4096
   batch_size: 1024

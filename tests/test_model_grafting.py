@@ -19,7 +19,7 @@ def test_cnn_input_grafting():
     
     # Set known weights for first channel
     with torch.no_grad():
-        net_3.cnn[0].weight[:, 0, :, :].fill_(1.23)
+        net_3.cnn_trunk[0].weight[:, 0, :, :].fill_(1.23)
     
     # 2. Target: 5 channels
     obs_space_5 = spaces.Dict({
@@ -35,9 +35,9 @@ def test_cnn_input_grafting():
     
     # 4. Verify
     # First channel should be preserved
-    assert torch.allclose(net_5.cnn[0].weight[:, 0, :, :], torch.tensor(1.23)), "Channel 0 weights lost!"
+    assert torch.allclose(net_5.cnn_trunk[0].weight[:, 0, :, :], torch.tensor(1.23)), "Channel 0 weights lost!"
     # New channels (3, 4) should be different from source (randomly initialized in graft)
-    assert not torch.allclose(net_5.cnn[0].weight[:, 3, :, :], torch.tensor(0.0)), "New channels should not be zero"
+    assert not torch.allclose(net_5.cnn_trunk[0].weight[:, 3, :, :], torch.tensor(0.0)), "New channels should not be zero"
 
 def test_fusion_layer_grafting_add_tactical():
     """Verify that adding the tactical stream preserves Global and Command weights in the fusion layer."""

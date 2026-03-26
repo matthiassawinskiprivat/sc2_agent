@@ -2,7 +2,7 @@
 # Multi-unit movement level for Universal Architecture (3 targets)
 
 training:
-  training_steps: 5_000_000
+  training_steps: 2_000_000
   num_envs: 4
   n_steps: 8192
   batch_size: 2048

@@ -907,8 +907,18 @@ class MaskableRecurrentPPO(RecurrentPPO):
             new_sd = {}
             for k, v in p_sd.items():
                 keys = [k]
-                if k.startswith("pi_features_extractor.") and "features_extractor.cnn.0.weight" in c_sd: keys = [k.replace("pi_features_extractor.", "features_extractor.")]
-                elif k.startswith("features_extractor.") and "pi_features_extractor.cnn.0.weight" in c_sd: keys = [k.replace("features_extractor.", "pi_features_extractor."), k.replace("features_extractor.", "vf_features_extractor.")]
+                _has_fe_cnn = (
+                    "features_extractor.cnn.0.weight" in c_sd
+                    or "features_extractor.cnn_trunk.0.weight" in c_sd
+                )
+                _has_pi_cnn = (
+                    "pi_features_extractor.cnn.0.weight" in c_sd
+                    or "pi_features_extractor.cnn_trunk.0.weight" in c_sd
+                )
+                if k.startswith("pi_features_extractor.") and _has_fe_cnn:
+                    keys = [k.replace("pi_features_extractor.", "features_extractor.")]
+                elif k.startswith("features_extractor.") and _has_pi_cnn:
+                    keys = [k.replace("features_extractor.", "pi_features_extractor."), k.replace("features_extractor.", "vf_features_extractor.")]
                 for tk in keys:
                     if tk in c_sd:
                         if v.shape == c_sd[tk].shape: new_sd[tk] = v
@@ -917,7 +927,7 @@ class MaskableRecurrentPPO(RecurrentPPO):
                         elif len(v.shape) == 2 and v.shape[1] < c_sd[tk].shape[1] and v.shape[0] == c_sd[tk].shape[0] and "linear" in tk:
                             logger.info(f"Expanding Linear input features for {tk}: {v.shape[1]} -> {c_sd[tk].shape[1]}")
                             exp = c_sd[tk].clone(); exp[:, :v.shape[1]] = v; new_sd[tk] = exp
-                        elif "action_net" in tk:
+                        elif "action_net" in tk or "command_head" in tk:
                             if v.shape[1] == c_sd[tk].shape[1]:
                                 logger.warning(f"Partial action head load for {tk}")
                                 exp = c_sd[tk].clone()

@@ -153,9 +153,14 @@ class AsyncCollector(mp.Process):
         if self.model_path and not self.resume_timesteps_from_save:
             model.num_timesteps = 0
 
-        # Diagnostic Log
-        obs_shape = model.policy.features_extractor.cnn[0].weight.shape
-        logger.info(f"Collector Model initialized with CNN input shape: {obs_shape}")
+        fe = model.policy.features_extractor
+        if hasattr(fe, "cnn_trunk"):
+            c0 = fe.cnn_trunk[0]
+            logger.info(f"Collector Model initialized (global CNN in_channels={c0.weight.shape[1]})")
+        elif hasattr(fe, "cnn") and len(fe.cnn) > 0:
+            logger.info(f"Collector Model initialized with CNN input shape: {fe.cnn[0].weight.shape}")
+        else:
+            logger.info("Collector Model initialized (features extractor ready)")
             
         # Save initial weights for Learner to ensure perfect synchronization at start
         initial_path = os.path.join(TEMP_DIR, "initial_model.zip")
@@ -374,8 +379,9 @@ class AsyncLearner:
         self.config = config
         self.resume_timesteps_from_save = resume_timesteps_from_save
         self.latest_model_path = os.path.join(TEMP_DIR, "latest_learner_model.zip")
-        # Ensure log directory exists
-        self.log_dir = os.path.join("logs_universal", level_name, "async")
+        training_params = config.get("training", {})
+        tb_subdir = training_params.get("tensorboard_subdir", "async")
+        self.log_dir = os.path.join("logs_universal", level_name, tb_subdir)
         os.makedirs(self.log_dir, exist_ok=True)
         # Ensure model directory exists
         self.model_dir = os.path.join("models_universal", level_name)
@@ -422,9 +428,14 @@ class AsyncLearner:
             
         model = AlgoClass(**algo_kwargs)
         
-        # Diagnostic Log
-        obs_shape = model.policy.features_extractor.cnn[0].weight.shape
-        logger.info(f"Learner Model initialized with CNN input shape: {obs_shape}")
+        fe = model.policy.features_extractor
+        if hasattr(fe, "cnn_trunk"):
+            c0 = fe.cnn_trunk[0]
+            logger.info(f"Learner Model initialized (global CNN in_channels={c0.weight.shape[1]})")
+        elif hasattr(fe, "cnn") and len(fe.cnn) > 0:
+            logger.info(f"Learner Model initialized with CNN input shape: {fe.cnn[0].weight.shape}")
+        else:
+            logger.info("Learner Model initialized (features extractor ready)")
         
         # WAIT FOR COLLECTOR'S INITIAL WEIGHTS
         initial_path = os.path.join(TEMP_DIR, "initial_model.zip")

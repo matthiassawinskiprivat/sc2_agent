@@ -386,9 +386,23 @@ class UnitControlAgent:
         world_x = rel_x + crop_x
         world_y = rel_y + crop_y
 
-        # 6. Clamp to absolute map bounds to prevent out-of-bounds errors
-        world_x = max(0, min(world_x, self.last_game_info.map_size.width))
-        world_y = max(0, min(world_y, self.last_game_info.map_size.height))
+        # 6. Clamp to playable bounds (preferred) to avoid targeting void.
+        # Using map_size here can allow coordinates outside playable_area on many ladder maps.
+        eps = 1e-3
+        if hasattr(self.last_game_info, "playable_area") and self.last_game_info.playable_area is not None:
+            area = self.last_game_info.playable_area
+            min_x = float(area.x)
+            min_y = float(area.y)
+            max_x = float(area.x + area.width) - eps
+            max_y = float(area.y + area.height) - eps
+        else:
+            min_x = 0.0
+            min_y = 0.0
+            max_x = float(self.last_game_info.map_size.width) - eps
+            max_y = float(self.last_game_info.map_size.height) - eps
+
+        world_x = max(min_x, min(float(world_x), max_x))
+        world_y = max(min_y, min(float(world_y), max_y))
 
         return world_x, world_y
 

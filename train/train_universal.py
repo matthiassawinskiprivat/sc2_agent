@@ -58,7 +58,12 @@ class UniversalPipelineManager(PipelineManager):
         model_params = level_config["model"]
 
         model_dir = os.path.join(self.model_dir_base, level_name)
-        log_dir = os.path.join(self.log_dir_base, level_name)
+        tb_sub = training_params.get("tensorboard_subdir", "")
+        log_dir = (
+            os.path.join(self.log_dir_base, level_name, tb_sub)
+            if tb_sub
+            else os.path.join(self.log_dir_base, level_name)
+        )
         os.makedirs(model_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
 

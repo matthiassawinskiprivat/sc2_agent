@@ -60,8 +60,14 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
     new_state_dict = copy.deepcopy(state_dict)
     
     # --- 1. Handle Input Channels (CNN & Tactical CNN) ---
-    # Matches 'cnn.0.weight' and 'tactical_cnn.0.weight'
-    input_keys = [k for k in state_dict.keys() if k.endswith("cnn.0.weight")]
+    # Matches first conv weights on global/tactical stacks
+    _suffixes = (
+        "cnn.0.weight",
+        "cnn_trunk.0.weight",
+        "tactical_cnn_to16.0.weight",
+        "tactical_cnn_legacy.0.weight",
+    )
+    input_keys = [k for k in state_dict.keys() if any(k.endswith(s) for s in _suffixes)]
     
     for key in input_keys:
         old_weight = state_dict[key]
@@ -121,7 +127,11 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                 new_state_dict[bias_key] = state_dict[bias_key] # features_dim is constant
 
     # --- 3. Handle Action/Value Heads ---
-    head_keys = [k for k in state_dict.keys() if ("action_net" in k or "value_net" in k) and "mlp_extractor" not in k]
+    head_keys = [
+        k for k in state_dict.keys()
+        if ("action_net" in k or "value_net" in k or "command_head" in k or "spatial_decoder" in k)
+        and "mlp_extractor" not in k
+    ]
     
     for key in head_keys:
         old_weight = state_dict[key]
