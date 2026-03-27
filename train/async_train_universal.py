@@ -11,7 +11,8 @@ import multiprocessing as mp
 from gymnasium import spaces
 
 # Add project root
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(_PROJECT_ROOT)
 
 from train.train_universal import UniversalPipelineManager, BOT_REGISTRY
 from src.sc2_bot_universal import SC2BotUniversal
@@ -25,9 +26,11 @@ from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
 import shutil
 import psutil
 
-# Standardizing configuration
-# Changed to v2 to bypass any zombie AsyncLearner processes from old runs
-TEMP_DIR = "C:/temp/sc2_async_buffer_v2"
+# Async buffer: memmaps + payload.npz + hot-swap model zip every rollout — heavy disk I/O.
+# Default to project folder (keeps load off C:); override with env SC2_ASYNC_BUFFER_DIR.
+# Example: set SC2_ASYNC_BUFFER_DIR=D:/sc2_buffer
+_DEFAULT_ASYNC_DIR = os.path.join(_PROJECT_ROOT, "temp_sc2_async_buffer")
+TEMP_DIR = os.path.normpath(os.environ.get("SC2_ASYNC_BUFFER_DIR", _DEFAULT_ASYNC_DIR))
 
 def force_kill_sc2():
     """Aggressively kills any SC2 and related processes at startup."""
@@ -223,7 +226,8 @@ class AsyncCollector(mp.Process):
             current_buffer = buffers[buffer_idx % 2]
             
             # Ensure learner is done with this buffer before overwriting
-            if not current_buffer.wait_for_consumer(timeout=120):
+            consume_timeout = training_params.get("buffer_consumer_timeout", 300)
+            if not current_buffer.wait_for_consumer(timeout=consume_timeout):
                 logger.error("Learner hung? Collector pausing.")
                 time.sleep(5)
                 continue
@@ -255,8 +259,10 @@ class AsyncCollector(mp.Process):
                 with torch.no_grad():
                     obs_tensor = model.policy.obs_to_tensor(obs)[0]
                     # We assume episode_starts are False initially or tracked
-                    if not hasattr(self, 'last_dones'):
-                        self.last_dones = np.zeros(num_envs, dtype=bool)
+                    # Match SB3 OnPolicyAlgorithm: episode_starts for an observation is True on the
+                    # first step after reset; initial value must be ones (not zeros).
+                    if not hasattr(self, "last_dones"):
+                        self.last_dones = np.ones(num_envs, dtype=bool)
                     masks = np.array(vec_env.env_method("action_masks"))
                     masks_tensor = torch.as_tensor(masks).to(model.device)
 
@@ -614,7 +620,16 @@ class AsyncLearner:
                     # 2. PERFORM PPO UPDATE
                     logger.info("Learner: Starting GPU Update...")
                     model.train()
-                    
+
+                    # Release CUDA allocator cache after each update.
+                    # Without this, PyTorch caches freed GPU blocks across updates
+                    # and the allocator must search increasingly fragmented pools,
+                    # causing each successive PPO update to take slightly longer
+                    # (visible as a gradual FPS decline in TensorBoard over 2M steps).
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+
                     # Force logger to write to disk
                     model.logger.dump(step=total_steps_trained)
                     
@@ -783,15 +798,30 @@ def main():
             last_final_model_path = model_path
             continue
 
-        model_to_load = model_path if status == "CONTINUE_TRAINING" else last_final_model_path
-        resume_timesteps = status == "CONTINUE_TRAINING"
-        if status == "NEEDS_TRAINING":
-            manager._cleanup_logs(level_name)
-
         config = build_config_for_level(level_name)
         if not config:
             logger.error(f"Could not load config for {level_name}")
             sys.exit(1)
+
+        model_to_load = model_path if status == "CONTINUE_TRAINING" else last_final_model_path
+        resume_timesteps = status == "CONTINUE_TRAINING"
+        if status == "NEEDS_TRAINING":
+            # Only wipe the async subdirectory, not the whole level log directory.
+            # _cleanup_logs() deletes logs_universal/<level>/ and everything below it,
+            # which includes the async/ subfolder the learner writes to.  When the
+            # pipeline is restarted before a first checkpoint exists (NEEDS_TRAINING),
+            # that call wipes the new run's event file on every restart — leaving only
+            # the 88-byte TensorBoard header and an empty progress.csv.
+            async_log_dir = os.path.join(
+                "logs_universal", level_name,
+                config.get("training", {}).get("tensorboard_subdir", "async"),
+            )
+            if os.path.exists(async_log_dir):
+                try:
+                    shutil.rmtree(async_log_dir)
+                    logger.info(f"Cleaned up async logs: {async_log_dir}")
+                except Exception as e:
+                    logger.warning(f"Could not clean async log dir {async_log_dir}: {e}")
 
         logger.info(
             f"--- [ASYNC] Pipeline stage '{level_name}' "

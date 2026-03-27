@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Policy Gradient Loss: -log P(a_t|s_t) * R_t</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; line-height: 1.4; margin: 24px; max-width: 900px; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .formula { font-size: 18px; }
+    .section { margin-top: 18px; }
+  </style>
+  <!-- MathJax for rendering LaTeX -->
+  <script>
+    window.MathJax = {
+      tex: { inlineMath: [['\\(','\\)'], ['$', '$']] },
+      options: { renderActions: { addMenu: [0] } }
+    };
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+  <h1>Policy Gradient Loss (log-likelihood intuition)</h1>
+
+  <p>A common Monte-Carlo / one-step form of the policy-gradient loss at time step <code>t</code> is:</p>
+  <p class="formula">\(\text{loss}_t = -\log\big(P(a_t \mid s_t)\big)\,R_t\)</p>
+
+  <div class="section">
+    <h2>Core idea (what the loss is doing)</h2>
+    <p>
+      For the sampled pair \((s_t, a_t)\), your policy assigns a probability to the action that you actually took.
+      Taking the log gives a <em>log-likelihood</em>; negating it gives the standard
+      <em>negative log-likelihood</em> form.
+    </p>
+    <pre>loss_t = - log( P(a_t | s_t) ) * R_t</pre>
+    <p>
+      During training you typically <strong>minimize</strong> this loss with gradient descent.
+      Intuition:
+      if <code>R_t &gt; 0</code>, minimizing the loss increases <code>P(a_t | s_t)</code>;
+      if <code>R_t &lt; 0</code>, it decreases <code>P(a_t | s_t)</code>.
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>What the symbols mean</h2>
+    <ul>
+      <li><code>s_t</code>: the state at time step <code>t</code></li>
+      <li><code>a_t</code>: the action actually sampled/taken at time step <code>t</code></li>
+      <li><code>P(a_t | s_t)</code> (often written <code>π_θ(a_t | s_t)</code>): the policy’s probability of choosing that particular action in that state</li>
+      <li><code>R_t</code>: the return signal associated with time <code>t</code> (often discounted sum of future rewards)</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>Why this form shows up (the log-gradient connection)</h2>
+    <p>
+      The policy-gradient theorem gives a gradient of expected return that (schematically) looks like:
+    </p>
+    <pre>∇_θ J(θ) = E[ Σ_t  ∇_θ log( π_θ(a_t | s_t) ) * R_t ]</pre>
+    <p>
+      The key trick is the “log trick”:
+      <code>∇_θ log(π_θ(a_t|s_t))</code> tells you how changing parameters would change the log-probability
+      of the action you sampled. Multiplying by <code>R_t</code> weights that update by “how good that time was”.
+      Using a loss of the form <code>-log(π_θ(a_t|s_t)) * R_t</code> makes gradient descent move toward higher return.
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>“Log-likelihood of the action” (meaning in this context)</h2>
+    <p>
+      The policy <code>π(a|s) = P(a|s)</code> is a probability distribution over actions.
+      For the specific sampled pair \((s_t, a_t)\), the policy assigns a probability
+      \(P(a_t \mid s_t)\) to the action that actually occurred.
+    </p>
+    <p class="formula">\(\log(P(a_t \mid s_t))\)</p>
+    <p>
+      That quantity is the <strong>log-likelihood</strong> of the action under the policy.
+      The loss uses its negative, so minimizing the loss corresponds to maximizing log-probability of good actions and
+      decreasing log-probability of bad actions (as indicated by <code>R_t</code> or an advantage).
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>Why the subscript <code>t</code> appears everywhere</h2>
+    <p>
+      You do this computation at every time step along a trajectory.
+      Each step yields its own <code>s_t</code>, sampled <code>a_t</code>, and its own return target <code>R_t</code>.
+      The final update is based on the sum (or average) over all time steps.
+    </p>
+  </div>
+
+  <div class="section">
+    <p>
+      <strong>Note:</strong> Many lectures replace <code>R_t</code> with an advantage <code>A_t</code>
+      (baseline-subtracted, variance-reduced return). The same intuition applies:
+      positive advantage pushes the probability of the action up; negative advantage pushes it down.
+    </p>
+  </div>
+</body>
+</html>
+

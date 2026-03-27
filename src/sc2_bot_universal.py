@@ -163,14 +163,20 @@ class SC2BotUniversal(BotAI):
         if area is not None and grid is not None:
             margin = 5.0
 
-            valid_points = []
-            for x in range(int(area.x + margin), int(area.x + area.width - margin), 2):
-                for y in range(int(area.y + margin), int(area.y + area.height - margin), 2):
-                    try:
-                        if grid[(x, y)] != 0:
-                            valid_points.append(Point2((x, y)))
-                    except Exception:
-                        continue
+            # Cache valid spawn points — pathing grid is static during training.
+            # Re-scanning the whole grid on every episode reset is the primary
+            # cause of FPS degradation as episodes get shorter with a better agent.
+            if not hasattr(self, "_cached_spawn_points") or not self._cached_spawn_points:
+                pts = []
+                for x in range(int(area.x + margin), int(area.x + area.width - margin), 2):
+                    for y in range(int(area.y + margin), int(area.y + area.height - margin), 2):
+                        try:
+                            if grid[(x, y)] != 0:
+                                pts.append(Point2((x, y)))
+                        except Exception:
+                            continue
+                self._cached_spawn_points = pts
+            valid_points = self._cached_spawn_points
 
             def _rand_pathable_point(max_tries: int = 50) -> Point2:
                 for _ in range(max_tries):

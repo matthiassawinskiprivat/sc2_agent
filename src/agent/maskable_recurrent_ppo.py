@@ -226,19 +226,14 @@ class MaskableRecurrentRolloutBuffer(RecurrentRolloutBuffer):
             local_seq_starts[current] = True
             current += length
 
-        # Helper for padding the mini-batch
+        # Helper for padding the mini-batch (O(n_seq) — do not recompute np.where inside inner loop)
+        boundary = np.where(local_seq_starts)[0]
+
         def local_pad(tensor_key):
             tensor = self.vram_cache[tensor_key][all_indices]
             seqs = []
-            curr = 0
-            for start_idx in np.where(local_seq_starts)[0]:
-                # Find end of this sequence
-                next_starts = np.where(local_seq_starts)[0]
-                idx_in_starts = np.where(next_starts == start_idx)[0][0]
-                if idx_in_starts + 1 < len(next_starts):
-                    end_idx = next_starts[idx_in_starts + 1]
-                else:
-                    end_idx = len(all_indices)
+            for i, start_idx in enumerate(boundary):
+                end_idx = boundary[i + 1] if i + 1 < len(boundary) else len(all_indices)
                 seqs.append(tensor[start_idx:end_idx])
             return torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True)
 

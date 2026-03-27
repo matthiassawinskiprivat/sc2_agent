@@ -1,8 +1,8 @@
 training:
   training_steps: 2_000_000
   num_envs: 4
-  n_steps: 16384
-  batch_size: 2048
+  n_steps: 4096
+  batch_size: 1024
   learning_rate: 0.0002
   render_beacon: True
   watchdog_timeout: 3600

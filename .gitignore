@@ -14,5 +14,6 @@ train/envs/__pycache__
 __pycache__
 temp_config/
 temp_logs/
+temp_sc2_async_buffer/
 /models_universal/
 /logs_universal/

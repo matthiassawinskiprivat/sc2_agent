@@ -34,8 +34,12 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
             if not isinstance(obs, np.memmap):
                 ram_observations[f"obs_{key}"] = obs
 
-        np.savez(
-            payload_path,
+        # Compressed npz: much less disk traffic than raw savez (major win on system drive).
+        # Temp name must end with `.npz` — NumPy appends `.npz` if the path does not, so
+        # `payload.npz.tmp` becomes `payload.npz.tmp.npz` and os.replace fails on Windows.
+        tmp_payload = os.path.join(self.instance_dir, "payload_staging.npz")
+        np.savez_compressed(
+            tmp_payload,
             actions=self.actions,
             rewards=self.rewards,
             episode_starts=self.episode_starts,
@@ -50,14 +54,17 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
             action_masks=getattr(self, 'action_masks', np.array([])),
             **ram_observations
         )
-        
+        os.replace(tmp_payload, payload_path)
+
         # Save structural metadata so the Learner knows exactly how to read the binary file
         metadata["buffer_size"] = self.buffer_size
         metadata["n_envs"] = self.n_envs
         metadata["observation_space"] = {k: v.shape for k, v in self.observation_space.spaces.items()}
-        
-        with open(self.signal_file, "w") as f:
+
+        tmp_signal = self.signal_file + ".tmp"
+        with open(tmp_signal, "w") as f:
             json.dump(metadata, f)
+        os.replace(tmp_signal, self.signal_file)
         logger.debug(f"Buffer signaled ready: {self.instance_id}")
 
     def to_device(self, device: th.device):

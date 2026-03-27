@@ -9,6 +9,7 @@ training:
   learning_rate: 0.0003
   render_beacon: True
   watchdog_timeout: 3600
+  buffer_consumer_timeout: 300
 
 # Environment parameters
 env:

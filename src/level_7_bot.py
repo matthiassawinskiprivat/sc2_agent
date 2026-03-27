@@ -77,14 +77,17 @@ class Level7Bot(Level3Bot):
                 break
             logger.warning(f"Cleanup attempt {cleanup_attempt+1} failed. Remaining: {self.all_units.amount}")
 
-        # 2. Grid Sampling for Spawns
-        grid = self.game_info.pathing_grid
-        valid_spawn_points = []
-        for x in range(4, grid.width - 4, 4):
-            for y in range(4, grid.height - 4, 4):
-                if grid[(x, y)] != 0:
-                    valid_spawn_points.append(Point2((x, y)))
-        
+        # 2. Grid Sampling for Spawns (cached — pathing grid is static during training)
+        if not hasattr(self, "_cached_spawn_points") or not self._cached_spawn_points:
+            grid = self.game_info.pathing_grid
+            self._cached_spawn_points = [
+                Point2((x, y))
+                for x in range(4, grid.width - 4, 4)
+                for y in range(4, grid.height - 4, 4)
+                if grid[(x, y)] != 0
+            ]
+        valid_spawn_points = self._cached_spawn_points
+
         if len(valid_spawn_points) < self.targets_count * 2:
              w, h = self.game_info.map_size
              valid_spawn_points = [Point2((w/2, h/2)) for _ in range(self.targets_count * 2)]
@@ -97,19 +100,15 @@ class Level7Bot(Level3Bot):
         for spawn_attempt in range(max_spawn_retries):
             locations = random.sample(valid_spawn_points, self.targets_count * 2)
             
-            # Spawn Pairs
+            # Spawn Pairs — batched into one RPC call to halve SC2 round-trips
+            enemy_amount = 2 if self.enemy_unit_type == UnitTypeId.ZERGLING else 1
+            spawn_cmds = []
             for i in range(self.targets_count):
                 start = locations[i]
-                end = locations[self.targets_count + i]
-                
-                # Ally (Player 1)
-                await self.client.debug_create_unit([[self.allied_unit_type, 1, start, self.player_id]])
-                
-                # Enemy (Player 2)
-                enemy_amount = 1
-                if self.enemy_unit_type == UnitTypeId.ZERGLING:
-                    enemy_amount = 2
-                await self.client.debug_create_unit([[self.enemy_unit_type, enemy_amount, end, 2]])
+                end   = locations[self.targets_count + i]
+                spawn_cmds.append([self.allied_unit_type, 1,            start, self.player_id])
+                spawn_cmds.append([self.enemy_unit_type,  enemy_amount, end,   2])
+            await self.client.debug_create_unit(spawn_cmds)
 
             # Wait for engine to place units
             await self.client.step()

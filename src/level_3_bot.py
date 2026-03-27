@@ -87,28 +87,38 @@ class Level3Bot(SC2Bot):
         self.pending_success_rewards = {}
         self.completed_tags = set()
         
-        # Spawn new units at valid pathable locations
-        grid = self.game_info.pathing_grid
-        valid_spawn_points = []
-        for x in range(4, grid.width - 4, 4):
-            for y in range(4, grid.height - 4, 4):
-                if grid[(x, y)] != 0:
-                    valid_spawn_points.append(Point2((x, y)))
+        # Spawn new units at valid pathable locations.
+        # Cache the spawn point list — pathing grid never changes during a training run.
+        # Without the cache this nested loop (~900 iterations on 128x128 with step 4)
+        # runs on every episode reset and becomes a major bottleneck as the agent
+        # improves (shorter episodes → more resets per second).
+        if not hasattr(self, "_cached_spawn_points") or not self._cached_spawn_points:
+            grid = self.game_info.pathing_grid
+            self._cached_spawn_points = [
+                Point2((x, y))
+                for x in range(4, grid.width - 4, 4)
+                for y in range(4, grid.height - 4, 4)
+                if grid[(x, y)] != 0
+            ]
+        valid_spawn_points = self._cached_spawn_points
         
+        # Build all spawn commands as one batched call instead of 2*targets_count
+        # individual awaited SC2 RPC calls.  Each individual call has localhost
+        # websocket round-trip overhead; batching reduces this from 8 calls to 1.
+        spawn_cmds = []
         if len(valid_spawn_points) < self.targets_count * 2:
             w, h = self.game_info.map_size
             for _ in range(self.targets_count):
                 start = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
-                end = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
-                await self.client.debug_create_unit([[self.allied_unit_type, 1, start, self.player_id]])
-                await self.client.debug_create_unit([[self.beacon_type, 1, end, self.player_id]])
+                end   = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
+                spawn_cmds.append([self.allied_unit_type, 1, start, self.player_id])
+                spawn_cmds.append([self.beacon_type,      1, end,   self.player_id])
         else:
             locations = random.sample(valid_spawn_points, self.targets_count * 2)
             for i in range(self.targets_count):
-                start = locations[i]
-                end = locations[self.targets_count + i]
-                await self.client.debug_create_unit([[self.allied_unit_type, 1, start, self.player_id]])
-                await self.client.debug_create_unit([[self.beacon_type, 1, end, self.player_id]])
+                spawn_cmds.append([self.allied_unit_type, 1, locations[i],                      self.player_id])
+                spawn_cmds.append([self.beacon_type,      1, locations[self.targets_count + i], self.player_id])
+        await self.client.debug_create_unit(spawn_cmds)
 
         # Step game to actually spawn units and refresh state
         await self.client.step()
@@ -328,7 +338,8 @@ class Level3Bot(SC2Bot):
         if not self.current_assignments:
             self.current_assignments = self.get_optimal_assignments()
             
-        assigned_beacon_tag = self.current_assignments.get(active_unit.tag)
+        prev_assigned_tag = self.current_assignments.get(active_unit.tag)
+        assigned_beacon_tag = prev_assigned_tag
         target_beacon = self.all_units.find_by_tag(assigned_beacon_tag) if assigned_beacon_tag else None
 
         # If the target is missing but beacons still exist, re-calculate
@@ -337,9 +348,13 @@ class Level3Bot(SC2Bot):
             assigned_beacon_tag = self.current_assignments.get(active_unit.tag)
             target_beacon = self.all_units.find_by_tag(assigned_beacon_tag) if assigned_beacon_tag else None
 
-        # 2. Layer Rendering Parity
-        # Show ONLY the assigned beacon to the agent on the COMMAND_OBJECTIVE layer.
-        # This helps the model focus on its specific target in multi-unit scenarios.
+        # If assignment changed, reset shaping baseline for this unit
+        if assigned_beacon_tag != prev_assigned_tag:
+            self.previous_distances.pop(active_unit.tag, None)
+
+        # 2. Rendering
+        # - Enemy density layer should render ALL beacons (training/UI parity).
+        # - Command objective layer should render ONLY this unit's assigned beacon via `command_target`.
         all_beacons = list(self.all_units(self.beacon_type))
         
         # ALLIED UNITS: Should NOT include any beacons.
@@ -348,13 +363,13 @@ class Level3Bot(SC2Bot):
         raw_obs = {
             'units': allied_units,
             'selected_units': [active_unit],
-            'enemy_units': all_beacons, # All beacons remain visible in enemy layer
+            'enemy_units': all_beacons,
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
             # Focus COMMAND_OBJECTIVE on the specific assigned target
-            'command_target': [target_beacon] if target_beacon else []
+            'command_target': (target_beacon.position if target_beacon else None)
         }
         
         if self.agent_system:
@@ -394,7 +409,7 @@ class Level3Bot(SC2Bot):
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
-            'command_target': target_beacon
+            'command_target': (target_beacon.position if target_beacon else None)
         }
         
         if self.agent_system:

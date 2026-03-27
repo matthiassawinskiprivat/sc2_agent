@@ -2,8 +2,9 @@ from train.envs.level_0_env import Level0Env, ProtoWrapper
 from src.level_3_bot import Level3Bot
 from sc2.player import Bot, Computer
 from sc2.data import Race, Difficulty
-from sc2.ids.unit_typeid import UnitTypeId
 import numpy as np
+from gymnasium import spaces as gym_spaces
+
 
 class Level3Env(Level0Env):
     def __init__(self, **kwargs):
@@ -131,8 +132,7 @@ class Level3Env(Level0Env):
 
     def _get_zero_observation(self):
         """Returns a properly shaped zero observation matching the space (Dict or Discrete)."""
-        from gymnasium import spaces
-        if isinstance(self.observation_space, spaces.Dict):
+        if isinstance(self.observation_space, gym_spaces.Dict):
              return {k: np.zeros(v.shape, dtype=v.dtype) for k, v in self.observation_space.spaces.items()}
         return np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype)
 
@@ -148,7 +148,7 @@ class Level3Env(Level0Env):
         else:
              self.active_unit_tags = []
              # Ensure obs matches space even if bot setup fails early
-             if not isinstance(obs, dict) and isinstance(self.observation_space, spaces.Dict):
+             if not isinstance(obs, dict) and isinstance(self.observation_space, gym_spaces.Dict):
                  obs = self._get_zero_observation()
              
         return obs, info
@@ -164,8 +164,13 @@ class Level3Env(Level0Env):
              self.active_unit_tags = [u.tag for u in self._bot.get_active_zerglings()]
         
         if not self.active_unit_tags:
-             # If no units are left, the episode is over.
-             return self._get_zero_observation(), 0, True, False, {}
+             # No controllable units left:
+             # - Success only if all beacons are already gone.
+             # - Otherwise terminate as truncated (unsuccessful ending).
+             beacons_left = self._bot.all_units(self._bot.beacon_type).amount
+             done = (beacons_left == 0)
+             truncated = (not done)
+             return self._get_zero_observation(), 0, done, truncated, {}
              
         current_tag = self.active_unit_tags[self.current_unit_index]
         
@@ -234,15 +239,20 @@ class Level3Env(Level0Env):
         self.current_unit_index += 1
         all_active_tags = [u.tag for u in self._bot.get_active_zerglings()]
         
-        # Termination conditions
-        beacons_left = self._bot.units(UnitTypeId.BEACON_TERRANSMALL).amount
+        # Termination conditions — must match Level3Bot beacon visibility (neutral beacons live in
+        # `all_units`, never in `self._bot.units`). Falling back to `units` makes beacons_left==0
+        # every step → done every step → constant VecEnv resets and near-zero GPU/CPU utilization.
+        beacons_left = self._bot.all_units(self._bot.beacon_type).amount
         zerglings_left = len(all_active_tags)
         
-        done = False
-        if beacons_left == 0:
-            done = True # All targets collected
-        elif zerglings_left == 0:
-            done = True # All units lost
+        # Gymnasium semantics for Level 3:
+        # - done=True only when all targets are collected.
+        # - truncated=True for unsuccessful terminal endings (e.g. no units left).
+        # Time-limit truncation is also applied by Level0Env.step() when max_steps is reached.
+        done = (beacons_left == 0)
+        truncated = False
+        if (not done) and (zerglings_left == 0):
+            truncated = True
             
         # Determine the next observation
         if done:
@@ -269,7 +279,7 @@ class Level3Env(Level0Env):
                     obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
                 else:
                     obs = self._get_zero_observation()
-                    done = True
+                    truncated = True
         else:
             # End of cycle reached normally
             self.current_unit_index = 0
@@ -278,9 +288,9 @@ class Level3Env(Level0Env):
                 obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
             else:
                 obs = self._get_zero_observation()
-                done = True
+                truncated = True
 
-        return obs, total_reward, done, False, {}
+        return obs, total_reward, done, truncated, {}
 
 
 
