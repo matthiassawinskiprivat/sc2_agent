@@ -368,8 +368,11 @@ class Level3Bot(SC2Bot):
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
-            # Focus COMMAND_OBJECTIVE on the specific assigned target
-            'command_target': (target_beacon.position if target_beacon else None)
+            # Pass the Unit object so the transformer can detect it is a BEACON and render it
+            # at full strength (val=20.0) in the COMMAND_OBJECTIVE layer.  Passing only
+            # target_beacon.position causes the beacon type-check to miss and the signal
+            # drops to val=1.0 — a 20× weaker target cue that severely hinders learning.
+            'command_target': [target_beacon] if target_beacon else []
         }
         
         if self.agent_system:
@@ -409,7 +412,7 @@ class Level3Bot(SC2Bot):
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
-            'command_target': (target_beacon.position if target_beacon else None)
+            'command_target': [target_beacon] if target_beacon else []
         }
         
         if self.agent_system:

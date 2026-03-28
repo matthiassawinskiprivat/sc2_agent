@@ -27,9 +27,10 @@ import shutil
 import psutil
 
 # Async buffer: memmaps + payload.npz + hot-swap model zip every rollout — heavy disk I/O.
-# Default to project folder (keeps load off C:); override with env SC2_ASYNC_BUFFER_DIR.
-# Example: set SC2_ASYNC_BUFFER_DIR=D:/sc2_buffer
-_DEFAULT_ASYNC_DIR = os.path.join(_PROJECT_ROOT, "temp_sc2_async_buffer")
+# Default to C:/temp (typically the OS SSD) for lowest latency.
+# Override with env var SC2_ASYNC_BUFFER_DIR if you want a different location.
+# Example: $env:SC2_ASYNC_BUFFER_DIR = "D:/sc2_buffer"
+_DEFAULT_ASYNC_DIR = "C:/temp/sc2_async_buffer"
 TEMP_DIR = os.path.normpath(os.environ.get("SC2_ASYNC_BUFFER_DIR", _DEFAULT_ASYNC_DIR))
 
 def force_kill_sc2():
@@ -621,14 +622,15 @@ class AsyncLearner:
                     logger.info("Learner: Starting GPU Update...")
                     model.train()
 
-                    # Release CUDA allocator cache after each update.
-                    # Without this, PyTorch caches freed GPU blocks across updates
-                    # and the allocator must search increasingly fragmented pools,
-                    # causing each successive PPO update to take slightly longer
-                    # (visible as a gradual FPS decline in TensorBoard over 2M steps).
+                    # Release CUDA allocator cache after each update to prevent
+                    # PyTorch's allocator searching fragmented pools over many updates.
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    gc.collect()
+                    # gc.collect() intentionally omitted: Python's heap scan grows
+                    # proportionally with heap size over millions of steps, causing the
+                    # gradual FPS decline visible in TensorBoard. empty_cache() is
+                    # sufficient for CUDA fragmentation; CPython's automatic threshold-
+                    # based GC handles Python objects without manual intervention.
 
                     # Force logger to write to disk
                     model.logger.dump(step=total_steps_trained)

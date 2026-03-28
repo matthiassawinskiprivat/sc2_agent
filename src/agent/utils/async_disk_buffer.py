@@ -34,11 +34,15 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
             if not isinstance(obs, np.memmap):
                 ram_observations[f"obs_{key}"] = obs
 
-        # Compressed npz: much less disk traffic than raw savez (major win on system drive).
+        # savez (uncompressed) is used here deliberately.  savez_compressed reduces file
+        # size but the zlib compression/decompression of large float32 rollout arrays
+        # (hidden states, observations, values…) costs more CPU time per rollout than the
+        # disk-bandwidth savings are worth — especially on SSDs.  The atomic rename below
+        # still protects against partial-read races between the Collector and Learner.
         # Temp name must end with `.npz` — NumPy appends `.npz` if the path does not, so
         # `payload.npz.tmp` becomes `payload.npz.tmp.npz` and os.replace fails on Windows.
         tmp_payload = os.path.join(self.instance_dir, "payload_staging.npz")
-        np.savez_compressed(
+        np.savez(
             tmp_payload,
             actions=self.actions,
             rewards=self.rewards,
