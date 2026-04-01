@@ -368,6 +368,7 @@ class Level3Bot(SC2Bot):
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
+            'high_level_command': self.training_conf.get('high_level_command', 0),
             # Pass the Unit object so the transformer can detect it is a BEACON and render it
             # at full strength (val=20.0) in the COMMAND_OBJECTIVE layer.  Passing only
             # target_beacon.position causes the beacon type-check to miss and the signal
@@ -407,11 +408,12 @@ class Level3Bot(SC2Bot):
         raw_obs = {
             'units': allied_units,
             'selected_units': [target_unit] if target_unit else [],
-            'enemy_units': all_beacons, # All beacons are visible
+            'enemy_units': all_beacons,
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
+            'high_level_command': self.training_conf.get('high_level_command', 0),
             'command_target': [target_beacon] if target_beacon else []
         }
         

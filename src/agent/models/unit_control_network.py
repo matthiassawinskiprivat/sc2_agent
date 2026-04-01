@@ -24,14 +24,15 @@ class UnitControlNetwork(BaseFeaturesExtractor):
         n_input_channels = map_space.shape[0]
 
         self.cnn_trunk = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
+            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=4, padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=2, dilation=2),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=2, dilation=2),
             nn.ReLU(),
         )
-        self.global_pool = nn.AdaptiveAvgPool2d((16, 16))
 
         self.tactical_enabled = False
         n_tactical_channels = n_input_channels
@@ -102,8 +103,7 @@ class UnitControlNetwork(BaseFeaturesExtractor):
             tactical_obs = None
 
         if self.use_spatial_fusion:
-            g = self.cnn_trunk(map_obs)
-            global_16 = self.global_pool(g)
+            global_16 = self.cnn_trunk(map_obs)
             batch_size = map_obs.shape[0]
             if tactical_obs is not None:
                 t16 = self.tactical_cnn_to16(tactical_obs)

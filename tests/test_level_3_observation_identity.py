@@ -4,8 +4,8 @@ from unittest.mock import MagicMock
 from src.transformers.observation_transformer import ObservationTransformer
 from src.utils.layer_constants import LayerConstants
 from sc2.position import Point2
-from sc2.unit import Unit
 from sc2.ids.unit_typeid import UnitTypeId
+
 
 class MockUnit:
     def __init__(self, tag, pos, radius=1.0, type_id=UnitTypeId.ZERGLING):
@@ -35,94 +35,73 @@ class MockUnit:
         self.build_progress = 1.0
         self.detect_range = 0
 
+
+def _make_game_info(w=64, h=64):
+    gi = MagicMock(map_size=MagicMock(width=w, height=h))
+    gi.playable_area = MagicMock(x=0, y=0, width=w, height=h)
+    gi.map_name = "test_map"
+    grid = np.zeros((h, w), dtype=np.uint8)
+    gi.pathing_grid = MagicMock()
+    gi.pathing_grid.data_numpy = grid
+    gi.terrain_height = MagicMock()
+    gi.terrain_height.data_numpy = grid
+    return gi
+
+
 def test_observation_identity_selection():
-    """
-    Verify that providing 'selected_units' restricts COMMAND_ASSIGNMENT layer
-    to only those units.
-    """
+    """Providing 'selected_units' restricts COMMAND_ASSIGNMENT to only those units."""
     transformer = ObservationTransformer(map_size=(64, 64))
-    
-    # Setup units
-    # Unit A at (10, 10)
-    # Unit B at (20, 20)
+
     unit_a = MockUnit(tag=1, pos=Point2((10, 10)))
     unit_b = MockUnit(tag=2, pos=Point2((20, 20)))
-    
+
     raw_obs = {
-        'units': [unit_a, unit_b],
-        'selected_units': [unit_a], # ONLY Unit A is selected
-        'enemy_units': [],
-        'effects': [],
-        'game_info': MagicMock(map_size=MagicMock(width=64, height=64)),
-        'game_data': None,
-        'creep': None,
-        'command_target': None
+        "units": [unit_a, unit_b],
+        "selected_units": [unit_a],
+        "enemy_units": [],
+        "effects": [],
+        "game_info": _make_game_info(),
+        "game_data": None,
+        "creep": None,
+        "command_target": None,
     }
-    
-    # Mock playable area and grids
-    raw_obs['game_info'].playable_area = MagicMock(x=0, y=0, width=64, height=64)
-    raw_obs['game_info'].map_name = "test_map"
-    
-    grid = np.zeros((64, 64), dtype=np.uint8)
-    raw_obs['game_info'].pathing_grid = MagicMock()
-    raw_obs['game_info'].pathing_grid.data_numpy = grid
-    
-    raw_obs['game_info'].terrain_height = MagicMock()
-    raw_obs['game_info'].terrain_height.data_numpy = grid
-    
-    layers = transformer.transform(raw_obs)
-    
+    result = transformer.transform(raw_obs)
+    map_data = result["map"]
+
     idx_sel = LayerConstants.LAYERS[LayerConstants.COMMAND_ASSIGNMENT]
-    sel_layer = layers[idx_sel]
-    
-    # Get pixel coords
+    sel_layer = map_data[idx_sel]
+
     px_a, py_a = transformer._get_pixel_coords(unit_a.position)
     px_b, py_b = transformer._get_pixel_coords(unit_b.position)
-    
-    # Verify Unit A is selected
+
     assert sel_layer[py_a, px_a] > 0, "Unit A should be marked as selected"
-    
-    # Verify Unit B is NOT selected
     assert sel_layer[py_b, px_b] == 0, "Unit B should NOT be marked as selected"
 
+
 def test_observation_legacy_fallback():
-    """
-    Verify that omitting 'selected_units' falls back to selecting ALL units
-    (Backward compatibility for Level 0).
-    """
+    """Omitting 'selected_units' falls back to selecting ALL units."""
     transformer = ObservationTransformer(map_size=(64, 64))
-    
+
     unit_a = MockUnit(tag=1, pos=Point2((10, 10)))
     unit_b = MockUnit(tag=2, pos=Point2((20, 20)))
-    
-    raw_obs = {
-        'units': [unit_a, unit_b],
-        # 'selected_units' is MISSING
-        'enemy_units': [],
-        'effects': [],
-        'game_info': MagicMock(map_size=MagicMock(width=64, height=64)),
-        'game_data': None,
-        'creep': None,
-        'command_target': None
-    }
-    
-    raw_obs['game_info'].playable_area = MagicMock(x=0, y=0, width=64, height=64)
-    raw_obs['game_info'].map_name = "test_map"
 
-    grid = np.zeros((64, 64), dtype=np.uint8)
-    raw_obs['game_info'].pathing_grid = MagicMock()
-    raw_obs['game_info'].pathing_grid.data_numpy = grid
-    
-    raw_obs['game_info'].terrain_height = MagicMock()
-    raw_obs['game_info'].terrain_height.data_numpy = grid
-    
-    layers = transformer.transform(raw_obs)
-    
+    raw_obs = {
+        "units": [unit_a, unit_b],
+        "enemy_units": [],
+        "effects": [],
+        "game_info": _make_game_info(),
+        "game_data": None,
+        "creep": None,
+        "command_target": None,
+    }
+    result = transformer.transform(raw_obs)
+    map_data = result["map"]
+
     idx_sel = LayerConstants.LAYERS[LayerConstants.COMMAND_ASSIGNMENT]
-    sel_layer = layers[idx_sel]
-    
+    sel_layer = map_data[idx_sel]
+
     px_a, py_a = transformer._get_pixel_coords(unit_a.position)
     px_b, py_b = transformer._get_pixel_coords(unit_b.position)
-    
+
     assert sel_layer[py_a, px_a] > 0, "Unit A should be selected in fallback mode"
     assert sel_layer[py_b, px_b] > 0, "Unit B should be selected in fallback mode"

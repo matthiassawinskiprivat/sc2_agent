@@ -160,11 +160,18 @@ class UniversalPipelineManager(PipelineManager):
             
             if model_path_to_load:
                 logger.info(f"Loading weights from: {model_path_to_load}")
-                model = AlgoClass.load(
-                    model_path_to_load, env=env, device=model_kwargs["device"],
-                    tensorboard_log=log_dir,
-                    custom_objects={"learning_rate": training_params["learning_rate"]}
-                )
+                try:
+                    model = AlgoClass.load(
+                        model_path_to_load, env=env, device=model_kwargs["device"],
+                        tensorboard_log=log_dir,
+                        custom_objects={"learning_rate": training_params["learning_rate"]}
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Could not load weights from '{model_path_to_load}' "
+                        f"(likely architecture change between levels): {e}. Starting fresh."
+                    )
+                    model = AlgoClass(**model_kwargs)
             else:
                 model = AlgoClass(**model_kwargs)
 

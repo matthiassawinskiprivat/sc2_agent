@@ -1,0 +1,68 @@
+# config_universal/level_attack_0.yaml
+# Combat level: 1 Roach vs 2 Zerglings on 128x128 maps
+
+training:
+  training_steps: 2_000_000
+  num_envs: 4
+  n_steps: 4096
+  batch_size: 1024
+  learning_rate: 0.0002
+  render_beacon: False
+  watchdog_timeout: 3600
+
+# Environment parameters
+env:
+  env_class: "Level7Env"
+  unit_type: "ROACH"
+  enemy_type: "ZERGLING"
+  targets: 4
+  headless: True
+  max_steps: 300
+  maps_dir: "train/maps/128x128"
+  high_level_command: "attack"
+  guidance_curriculum: False
+  active_layers:
+    - "allied_g_dps_base"
+    - "enemy_g_dps_base"
+    - "allied_health"
+    - "enemy_health"
+  active_tactical_layers:
+    - "allied_g_dps_base"
+    - "enemy_g_dps_base"
+    - "allied_health"
+    - "enemy_health"
+  action_heads:
+    - "attack_local"
+  rewards:
+    step_penalty: -0.05
+    damage_reward: 0.5
+    kill_reward: 10.0
+    win_reward: 50.0
+    loss_penalty: -5.0
+    distance_multiplier: 0.1
+    damage_penalty: -0.2
+    kill_penalty: -20.0
+
+# Model parameters
+model:
+  algorithm: "MaskableRecurrentPPO"
+  policy: "CnnLstmPolicy"
+  rnn_type: "gru"
+  policy_kwargs:
+    features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
+    features_extractor_kwargs:
+      features_dim: 512
+      thinking_steps: 3
+    lstm_hidden_size: 512
+    net_arch: []
+  gamma: 0.995
+  ent_coef: 0.01
+  n_epochs: 4
+
+# Evaluation parameters
+evaluation:
+  stop_on_metric:
+    monitor: "rollout/ep_rew_mean"
+    threshold: 15.0
+    comparison: ">"
+    patience: 10

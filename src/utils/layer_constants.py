@@ -165,7 +165,11 @@ class LayerConstants:
         ENEMY_UNIT_DENSITY: 1,
         TERRAIN_PATHABLE: 2,
         COMMAND_ASSIGNMENT: 3,
-        COMMAND_OBJECTIVE: 4
+        COMMAND_OBJECTIVE: 4,
+        ALLIED_G_DPS_BASE: 5,
+        ENEMY_G_DPS_BASE: 6,
+        ALLIED_HEALTH: 7,
+        ENEMY_HEALTH: 8,
     }
 
     @classmethod
@@ -174,4 +178,4 @@ class LayerConstants:
 
     @classmethod
     def get_num_tactical_layers(cls) -> int:
-        return 5
+        return 9

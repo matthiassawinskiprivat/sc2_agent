@@ -63,3 +63,30 @@ def test_local_decode_clamped_to_playable_area():
         assert 10.0 <= x < 10.0 + 128.0
         assert 20.0 <= y < 20.0 + 96.0
 
+
+# --- get_action_mask shape tests ---
+
+def test_universal_get_action_mask_no_heads_returns_spatial_only():
+    """head_names=None → flat mask of size spatial_resolution^2 (1024)."""
+    agent = UniversalUnitControlAgent(cnn_input_size=(128, 128), grid_size=32, dilation_size=0)
+    mask = agent.get_action_mask(head_names=None)
+    assert mask.shape == (1024,)
+    assert mask.dtype == bool
+    assert mask.all()
+
+
+def test_universal_get_action_mask_with_two_heads():
+    """head_names with 2 entries → mask of size 2 + 1024 = 1026."""
+    agent = UniversalUnitControlAgent(cnn_input_size=(128, 128), grid_size=32, dilation_size=0)
+    mask = agent.get_action_mask(head_names=["move_global", "attack_global"])
+    assert mask.shape == (1026,)
+    assert mask.all()
+
+
+def test_universal_get_action_mask_with_three_heads():
+    agent = UniversalUnitControlAgent(cnn_input_size=(128, 128), grid_size=32, dilation_size=0)
+    mask = agent.get_action_mask(head_names=["move_global", "move_local", "attack_global"])
+    assert mask.shape == (1027,)
+    assert mask[:3].all()
+    assert mask[3:].all()
+

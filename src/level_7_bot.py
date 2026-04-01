@@ -58,8 +58,11 @@ class Level7Bot(Level3Bot):
         self.previous_allied_health = {}
         
         # 1. Guarantee Vision and Initial Cleanup
-        # We step after debug_show_map to ensure it's applied before we look for units to kill
-        await self.client.debug_show_map()
+        # debug_show_map is a TOGGLE — calling it twice re-enables fog.
+        # Only call when fog is currently enabled to avoid flipping it back on.
+        if not getattr(self, "_debug_show_map_enabled", False):
+            await self.client.debug_show_map()
+            self._debug_show_map_enabled = True
         await self.client.step()
         await self._refresh_state_local()
 
@@ -275,16 +278,14 @@ class Level7Bot(Level3Bot):
             
         return total_dist_change * dist_multiplier
 
-    def get_observation_for_unit(self, unit_tag) -> Tuple[np.ndarray, Dict]:
-        # Override to use dynamic context
+    def get_observation_for_unit(self, unit_tag) -> Tuple[Any, Dict]:
         unit = self.units.find_by_tag(unit_tag)
         if not unit:
-            return np.zeros((1, 1, 1)), {}
+            return self._get_zero_observation(), {}
 
         original_unit = self.zergling
-        self.zergling = unit # 'zergling' is the centering unit alias
-        
-        # Update assignments
+        self.zergling = unit
+
         assignments = self.get_closest_targets_combat()
         assigned_target_tag = assignments.get(unit.tag)
         
@@ -304,13 +305,31 @@ class Level7Bot(Level3Bot):
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
-            'command_target': target_pos
+            'command_target': target_pos,
+            'high_level_command': self.training_conf.get('high_level_command', 0),
         }
         
         if self.agent_system:
-             processed_obs = self.agent_system.process_observation(observation=raw_obs)["agent_0"]
+             processed_obs = self.agent_system.process_observation(
+                 observation=raw_obs, active_unit=unit
+             )["agent_0"]
         else:
-             processed_obs = np.zeros((1, 64, 64))
+             processed_obs = self._get_zero_observation()
              
         self.zergling = original_unit
         return processed_obs, {}
+
+    def _get_zero_observation(self):
+        """Returns a zero observation matching the expected observation structure."""
+        arch = self.training_conf.get("agent_architecture", "original")
+        active_layers = self.training_conf.get("active_layers", [])
+        n_channels = len(active_layers) if active_layers else 5
+        if arch == "universal":
+            active_tactical = self.training_conf.get("active_tactical_layers", active_layers)
+            n_tactical = len(active_tactical) if active_tactical else n_channels
+            return {
+                "map": np.zeros((n_channels, 128, 128), dtype=np.float32),
+                "tactical": np.zeros((n_tactical, 32, 32), dtype=np.float32),
+                "command": np.zeros(10, dtype=np.float32),
+            }
+        return np.zeros((n_channels, 128, 128), dtype=np.float32)

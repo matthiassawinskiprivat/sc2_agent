@@ -68,18 +68,11 @@ def test_fusion_layer_grafting_add_tactical():
     # 3. Graft
     grafted_state = graft_model_weights(net_old.state_dict(), new_in_channels=3, target_state_dict=target_state)
     
-    # This might fail currently because graft_model_weights doesn't know how to split the fusion layer
-    try:
-        net_new.load_state_dict(grafted_state)
-    except Exception as e:
-        print(f"Current grafting failed as expected: {e}")
-        return
+    net_new.load_state_dict(grafted_state)
 
-    # 4. Verify (These will fail until we fix model_utils.py)
     # n_flatten for 128x128 is 9216
     assert torch.allclose(net_new.linear[0].weight[:, :100], torch.tensor(7.77)), "Global fusion weights lost!"
     assert torch.allclose(net_new.linear[0].weight[:, -10:], torch.tensor(9.99)), "Command fusion weights lost!"
-    print("Fusion layer grafting passed!")
 
 def test_spatial_interpolation_16_to_32():
     """Verify that action head scales from 16x16 knowledge to 32x32."""

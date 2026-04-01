@@ -173,7 +173,7 @@ def create_run_scripts():
     if sys.platform == "win32":
         batch_content = """@echo off
 echo Starting StarCraft 2 Unit Control Agent Demo...
-python main.py --demo
+python run_game_with_ui.py
 pause
 """
         with open("run_demo.bat", "w") as f:
@@ -193,7 +193,7 @@ pause
     else:
         shell_content = """#!/bin/bash
 echo "Starting StarCraft 2 Unit Control Agent Demo..."
-python3 main.py --demo
+python3 run_game_with_ui.py
 """
         with open("run_demo.sh", "w") as f:
             f.write(shell_content)

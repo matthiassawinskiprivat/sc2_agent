@@ -116,7 +116,11 @@ class ObservationTransformer:
         Uses TACTICAL_LAYERS for reduced state space.
         """
         if active_unit is None:
-            num_channels = LayerConstants.get_num_tactical_layers()
+            if self.active_tactical_layers:
+                num_channels = sum(1 for ln in self.active_tactical_layers
+                                   if ln.lower() in LayerConstants.TACTICAL_LAYERS)
+            else:
+                num_channels = LayerConstants.get_num_tactical_layers()
             return np.zeros((num_channels, 32, 32), dtype=np.float32)
 
         total_layers = LayerConstants.get_num_tactical_layers()
@@ -167,6 +171,20 @@ class ObservationTransformer:
                     continue
                 self._process_single_unit(unit, layers, True, 32, 32, game_data)
 
+            # Enemy DPS from units outside view whose weapon range reaches in
+            dps_idx = LayerConstants.TACTICAL_LAYERS.get(LayerConstants.ENEMY_G_DPS_BASE)
+            if dps_idx is not None and dps_idx in self.active_indices:
+                for unit in list(enemy_units) + list(enemy_structures):
+                    dx = abs(unit.position.x - active_unit.position.x)
+                    dy = abs(unit.position.y - active_unit.position.y)
+                    if dx <= 17 and dy <= 17:
+                        continue
+                    if dx > 32 or dy > 32:
+                        continue
+                    px, py = self._get_pixel_coords_unclamped(unit.position)
+                    if px is not None:
+                        self._draw_unit_dps(unit, layers, True, px, py, game_data)
+
             # Draw Command Info (High-priority markers)
             tactical_raw_obs = raw_obs.copy()
             tactical_raw_obs['selected_units'] = [active_unit]
@@ -174,9 +192,23 @@ class ObservationTransformer:
 
             if effects: self._draw_effects(effects, layers)
 
-            # Normalize & Clip
+            # Normalize DPS layers with tanh (matches global transform)
+            for dps_layer_name in [LayerConstants.ALLIED_G_DPS_BASE, LayerConstants.ENEMY_G_DPS_BASE]:
+                dps_layer_idx = LayerConstants.TACTICAL_LAYERS.get(dps_layer_name)
+                if dps_layer_idx is not None:
+                    layers[dps_layer_idx] = np.tanh(layers[dps_layer_idx] / 50.0)
+
+            # Clip
             layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
-            tactical_data = layers
+
+            # Slice to active tactical layers (preserving config order)
+            if self.active_tactical_layers:
+                indices = [LayerConstants.TACTICAL_LAYERS[ln.lower()]
+                           for ln in self.active_tactical_layers
+                           if ln.lower() in LayerConstants.TACTICAL_LAYERS]
+                tactical_data = layers[indices]
+            else:
+                tactical_data = layers
         finally:
             # Restore state
             (self.scale, self.offset_x, self.offset_y, self.crop_x, self.crop_y, 
@@ -276,6 +308,15 @@ class ObservationTransformer:
             return px, py
         return None, None
 
+    def _get_pixel_coords_unclamped(self, position) -> tuple:
+        """Same as _get_pixel_coords but without bounds check.
+        Used for DPS circles whose center is outside the view but whose
+        radius overlaps it. _draw_circle_vectorized clips correctly."""
+        if position is None: return None, None
+        px = int((position.x - self.crop_x) * self.scale + self.offset_x)
+        py = int(self.feature_map_height - 1 - ((position.y - self.crop_y) * self.scale + self.offset_y))
+        return px, py
+
     def _process_single_unit(self, unit: Unit, layers: np.ndarray, is_enemy: bool,
                              map_w: int, map_h: int, game_data: GameData):
         px, py = self._get_pixel_coords(unit.position)
@@ -315,6 +356,9 @@ class ObservationTransformer:
             self._draw_unit_detection(unit, layers, is_enemy, px, py)
             self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
             self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
+        else:
+            self._draw_unit_vitals(unit, layers, is_enemy, px, py)
+            self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
 
     def _draw_unit_body(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
         prefix = "enemy" if is_enemy else "allied"
@@ -329,7 +373,7 @@ class ObservationTransformer:
             r = int(unit.radius * self.scale) if unit.is_structure else 0
 
         val = 1.0
-        if not is_enemy and not unit.is_structure:
+        if not is_enemy:
             cd = getattr(unit, 'weapon_cooldown', 0.0)
             val = 1.0 - (0.7 * (min(cd, 60.0) / 60.0))
 
@@ -377,7 +421,7 @@ class ObservationTransformer:
                         is_beacon = True
                 
                 if is_beacon:
-                    val, r = 20.0, max(1, int(1.5 * self.scale))
+                    val, r = 20.0, max(3, int(1.5 * self.scale))
 
                 pos = getattr(target, "position", target)
                 px, py = self._get_pixel_coords(pos)

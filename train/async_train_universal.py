@@ -132,6 +132,17 @@ class AsyncCollector(mp.Process):
         if "features_extractor_class" in policy_kwargs and policy_kwargs["features_extractor_class"] == "src.agent.models.unit_control_network.UnitControlNetwork":
             policy_kwargs["features_extractor_class"] = UnitControlNetwork
 
+        algo_kwargs = {
+            "policy": PolicyClass,
+            "env": vec_env,
+            "policy_kwargs": policy_kwargs,
+            "n_steps": training_params["n_steps"],
+            "batch_size": training_params["batch_size"],
+            "gamma": model_params["gamma"]
+        }
+        if AlgoClass == MaskableRecurrentPPO:
+            algo_kwargs["rnn_type"] = rnn_type
+
         if self.model_path:
             logger.info(f"Loading weights from: {self.model_path}")
             load_kwargs = {
@@ -140,18 +151,15 @@ class AsyncCollector(mp.Process):
             }
             if AlgoClass == MaskableRecurrentPPO:
                 load_kwargs["rnn_type"] = rnn_type
-            model = AlgoClass.load(self.model_path, **load_kwargs)
+            try:
+                model = AlgoClass.load(self.model_path, **load_kwargs)
+            except Exception as e:
+                logger.warning(
+                    f"Could not load weights from '{self.model_path}' "
+                    f"(likely architecture change between levels): {e}. Starting fresh."
+                )
+                model = AlgoClass(**algo_kwargs)
         else:
-            algo_kwargs = {
-                "policy": PolicyClass,
-                "env": vec_env,
-                "policy_kwargs": policy_kwargs,
-                "n_steps": training_params["n_steps"],
-                "batch_size": training_params["batch_size"],
-                "gamma": model_params["gamma"]
-            }
-            if AlgoClass == MaskableRecurrentPPO:
-                algo_kwargs["rnn_type"] = rnn_type
             model = AlgoClass(**algo_kwargs)
 
         if self.model_path and not self.resume_timesteps_from_save:

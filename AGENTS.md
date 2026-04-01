@@ -1,0 +1,422 @@
+# AGENTS.md — Technical Reference for AI Assistants
+
+This file contains internal wiring rules, contracts, and conventions for the SC2 Unit Control Agent codebase. It is intended for AI coding assistants (Cursor, Copilot, etc.) working on this project.
+
+For a human-oriented overview, see [README.md](README.md).
+
+**Important:** The `original` architecture (`agent_architecture: "original"`, `config/`, `train/train_pipeline.py`, `SC2Bot`) is **deprecated** and will be removed. All new development targets the **`universal`** architecture (`agent_architecture: "universal"`, `config_universal/`, `train/async_train_universal.py`, `SC2BotUniversal`). When making changes, focus exclusively on the universal path unless explicitly asked to modify legacy code.
+
+---
+
+## Source of truth files
+
+When making changes to observations, actions, or config wiring, always consult these files first:
+
+| Area | File |
+|------|------|
+| Layer names and indices | `src/utils/layer_constants.py` |
+| Cumulative config accumulation | `src/utils/config_manager.py` |
+| Observation tensor construction | `src/transformers/observation_transformer.py` |
+| Base environment and obs space | `train/envs/level_0_env.py` |
+| Universal bot / action decoding | `src/sc2_bot_universal.py` |
+| Network architecture | `src/agent/models/unit_control_network.py` |
+| Universal curriculum | `config_universal/pipeline.yaml` |
+
+---
+
+## Class hierarchy
+
+### Environments
+
+```
+Level0Env (gym.Env)        — base: single unit, single target, obs space, config wiring
+  └─ Level3Env             — multi-unit, multi-target (beacon collection)
+       └─ Level7Env        — combat (attack actions)
+```
+
+### Bots
+
+```
+SC2Bot (BotAI)             — original architecture, base game logic
+  └─ Level0Bot             — single-unit beacon collection
+  └─ Level3Bot             — multi-unit beacon assignment and cycling
+       └─ Level7Bot        — combat reward/observation extensions
+
+SC2BotUniversal (BotAI)    — universal architecture, MultiDiscrete action decoding
+```
+
+### Key components
+
+```
+ObservationTransformer     — raw SC2 state → (C, H, W) tensor stacks
+HierarchicalAgentSystem    — shared transformer + per-unit agent management
+UnitControlNetwork         — CNN feature extractor (global + tactical streams → fused features)
+```
+
+---
+
+## ConfigManager — cumulative config accumulation
+
+**Module:** `src/utils/config_manager.py`
+
+The ConfigManager walks `pipeline.yaml`'s `levels` list in order and accumulates four additive properties. For a target level `L`:
+
+1. Start from the **pipeline root** list (if present).
+2. Walk levels in order, loading each `<level>.yaml`'s `env` section.
+3. **Append** new items in order, **skip duplicates** (case-insensitive).
+4. Stop when the walk reaches `L`.
+5. If `L` is not in `pipeline.levels`, load `L.yaml` and merge on top.
+
+| Getter | YAML key (under `env`) |
+|--------|----------------------|
+| `get_cumulative_active_layers(level)` | `active_layers` |
+| `get_cumulative_active_tactical_layers(level)` | `active_tactical_layers` |
+| `get_cumulative_action_heads(level)` | `action_heads` |
+| `get_cumulative_categorical_heads(level)` | `categorical_heads` |
+
+Lists are **union-in-order**, not per-level replacement. Adding a layer or head in a later level **never removes** earlier ones.
+
+**Consumed by:** `Level0Env.__init__()` — calls all four getters, stores results in `training_conf` so bots and the `ObservationTransformer` see a single flat config dict.
+
+---
+
+## Observation layer ordering — CRITICAL CONTRACT
+
+`active_layers` (global map) and `active_tactical_layers` (tactical map) are **independent** cumulative configs. They may contain different layer sets and different numbers of layers.
+
+| Stream | Config key | Getter | Index mapping used for slicing |
+|--------|-----------|--------|-------------------------------|
+| Global 128×128 | `active_layers` | `get_cumulative_active_layers` | `LayerConstants.LAYERS` |
+| Tactical 32×32 | `active_tactical_layers` | `get_cumulative_active_tactical_layers` | `LayerConstants.TACTICAL_LAYERS` |
+
+### Ordering rules
+
+1. **Config order IS channel order.** The `ObservationTransformer` slices channels in the exact order they appear in the accumulated list. No sorting or reordering is applied. Channel 0 = first entry, channel 1 = second, etc.
+2. **Accumulation is append-only.** Each level can add new layer names; they are appended to the end. Duplicates are skipped. Layers are never removed.
+3. **Existing channels never shift.** A channel at position N in an earlier level stays at position N in all subsequent levels. The network's learned weights for that channel remain valid across the curriculum.
+4. **Levels that define no layers inherit everything.** If a level's YAML omits `active_layers` / `active_tactical_layers` (or the list is empty), it uses the accumulated list from prior levels, unchanged.
+
+### Example pipeline accumulation
+
+```
+level_move_single_0:
+  active_layers: [allied_density, enemy_density, terrain, objective, assignment]
+  active_tactical_layers: [allied_density, enemy_density, objective, assignment, terrain]
+
+level_move_multi_0 through level_move_multi_4:
+  (no new layers → inherits same lists)
+
+level_attack_0:
+  active_layers: [allied_g_dps_base, enemy_g_dps_base, allied_health, enemy_health]
+  active_tactical_layers: [allied_g_dps_base, enemy_g_dps_base, allied_health, enemy_health]
+
+→ At level_attack_0, cumulative active_layers =
+  [allied_density, enemy_density, terrain, objective, assignment,
+   allied_g_dps_base, enemy_g_dps_base, allied_health, enemy_health]
+  (channels 0-4 unchanged, channels 5-8 appended)
+```
+
+### When adding new layers
+
+Only list **new** layer names in a level YAML. They get appended after all previously accumulated layers. Never redefine the full list.
+
+If you add a new layer name, you must:
+1. Add a string constant in `LayerConstants` (`src/utils/layer_constants.py`).
+2. Add it to `LayerConstants.LAYERS` (and `TACTICAL_LAYERS` if applicable) with the next available index.
+3. Implement the rendering logic in `ObservationTransformer._process_single_unit` or the relevant method.
+4. Add the name to the appropriate level YAML under `active_layers` / `active_tactical_layers`.
+
+---
+
+## Observation construction flow
+
+### Global map (128×128)
+
+```
+Bot._get_observation() → raw_obs dict
+  → ObservationTransformer.transform(raw_obs)
+    → allocates (NUM_LAYERS, 128, 128) buffer
+    → renders all units/beacons/terrain into full buffer
+    → slices to active_layers channels (config order)
+    → returns {"map": (N, 128, 128), "command": (10,)}
+```
+
+### Tactical map (32×32, universal only)
+
+```
+Bot._get_observation() → raw_obs dict
+  → ObservationTransformer.transform_tactical(raw_obs, active_unit)
+    → allocates (NUM_TACTICAL_LAYERS, 32, 32) buffer
+    → renders units/beacons within local crop around active_unit
+    → slices to active_tactical_layers channels (config order)
+    → returns (N_tactical, 32, 32)
+```
+
+### Key details
+
+- `transform_tactical` temporarily overrides internal state (scale, offsets, crop, layer map) to render at tactical resolution, then restores.
+- Both `transform` and `transform_tactical` use their respective config lists for slicing — they are independent.
+- The `raw_obs` dict must include `high_level_command` for the command vector to be set correctly. Level-specific bots are responsible for including this field.
+
+---
+
+## UnitControlNetwork — spatial fusion architecture
+
+The network processes three inputs:
+
+- **`map`** (global, 128×128) → Global CNN trunk → AdaptiveAvgPool2d to 16×16
+- **`tactical`** (32×32) → Tactical CNN → downsample to 16×16
+- **`command`** (10,) → one-hot/embedding
+
+The 16×16 outputs from both CNNs are:
+1. **Concatenated** channel-wise → `_spatial_fused` (stashed for the SpatialDecoder)
+2. **Global Average Pooled** separately, then concatenated with `command` → fed through Linear + ReasoningCore → `thought` features
+
+The policy head uses `thought` for the command head and `_spatial_fused` + latent for the SpatialDecoder.
+
+---
+
+## Action space
+
+### Universal architecture (`agent_architecture == "universal"`)
+
+- **Space:** `MultiDiscrete([n_heads, spatial_res²])` where `spatial_res = 32`.
+- `action[0]` = command/head index, `action[1]` = spatial cell on 32×32 grid.
+- If `head_idx >= len(action_heads)`, it indexes into `categorical_heads` (no spatial target).
+- `SC2BotUniversal` decodes head index → head name, spatial index → game coordinate.
+- `UniversalRecurrentPolicy` disables masking on the spatial slice (shared spatial head assumption).
+
+### Original architecture
+
+- **Space:** `Discrete(len(action_heads) * grid_size² + len(categorical_heads))`.
+- Flattened `(head, y, x)` with categoricals appended. Decoded by `SC2Bot`.
+
+### action_heads vs categorical_heads
+
+- **`action_heads`** — spatial heads needing a grid target (e.g. `move`, `attack`, `load`). Cumulative.
+- **`categorical_heads`** — discrete toggles with no spatial target. Cumulative.
+
+---
+
+## Level YAML structure
+
+Each level file (e.g. `level_move_single_0.yaml`) has three top-level sections:
+
+```yaml
+training:
+  training_steps: 2_000_000
+  num_envs: 4
+  n_steps: 4096
+  batch_size: 1024
+  learning_rate: 0.0003
+  # ...
+
+env:
+  env_class: "Level3Env"       # which Gym env class to instantiate
+  targets: 2
+  max_steps: 200
+  maps_dir: "train/maps/128x128"
+  high_level_command: "scout"
+  active_layers: [...]         # NEW layers to add (appended to accumulated)
+  active_tactical_layers: [...] # NEW tactical layers to add
+  action_heads: [...]          # NEW action heads to add
+  rewards:
+    success: 40.0
+    step_penalty: -0.1
+    distance_multiplier: 1.0
+
+model:
+  algorithm: "MaskableRecurrentPPO"
+  policy: "CnnLstmPolicy"
+  policy_kwargs:
+    features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
+    features_extractor_kwargs:
+      features_dim: 512
+      thinking_steps: 3
+    lstm_hidden_size: 512
+```
+
+`Level0Env` flattens `training` and `env` into a single `training_conf` dict consumed by bots and the transformer.
+
+---
+
+## Environment ↔ Bot ↔ Transformer wiring
+
+| Level type | Env class | Bot class | Targets |
+|-----------|-----------|-----------|---------|
+| Single-unit move | `Level0Env` | `Level0Bot` / `SC2BotUniversal` | `Point2` beacons |
+| Multi-unit move | `Level3Env` | `Level3Bot` | `Unit` beacons (player_id=1) |
+| Combat | `Level7Env` | `Level7Bot` | `Unit` enemies |
+
+### Important: `command_target` type differences
+
+- **Single-unit levels (Level0Bot):** `command_target` is a `Point2` object. In `ObservationTransformer._draw_command_info`, this triggers the default branch which draws `COMMAND_OBJECTIVE` with radius `r=3`.
+- **Multi-unit levels (Level3Bot):** `command_target` is a beacon `Unit` object. This triggers the `is_beacon` branch. The radius for `COMMAND_OBJECTIVE` must be explicitly set to `max(3, int(1.5 * scale))` to match the effective size from single-unit levels.
+- **Combat levels (Level7Bot):** `command_target` is a `Point2` (enemy position). Same default branch as single-unit.
+
+If beacon markers appear too small for the CNN to detect (especially after Global Average Pooling), check the radius logic in `_draw_command_info`.
+
+---
+
+## Common pitfalls
+
+1. **Layer ordering:** Never apply `sorted()` to channel indices during slicing. Config list order = channel order. Sorting scrambles the semantic alignment.
+2. **Beacon marker size:** Beacon `Unit` objects and `Point2` targets follow different code paths in `_draw_command_info`. Verify both produce appropriately sized markers on the `COMMAND_OBJECTIVE` layer.
+3. **Missing `high_level_command`:** Level-specific bots must include `high_level_command` in `raw_obs`. Without it, the command vector defaults to index 0 regardless of config.
+4. **`debug_show_map()` is a toggle:** Calling it twice re-enables fog of war. Guard with a flag if used in `reset_game_state`.
+5. **Observation space changes:** When a new level adds layers/heads, `Level0Env.reset()` rebuilds the observation space. The model's feature extractor input channels must match.
+
+---
+
+## Testing
+
+```bash
+pytest
+```
+
+Key test files:
+- `tests/test_additive_config.py` — ConfigManager accumulation correctness
+- `tests/test_level_3_universal_architecture.py` — Level3 obs/action wiring
+- `tests/test_level_7_env.py` — Level7 combat env
+- `tests/test_level_7_mask_mismatch.py` — action mask shape validation
+
+---
+
+## TDD best practices
+
+**Every code change must include corresponding test updates.** When adding a feature, add tests that cover it. When fixing a bug, add a regression test that reproduces the bug and verifies the fix. When refactoring, ensure existing tests still pass and update any that relied on the old structure. Do not submit changes without tests — if existing tests break due to your change, fix them as part of the same change.
+
+**Always run and validate tests before considering a feature complete.** After implementing a change, execute the relevant tests with `pytest` and confirm they pass. A feature is not done until its tests run green. If tests fail, diagnose and fix before moving on.
+
+### 1. Always mock ConfigManager — never read real YAML in unit tests
+
+Configs change frequently. Tests that open `config/level_2.yaml` or `config_universal/level_move_multi_0.yaml` and assert specific values (reward scalars, step counts, layer counts) **will break** every time the config is tuned.
+
+**Do this:** Patch `ConfigManager` at the import site and return controlled values.
+
+```python
+from unittest.mock import patch, MagicMock
+
+def test_env_obs_space():
+    mock_cm = MagicMock()
+    mock_cm.get_cumulative_active_layers.return_value = ["layer_a", "layer_b", "layer_c"]
+    mock_cm.get_cumulative_active_tactical_layers.return_value = ["layer_a", "layer_b"]
+    mock_cm.get_cumulative_action_heads.return_value = ["move"]
+    mock_cm.get_cumulative_categorical_heads.return_value = []
+    mock_cm.get_agent_architecture.return_value = "universal"
+    mock_cm.get_level_config.return_value = {"env": {"rewards": {}}}
+
+    with patch("train.envs.level_0_env.ConfigManager", return_value=mock_cm), \
+         patch("train.envs.level_0_env.Level0Env._discover_maps", return_value=["map.SC2Map"]):
+        env = Level0Env(training_conf={...})
+        assert env.observation_space["map"].shape[0] == 3  # matches mock, not YAML
+```
+
+**Don't do this:**
+
+```python
+def test_config_values():
+    cm = ConfigManager("config")
+    cfg = cm.get_level_config("level_2")
+    assert cfg["training"]["n_steps"] == 2048      # breaks when tuned
+    assert cfg["env"]["rewards"]["success"] == 50.0  # breaks when tuned
+```
+
+### 2. Use `tmp_path` for ConfigManager accumulation tests
+
+When testing `ConfigManager` itself (accumulation order, dedup, off-pipeline levels), create synthetic YAML files under pytest's `tmp_path`. This isolates the test from any real pipeline changes.
+
+```python
+def test_cumulative_layers(tmp_path):
+    (tmp_path / "pipeline.yaml").write_text("levels: [lvl0, lvl1]")
+    (tmp_path / "lvl0.yaml").write_text("env:\n  active_layers: [A, B]")
+    (tmp_path / "lvl1.yaml").write_text("env:\n  active_layers: [C]")
+
+    cm = ConfigManager(str(tmp_path))
+    assert cm.get_cumulative_active_layers("lvl1") == ["a", "b", "c"]
+```
+
+### 3. Assert structural properties, not magic numbers
+
+Tests should verify that components **agree with each other**, not that they match a hard-coded constant that mirrors the current config.
+
+**Good — assert consistency:**
+
+```python
+assert env.observation_space["map"].shape[0] == len(env.active_layers)
+assert env.action_space.n == len(env.action_heads) * grid_size ** 2 + len(env.categorical_heads)
+assert mask.shape[0] == env.action_space.n
+```
+
+**Bad — assert a snapshot of today's config:**
+
+```python
+assert env.observation_space.shape[0] == 23      # why 23? breaks when layers change
+assert env.action_space.n == 32768               # breaks when grid or heads change
+assert np.array_equal(env.action_space.nvec, [2, 1024])  # breaks when heads change
+```
+
+If a test needs a specific number, derive it from the mock config that the test itself defines, not from the real pipeline.
+
+### 4. Keep fixtures self-contained
+
+Every test fixture should define its own complete `training_conf` with all values the code under test needs. Don't rely on defaults that come from real YAML files.
+
+```python
+@pytest.fixture
+def mock_training_conf():
+    return {
+        "grid_size": 128,
+        "max_steps": 100,
+        "config_dir": "config_universal",
+        "level_name": "test_level",
+        "active_layers": ["allied_unit_density", "enemy_unit_density"],
+        "active_tactical_layers": ["allied_unit_density", "enemy_unit_density"],
+        "action_heads": ["move"],
+        "categorical_heads": [],
+        "agent_architecture": "universal",
+        "high_level_command": 0,
+        "rewards": {"success": 10.0, "step_penalty": -0.1},
+        "env": {"targets": 1, "maps_dir": "train/maps/128x128"},
+    }
+```
+
+### 5. Common mock stack for environment tests
+
+Most env tests need the same set of patches. Use this pattern:
+
+```python
+with patch("train.envs.level_0_env.ConfigManager", return_value=mock_cm), \
+     patch("train.envs.level_0_env.SC2Process"), \
+     patch("train.envs.level_0_env.Client"), \
+     patch("train.envs.level_0_env.Level0Env._discover_maps", return_value=["test.SC2Map"]):
+    env = SomeEnv(training_conf=mock_training_conf)
+```
+
+Consider extracting this into a shared fixture if many test files need it.
+
+### 6. Test behavior, not config values
+
+Tests should answer questions like:
+- "Does the reward function compute correctly given these inputs?" (mock the inputs)
+- "Does the observation space shape match the configured layers?" (mock the layer list)
+- "Does the action mask have the right length for this action space?" (mock the heads)
+
+Tests should NOT answer:
+- "Does level_2.yaml have gamma=0.995?" (config validation, not behavior)
+- "Does the CTF pipeline produce exactly 23 layers?" (snapshot, not invariant)
+
+### 7. Existing tests that need refactoring
+
+These tests currently depend on real config files and are known to be brittle:
+
+| Test file | Issue |
+|-----------|-------|
+| `test_config_reward.py` | Reads `config/level_2.yaml`, asserts exact reward values and hyperparams |
+| `test_level_7_config.py` | Reads `config/level_7.yaml`, asserts exact env_class, unit types |
+| `test_capture_the_flag_single_env.py` | Asserts `observation_space.shape[0] == 23` from real pipeline |
+| `test_fix_ctf_space_mismatch.py` | Asserts `action_space.n == 32768` from real pipeline |
+| `test_multi_client_config_integration.py` | Asserts `config_dir == "config"` |
+| `test_action_mask_shape.py` | Constructs env with real `config_universal` pipeline, prints instead of asserts |
+
+When touching these files, refactor them to use mocked configs.

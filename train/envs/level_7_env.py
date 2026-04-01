@@ -11,9 +11,16 @@ class Level7Env(Level3Env):
         super().__init__(**kwargs)
         # Dynamic Action Space based on accumulated heads (now handled by super().__init__)
         
-        # Unit and Enemy types from config
-        self.unit_type = self.training_conf.get('env', {}).get('unit_type', 'MARINE').upper()
-        self.enemy_type = self.training_conf.get('env', {}).get('enemy_type', 'ZERGLING').upper()
+        # Unit and Enemy types from config — read from flat root first (set by Level0Env's
+        # flattening of env params), then fall back to nested env dict for direct instantiation.
+        self.unit_type = (
+            self.training_conf.get("unit_type")
+            or self.training_conf.get("env", {}).get("unit_type", "MARINE")
+        ).upper()
+        self.enemy_type = (
+            self.training_conf.get("enemy_type")
+            or self.training_conf.get("env", {}).get("enemy_type", "ZERGLING")
+        ).upper()
 
     def get_race_from_unit_type(self, unit_type_name: str) -> Race:
         """Maps unit type names to SC2 Races."""
@@ -36,16 +43,16 @@ class Level7Env(Level3Env):
         Retrieves and validates the action mask shape.
         """
         if self._bot:
-            # Robust unit identification for masking
             if hasattr(self, "active_unit_tags") and 0 <= self.current_unit_index < len(self.active_unit_tags):
                 self._bot.active_unit_tag = self.active_unit_tags[self.current_unit_index]
             else:
                 self._bot.active_unit_tag = None
             self._bot.current_unit_index = self.current_unit_index
         mask = super().action_masks()
-        if mask.shape[0] != self.action_space.n:
-            self._log(f"ERROR: Mask shape mismatch! Expected {self.action_space.n}, got {mask.shape[0]}")
-            return np.ones(self.action_space.n, dtype=bool)
+        if isinstance(self.action_space, spaces.Discrete):
+            if mask.shape[0] != self.action_space.n:
+                self._log(f"ERROR: Mask shape mismatch! Expected {self.action_space.n}, got {mask.shape[0]}")
+                return np.ones(self.action_space.n, dtype=bool)
         return mask
 
     async def _setup_game_session(self):
@@ -77,8 +84,10 @@ class Level7Env(Level3Env):
             realtime=self.visualize,
         )
         await self._client.join_game(race=allied_race)
-        # Enable full vision for unit cleanup and observation
+        # Enable full vision for unit cleanup and observation.
+        # Mark the flag on the bot so reset_game_state doesn't toggle it back.
         await self._client.debug_show_map()
+        self._bot._debug_show_map_enabled = True
         
         self._bot._generated_frame = -1
         game_info = await self._client.get_game_info()
@@ -128,7 +137,7 @@ class Level7Env(Level3Env):
              self.active_unit_tags = [u.tag for u in self._bot.get_active_units()]
         
         if not self.active_unit_tags:
-             return np.zeros(self.observation_space.shape), 0, True, False, {}
+             return self._get_zero_observation(), 0, True, False, {}
 
         current_tag = self.active_unit_tags[self.current_unit_index]
         
@@ -185,7 +194,7 @@ class Level7Env(Level3Env):
             done = True
 
         if done:
-            obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
+            obs = self._get_zero_observation()
             self.current_unit_index = 0
             self.active_unit_tags = all_active_tags
         elif self.current_unit_index < len(self.active_unit_tags):
@@ -206,7 +215,7 @@ class Level7Env(Level3Env):
                 if self.active_unit_tags:
                     obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
                 else:
-                    obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
+                    obs = self._get_zero_observation()
                     done = True
         else:
             # End of cycle reached normally
@@ -215,7 +224,7 @@ class Level7Env(Level3Env):
             if self.active_unit_tags:
                 obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
             else:
-                obs = np.zeros(self.observation_space.shape, dtype=np.uint8)
+                obs = self._get_zero_observation()
                 done = True
 
         return obs, total_reward, done, False, {}
