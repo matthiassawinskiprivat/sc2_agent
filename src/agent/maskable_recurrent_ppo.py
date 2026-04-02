@@ -439,12 +439,14 @@ class MaskableRecurrentDictRolloutBuffer(MaskableRecurrentRolloutBuffer):
                 return {k: local_pad_tensor(v[all_indices]) for k, v in tensor_or_dict.items()}
             return local_pad_tensor(tensor_or_dict[all_indices])
 
+        # Precompute once per batch: the old loop called np.where(local_seq_starts) inside
+        # every outer iteration (O(n_seq²) scans) and was a major CPU bottleneck.
+        _boundary = np.where(local_seq_starts)[0]
+
         def local_pad_tensor(tensor):
             seqs = []
-            for start_idx in np.where(local_seq_starts)[0]:
-                next_starts = np.where(local_seq_starts)[0]
-                idx_in_starts = np.where(next_starts == start_idx)[0][0]
-                end_idx = next_starts[idx_in_starts + 1] if idx_in_starts + 1 < len(next_starts) else len(all_indices)
+            for i, start_idx in enumerate(_boundary):
+                end_idx = _boundary[i + 1] if i + 1 < len(_boundary) else len(all_indices)
                 seqs.append(tensor[start_idx:end_idx])
             return torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True)
 
@@ -758,7 +760,8 @@ class MaskableRecurrentPPO(RecurrentPPO):
 
                 with torch.no_grad():
                     log_ratio = log_p - r_data.old_log_prob
-                    approx_kl_div = torch.mean(((torch.exp(log_ratio) - 1) - log_ratio)[mask]).cpu().numpy()
+                    # Single scalar sync (avoid .cpu().numpy() per batch — extra GPU sync)
+                    approx_kl_div = torch.mean(((torch.exp(log_ratio) - 1) - log_ratio)[mask]).item()
                     approx_kls.append(approx_kl_div)
 
                 if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:

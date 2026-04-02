@@ -1,6 +1,8 @@
+import errno
 import os
 import sys
 import time
+from collections import deque
 import torch
 import numpy as np
 import yaml
@@ -58,6 +60,60 @@ def clear_temp_dir():
         except Exception as e:
             logger.warning(f"Startup cleanup failed: {e}")
     os.makedirs(TEMP_DIR, exist_ok=True)
+
+
+def _is_transient_file_lock(err: OSError) -> bool:
+    """True when another process (e.g. collector loading the zip) still holds the file."""
+    if isinstance(err, PermissionError):
+        return True
+    win = getattr(err, "winerror", None)
+    if win == 32:  # ERROR_SHARING_VIOLATION
+        return True
+    return err.errno in (errno.EACCES, errno.EPERM, errno.EBUSY)
+
+
+def replace_file_retry(src: str, dst: str, *, retries: int = 50, delay_sec: float = 0.1) -> None:
+    """
+    Atomic replace (os.replace). Retries on Windows sharing violations — the collector
+    may still have latest_learner_model.zip open after set_parameters().
+    """
+    last: OSError | None = None
+    for attempt in range(retries):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as e:
+            last = e
+            if _is_transient_file_lock(e):
+                if attempt == 0 or attempt % 10 == 9:
+                    logger.debug(
+                        f"replace_file_retry: dst busy ({dst}), attempt {attempt + 1}/{retries}"
+                    )
+                time.sleep(delay_sec)
+                continue
+            raise
+    assert last is not None
+    raise last
+
+
+def remove_file_retry(path: str, *, retries: int = 50, delay_sec: float = 0.1) -> None:
+    """Best-effort unlink with retries (Windows antivirus / other readers)."""
+    if not os.path.exists(path):
+        return
+    last: OSError | None = None
+    for attempt in range(retries):
+        try:
+            os.remove(path)
+            return
+        except OSError as e:
+            last = e
+            if _is_transient_file_lock(e):
+                time.sleep(delay_sec)
+                continue
+            raise
+    assert last is not None
+    raise last
+
 
 class AsyncCollector(mp.Process):
     """
@@ -299,6 +355,7 @@ class AsyncCollector(mp.Process):
                 episode_lengths += 1
                 
                 # Buffer for custom info metrics (success rates, distance, etc.)
+                # deque(maxlen=) avoids O(n) list.pop(0) churn as training runs for hours.
                 if not hasattr(self, 'custom_metrics'):
                     self.custom_metrics = {}
 
@@ -308,10 +365,8 @@ class AsyncCollector(mp.Process):
                     for key, val in info.items():
                         if isinstance(val, (int, float, np.number)):
                             if key not in self.custom_metrics:
-                                self.custom_metrics[key] = []
+                                self.custom_metrics[key] = deque(maxlen=100)
                             self.custom_metrics[key].append(val)
-                            if len(self.custom_metrics[key]) > 100:
-                                self.custom_metrics[key].pop(0)
 
                     if done:
                         recent_ep_rewards.append(episode_rewards[i])
@@ -403,6 +458,18 @@ class AsyncLearner:
         os.makedirs(self.model_dir, exist_ok=True)
         self.save_freq = config["training"].get("save_freq", 50000)
 
+    def close(self):
+        """Clean up handles to prevent WinError 32 leaks across curriculum levels"""
+        if hasattr(self, 'logger'):
+            try:
+                self.logger.close()
+            except Exception as e:
+                logger.warning(f"Could not close logger: {e}")
+        if hasattr(self, 'learner_buffers'):
+            for buf in self.learner_buffers.values():
+                if hasattr(buf, 'close_memmaps'):
+                    buf.close_memmaps()
+
     def run(self):
         logger.info(f"Learner started for level: {self.level_name}")
         training_params = self.config["training"]
@@ -486,12 +553,13 @@ class AsyncLearner:
         from stable_baselines3.common.logger import configure
         new_logger = configure(self.log_dir, ["stdout", "tensorboard", "csv"])
         model.set_logger(new_logger)
+        self.logger = new_logger
         logger.info(f"Learner logging configured to: {self.log_dir}")
 
         # PRE-INITIALIZE LEARNER BUFFERS
         # We create persistent buffer objects that point to the static directories.
         # This prevents opening/closing file handles during the loop.
-        learner_buffers = {}
+        self.learner_buffers = {}
         for i in range(2):
             instance_id = f"buffer_{i}"
             instance_dir = os.path.join(TEMP_DIR, instance_id)
@@ -520,13 +588,18 @@ class AsyncLearner:
             buf.instance_id = instance_id
             buf.instance_dir = instance_dir
             
-            # Pre-load memmaps (Read-Only)
-            # These handles will stay open forever.
-            # We retry until the file exists because Collector might be slow.
+            # Close and remove dummy memmaps created by AsyncDiskBuffer.__init__
             buf.disk_files = {}
+            for key in list(buf.observations.keys()):
+                if isinstance(buf.observations[key], np.memmap):
+                    try:
+                        buf.observations[key]._mmap.close()
+                    except:
+                        pass
+                    del buf.observations[key]
             
             # Placeholder to be filled when files actually exist
-            learner_buffers[instance_id] = buf
+            self.learner_buffers[instance_id] = buf
 
         logger.info("Learner waiting for first buffer...")
         start_time = time.time()
@@ -560,39 +633,52 @@ class AsyncLearner:
                     model.logger.record("time/total_timesteps", total_steps_trained, exclude="tensorboard")
                     
                     # 1. SWITCH TO STATIC BUFFER
-                    if d not in learner_buffers:
+                    if d not in self.learner_buffers:
                         # Should not happen with static buffering 0/1
                         logger.warning(f"Unknown buffer ID {d}, skipping")
                         continue
                         
-                    target_buffer = learner_buffers[d]
+                    target_buffer = self.learner_buffers[d]
                     
                     # LOAD RAM PAYLOAD
                     payload_path = os.path.join(instance_dir, "payload.npz")
                     if os.path.exists(payload_path):
                         try:
-                            payload = np.load(payload_path)
-                            target_buffer.actions[:] = payload['actions']
-                            target_buffer.rewards[:] = payload['rewards']
-                            target_buffer.episode_starts[:] = payload['episode_starts']
-                            target_buffer.values[:] = payload['values']
-                            target_buffer.log_probs[:] = payload['log_probs']
-                            target_buffer.advantages[:] = payload['advantages']
-                            target_buffer.returns[:] = payload['returns']
-                            target_buffer.hidden_states_pi[:] = payload['hidden_states_pi']
-                            target_buffer.hidden_states_vf[:] = payload['hidden_states_vf']
-                            if 'cell_states_pi' in payload and payload['cell_states_pi'].size > 0:
-                                target_buffer.cell_states_pi[:] = payload['cell_states_pi']
-                                target_buffer.cell_states_vf[:] = payload['cell_states_vf']
-                            if 'action_masks' in payload and payload['action_masks'].size > 0:
-                                target_buffer.action_masks[:] = payload['action_masks']
-                            
-                            # Load RAM-based observations (e.g., 'command')
-                            for key in payload.files:
-                                if key.startswith("obs_"):
-                                    obs_key = key[4:]
-                                    if obs_key in target_buffer.observations:
-                                        target_buffer.observations[obs_key][:] = payload[key]
+                            # Always close NpzFile: leaving it open leaks Windows handles and keeps
+                            # the archive locked, which worsens over long runs (slowdown + WinError 32).
+                            with np.load(payload_path) as payload:
+                                for key in ['actions', 'rewards', 'episode_starts', 'values', 'log_probs', 'advantages', 'returns', 'hidden_states_pi', 'hidden_states_vf']:
+                                    try:
+                                        setattr(target_buffer, key, payload[key].copy())
+                                    except Exception as e:
+                                        logger.error(f"Failed on key {key}: {getattr(target_buffer, key).flags}")
+                                        raise e
+                                        
+                                if 'cell_states_pi' in payload and payload['cell_states_pi'].size > 0:
+                                    target_buffer.cell_states_pi = payload['cell_states_pi'].copy()
+                                    target_buffer.cell_states_vf = payload['cell_states_vf'].copy()
+                                if 'action_masks' in payload and payload['action_masks'].size > 0:
+                                    try:
+                                        target_buffer.action_masks = payload['action_masks'].copy()
+                                    except Exception as e:
+                                        logger.error(f"Failed on action_masks: {target_buffer.action_masks.flags}")
+                                        raise e
+
+                                # Load RAM-based observations (e.g., 'command')
+                                for key in payload.files:
+                                    if key.startswith("obs_"):
+                                        obs_key = key[4:]
+                                        if obs_key in target_buffer.observations:
+                                            try:
+                                                if isinstance(target_buffer.observations[obs_key], np.memmap):
+                                                    if not target_buffer.observations[obs_key].flags.writeable:
+                                                        target_buffer.observations[obs_key].flags.writeable = True
+                                                    target_buffer.observations[obs_key][:] = payload[key]
+                                                else:
+                                                    target_buffer.observations[obs_key] = payload[key].copy()
+                                            except Exception as e:
+                                                logger.error(f"Failed on obs {obs_key}: {target_buffer.observations[obs_key].flags}")
+                                                raise e
                         except Exception as e:
                             logger.error(f"Failed to load buffer payload: {e}")
                             continue
@@ -608,15 +694,15 @@ class AsyncLearner:
                                 if os.path.exists(filename):
                                     subspace = dummy_env.observation_space.spaces[key]
                                     shape = (meta["buffer_size"], meta["n_envs"], *subspace.shape)
-                                    target_buffer.observations[key] = np.memmap(filename, dtype=np.float32, mode='r', shape=shape)
+                                    target_buffer.observations[key] = np.memmap(filename, dtype=np.float32, mode='r+', shape=shape)
                         elif key not in target_buffer.observations:
-                             subspace = dummy_env.observation_space.spaces[key]
-                             target_buffer.observations[key] = np.zeros((meta["buffer_size"], meta["n_envs"], *subspace.shape), dtype=np.float32)
-                    
+                            subspace = dummy_env.observation_space.spaces[key]
+                            target_buffer.observations[key] = np.zeros((meta["buffer_size"], meta["n_envs"], *subspace.shape), dtype=np.float32)
+
                     model.rollout_buffer = target_buffer
                     model.rollout_buffer.full = True
                     model.rollout_buffer.pos = meta["buffer_size"]
-
+                    
                     # Log ALL metrics passed from Collector
                     for key, val in meta.items():
                         if any(prefix in key for prefix in ["rollout/", "env/", "success"]):
@@ -626,50 +712,65 @@ class AsyncLearner:
                             if isinstance(val, (int, float, np.number)):
                                 model.logger.record(f"metrics/{key}", val)
 
-                    # 2. PERFORM PPO UPDATE
+                    # 2. PERFORM PPO UPDATE (+ timings: explains low GPU % = PCIe/Python vs kernel)
+                    t_learner_start = time.perf_counter()
                     logger.info("Learner: Starting GPU Update...")
-                    model.train()
+                    try:
+                        model.train()
+                    finally:
+                        # Always clear the ready signal after we bound this buffer, even if
+                        # train() raises — otherwise the Collector waits until buffer_consumer_timeout.
+                        try:
+                            if os.path.exists(signal_path):
+                                os.remove(signal_path)
+                        except OSError as exc:
+                            logger.warning(f"Learner: could not remove buffer signal {signal_path}: {exc}")
 
-                    # Release CUDA allocator cache after each update to prevent
-                    # PyTorch's allocator searching fragmented pools over many updates.
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    # gc.collect() intentionally omitted: Python's heap scan grows
-                    # proportionally with heap size over millions of steps, causing the
-                    # gradual FPS decline visible in TensorBoard. empty_cache() is
-                    # sufficient for CUDA fragmentation; CPython's automatic threshold-
-                    # based GC handles Python objects without manual intervention.
+                    t_after_train = time.perf_counter()
+                    # empty_cache() forces a device sync and allocator churn; it can *lower* throughput
+                    # and make GPU util look low while the CPU waits. Opt-in via env only.
+                    if os.environ.get("SC2_CUDA_EMPTY_CACHE", "").strip() in ("1", "true", "True"):
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
                     # Force logger to write to disk
                     model.logger.dump(step=total_steps_trained)
-                    
+
                     # 3. Save updated weights for Collector (Hot Swap)
+                    t_before_save = time.perf_counter()
                     tmp_save = self.latest_model_path + ".tmp"
                     model.save(tmp_save)
-                    if os.path.exists(self.latest_model_path): os.remove(self.latest_model_path)
-                    os.rename(tmp_save, self.latest_model_path)
-                    
+                    # os.replace overwrites dst; retries handle WinError 32 if collector still
+                    # has latest_learner_model.zip open after set_parameters().
+                    replace_file_retry(tmp_save, self.latest_model_path)
+                    t_after_hot = time.perf_counter()
+
                     # 4. Save Checkpoint (Permanent Storage)
-                    # We check if we crossed a checkpoint boundary
-                    # (Simplified: just save if we are "close enough" or exactly on it)
-                    # Since steps jump by buffer_size, we use integer division check
                     steps_before = total_steps_trained - num_steps
-                    if (total_steps_trained // self.save_freq) > (steps_before // self.save_freq):
+                    did_ckpt = (total_steps_trained // self.save_freq) > (steps_before // self.save_freq)
+                    if did_ckpt:
                         ckpt_path = os.path.join(self.model_dir, f"universal_{total_steps_trained}_steps.zip")
                         model.save(ckpt_path)
                         logger.info(f"Saved checkpoint: {ckpt_path}")
-                        
+
+                    t_end = time.perf_counter()
+                    logger.info(
+                        f"Learner timings: train={t_after_train - t_learner_start:.2f}s, "
+                        f"hot_swap_save={t_after_hot - t_before_save:.2f}s, "
+                        f"total={t_end - t_learner_start:.2f}s"
+                    )
+
                     # Check for completion
                     if total_steps_trained >= training_params["training_steps"]:
                         final_path = os.path.join(self.model_dir, "final_model.zip")
                         model.save(final_path)
                         logger.info(f"Training completed! Saved final model: {final_path}")
-                        # Clean up temp file
-                        if os.path.exists(self.latest_model_path): os.remove(self.latest_model_path)
-                        return # Exit learner
+                        try:
+                            remove_file_retry(self.latest_model_path)
+                        except OSError as e:
+                            logger.warning(f"Could not remove hot-swap file {self.latest_model_path}: {e}")
+                        return
 
-                    # 5. Clear signal so Collector can reuse the buffer
-                    os.remove(signal_path)
                     logger.info("Learner: Update complete. Weights broadcasted.")
                     found_buffer = True
                     break
@@ -699,7 +800,7 @@ def run_single_async_training_session(
     stale_model = os.path.join(TEMP_DIR, "latest_learner_model.zip")
     if os.path.exists(stale_model):
         try:
-            os.remove(stale_model)
+            remove_file_retry(stale_model)
         except OSError:
             logger.warning(f"Could not remove stale model: {stale_model}")
 
@@ -722,6 +823,8 @@ def run_single_async_training_session(
         logger.info("Shutdown signaled...")
         raise
     finally:
+        if 'learner' in locals() and hasattr(learner, 'close'):
+            learner.close()
         stop_event.set()
         collector.terminate()
         collector.join(timeout=collector_join_timeout)
@@ -733,6 +836,16 @@ def run_single_async_training_session(
                 pass
         from src.utils.sc2_cleanup import kill_switch_sc2
         kill_switch_sc2(force=True)
+
+        # Force Python GC and PyTorch CUDA cache clearing
+        # Prevents VRAM fragmentation/exhaustion across curriculum levels
+        if 'learner' in locals():
+            del learner
+        import gc
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def main():

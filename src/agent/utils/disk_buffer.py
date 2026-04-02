@@ -65,9 +65,34 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
                 self.observations[key] = np.memmap(filename, dtype=np.float32, mode='w+', shape=shape)
                 self.disk_files[key] = filename
 
+    def reset(self) -> None:
+        """
+        Resets the buffer while preserving the underlying np.memmap objects
+        for large observation arrays.
+        """
+        super().reset()
+        # Restore memmaps that super().reset() overwrote with np.zeros
+        if hasattr(self, 'disk_files'):
+            for key, filename in self.disk_files.items():
+                if os.path.exists(filename):
+                    subspace = self.observation_space.spaces[key]
+                    shape = (self.buffer_size, self.n_envs, *subspace.shape)
+                    self.observations[key] = np.memmap(filename, dtype=np.float32, mode='r+', shape=shape)
+
     def to_device(self, device: torch.device):
         self.device = device
         return self
+
+    def close_memmaps(self):
+        """Explicitly close memmaps to release Windows file handles and standby memory."""
+        if hasattr(self, 'observations'):
+            for key in list(self.observations.keys()):
+                obs = self.observations[key]
+                if isinstance(obs, np.memmap):
+                    try:
+                        obs._mmap.close()
+                    except Exception as e:
+                        logger.warning(f"Failed to close memmap {key}: {e}")
 
     def clear_vram_cache(self):
         """No-op for disk buffer as we don't cache in VRAM."""
@@ -226,16 +251,20 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
             mask_batch.append(m)
 
         # Convert to Tensors
-        def to_t(list_of_arr, flatten=True):
-            res = th.as_tensor(np.stack(list_of_arr)).to(self.device)
+        def _np_stack_to_device(arr_list, flatten=True):
+            res = th.as_tensor(np.stack(arr_list))
+            res = res.to(self.device, non_blocking=True)
             return res.reshape(-1, *res.shape[2:]) if flatten else res
 
+        def to_t(list_of_arr, flatten=True):
+            return _np_stack_to_device(list_of_arr, flatten=flatten)
+
         # RNN States: (n_layers, n_seq, dim)
-        h_pi = th.as_tensor(np.stack(h_pi_starts)).to(self.device).transpose(0, 1).contiguous()
-        h_vf = th.as_tensor(np.stack(h_vf_starts)).to(self.device).transpose(0, 1).contiguous()
+        h_pi = _np_stack_to_device(h_pi_starts, flatten=False).transpose(0, 1).contiguous()
+        h_vf = _np_stack_to_device(h_vf_starts, flatten=False).transpose(0, 1).contiguous()
         if self.rnn_type == "lstm":
-            c_pi = th.as_tensor(np.stack(c_pi_starts)).to(self.device).transpose(0, 1).contiguous()
-            c_vf = th.as_tensor(np.stack(c_vf_starts)).to(self.device).transpose(0, 1).contiguous()
+            c_pi = _np_stack_to_device(c_pi_starts, flatten=False).transpose(0, 1).contiguous()
+            c_vf = _np_stack_to_device(c_vf_starts, flatten=False).transpose(0, 1).contiguous()
             lstm_states = RNNStates((h_pi, c_pi), (h_vf, c_vf))
         else:
             lstm_states = RNNStates(h_pi, h_vf)
@@ -265,6 +294,7 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
         )
 
     def __del__(self):
+        self.close_memmaps()
         if hasattr(self, 'disk_files'):
             for key, filename in self.disk_files.items():
                 if os.path.exists(filename):

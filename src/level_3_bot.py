@@ -457,9 +457,6 @@ class Level3Bot(SC2Bot):
                          dist = ((unit.position.x - beacon.position.x)**2 + (unit.position.y - beacon.position.y)**2)**0.5
                 except:
                     dist = 999.0
-                
-                # [DEBUG] Trace distances
-                logger.debug(f"check_collections [Unit {u_tag} -> Beacon {b_tag}]: dist={dist:.2f}")
 
                 if dist < 2.0:
                     logger.info(f"Collection! Unit {u_tag} reached assigned Beacon {b_tag} (dist: {dist:.2f})")
@@ -478,9 +475,7 @@ class Level3Bot(SC2Bot):
                  # Map triggers often delete the beacon (or unit) immediately upon collision.
                  # If they suddenly disappeared, check if they were close in the last frame.
                  prev_dist = self.previous_distances.get(u_tag, 999.0)
-                 
-                 logger.debug(f"check_collections: Missing entity. Unit {u_tag} exists: {bool(unit)}, Beacon {b_tag} exists: {bool(beacon)}. prev_dist={prev_dist:.2f}")
-                 
+
                  if prev_dist < 4.0: # Threshold accounts for Zergling movement speed per frame
                      logger.info(f"Collection inferred (Map Trigger)! Unit {u_tag} reached assigned Beacon {b_tag} (prev_dist: {prev_dist:.2f})")
                      self.completed_tags.add(u_tag)
