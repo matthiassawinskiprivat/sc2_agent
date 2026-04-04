@@ -23,6 +23,7 @@ from src.agent.maskable_ppo import MaskablePPO
 from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
 from src.agent.models.universal_policy import UniversalActorCriticPolicy
 from src.agent.models.unit_control_network import UnitControlNetwork
+from src.utils.training_device import resolve_training_device, warmup_cuda_if_needed
 from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
 
 import shutil
@@ -34,6 +35,10 @@ import psutil
 # Example: $env:SC2_ASYNC_BUFFER_DIR = "D:/sc2_buffer"
 _DEFAULT_ASYNC_DIR = "C:/temp/sc2_async_buffer"
 TEMP_DIR = os.path.normpath(os.environ.get("SC2_ASYNC_BUFFER_DIR", _DEFAULT_ASYNC_DIR))
+# Collector loads from this path. Never read `latest_learner_model.zip` directly — the learner
+# replaces that file; simultaneous open on Windows causes Errno 13 / sharing violations.
+COLLECTOR_WEIGHTS_STAGING_ZIP = os.path.join(TEMP_DIR, "latest_learner_model_collector_staging.zip")
+
 
 def force_kill_sc2():
     """Aggressively kills any SC2 and related processes at startup."""
@@ -74,8 +79,8 @@ def _is_transient_file_lock(err: OSError) -> bool:
 
 def replace_file_retry(src: str, dst: str, *, retries: int = 50, delay_sec: float = 0.1) -> None:
     """
-    Atomic replace (os.replace). Retries on Windows sharing violations — the collector
-    may still have latest_learner_model.zip open after set_parameters().
+    Atomic replace (os.replace). Retries on Windows sharing violations (e.g. antivirus
+    or a reader still closing a handle on dst).
     """
     last: OSError | None = None
     for attempt in range(retries):
@@ -88,6 +93,61 @@ def replace_file_retry(src: str, dst: str, *, retries: int = 50, delay_sec: floa
                 if attempt == 0 or attempt % 10 == 9:
                     logger.debug(
                         f"replace_file_retry: dst busy ({dst}), attempt {attempt + 1}/{retries}"
+                    )
+                time.sleep(delay_sec)
+                continue
+            raise
+    assert last is not None
+    raise last
+
+
+def copy_file_retry(src: str, dst: str, *, retries: int = 50, delay_sec: float = 0.1) -> None:
+    """
+    Copy a file with retries on Windows sharing / antivirus locks (Errno 13, WinError 32).
+    Overwrites dst when the copy succeeds.
+    """
+    last: OSError | None = None
+    for attempt in range(retries):
+        try:
+            shutil.copyfile(src, dst)
+            return
+        except OSError as e:
+            last = e
+            if _is_transient_file_lock(e):
+                if attempt == 0 or attempt % 10 == 9:
+                    logger.debug(
+                        f"copy_file_retry: busy ({src!r} -> {dst!r}), attempt {attempt + 1}/{retries}"
+                    )
+                time.sleep(delay_sec)
+                continue
+            raise
+    assert last is not None
+    raise last
+
+
+def stage_learner_zip_for_collector(src_zip: str, staging_zip: str) -> None:
+    """
+    Atomically publish a private copy for the collector: copy to *.part then replace staging.
+    Avoids reading a zip the learner is still writing or replacing.
+    """
+    part = staging_zip + ".part"
+    copy_file_retry(src_zip, part)
+    replace_file_retry(part, staging_zip)
+
+
+def set_parameters_with_retry(model, load_path: str, device: torch.device, *, retries: int = 12, delay_sec: float = 0.12) -> None:
+    """SB3 set_parameters can still hit brief locks (AV); retry transient OS errors."""
+    last: BaseException | None = None
+    for attempt in range(retries):
+        try:
+            model.set_parameters(load_path, device=device)
+            return
+        except OSError as e:
+            last = e
+            if _is_transient_file_lock(e):
+                if attempt == 0 or attempt % 4 == 3:
+                    logger.debug(
+                        f"set_parameters_with_retry: {load_path!r} busy, attempt {attempt + 1}/{retries}"
                     )
                 time.sleep(delay_sec)
                 continue
@@ -143,6 +203,9 @@ class AsyncCollector(mp.Process):
         
         # 1. Setup Env (Simplified from _train_level)
         training_params = self.config["training"]
+        train_device = resolve_training_device(training_params)
+        warmup_cuda_if_needed(train_device)
+        logger.info(f"Collector policy device: {train_device}")
         env_params = self.config["env"]
         num_envs = training_params["num_envs"]
         
@@ -194,7 +257,8 @@ class AsyncCollector(mp.Process):
             "policy_kwargs": policy_kwargs,
             "n_steps": training_params["n_steps"],
             "batch_size": training_params["batch_size"],
-            "gamma": model_params["gamma"]
+            "gamma": model_params["gamma"],
+            "device": train_device,
         }
         if AlgoClass == MaskableRecurrentPPO:
             algo_kwargs["rnn_type"] = rnn_type
@@ -204,6 +268,7 @@ class AsyncCollector(mp.Process):
             load_kwargs = {
                 "env": vec_env,
                 "policy_kwargs": policy_kwargs,
+                "device": train_device,
             }
             if AlgoClass == MaskableRecurrentPPO:
                 load_kwargs["rnn_type"] = rnn_type
@@ -304,9 +369,11 @@ class AsyncCollector(mp.Process):
                     # Atomic check: only load if it's new
                     mtime = os.path.getmtime(updated_model_path)
                     if not hasattr(self, 'last_model_load_time') or mtime > self.last_model_load_time:
-                        # Attempt to load parameters
-                        logger.info(f"Collector found new weights (mtime={mtime}). Loading...")
-                        model.set_parameters(updated_model_path)
+                        # Stage to a private zip: opening latest_learner_model.zip while the learner
+                        # replaces it (or AV scans it) causes Permission denied on Windows.
+                        logger.info(f"Collector found new weights (mtime={mtime}). Staging copy...")
+                        stage_learner_zip_for_collector(updated_model_path, COLLECTOR_WEIGHTS_STAGING_ZIP)
+                        set_parameters_with_retry(model, COLLECTOR_WEIGHTS_STAGING_ZIP, model.device)
                         self.last_model_load_time = mtime
                         logger.info("Collector: Successfully loaded fresh weights from Learner.")
                 except Exception as e:
@@ -473,6 +540,12 @@ class AsyncLearner:
     def run(self):
         logger.info(f"Learner started for level: {self.level_name}")
         training_params = self.config["training"]
+        train_device = resolve_training_device(training_params)
+        warmup_cuda_if_needed(train_device)
+        logger.info(
+            f"Learner training device: {train_device} "
+            f"(torch.cuda.is_available()={torch.cuda.is_available()})"
+        )
         model_params = self.config.get("model", {})
         
         # 1. Setup Dummy Env for Model
@@ -501,15 +574,27 @@ class AsyncLearner:
             "learning_rate": training_params["learning_rate"],
             "ent_coef": model_params.get("ent_coef", 0.0),
             "policy_kwargs": policy_kwargs,
-            "device": "cuda" if torch.cuda.is_available() else "cpu",
+            "device": train_device,
             "tensorboard_log": self.log_dir,
-            "target_kl": 0.015 # SAFETY: Stops epoch early if policy shifts too much
+            # Default None: run full n_epochs (sync universal also omits this). Hardcoded 0.015 caused
+            # early exit on "easy" rollouts → far fewer minibatches vs hard settings. Override in YAML:
+            # model: { target_kl: 0.015 }
+            "target_kl": model_params.get("target_kl"),
         }
         if AlgoClass == MaskableRecurrentPPO:
             algo_kwargs["rnn_type"] = rnn_type
             
+        tk = algo_kwargs.get("target_kl")
+        logger.info(
+            f"Learner PPO target_kl={tk!r} (approx_kl early-stop at {1.5 * tk:.4f} per batch when set)"
+            if tk is not None
+            else "Learner PPO target_kl=None (no KL early-stop; full n_epochs each update)"
+        )
         model = AlgoClass(**algo_kwargs)
-        
+        model.learner_profile = training_params.get("learner_profile", True)
+        p0 = next(model.policy.parameters())
+        logger.info(f"Learner model.device={model.device} policy params on {p0.device}")
+
         fe = model.policy.features_extractor
         if hasattr(fe, "cnn_trunk"):
             c0 = fe.cnn_trunk[0]
@@ -526,7 +611,7 @@ class AsyncLearner:
         for _ in range(60): # Wait up to 60 seconds
             if os.path.exists(initial_path):
                 try:
-                    model.set_parameters(initial_path)
+                    model.set_parameters(initial_path, device=train_device)
 
                     import zipfile
                     with zipfile.ZipFile(initial_path, 'r') as archive:
@@ -713,6 +798,7 @@ class AsyncLearner:
                                 model.logger.record(f"metrics/{key}", val)
 
                     # 2. PERFORM PPO UPDATE (+ timings: explains low GPU % = PCIe/Python vs kernel)
+                    # Per-minibatch profiling: training.learner_profile in YAML (see parse_learner_profile_option).
                     t_learner_start = time.perf_counter()
                     logger.info("Learner: Starting GPU Update...")
                     try:

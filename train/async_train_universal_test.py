@@ -503,13 +503,20 @@ class AsyncLearner:
             "policy_kwargs": policy_kwargs,
             "device": "cuda" if torch.cuda.is_available() else "cpu",
             "tensorboard_log": self.log_dir,
-            "target_kl": 0.015 # SAFETY: Stops epoch early if policy shifts too much
+            "target_kl": model_params.get("target_kl"),
         }
         if AlgoClass == MaskableRecurrentPPO:
             algo_kwargs["rnn_type"] = rnn_type
-            
+
+        tk = algo_kwargs.get("target_kl")
+        logger.info(
+            f"Learner PPO target_kl={tk!r} (approx_kl early-stop at {1.5 * tk:.4f} per batch when set)"
+            if tk is not None
+            else "Learner PPO target_kl=None (no KL early-stop; full n_epochs each update)"
+        )
         model = AlgoClass(**algo_kwargs)
-        
+        model.learner_profile = training_params.get("learner_profile", True)
+
         fe = model.policy.features_extractor
         if hasattr(fe, "cnn_trunk"):
             c0 = fe.cnn_trunk[0]
@@ -713,6 +720,7 @@ class AsyncLearner:
                                 model.logger.record(f"metrics/{key}", val)
 
                     # 2. PERFORM PPO UPDATE (+ timings: explains low GPU % = PCIe/Python vs kernel)
+                    # Per-minibatch profiling: training.learner_profile in YAML (see parse_learner_profile_option).
                     t_learner_start = time.perf_counter()
                     logger.info("Learner: Starting GPU Update...")
                     try:

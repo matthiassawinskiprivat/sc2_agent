@@ -34,6 +34,7 @@ from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from src.utils.watchdog import Watchdog
 from src.utils.sc2_cleanup import kill_switch_sc2
+from src.utils.training_device import resolve_training_device, warmup_cuda_if_needed
 
 class UniversalPipelineManager(PipelineManager):
     def __init__(self, config_dir="config_universal", model_dir_base="models_universal", log_dir_base="logs_universal"):
@@ -129,6 +130,10 @@ class UniversalPipelineManager(PipelineManager):
         logger.info(f"Vectorized environment ready for '{level_name}'.")
 
         try:
+            train_device = resolve_training_device(training_params)
+            warmup_cuda_if_needed(train_device)
+            logger.info(f"Sync universal training device: {train_device}")
+
             # 3. Setup Model
             algo_name = model_params.get("algorithm", "MaskablePPO")
             AlgoClass = MaskableRecurrentPPO if algo_name == "MaskableRecurrentPPO" else MaskablePPO
@@ -150,14 +155,15 @@ class UniversalPipelineManager(PipelineManager):
                 "ent_coef": model_params["ent_coef"],
                 "n_epochs": model_params["n_epochs"],
                 "policy_kwargs": policy_kwargs,
-                "device": "cuda" if torch.cuda.is_available() else "cpu",
+                "device": train_device,
                 "level_name": level_name,
                 "rollout_buffer_class": DiskDictRolloutBuffer,
                 "rollout_buffer_kwargs": {"temp_dir": "C:/temp/sc2_buffer_cache"}
             }
             if AlgoClass == MaskableRecurrentPPO:
                 model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
-            
+            model_kwargs["target_kl"] = model_params.get("target_kl")
+
             if model_path_to_load:
                 logger.info(f"Loading weights from: {model_path_to_load}")
                 try:
@@ -174,6 +180,8 @@ class UniversalPipelineManager(PipelineManager):
                     model = AlgoClass(**model_kwargs)
             else:
                 model = AlgoClass(**model_kwargs)
+
+            model.learner_profile = training_params.get("learner_profile", True)
 
             # 4. Train
             total_steps_target = training_params["training_steps"]

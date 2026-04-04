@@ -1,3 +1,4 @@
+import time
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, NamedTuple, ClassVar
 from copy import deepcopy
@@ -28,6 +29,29 @@ from sb3_contrib.ppo_recurrent.ppo_recurrent import RecurrentPPO
 from sb3_contrib.common.maskable.distributions import MaskableDistribution, MaskableMultiCategoricalDistribution, MaskableBernoulliDistribution, MaskableCategoricalDistribution
 from sb3_contrib.common.recurrent.buffers import RecurrentRolloutBuffer, create_sequencers
 from sb3_contrib.common.recurrent.type_aliases import RNNStates
+
+
+def parse_learner_profile_option(value: Any) -> Tuple[bool, bool]:
+    """
+    training.learner_profile (set on the model as model.learner_profile):
+      None — default (True, False): wall-time profiling on, no phase sync
+      False / "false" / "0" / "off" / "no" — disabled
+      True / "true" / "1" / "on" / "yes" — wall times + summary
+      "phases" / "2" / "detailed" — forward vs backward (uses cuda.synchronize when CUDA)
+    Returns (enabled, phases).
+    """
+    if value is None:
+        return True, False
+    if isinstance(value, bool):
+        return (value, False) if value else (False, False)
+    raw = str(value).strip().lower()
+    if raw in ("false", "0", "off", "no"):
+        return False, False
+    if raw in ("phases", "2", "detailed"):
+        return True, True
+    if raw in ("true", "1", "on", "yes"):
+        return True, False
+    return True, False
 
 def tensor_safe_pad(
     seq_start_indices: np.ndarray,
@@ -720,12 +744,31 @@ class MaskableRecurrentPPO(RecurrentPPO):
         self.rollout_buffer.to_device(self.device)
         c_r = self.clip_range(self._current_progress_remaining)
         c_r_vf = self.clip_range_vf(self._current_progress_remaining) if self.clip_range_vf is not None else None
+
+        profile_enabled, profile_phases = parse_learner_profile_option(getattr(self, "learner_profile", None))
+        batch_times: List[float] = []
+        forward_times: List[float] = []
+        backward_times: List[float] = []
+        kl_skipped_backward = 0
+        if profile_enabled:
+            p0 = next(self.policy.parameters())
+            logger.info(
+                f"PPO train profile: active (phases={profile_phases}) "
+                f"policy_device={p0.device} batch_size={self.batch_size} n_epochs={self.n_epochs} "
+                f"rollout buffer_size={self.rollout_buffer.buffer_size} n_envs={self.rollout_buffer.n_envs}"
+            )
         
         entropy_losses, pg_losses, value_losses, approx_kls, clip_fractions, imitation_losses, loss_ls = [], [], [], [], [], [], []
         
         continue_training = True
         for epoch in range(self.n_epochs):
             for r_data in self.rollout_buffer.get(self.batch_size):
+                t_batch0 = time.perf_counter()
+                if profile_phases:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    t_fwd0 = time.perf_counter()
+
                 acts = r_data.actions.long().flatten() if isinstance(self.action_space, gym.spaces.Discrete) else r_data.actions
                 vals, log_p, entropy = self.policy.evaluate_actions(r_data.observations, acts, r_data.lstm_states, r_data.episode_starts, r_data.action_masks)
                 
@@ -766,6 +809,13 @@ class MaskableRecurrentPPO(RecurrentPPO):
 
                 if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
                     continue_training = False
+                    if profile_enabled:
+                        if profile_phases:
+                            if torch.cuda.is_available():
+                                torch.cuda.synchronize()
+                            forward_times.append(time.perf_counter() - t_fwd0)
+                        batch_times.append(time.perf_counter() - t_batch0)
+                    kl_skipped_backward += 1
                     break
 
                 # --- IMITATION LOSS ---
@@ -798,14 +848,43 @@ class MaskableRecurrentPPO(RecurrentPPO):
 
                 loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss + imitation_loss
                 loss_ls.append(loss.item())
-                
+
+                if profile_phases:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    forward_times.append(time.perf_counter() - t_fwd0)
+                    t_bwd0 = time.perf_counter()
+
                 self.policy.optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 self.policy.optimizer.step()
+
+                if profile_phases:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    backward_times.append(time.perf_counter() - t_bwd0)
+                if profile_enabled:
+                    batch_times.append(time.perf_counter() - t_batch0)
             
             if not continue_training:
                 break
+
+        if profile_enabled and batch_times:
+            bt = np.asarray(batch_times, dtype=np.float64)
+            parts = [
+                f"PPO train profile summary: minibatches={len(bt)} "
+                f"wall_s first={bt[0]:.3f} mean={bt.mean():.3f} max={bt.max():.3f} sum={bt.sum():.3f}"
+            ]
+            if profile_phases and forward_times:
+                ft = np.asarray(forward_times, dtype=np.float64)
+                parts.append(f"forward_s mean={ft.mean():.3f} max={ft.max():.3f}")
+            if profile_phases and backward_times:
+                bdt = np.asarray(backward_times, dtype=np.float64)
+                parts.append(f"backward_s mean={bdt.mean():.3f} max={bdt.max():.3f}")
+            if kl_skipped_backward:
+                parts.append(f"kl_early_stop_batches={kl_skipped_backward}")
+            logger.info(" | ".join(parts))
 
         self.rollout_buffer.clear_vram_cache()
         self._n_updates += self.n_epochs

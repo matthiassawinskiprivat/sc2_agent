@@ -1,0 +1,35 @@
+# GPU training environment (CUDA). Does NOT replace sc2_agent_repro — keep that for CPU fallback.
+#
+# Create:  conda env create -f environment_cuda.yml
+# Update:  conda env update -f environment_cuda.yml --prune
+#
+# PyTorch + CUDA libs come from conda (pytorch/nvidia). If your driver is too old for CUDA 12.1,
+# change the line below to:  - pytorch-cuda=11.8
+name: sc2_agent_cuda
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch
+  - pytorch-cuda=12.1
+  - pip:
+      # Same as requirements.yml except torch (provided by conda above)
+      - numpy<2.0
+      - opencv-python>=4.5.0
+      - matplotlib>=3.3.0
+      - PyQt5>=5.15.0
+      - burnysc2
+      - protobuf==3.20.0
+      - tensorboard>=2.7.0
+      - PyYAML>=5.4.0
+      - websockets>=10.0
+      - aiohttp>=3.7.0
+      - loguru
+      - psutil
+      - gymnasium
+      - stable-baselines3>=2.0.0
+      - sb3-contrib>=2.0.0
+      - pytest

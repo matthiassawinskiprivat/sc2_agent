@@ -459,7 +459,7 @@ class Level3Bot(SC2Bot):
                     dist = 999.0
 
                 if dist < 2.0:
-                    logger.info(f"Collection! Unit {u_tag} reached assigned Beacon {b_tag} (dist: {dist:.2f})")
+                    # logger.info(f"Collection! Unit {u_tag} reached assigned Beacon {b_tag} (dist: {dist:.2f})")
                     # Mark for deletion
                     self.completed_tags.add(u_tag)
                     self.completed_tags.add(b_tag)
