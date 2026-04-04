@@ -8,6 +8,8 @@ import numpy as np
 from loguru import logger
 from typing import Tuple, Dict, List, Any
 
+from src.sc2_bot import MapCleanupFailedError
+
 class Level7Bot(Level3Bot):
     """
     Level 7 Bot: Combat Basics (Move vs Attack).
@@ -79,6 +81,15 @@ class Level7Bot(Level3Bot):
             if not self.all_units:
                 break
             logger.warning(f"Cleanup attempt {cleanup_attempt+1} failed. Remaining: {self.all_units.amount}")
+
+        remaining_tags = [u.tag for u in self.all_units]
+        if remaining_tags:
+            n = len(remaining_tags)
+            logger.error(
+                f"Failed to clear map after cleanup loop. Remaining: {n}. "
+                "Raising MapCleanupFailedError so the env can hard-reset SC2."
+            )
+            raise MapCleanupFailedError(n)
 
         # 2. Grid Sampling for Spawns (cached — pathing grid is static during training)
         if not hasattr(self, "_cached_spawn_points") or not self._cached_spawn_points:

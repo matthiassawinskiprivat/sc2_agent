@@ -20,7 +20,7 @@ from sc2.player import Bot, Computer
 from sc2.protocol import ConnectionAlreadyClosed, ProtocolError, Protocol
 from sc2.sc2process import SC2Process
 
-from src.sc2_bot import SC2Bot
+from src.sc2_bot import SC2Bot, MapCleanupFailedError
 from src.level_0_bot import Level0Bot
 from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.config_manager import ConfigManager
@@ -226,6 +226,17 @@ class Level0Env(gym.Env):
                 
                 # Success
                 break
+            except MapCleanupFailedError as e:
+                # Expected recovery path: teardown SC2 and relaunch on next loop iteration.
+                self._log(
+                    f"Map cleanup incomplete ({e}); forcing SC2 hard reset "
+                    f"(attempt {attempt + 1}/{max_retries}, worker {self.worker_index})."
+                )
+                self.close()
+                if attempt == max_retries - 1:
+                    self._log(f"Max retries reached for level '{self.level_name}'. Raising error to main process.")
+                    raise e
+                time.sleep(2.0)
             except Exception as e:
                 import traceback
                 self._log(f"CRITICAL: Error during environment reset for level '{self.level_name}' (Worker {self.worker_index}): {e}")

@@ -6,6 +6,7 @@ training:
   learning_rate: 0.0002
   render_beacon: True
   watchdog_timeout: 3600
+  target_kl: null
 
 # Environment parameters
 env:

@@ -19,6 +19,20 @@ from sc2.unit import Unit
 from src.hierarchical_agent import HierarchicalAgentSystem
 
 
+class MapCleanupFailedError(RuntimeError):
+    """
+    Raised when debug_kill_unit could not clear all non-neutral units within
+    the retry budget. Level0Env treats this like a failed reset: close SC2 and
+    relaunch (hard reset) instead of spawning on a dirty map.
+    """
+
+    def __init__(self, remaining_count: int):
+        self.remaining_count = remaining_count
+        super().__init__(
+            f"map cleanup failed: {remaining_count} killable unit(s) still present after max attempts"
+        )
+
+
 class SC2Bot(BotAI):
     """A simple bot that wraps the HierarchicalAgentSystem."""
 
@@ -240,7 +254,12 @@ class SC2Bot(BotAI):
         
         remaining_killable = self.all_units.filter(lambda u: u.alliance != Alliance.Neutral)
         if remaining_killable:
-            logger.error(f"Failed to clear map after {max_cleanup_attempts} cleanup attempts. Remaining: {remaining_killable.amount}")
+            n = remaining_killable.amount
+            logger.error(
+                f"Failed to clear map after {max_cleanup_attempts} cleanup attempts. Remaining: {n}. "
+                "Raising MapCleanupFailedError so the env can hard-reset SC2."
+            )
+            raise MapCleanupFailedError(n)
 
     def get_active_units(self):
         """Returns active allied units. Default implementation for single-unit bots."""

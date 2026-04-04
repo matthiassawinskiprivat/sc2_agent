@@ -23,7 +23,8 @@ async def test_level_7_zergling_ratio():
     # Mock units behavior to satisfy verification loop
     bot.all_units = MagicMock()
     bot.all_units.amount = 0
-    bot.all_units.__bool__.return_value = False # For cleanup loop
+    bot.all_units.__bool__.return_value = False  # For cleanup loop
+    bot.all_units.__iter__.return_value = []  # post-cleanup must be empty for MapCleanupFailedError check
     
     bot.units = MagicMock()
     bot.units.return_value.amount = 2
@@ -47,6 +48,25 @@ async def test_level_7_zergling_ratio():
     assert allied_created == 2
     assert enemy_created == 4
 
+class _UnitsUntilKilled:
+    """Simulates one unit until debug_kill_unit runs, then empty (matches real SC2 cleanup)."""
+
+    def __init__(self, mock_unit):
+        self._mock_unit = mock_unit
+        self._alive = True
+
+    def __iter__(self):
+        if self._alive:
+            return iter([self._mock_unit])
+        return iter([])
+
+    def __bool__(self):
+        return self._alive
+
+    def clear(self):
+        self._alive = False
+
+
 @pytest.mark.asyncio
 async def test_level_7_cleanup_step():
     training_conf = {"targets": 1, "enemy_type": "MARINE"} # Expected 1 allied, 1 enemy
@@ -62,10 +82,16 @@ async def test_level_7_cleanup_step():
     mock_unit = MagicMock()
     mock_unit.tag = 101
     
-    bot.all_units = MagicMock()
-    # Initial vision step, then cleanup loop (1st true, 2nd false)
-    bot.all_units.__bool__.side_effect = [False, True, False, False, False, False]
-    bot.all_units.__iter__.return_value = [mock_unit]
+    cleanup_units = _UnitsUntilKilled(mock_unit)
+    bot.all_units = cleanup_units
+
+    real_kill = bot.client.debug_kill_unit
+
+    async def kill_then_clear(*args, **kwargs):
+        await real_kill(*args, **kwargs)
+        cleanup_units.clear()
+
+    bot.client.debug_kill_unit = kill_then_clear
     
     bot.units = MagicMock()
     bot.units.return_value.amount = 1

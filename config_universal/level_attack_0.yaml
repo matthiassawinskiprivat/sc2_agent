@@ -9,7 +9,8 @@ training:
   learning_rate: 0.0002
   render_beacon: False
   watchdog_timeout: 3600
-
+  target_kl: null
+  
 # Environment parameters
 env:
   env_class: "Level7Env"
