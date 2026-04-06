@@ -39,3 +39,15 @@ def test_sc2bot_reset_raises_map_cleanup_failed_when_units_stuck():
         assert exc_info.value.remaining_count == 2
 
     asyncio.run(run())
+
+
+def test_sc2bot_reset_strict_empty_map_false_does_not_raise():
+    async def run():
+        bot = SC2Bot(conn=MagicMock())
+        bot.client = AsyncMock()
+        bot._refresh_state = AsyncMock()
+        stuck = _StuckKillableUnits()
+        with patch.object(BotAI, "all_units", new_callable=PropertyMock, return_value=stuck):
+            await bot.reset_game_state(strict_empty_map=False)
+
+    asyncio.run(run())

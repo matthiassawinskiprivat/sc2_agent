@@ -24,11 +24,17 @@ from src.hierarchical_agent import HierarchicalAgentSystem
 from src.sc2_bot import UnitControlBot
 from src.ui.debug_ui import DebugUI
 from src.ui.ui_manager import UIManager
+from src.utils.layer_constants import LayerConstants
+
+
+def _layer_names_in_map_order(layer_dict: dict) -> list:
+    """Stable channel order for observation tensors (sorted by layer index)."""
+    return [name for name, _ in sorted(layer_dict.items(), key=lambda kv: kv[1])]
 
 # --- Configuration ---
 # Change this to "Zerg_Lower_Left" to test your training map
-MAP_NAME = "08_128x128_Full"
-# MAP_NAME = "PersephoneAIE_v4"
+# MAP_NAME = "08_128x128_Full"
+MAP_NAME = "PersephoneAIE_v4"
 BOT_RACE = Race.Terran
 OPPONENT_RACE = Race.Zerg
 DIFFICULTY = Difficulty.Easy
@@ -106,11 +112,14 @@ class SC2Visualizer:
         print("[Main] Initializing Agent System...")
 
         # 1. Init Agent System
+        # Full layer lists so the debug UI sees creep, DPS, etc. (universal default is only 5 global channels).
         training_conf = {
             'agent_architecture': 'universal',
-            'render_beacon': True, 
+            'render_beacon': True,
             'larger_units': False,
-            'action_heads': ['move_global', 'move_local']
+            'action_heads': ['move_global', 'move_local'],
+            'active_layers': _layer_names_in_map_order(LayerConstants.LAYERS),
+            'active_tactical_layers': _layer_names_in_map_order(LayerConstants.TACTICAL_LAYERS),
         }
         self.system = HierarchicalAgentSystem(map_size=(128, 128), training_conf=training_conf)
         self.agent_id = "main_agent"

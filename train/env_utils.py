@@ -10,6 +10,18 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
+
+def vec_env_obs_focus_tags(vec_env, n_envs: int) -> np.ndarray:
+    """
+    Per-env unit tag for the observation the policy is acting on (see Env.get_obs_focus_unit_tag).
+    Used to reset recurrent state when Level3/Level7 cycles to a different unit.
+    """
+    if not hasattr(vec_env, "env_method"):
+        return np.full((n_envs,), -1, dtype=np.int64)
+    tags = vec_env.env_method("get_obs_focus_unit_tag")
+    arr = np.asarray(tags, dtype=np.int64).reshape((n_envs,))
+    return arr
+
 def create_dummy_env_from_config(config: dict):
     """
     Creates a mock Gymnasium environment with only spaces defined.

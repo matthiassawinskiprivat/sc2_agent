@@ -88,9 +88,8 @@ def test_level_3_observation_guidance():
     bot.agent_system = MagicMock()
     bot.agent_system.process_observation.return_value = {"agent_0": np.zeros((1, 64, 64))}
 
-    bot.get_optimal_assignments = MagicMock(
-        return_value={u1.tag: b1.tag, u2.tag: b2.tag}
-    )
+    # Same as after reset_game_state: assignments are set once per episode, not via lazy init.
+    bot.current_assignments = {u1.tag: b1.tag, u2.tag: b2.tag}
 
     # Observation for U1
     bot.get_observation_for_unit(u1.tag)

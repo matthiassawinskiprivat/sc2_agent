@@ -327,9 +327,18 @@ class SC2BotUniversal(BotAI):
         cmd_mask = np.ones(len(action_heads), dtype=bool)
         
         # Return a single concatenated array [Cmds, Spatial]
+        # Must match MultiDiscrete nvec: [len(action_heads), 32*32] (not a fixed 2+1024).
         mask_out = np.concatenate([cmd_mask, final_spatial_mask])
-        if len(mask_out) != 1026:
-             logger.warning(f"CRITICAL SHAPE: cmd_mask={len(cmd_mask)}, spatial={final_spatial_mask.shape}, action_heads={action_heads}")
+        n_spatial_expected = 32 * 32
+        if final_spatial_mask.size != n_spatial_expected:
+            logger.warning(
+                f"CRITICAL SHAPE: spatial mask size {final_spatial_mask.size} != {n_spatial_expected}, "
+                f"cmd_heads={len(cmd_mask)}, action_heads={action_heads}"
+            )
+        if len(cmd_mask) != len(action_heads):
+            logger.warning(
+                f"CRITICAL SHAPE: cmd_mask length {len(cmd_mask)} != len(action_heads)={len(action_heads)}"
+            )
         return mask_out
 
     def _get_observation(self, active_unit: Optional[Unit] = None) -> Tuple[np.ndarray, Dict]:

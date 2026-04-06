@@ -2,6 +2,7 @@ import pytest
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, call
 from src.level_7_bot import Level7Bot
+from sc2.data import Alliance
 from sc2.ids.unit_typeid import UnitTypeId
 
 @pytest.mark.asyncio
@@ -81,7 +82,9 @@ async def test_level_7_cleanup_step():
     
     mock_unit = MagicMock()
     mock_unit.tag = 101
-    
+    mock_unit.alliance = Alliance.Self
+    mock_unit.type_id = UnitTypeId.MARINE
+
     cleanup_units = _UnitsUntilKilled(mock_unit)
     bot.all_units = cleanup_units
 

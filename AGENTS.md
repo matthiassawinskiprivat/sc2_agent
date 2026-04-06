@@ -19,6 +19,7 @@ When making changes to observations, actions, or config wiring, always consult t
 | Observation tensor construction | `src/transformers/observation_transformer.py` |
 | Base environment and obs space | `train/envs/level_0_env.py` |
 | Universal bot / action decoding | `src/sc2_bot_universal.py` |
+| Multi-unit beacon assignment (Level 3) | `src/level_3_bot.py`, `train/envs/level_3_env.py` |
 | Network architecture | `src/agent/models/unit_control_network.py` |
 | Universal curriculum | `config_universal/pipeline.yaml` |
 
@@ -52,6 +53,26 @@ ObservationTransformer     — raw SC2 state → (C, H, W) tensor stacks
 HierarchicalAgentSystem    — shared transformer + per-unit agent management
 UnitControlNetwork         — CNN feature extractor (global + tactical streams → fused features)
 ```
+
+---
+
+## Shared code, inheritance, and refactoring discipline
+
+Training environments and bots **inherit from each other** (see hierarchy above). The same methods are often **reused across levels** and **called from distant code** (vectorized env wrappers, async collectors, universal vs original policy paths, tests). A change that looks correct in one file can **silently break** another level or subsystem.
+
+**Before changing a method on a base or shared class** (`Level0Env`, `Level3Bot`, `SC2Bot`, `reset_game_state`, reward helpers, observation builders, `ConfigManager` getters, rollout collection, etc.):
+
+1. **Find every caller** — use search (e.g. ripgrep) for the method name, class name, and related hooks (`env_method`, `super()` overrides). Do not assume only one level uses it.
+2. **Reason about subclasses** — overrides may depend on base behavior; changing the base can bypass or invert intent in `Level3Env` / `Level7Env` / `Level3Bot` / `Level7Bot` without a compile error.
+3. **Run tests for all affected areas** — movement, multi-unit, combat, config accumulation, and any recurrent / vec-env tests tied to the change.
+
+**When a fix would force awkward branching or risks breaking unrelated callers, prefer isolation over mutation:**
+
+- **Override in the specific subclass** (`Level3Env` only, `Level7Bot` only) instead of widening `Level0Env` behavior.
+- **Add a new helper or small module** with a clear name instead of overloading an existing function with new parameters or hidden global state.
+- **Add a dedicated code path** (e.g. env flag, `agent_architecture` branch) rather than changing semantics for all architectures at once.
+
+Default stance: **minimize blast radius**. Shared bases are contracts for the whole curriculum; treat edits there like API changes.
 
 ---
 
@@ -248,6 +269,33 @@ model:
 | Multi-unit move | `Level3Env` | `Level3Bot` | `Unit` beacons (player_id=1) |
 | Combat | `Level7Env` | `Level7Bot` | `Unit` enemies |
 
+### Level3Env / Level3Bot — unit-to-beacon assignment (CRITICAL CONTRACT)
+
+This behavior is intentional for curriculum stability and credit assignment. **Do not “optimize” it away** by re-running global matching when beacons disappear.
+
+| Rule | Details |
+|------|---------|
+| **When assignments are created** | Exactly **once per episode**, after spawn, in `Level3Bot.reset_game_state`: `self.current_assignments = self.get_optimal_assignments()`. |
+| **Algorithm** | `get_optimal_assignments()` uses `scipy.optimize.linear_sum_assignment` (Hungarian) on unit–beacon distances. With `targets` units and `targets` beacons (verified at reset), the matching is **one-to-one**: each beacon tag appears at most once as a value in `current_assignments`. |
+| **Frozen for the episode** | **Never** call `get_optimal_assignments()` mid-episode to **re-match remaining** units and beacons. Survivors **keep** their initial beacon tag until that beacon is collected or the pairing is cleaned up. |
+| **When a beacon is collected** | `Level3Env._async_step` removes **only** the collecting unit’s entry from `current_assignments` after kill. Other units’ `unit_tag → beacon_tag` entries are **unchanged**. |
+| **Stale pairing (beacon gone, unit still in dict)** | In `Level3Bot._get_observation`, if this unit’s assigned beacon no longer exists in the game, **only** `pop` that unit’s key from `current_assignments` (and reset its distance baseline). **Do not** run Hungarian on all remaining units to assign “leftover” beacons. |
+| **Empty `current_assignments`** | Helpers such as `get_assigned_distances`, `check_collections`, and original-arch `action_masks` must **not** lazily refill via `get_optimal_assignments()` when the dict is empty mid-episode. Empty means “no pairing”; refilling would violate the frozen contract. |
+| **Surplus units (`num_units > num_beacons`)** | `get_optimal_assignments()` still assigns extra units to **closest** beacon (many-to-one). Normal Level 3 episodes assert equal counts at spawn; do not rely on surplus behavior for standard multi-beacon levels. |
+
+**Why this matters:** Re-running Hungarian after each collection changes every survivor’s designated beacon, observation `command_target`, and distance-shaping baseline. That contradicts the training assumption that each unit’s objective stays the **same beacon for the whole episode** (aside from completion/removal of that pair).
+
+**Regression coverage:** `tests/test_level_3_assignment_logic.py::test_frozen_assignments_no_rehungarian_when_peer_beacon_missing` asserts that a missing peer beacon does not trigger a global re-match and that surviving units keep their original beacon in `command_target`.
+
+### Level3Env — per-step reward attribution (and recurrent training)
+
+| Piece | Behavior |
+|-------|----------|
+| **Who acts** | `Level3Env._async_step` uses `current_tag = active_unit_tags[current_unit_index]`, applies the action only to that unit, then one `client.step()`. |
+| **Distance shaping** | `calculate_distance_reward(current_tag)` updates `previous_distances[current_tag]` only. No other unit’s baseline is touched on that env step. |
+| **Collection / success** | `check_collections` buffers `pending_success_rewards[u_tag]` per collecting unit. The env pops **`pending_success_rewards.pop(current_tag, 0.0)`** so the success bonus is attributed on the **step where that unit is the actor** (may be a later step if another unit’s physics completed a pickup first — still the correct unit tag, not the wrong actor). |
+| **RNN / GRU reset when cycling units** | One env step = one **different** unit’s egocentric observation. The shared policy must **not** carry LSTM hidden state from unit A into the forward pass for unit B. Envs expose `get_obs_focus_unit_tag()`; async collectors (`train/async_train_universal.py`) and `MaskableRecurrentPPO.collect_rollouts` OR **true episode starts** with **focal-unit change** so `episode_starts` resets the RNN whenever `obs_focus_unit_tag` changes. Level0 single-unit: stable tag → same behavior as before. |
+
 ### Important: `command_target` type differences
 
 - **Single-unit levels (Level0Bot):** `command_target` is a `Point2` object. In `ObservationTransformer._draw_command_info`, this triggers the default branch which draws `COMMAND_OBJECTIVE` with radius `r=3`.
@@ -265,6 +313,9 @@ If beacon markers appear too small for the CNN to detect (especially after Globa
 3. **Missing `high_level_command`:** Level-specific bots must include `high_level_command` in `raw_obs`. Without it, the command vector defaults to index 0 regardless of config.
 4. **`debug_show_map()` is a toggle:** Calling it twice re-enables fog of war. Guard with a flag if used in `reset_game_state`.
 5. **Observation space changes:** When a new level adds layers/heads, `Level0Env.reset()` rebuilds the observation space. The model's feature extractor input channels must match.
+6. **Level 3 assignment:** Do not add mid-episode `get_optimal_assignments()` calls (e.g. in `_get_observation` when a beacon disappears) to “rebalance” targets. See **Level3Env / Level3Bot — unit-to-beacon assignment (CRITICAL CONTRACT)** above.
+7. **Level 3 + recurrent PPO:** If you change rollout collection, keep **LSTM/GRU resets on focal-unit change** in sync with `get_obs_focus_unit_tag()`. Dropping that OR turns multi-unit cycling into cross-contaminated hidden state and breaks learning.
+8. **Inherited / shared methods:** Editing base env or bot methods without checking **all callers and subclasses** often breaks other levels. See **Shared code, inheritance, and refactoring discipline** above; when in doubt, **override locally** or **add isolated code** instead of changing shared behavior.
 
 ---
 
@@ -277,6 +328,8 @@ pytest
 Key test files:
 - `tests/test_additive_config.py` — ConfigManager accumulation correctness
 - `tests/test_level_3_universal_architecture.py` — Level3 obs/action wiring
+- `tests/test_level_3_assignment_logic.py` — Hungarian pairing, collection rules, **episode-frozen assignment** (no mid-episode global re-match)
+- `tests/test_vec_env_focus.py` — `get_obs_focus_unit_tag` / `vec_env_obs_focus_tags` for recurrent resets when cycling units
 - `tests/test_level_7_env.py` — Level7 combat env
 - `tests/test_level_7_mask_mismatch.py` — action mask shape validation
 

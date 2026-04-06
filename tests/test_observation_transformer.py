@@ -143,6 +143,45 @@ def test_command_vector_with_high_level_command():
 
 
 # ---------------------------------------------------------------------------
+# COMMAND_ASSIGNMENT radius on large playable areas
+# ---------------------------------------------------------------------------
+
+
+def test_command_assignment_radius_floored_like_128_playable():
+    """Large play areas shrink self.scale; assignment dot keeps 128×128-equivalent pixel radius."""
+    transformer = ObservationTransformer(map_size=(128, 128))
+
+    gi = MagicMock()
+    gi.map_size = MagicMock(width=256, height=256)
+    gi.playable_area = MagicMock(x=0, y=0, width=256, height=256)
+    gi.map_name = "big_map"
+    grid = np.ones((256, 256), dtype=np.uint8)
+    gi.pathing_grid = MagicMock()
+    gi.pathing_grid.data_numpy = grid
+    gi.terrain_height = MagicMock()
+    gi.terrain_height.data_numpy = (grid * 128).astype(np.uint8)
+
+    unit = create_mock_unit(UnitTypeId.MARINE, Point2((128.0, 128.0)), radius=2.5)
+
+    raw_obs = {
+        "units": [],
+        "selected_units": [unit],
+        "enemy_units": [],
+        "effects": [],
+        "game_info": gi,
+        "game_data": None,
+    }
+    result = transformer.transform(raw_obs)
+    idx_sel = LayerConstants.LAYERS[LayerConstants.COMMAND_ASSIGNMENT]
+    assign = result["map"][idx_sel]
+
+    px, py = transformer._get_pixel_coords(unit.position)
+    assert assign[py, px] > 0
+    # scale=0.5 → naive int(2.5*0.5)=1 would miss (px-2, py); floor uses ref scale 1.0 → r=2
+    assert assign[py, px - 2] > 0
+
+
+# ---------------------------------------------------------------------------
 # Output clipping (all values in [0, 1])
 # ---------------------------------------------------------------------------
 
@@ -323,6 +362,35 @@ def test_tactical_preserves_config_order():
     assert result[0].sum() > 0
     # Channel 1 should be ALLIED_UNIT_DENSITY (has signal from the zergling)
     assert result[1].sum() > 0
+
+
+def test_tactical_dps_follows_active_tactical_not_global_layers():
+    """Tactical DPS must draw when listed in active_tactical_layers even if global active_layers omits DPS."""
+    tactical = [
+        LayerConstants.TERRAIN_PATHABLE,
+        LayerConstants.ENEMY_UNIT_DENSITY,
+        LayerConstants.ENEMY_G_DPS_BASE,
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": [LayerConstants.ALLIED_UNIT_DENSITY],
+            "active_tactical_layers": tactical,
+        },
+    )
+    zerg = create_mock_unit(UnitTypeId.ZERGLING, Point2((64, 64)))
+    marine = create_mock_unit(UnitTypeId.MARINE, Point2((66, 64)))
+    raw_obs = {
+        "units": [zerg],
+        "enemy_units": [marine],
+        "effects": [],
+        "game_info": _make_game_info(128, 128, with_grids=True),
+        "game_data": None,
+        "selected_units": [zerg],
+    }
+    result = transformer.transform_tactical(raw_obs, zerg)
+    assert result.shape == (3, 32, 32)
+    assert result[2].max() > 0, "enemy_g_dps tactical channel should receive weapon heatmap"
 
 
 def test_tactical_restores_state_after_call():

@@ -27,6 +27,9 @@ from sc2.ids.ability_id import AbilityId
 from src.utils.layer_constants import LayerConstants
 from src.utils.command_constants import CommandConstants
 
+# Playable size (game units) used as reference so COMMAND_ASSIGNMENT stays as visible as on 128×128 maps.
+_ASSIGNMENT_REFERENCE_PLAYABLE = 128
+
 
 class ObservationTransformer:
     def __init__(self, map_size: tuple[int, int] = (128, 128), unit_data_file: str = None, training_conf: Dict = None):
@@ -90,8 +93,14 @@ class ObservationTransformer:
 
     def _update_active_indices(self):
         """Updates active indices based on current layer map and pruning config."""
-        if self.active_layers:
-            self.active_indices = {self.current_layer_map[ln.lower()] for ln in self.active_layers if ln.lower() in self.current_layer_map}
+        # Tactical draws must honor active_tactical_layers so DPS/vitals are not
+        # skipped when global active_layers is a smaller universal subset.
+        if self.is_tactical_mode:
+            names = self.active_tactical_layers
+        else:
+            names = self.active_layers
+        if names:
+            self.active_indices = {self.current_layer_map[ln.lower()] for ln in names if ln.lower() in self.current_layer_map}
         else:
             self.active_indices = set(range(len(self.current_layer_map)))
 
@@ -158,7 +167,8 @@ class ObservationTransformer:
             
             # Draw
             self._draw_terrain_pathing(game_info, layers)
-            
+            self._draw_terrain_creep(raw_obs, layers)
+
             # Allied
             for unit in list(allied_units) + list(allied_structures):
                 if abs(unit.position.x - active_unit.position.x) > 17 or abs(unit.position.y - active_unit.position.y) > 17:
@@ -394,7 +404,15 @@ class ObservationTransformer:
                 if "BEACON" in getattr(unit.type_id, "name", "").upper(): continue
                 px, py = self._get_pixel_coords(unit.position)
                 if px is not None:
-                    r = 0 if self.is_tactical_mode else max(1, int(unit.radius * self.scale))
+                    if self.is_tactical_mode:
+                        r = 0
+                    else:
+                        ref_scale = min(self.feature_map_width, self.feature_map_height) / float(
+                            _ASSIGNMENT_REFERENCE_PLAYABLE
+                        )
+                        r_draw = int(unit.radius * self.scale)
+                        r_ref = int(unit.radius * ref_scale)
+                        r = max(1, r_draw, r_ref)
                     self._draw_circle_vectorized(layers, idx_sel, px, py, 0, r, 1.0, True)
 
         idx_obj = self.current_layer_map.get(LayerConstants.COMMAND_OBJECTIVE)

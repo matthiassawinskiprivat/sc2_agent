@@ -1,4 +1,7 @@
+from collections import Counter
+
 from src.level_3_bot import Level3Bot
+from src.sc2_bot import MapCleanupFailedError, unit_is_subject_to_map_cleanup
 from src.sc2_bot_universal import SC2BotUniversal
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
@@ -8,7 +11,6 @@ import numpy as np
 from loguru import logger
 from typing import Tuple, Dict, List, Any
 
-from src.sc2_bot import MapCleanupFailedError
 
 class Level7Bot(Level3Bot):
     """
@@ -68,26 +70,34 @@ class Level7Bot(Level3Bot):
         await self.client.step()
         await self._refresh_state_local()
 
-        # Robust Cleanup Loop
-        for cleanup_attempt in range(3):
-            tags_to_kill = [u.tag for u in self.all_units]
+        # Robust cleanup: match SC2Bot (neutral + map props like collapsible rocks excluded).
+        max_cleanup_attempts = 8
+        steps_after_kill = 2
+        for cleanup_attempt in range(max_cleanup_attempts):
+            tags_to_kill = [u.tag for u in self.all_units if unit_is_subject_to_map_cleanup(u)]
             if not tags_to_kill:
                 break
-                
-            await self.client.debug_kill_unit(tags_to_kill)
-            await self.client.step()
-            await self._refresh_state_local()
-            
-            if not self.all_units:
-                break
-            logger.warning(f"Cleanup attempt {cleanup_attempt+1} failed. Remaining: {self.all_units.amount}")
 
-        remaining_tags = [u.tag for u in self.all_units]
-        if remaining_tags:
-            n = len(remaining_tags)
+            await self.client.debug_kill_unit(tags_to_kill)
+            for _ in range(steps_after_kill):
+                await self.client.step()
+            await self._refresh_state_local()
+
+            remaining_targets = [u for u in self.all_units if unit_is_subject_to_map_cleanup(u)]
+            if not remaining_targets:
+                break
+            logger.warning(
+                f"Cleanup attempt {cleanup_attempt+1} incomplete. "
+                f"Remaining cleanup targets: {len(remaining_targets)}."
+            )
+
+        remaining = [u for u in self.all_units if unit_is_subject_to_map_cleanup(u)]
+        if remaining:
+            n = len(remaining)
+            type_hist = Counter(getattr(u.type_id, "name", str(u.type_id)) for u in remaining)
             logger.error(
-                f"Failed to clear map after cleanup loop. Remaining: {n}. "
-                "Raising MapCleanupFailedError so the env can hard-reset SC2."
+                f"Failed to clear map after cleanup loop. Remaining cleanup targets: {n}. "
+                f"Types: {dict(type_hist)}. Raising MapCleanupFailedError so the env can hard-reset SC2."
             )
             raise MapCleanupFailedError(n)
 
@@ -138,9 +148,12 @@ class Level7Bot(Level3Bot):
             logger.warning(f"Spawning attempt {spawn_attempt+1} failed. Expected {expected_allied}/{expected_enemy}, got {actual_allied}/{actual_enemy}. Retrying cleanup.")
             
             # Cleanup and retry
-            await self.client.debug_kill_unit([u.tag for u in self.all_units])
-            await self.client.step()
-            await self._refresh_state_local()
+            retry_tags = [u.tag for u in self.all_units if unit_is_subject_to_map_cleanup(u)]
+            if retry_tags:
+                await self.client.debug_kill_unit(retry_tags)
+                for _ in range(steps_after_kill):
+                    await self.client.step()
+                await self._refresh_state_local()
             
         logger.error(f"Failed to spawn correct unit counts after {max_spawn_retries} attempts.")
 

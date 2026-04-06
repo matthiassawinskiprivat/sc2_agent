@@ -170,6 +170,7 @@ class LayerConstants:
         ENEMY_G_DPS_BASE: 6,
         ALLIED_HEALTH: 7,
         ENEMY_HEALTH: 8,
+        TERRAIN_CREEP: 9,
     }
 
     @classmethod
@@ -178,4 +179,4 @@ class LayerConstants:
 
     @classmethod
     def get_num_tactical_layers(cls) -> int:
-        return 9
+        return 10

@@ -1,4 +1,5 @@
 from train.envs.level_0_env import Level0Env, ProtoWrapper
+from train.envs.sc2_session_config import use_computer_player
 from src.level_3_bot import Level3Bot
 from sc2.player import Bot, Computer
 from sc2.data import Race, Difficulty
@@ -37,6 +38,14 @@ class Level3Env(Level0Env):
     def _log(self, message):
         # Prefix logs with Level3Env to distinguish
         super()._log(f"[Level3Env] {message}")
+
+    def get_obs_focus_unit_tag(self) -> int:
+        """Tag of the unit whose egocentric observation is returned on the next step (see Level0Env)."""
+        tags = getattr(self, "active_unit_tags", None) or []
+        idx = getattr(self, "current_unit_index", 0)
+        if not tags or idx >= len(tags):
+            return -1
+        return int(tags[idx])
 
     def action_masks(self):
         if self._bot:
@@ -94,10 +103,27 @@ class Level3Env(Level0Env):
             self._bot.distance_calculation_method = 2
             self._bot.grid_size = self.grid_size
 
+        # Match Level0Env: movement curriculum maps must NOT add a Computer opponent.
+        # A Zerg AI will spawn hatchery/larva/overlords etc.; cleanup cannot clear the map
+        # and MapCleanupFailedError will fire on every reset including fresh SC2 launches.
         self._log("Creating game...")
+        use_computer = use_computer_player(self.level_name, self.training_conf)
+
+        players = [Bot(Race.Zerg, self._bot)]
+        if use_computer:
+            difficulty_name = self.training_conf.get("env", {}).get("difficulty", "Easy")
+            try:
+                difficulty = getattr(Difficulty, difficulty_name)
+            except AttributeError:
+                difficulty = Difficulty.Easy
+            players.append(Computer(Race.Zerg, difficulty))
+            self._log(f"Starting game with Computer ({difficulty_name})")
+        else:
+            self._log("Starting game WITHOUT Computer (Movement Level)")
+
         await self._controller.create_game(
             game_map,
-            [Bot(Race.Zerg, self._bot), Computer(Race.Zerg, Difficulty.Easy)],
+            players,
             realtime=self.visualize,
         )
         await self._client.join_game(race=Race.Zerg)
@@ -221,8 +247,7 @@ class Level3Env(Level0Env):
             if current_tag in self._bot.current_assignments:
                 del self._bot.current_assignments[current_tag]
             
-            # Note: We NO LONGER delete other assignments to b_tag here.
-            # Level3Bot will dynamically re-assign those units in the next _get_observation.
+            # Remaining units keep their episode-initial Hungarian pairing (no global re-match).
             
             if current_tag in self._bot.completed_tags:
                 self._bot.completed_tags.remove(current_tag)

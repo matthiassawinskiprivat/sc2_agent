@@ -33,10 +33,22 @@ class MockMaskEnv(gym.Env):
         mask[self.valid_action] = True
         return mask
 
+    def get_obs_focus_unit_tag(self):
+        """Single synthetic agent; constant tag so recurrent collector never false-switches."""
+        return 1
+
+def _gru_recurrent_ppo(env, **kwargs):
+    """Universal curriculum uses GRU (`rnn_type: gru`); LSTM-only paths are not the target."""
+    kw = {"rnn_type": "gru", "verbose": 1}
+    kw.update(kwargs)
+    return MaskableRecurrentPPO("MlpLstmPolicy", env, **kw)
+
+
 def test_maskable_recurrent_ppo_instantiation():
     env = MockMaskEnv()
-    model = MaskableRecurrentPPO("MlpLstmPolicy", env, verbose=1)
+    model = _gru_recurrent_ppo(env)
     assert isinstance(model.policy, MaskableRecurrentActorCriticPolicy)
+    assert isinstance(model.policy.lstm_actor, torch.nn.GRU)
 
 def test_maskable_recurrent_ppo_training():
     """
@@ -45,13 +57,11 @@ def test_maskable_recurrent_ppo_training():
     """
     env = DummyVecEnv([lambda: MockMaskEnv()])
     
-    model = MaskableRecurrentPPO(
-        "MlpLstmPolicy", 
-        env, 
-        n_steps=32, 
-        batch_size=16, 
-        verbose=1,
-        policy_kwargs=dict(enable_critic_lstm=False)
+    model = _gru_recurrent_ppo(
+        env,
+        n_steps=32,
+        batch_size=16,
+        policy_kwargs=dict(enable_critic_lstm=False),
     )
     
     # Train for enough steps to trigger updates
@@ -59,17 +69,17 @@ def test_maskable_recurrent_ppo_training():
 
 def test_maskable_recurrent_ppo_predict():
     env = MockMaskEnv()
-    model = MaskableRecurrentPPO("MlpLstmPolicy", env, verbose=1)
+    model = _gru_recurrent_ppo(env)
     
     obs, _ = env.reset()
-    lstm_states = None
+    rnn_states = None
     episode_starts = np.ones((1,), dtype=bool)
     
     for _ in range(20):
         action_masks = env.action_masks()
-        action, lstm_states = model.predict(
+        action, rnn_states = model.predict(
             obs, 
-            state=lstm_states, 
+            state=rnn_states, 
             episode_start=episode_starts,
             action_masks=action_masks
         )
@@ -86,7 +96,7 @@ def test_maskable_recurrent_ppo_memory():
     We create two different sequences and check if the hidden state at the end is different.
     """
     env = MockMaskEnv()
-    model = MaskableRecurrentPPO("MlpLstmPolicy", env, verbose=0)
+    model = _gru_recurrent_ppo(env, verbose=0)
     
     obs_1 = np.ones(10, dtype=np.float32) * 0.1
     obs_2 = np.ones(10, dtype=np.float32) * 0.9
@@ -95,8 +105,7 @@ def test_maskable_recurrent_ppo_memory():
     _, state_1 = model.predict(obs_1, state=None, episode_start=np.ones(1, dtype=bool))
     _, state_2 = model.predict(obs_2, state=None, episode_start=np.ones(1, dtype=bool))
     
-    # Hidden states should be different after different observations
-    # state is ((h_pi, c_pi), (h_vf, c_vf)) or ((h_pi,), (h_vf,))
+    # Hidden states should be different after different observations (GRU: ((h_pi,), (h_vf,)))
     assert not np.allclose(state_1[0][0], state_2[0][0]), "Hidden states for different observations should be different"
     
     # Now check if state carries over
@@ -107,10 +116,10 @@ def test_maskable_recurrent_ppo_memory():
 
 def test_maskable_recurrent_ppo_gru():
     """
-    Test MaskableRecurrentPPO with GRU.
+    Explicit GRU smoke test (same stack as other tests; kept for clarity).
     """
     env = DummyVecEnv([lambda: MockMaskEnv()])
-    model = MaskableRecurrentPPO("MlpLstmPolicy", env, rnn_type="gru", verbose=1)
+    model = _gru_recurrent_ppo(env)
     
     assert model.rnn_type == "gru"
     assert isinstance(model.policy.lstm_actor, torch.nn.GRU)

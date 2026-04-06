@@ -151,7 +151,7 @@ class AsyncCollector(mp.Process):
         
         # Use existing factory to build env
         from train.train_pipeline import MaskableSubprocVecEnv, MaskableSyncVecEnv
-        from train.env_utils import EnvFactory
+        from train.env_utils import EnvFactory, vec_env_obs_focus_tags
         from train.train_pipeline import ENV_REGISTRY
         
         EnvClass = ENV_REGISTRY.get(env_params.get("env_class", "Level0Env"))
@@ -279,7 +279,9 @@ class AsyncCollector(mp.Process):
             buffers.append(buf)
 
         logger.info("Collector entering main loop...")
-        obs = vec_env.reset()
+        _reset_out = vec_env.reset()
+        obs = _reset_out[0] if isinstance(_reset_out, tuple) else _reset_out
+        self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
         
         # Track metrics manually to avoid wrapper attribute errors
         episode_rewards = np.zeros(num_envs)
@@ -319,6 +321,7 @@ class AsyncCollector(mp.Process):
             # running non-recurrent PPO.
             is_recurrent = isinstance(model, MaskableRecurrentPPO)
             for step in range(training_params["n_steps"]):
+                lstm_starts = None
                 # Get actions, values, and log_probs from model
                 # We need torch tensors for the policy.forward call
                 with torch.no_grad():
@@ -328,12 +331,17 @@ class AsyncCollector(mp.Process):
                     # first step after reset; initial value must be ones (not zeros).
                     if not hasattr(self, "last_dones"):
                         self.last_dones = np.ones(num_envs, dtype=bool)
+                    focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
                     masks = np.array(vec_env.env_method("action_masks"))
                     masks_tensor = torch.as_tensor(masks).to(model.device)
 
                     # Call forward to get EVERYTHING we need for the buffer
                     if is_recurrent:
-                        starts_tensor = torch.as_tensor(self.last_dones).to(model.device).float()
+                        lstm_starts = np.logical_or(
+                            self.last_dones,
+                            focus_tags != self._prev_obs_focus_tags,
+                        ).astype(np.float32)
+                        starts_tensor = torch.as_tensor(lstm_starts).to(model.device)
                         actions_tensor, values_tensor, log_probs_tensor, new_lstm_states = model.policy.forward(
                             obs_tensor, model._last_lstm_states, starts_tensor, action_masks=masks_tensor
                         )
@@ -379,11 +387,16 @@ class AsyncCollector(mp.Process):
                             recent_ep_lengths.pop(0)
 
                 # Add to buffer with ALL required fields
+                lstm_episode_starts = (
+                    lstm_starts
+                    if is_recurrent
+                    else self.last_dones.astype(np.float32)
+                )
                 current_buffer.add(
                     obs, 
                     actions, 
                     rewards, 
-                    self.last_dones, 
+                    lstm_episode_starts, 
                     values_tensor, 
                     log_probs_tensor, 
                     model._last_lstm_states if is_recurrent else None,
@@ -394,6 +407,7 @@ class AsyncCollector(mp.Process):
                 self.last_dones = dones
                 if is_recurrent:
                     model._last_lstm_states = new_lstm_states
+                    self._prev_obs_focus_tags = focus_tags.copy()
 
             # CRITICAL: Compute GAE (Advantages & Returns) before sending to Learner
             # We need the value of the LAST observation to bootstrap
@@ -404,8 +418,14 @@ class AsyncCollector(mp.Process):
                 
                 # We only need the value
                 if is_recurrent:
-                    starts_tensor = torch.as_tensor(dones).to(model.device).float()
+                    focus_last = vec_env_obs_focus_tags(vec_env, num_envs)
+                    lstm_starts_last = np.logical_or(
+                        dones,
+                        focus_last != self._prev_obs_focus_tags,
+                    ).astype(np.float32)
+                    starts_tensor = torch.as_tensor(lstm_starts_last).to(model.device)
                     last_values = model.policy.predict_values(obs_tensor, model._last_lstm_states.vf, starts_tensor)
+                    self._prev_obs_focus_tags = focus_last.copy()
                 else:
                     last_values = model.policy.predict_values(obs_tensor)
             

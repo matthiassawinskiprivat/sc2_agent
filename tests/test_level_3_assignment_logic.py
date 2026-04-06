@@ -1,7 +1,8 @@
 import pytest
 import numpy as np
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from src.level_3_bot import Level3Bot
+from src.sc2_bot import SC2Bot
 from sc2.ids.unit_typeid import UnitTypeId
 from scipy.optimize import linear_sum_assignment
 
@@ -159,11 +160,10 @@ async def test_bot_collection_logic():
     
     assert 1 in rewards
     assert rewards[1] == 50.0 # 100 / 2
-    assert 1 not in bot.current_assignments # Removed
-    assert 2 in bot.current_assignments # Still there
-    
-    # Verify debug_kill_unit was called with U1 and B1 tags
-    bot.client.debug_kill_unit.assert_called_with([1, 101])
+    # Assignment stays until the env step removes it after kill (check_collections buffers only).
+    assert 1 in bot.current_assignments
+    assert 2 in bot.current_assignments
+    bot.client.debug_kill_unit.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_bot_no_collection_of_unassigned_beacon():
@@ -192,4 +192,75 @@ async def test_bot_no_collection_of_unassigned_beacon():
     assert 1 in bot.current_assignments
     assert 2 in bot.current_assignments
     bot.client.debug_kill_unit.assert_not_called()
-    
+
+
+def test_frozen_assignments_no_rehungarian_when_peer_beacon_missing():
+    """Survivors keep their initial beacon; missing peer beacon must not trigger Hungarian."""
+    u1 = MockUnit(1, (0, 0))
+    u2 = MockUnit(2, (10, 0))
+    b2 = MockUnit(102, (10, 10))
+    u1.type_id = UnitTypeId.ZERGLING
+    u2.type_id = UnitTypeId.ZERGLING
+    b2.type_id = UnitTypeId.BEACON_TERRANSMALL
+
+    training_conf = {
+        "targets": 2,
+        "high_level_command": 0,
+        "active_layers": ["terrain"],
+        "active_tactical_layers": ["terrain"],
+    }
+    with patch.object(SC2Bot, "__init__", lambda self, *a, **kw: None):
+        bot = Level3Bot.__new__(Level3Bot)
+    bot.conn = MagicMock()
+    bot.training_conf = training_conf
+    bot.targets_count = 2
+    bot.allied_unit_type = UnitTypeId.ZERGLING
+    bot.beacon_type = UnitTypeId.BEACON_TERRANSMALL
+    bot.previous_distances = {}
+    bot.pending_success_rewards = {}
+    bot.completed_tags = set()
+    bot.agent_system = MagicMock()
+    bot.agent_system.process_observation.return_value = {
+        "agent_0": np.zeros((1, 128, 128), dtype=np.float32)
+    }
+    bot.current_assignments = {1: 101, 2: 102}
+    bot.beacon_type = UnitTypeId.BEACON_TERRANSMALL
+
+    def find_by_tag(tag):
+        return {1: u1, 2: u2, 102: b2}.get(tag)
+
+    mock_all = MagicMock()
+    mock_all.find_by_tag = MagicMock(side_effect=find_by_tag)
+    beacons_coll = MagicMock()
+    beacons_coll.__iter__ = MagicMock(return_value=iter([b2]))
+    beacons_coll.exists = True
+    mock_all.__call__ = MagicMock(return_value=beacons_coll)
+    bot.all_units = mock_all
+
+    allied = MagicMock()
+    allied.__iter__ = MagicMock(return_value=iter([u1, u2]))
+    bot.units = MagicMock()
+    bot.units.find_by_tag = MagicMock(side_effect=find_by_tag)
+    bot.units.filter = MagicMock(return_value=allied)
+
+    bot.state = MagicMock()
+    bot.state.effects = []
+    bot.state.creep = None
+    bot._game_info = MagicMock()
+
+    def no_hungarian():
+        raise AssertionError("get_optimal_assignments must not run mid-episode")
+
+    bot.get_optimal_assignments = no_hungarian
+
+    bot.get_observation_for_unit(2)
+    assert bot.current_assignments.get(2) == 102
+    raw = bot.agent_system.process_observation.call_args.kwargs["observation"]
+    assert raw["command_target"] == [b2]
+
+    bot.get_observation_for_unit(1)
+    assert 1 not in bot.current_assignments
+    assert bot.current_assignments.get(2) == 102
+    raw_u1 = bot.agent_system.process_observation.call_args.kwargs["observation"]
+    assert raw_u1["command_target"] == []
+

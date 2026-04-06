@@ -10,7 +10,7 @@ training:
   render_beacon: False
   watchdog_timeout: 3600
   target_kl: null
-  
+
 # Environment parameters
 env:
   env_class: "Level7Env"
@@ -19,7 +19,7 @@ env:
   targets: 4
   headless: True
   max_steps: 300
-  maps_dir: "train/maps/128x128"
+  maps_dir: "train/maps/ladder/no_trigger"
   high_level_command: "attack"
   guidance_curriculum: False
   active_layers:
@@ -56,7 +56,7 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.996
   ent_coef: 0.01
   n_epochs: 4
 

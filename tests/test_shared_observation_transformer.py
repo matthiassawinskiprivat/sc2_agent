@@ -72,11 +72,25 @@ class TestUniversalDictPath:
 class TestCaching:
     def test_cache_hit_returns_same_object(self):
         st, mock_inner = _make_shared_transformer()
-        r1 = st.transform_observation({"a": 1}, observation_id="obs_1")
-        r2 = st.transform_observation({"a": 1}, observation_id="obs_1")
+        u = MagicMock()
+        u.tag = 1
+        r1 = st.transform_observation({"a": 1}, observation_id="obs_1", active_unit=u)
+        r2 = st.transform_observation({"a": 1}, observation_id="obs_1", active_unit=u)
 
         assert r1 is r2
         assert mock_inner.transform.call_count == 1
+
+    def test_cache_miss_when_same_id_but_active_unit_changes(self):
+        st, mock_inner = _make_shared_transformer()
+        u1 = MagicMock()
+        u1.tag = 1
+        u2 = MagicMock()
+        u2.tag = 2
+        st.transform_observation({"a": 1}, observation_id="obs_1", active_unit=u1)
+        st.transform_observation({"a": 1}, observation_id="obs_1", active_unit=u2)
+
+        assert mock_inner.transform.call_count == 2
+        assert mock_inner.transform_tactical.call_count == 2
 
     def test_cache_miss_on_new_observation_id(self):
         st, mock_inner = _make_shared_transformer()

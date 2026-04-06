@@ -30,6 +30,7 @@ class SharedObservationTransformer:
         self.current_observation = None
         self.transformed_observation = None
         self.last_observation_id = None
+        self._cache_active_unit_tag = None
 
     def transform_observation(self, observation: Dict[str, Any],
                               observation_id: Any = None, player_id: int = 1,
@@ -37,12 +38,16 @@ class SharedObservationTransformer:
         """
         Transform observation if it's new, otherwise return cached result
         """
-        # Check if this is a new observation
-        if observation_id is not None and observation_id == self.last_observation_id:
-            # Multi-agent cache: if we have a cached dict, we check if the active_unit is the same.
-            # However, for UI and simple cases, just returning the cache is better.
-            if self.transformed_observation is not None:
-                return self.transformed_observation
+        active_tag = getattr(active_unit, "tag", None) if active_unit is not None else None
+
+        # Check if this is a new observation (tactical fovea must match active_unit tag)
+        if (
+            observation_id is not None
+            and observation_id == self.last_observation_id
+            and active_tag == self._cache_active_unit_tag
+            and self.transformed_observation is not None
+        ):
+            return self.transformed_observation
 
         # Transform the observation
         self.current_observation = observation
@@ -60,6 +65,7 @@ class SharedObservationTransformer:
             self.transformed_observation = global_result
             
         self.last_observation_id = observation_id
+        self._cache_active_unit_tag = active_tag
         return self.transformed_observation
 
     def get_full_layer_stack(self) -> Optional[np.ndarray]:
@@ -91,6 +97,7 @@ class SharedObservationTransformer:
         self.current_observation = None
         self.transformed_observation = None
         self.last_observation_id = None
+        self._cache_active_unit_tag = None
 
     def get_transformer_config(self) -> Dict[str, Any]:
         """Get the underlying transformer's configuration"""

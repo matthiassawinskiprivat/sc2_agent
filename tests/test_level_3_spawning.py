@@ -4,6 +4,39 @@ from unittest.mock import MagicMock, AsyncMock, call
 from src.level_3_bot import Level3Bot
 from sc2.ids.unit_typeid import UnitTypeId
 
+
+class _EmptyKillable:
+    def __bool__(self):
+        return False
+
+    @property
+    def amount(self):
+        return 0
+
+    def __iter__(self):
+        return iter([])
+
+
+def _fake_all_units(beacon_amount: int):
+    """SC2Bot cleanup uses .filter; Level3 verification uses __call__(beacon_type)."""
+
+    class _Fake:
+        def filter(self, pred):
+            return _EmptyKillable()
+
+        def __call__(self, unit_type=None):
+            coll = MagicMock()
+            if unit_type == UnitTypeId.BEACON_TERRANSMALL:
+                coll.amount = beacon_amount
+                coll.exists = beacon_amount > 0
+            else:
+                coll.amount = 0
+                coll.exists = False
+            return coll
+
+    return _Fake()
+
+
 def test_level3_spawn_logic():
     asyncio.run(_test_level3_spawn_logic_impl())
 
@@ -22,11 +55,22 @@ async def _test_level3_spawn_logic_impl():
     
     bot.game_info.map_size = (100, 100)
     bot.player_id = 1
-    
-    # Mock units
-    bot.units = MagicMock()
-    bot.units.return_value.exists = False
-    
+
+    bot.all_units = _fake_all_units(beacon_amount=2)
+
+    z1, z2 = MagicMock(), MagicMock()
+    z1.tag, z2.tag = 1, 2
+
+    def units_side_effect(unit_type):
+        coll = MagicMock()
+        if unit_type == UnitTypeId.ZERGLING:
+            coll.__iter__.return_value = [z1, z2]
+        else:
+            coll.exists = False
+        return coll
+
+    bot.units.side_effect = units_side_effect
+
     await bot.reset_game_state()
     
     assert bot.client.debug_create_unit.call_count == 4
@@ -53,14 +97,14 @@ async def _test_level3_spawn_cleanup_impl():
     bot.game_info.pathing_grid = mock_grid
     bot.game_info.map_size = (100, 100)
     bot.player_id = 1
-    
-    bot.units = MagicMock()
-    
+
+    bot.all_units = _fake_all_units(beacon_amount=1)
+
     mock_z = MagicMock()
     mock_z.tag = 100
     mock_b = MagicMock()
     mock_b.tag = 200
-    
+
     def units_side_effect(unit_type):
         mock_collection = MagicMock()
         mock_collection.exists = True
@@ -69,9 +113,9 @@ async def _test_level3_spawn_cleanup_impl():
         elif unit_type == UnitTypeId.BEACON_TERRANSMALL:
             mock_collection.__iter__.return_value = [mock_b]
         return mock_collection
-        
+
     bot.units.side_effect = units_side_effect
-    
+
     await bot.reset_game_state()
     
     assert bot.client.debug_kill_unit.called

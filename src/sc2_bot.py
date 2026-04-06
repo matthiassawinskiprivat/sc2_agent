@@ -4,26 +4,46 @@ and handles the communication with the main process.
 """
 
 import numpy as np
-from typing import Dict, Any, Optional, Tuple
+from collections import Counter
+from typing import Any, Dict, Optional, Tuple
 import multiprocessing
 import multiprocessing.connection
 import random
 from loguru import logger
 
 from sc2.bot_ai import BotAI
-from sc2.data import Race
+from sc2.data import Alliance, Race
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.ids.ability_id import AbilityId
 from sc2.position import Point2
 from sc2.unit import Unit
 from src.hierarchical_agent import HierarchicalAgentSystem
 
+# Map props / destructibles that are not Neutral but do not behave like trainable
+# units: debug_kill often does not remove them, and they are static geometry.
+MAP_CLEANUP_IGNORE_TYPE_IDS = frozenset(
+    tid
+    for tid in (
+        getattr(UnitTypeId, "COLLAPSIBLEROCKTOWER", None),
+        getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERDEBRIS", None),
+        getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERPUSHUNIT", None),
+        getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERPUSHUNITRAMPLEFT", None),
+        getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERPUSHUNITRAMPRIGHT", None),
+    )
+    if tid is not None
+)
+
+
+def unit_is_subject_to_map_cleanup(u) -> bool:
+    """True if reset should try debug_kill on this unit (shared by SC2Bot and Level7Bot)."""
+    return u.alliance != Alliance.Neutral and u.type_id not in MAP_CLEANUP_IGNORE_TYPE_IDS
+
 
 class MapCleanupFailedError(RuntimeError):
     """
     Raised when debug_kill_unit could not clear all non-neutral units within
-    the retry budget. Level0Env treats this like a failed reset: close SC2 and
-    relaunch (hard reset) instead of spawning on a dirty map.
+    the retry budget and strict_empty_map=True. Level0Env treats this like a
+    failed reset: close SC2 and relaunch (hard reset).
     """
 
     def __init__(self, remaining_count: int):
@@ -217,9 +237,14 @@ class SC2Bot(BotAI):
             # Actually send the byte-packet to the StarCraft II engine
             self.do(cmd)
 
-    async def reset_game_state(self, verify: bool = True):
+    async def reset_game_state(self, verify: bool = True, strict_empty_map: bool = True):
         """
-        Base reset logic: Guarantees vision and clears all units from the map.
+        Base reset logic: full vision and kill all non-neutral units.
+
+        Some ladder/editor maps leave non-neutral units that do not disappear in
+        time (or ignore debug_kill). Level3 multi-unit training sets
+        strict_empty_map=False so we still run cleanup but can spawn the scripted
+        scenario afterward without killing the worker.
         """
         self.previous_distance = None
         self.unit_tags_received_action.clear()
@@ -232,34 +257,44 @@ class SC2Bot(BotAI):
 
         # 2. Robust Cleanup Loop
         # We keep killing until the map is actually empty
-        max_cleanup_attempts = 5
-        from sc2.data import Alliance
+        max_cleanup_attempts = 8
+        steps_after_kill = 2
+
         for attempt in range(max_cleanup_attempts):
             # IMPORTANT: We only try to kill units that ARE killable.
             # Neutral units (minerals, etc) cannot be killed and will cause the loop to fail if we include them.
-            killable_units = self.all_units.filter(lambda u: u.alliance != Alliance.Neutral)
+            killable_units = self.all_units.filter(unit_is_subject_to_map_cleanup)
             
             if not killable_units:
                 break
                 
             logger.info(f"Cleanup attempt {attempt+1}: Killing {killable_units.amount} units.")
             await self.client.debug_kill_unit([u.tag for u in killable_units])
-            await self.client.step()
+            for _ in range(steps_after_kill):
+                await self.client.step()
             await self._refresh_state()
             
             # Re-check killable units
-            killable_units = self.all_units.filter(lambda u: u.alliance != Alliance.Neutral)
+            killable_units = self.all_units.filter(unit_is_subject_to_map_cleanup)
             if not killable_units:
                 break
         
-        remaining_killable = self.all_units.filter(lambda u: u.alliance != Alliance.Neutral)
+        remaining_killable = self.all_units.filter(unit_is_subject_to_map_cleanup)
         if remaining_killable:
             n = remaining_killable.amount
-            logger.error(
-                f"Failed to clear map after {max_cleanup_attempts} cleanup attempts. Remaining: {n}. "
-                "Raising MapCleanupFailedError so the env can hard-reset SC2."
+            type_hist = Counter(
+                getattr(u.type_id, "name", str(u.type_id)) for u in remaining_killable
             )
-            raise MapCleanupFailedError(n)
+            if strict_empty_map:
+                logger.error(
+                    f"Failed to clear map after {max_cleanup_attempts} cleanup attempts. Remaining: {n}. "
+                    f"Types: {dict(type_hist)}. Raising MapCleanupFailedError so the env can hard-reset SC2."
+                )
+                raise MapCleanupFailedError(n)
+            logger.warning(
+                f"Map cleanup incomplete ({n} non-neutral unit(s) left); continuing because "
+                f"strict_empty_map=False. Types: {dict(type_hist)}"
+            )
 
     def get_active_units(self):
         """Returns active allied units. Default implementation for single-unit bots."""
@@ -556,6 +591,34 @@ class SC2Bot(BotAI):
         return obs, reward, done, truncated, info
 
 
+def resolve_tactical_active_unit_for_debug(bot: Any) -> Tuple[Optional[Unit], Optional[int]]:
+    """
+    Pick the unit/structure that centers the tactical fovea in debug / UI mode.
+
+    Prefer the client's in-game selection (python-sc2: units/structures with
+    is_selected). Fall back to the last tag, then the first owned unit.
+    """
+    if getattr(bot, "units", None) is not None and bot.units.selected.exists:
+        u = bot.units.selected.first
+        return u, u.tag
+    if getattr(bot, "structures", None) is not None and bot.structures.selected.exists:
+        u = bot.structures.selected.first
+        return u, u.tag
+
+    tag = getattr(bot, "_active_unit_tag", None)
+    active: Optional[Unit] = None
+    if tag is not None:
+        active = bot.units.find_by_tag(tag)
+        if active is None and getattr(bot, "structures", None) is not None:
+            active = bot.structures.find_by_tag(tag)
+
+    if active is None and getattr(bot, "units", None) is not None and bot.units.exists:
+        active = bot.units.first
+        tag = active.tag
+
+    return active, tag
+
+
 class UnitControlBot(BotAI):
     """
     Standalone bot implementation for visualizer and demo modes.
@@ -596,21 +659,21 @@ class UnitControlBot(BotAI):
             'creep': self.state.creep,
             'command_target': beacon # Set to beacon so it shows on COMMAND_OBJECTIVE
         }
-        
-        # 2. Process with Hierarchical System
-        # This also updates the agent's internal state for UI visualization
-        
-        # FIX: Ensure a stable unit selection for the tactical view
+
+        # 2. Tactical fovea + COMMAND_ASSIGNMENT follow client selection when possible
         if not hasattr(self, "_active_unit_tag"):
             self._active_unit_tag = None
 
-        active_unit = None
-        if self._active_unit_tag:
-            active_unit = self.units.find_by_tag(self._active_unit_tag)
-        
-        if not active_unit and self.units.exists:
-            active_unit = self.units.first
-            self._active_unit_tag = active_unit.tag
+        active_unit, self._active_unit_tag = resolve_tactical_active_unit_for_debug(self)
+
+        selected_units = []
+        if self.units.selected.exists:
+            selected_units.extend(list(self.units.selected))
+        if self.structures.selected.exists:
+            selected_units.extend(list(self.structures.selected))
+        if not selected_units and active_unit is not None:
+            selected_units = [active_unit]
+        raw_obs['selected_units'] = selected_units
 
         results = self.agent_system.process_observation(raw_obs, player_id=1, active_unit=active_unit)
         

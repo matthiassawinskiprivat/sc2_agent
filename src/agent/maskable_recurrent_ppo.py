@@ -31,6 +31,73 @@ from sb3_contrib.common.recurrent.buffers import RecurrentRolloutBuffer, create_
 from sb3_contrib.common.recurrent.type_aliases import RNNStates
 
 
+def _observation_dict_channel_shapes(space: gym.spaces.Space) -> Optional[Dict[str, Tuple[int, ...]]]:
+    """For Dict spaces, return {key: shape tuple} for tensor-like subspaces; else None."""
+    if not isinstance(space, gym.spaces.Dict):
+        return None
+    out: Dict[str, Tuple[int, ...]] = {}
+    for key, sub in space.spaces.items():
+        sh = getattr(sub, "shape", None)
+        if sh is not None:
+            out[key] = tuple(int(x) for x in sh)
+    return out
+
+
+def _multi_discrete_nvec_tuple(space: gym.spaces.Space) -> Optional[Tuple[int, ...]]:
+    if isinstance(space, gym.spaces.MultiDiscrete):
+        return tuple(int(x) for x in space.nvec)
+    return None
+
+
+def checkpoint_obs_action_mismatch_env(checkpoint_path: str, env: GymEnv) -> bool:
+    """
+    True when the zip was saved with different observation/action shapes than ``env``.
+    In that case SB3's default load can leave a policy whose weights do not match
+    rollout tensors (e.g. move-only checkpoint -> attack level with extra layers/heads).
+    """
+    try:
+        from stable_baselines3.common.save_util import load_from_zip_file
+
+        data, _, _ = load_from_zip_file(checkpoint_path, device="cpu")
+    except Exception as e:
+        logger.debug(f"Could not peek checkpoint spaces ({checkpoint_path}): {e}")
+        return False
+
+    saved_obs = data.get("observation_space")
+    if saved_obs is None:
+        return False
+
+    cur_obs = env.observation_space
+    saved_shapes = _observation_dict_channel_shapes(saved_obs)
+    cur_shapes = _observation_dict_channel_shapes(cur_obs)
+    if saved_shapes is not None and cur_shapes is not None:
+        if saved_shapes != cur_shapes:
+            logger.info(
+                "Curriculum transfer: observation shapes differ "
+                f"(checkpoint {saved_shapes} vs env {cur_shapes}); "
+                "rebuilding policy with surgical weight copy."
+            )
+            return True
+    elif type(saved_obs) is not type(cur_obs):
+        logger.info(
+            f"Curriculum transfer: observation_space types differ ({type(saved_obs)} vs {type(cur_obs)})."
+        )
+        return True
+
+    saved_act = data.get("action_space")
+    if saved_act is not None:
+        s_nvec = _multi_discrete_nvec_tuple(saved_act)
+        c_nvec = _multi_discrete_nvec_tuple(env.action_space)
+        if s_nvec is not None and c_nvec is not None and s_nvec != c_nvec:
+            logger.info(
+                "Curriculum transfer: MultiDiscrete head counts differ "
+                f"(checkpoint {s_nvec} vs env {c_nvec}); rebuilding policy with surgical weight copy."
+            )
+            return True
+
+    return False
+
+
 def parse_learner_profile_option(value: Any) -> Tuple[bool, bool]:
     """
     training.learner_profile (set on the model as model.learner_profile):
@@ -710,17 +777,27 @@ class MaskableRecurrentPPO(RecurrentPPO):
         if self.clip_range_vf: self.clip_range_vf = get_schedule_fn(self.clip_range_vf)
 
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
+        from train.env_utils import vec_env_obs_focus_tags
+
         assert self._last_obs is not None
         self.policy.set_training_mode(False)
         n_steps = 0
         rollout_buffer.reset()
         callback.on_rollout_start()
         lstm_states = deepcopy(self._last_lstm_states)
+        n_envs = env.num_envs
+        if not hasattr(self, "_prev_obs_focus_tags"):
+            self._prev_obs_focus_tags = vec_env_obs_focus_tags(env, n_envs)
         with torch.no_grad():
             while n_steps < n_rollout_steps:
                 m = get_action_masks(env) if is_masking_supported(env) else None
                 obs_t = self.policy.obs_to_tensor(self._last_obs)[0]
-                starts_t = torch.as_tensor(self._last_episode_starts).float().to(self.device)
+                focus_tags = vec_env_obs_focus_tags(env, n_envs)
+                lstm_starts_np = np.logical_or(
+                    self._last_episode_starts,
+                    focus_tags != self._prev_obs_focus_tags,
+                ).astype(np.float32)
+                starts_t = torch.as_tensor(lstm_starts_np).float().to(self.device)
                 m_t = torch.as_tensor(m).to(self.device) if m is not None else None
                 acts, vals, log_ps, lstm_states = self.policy.forward(obs_t, lstm_states, starts_t, action_masks=m_t)
                 res_acts = acts.cpu().numpy()
@@ -730,10 +807,20 @@ class MaskableRecurrentPPO(RecurrentPPO):
                 self._update_info_buffer(infos)
                 n_steps += 1
                 rollout_buffer.add(self._last_obs, acts.cpu().numpy() if not isinstance(self.action_space, gym.spaces.Discrete) else acts.cpu().numpy().reshape(-1, 1),
-                                   rewards, self._last_episode_starts, vals, log_ps, self._last_lstm_states, m)
+                                   rewards, lstm_starts_np, vals, log_ps, self._last_lstm_states, m)
                 self._last_obs, self._last_episode_starts, self._last_lstm_states = new_obs, dones, lstm_states
+                self._prev_obs_focus_tags = focus_tags.copy()
         with torch.no_grad():
-            vals = self.policy.predict_values(self.policy.obs_to_tensor(new_obs)[0], lstm_states.vf, torch.tensor(dones, dtype=torch.float32, device=self.device))
+            focus_last = vec_env_obs_focus_tags(env, n_envs)
+            lstm_starts_last = np.logical_or(
+                dones,
+                focus_last != self._prev_obs_focus_tags,
+            ).astype(np.float32)
+            starts_last = torch.as_tensor(lstm_starts_last).float().to(self.device)
+            vals = self.policy.predict_values(
+                self.policy.obs_to_tensor(new_obs)[0], lstm_states.vf, starts_last
+            )
+            self._prev_obs_focus_tags = focus_last.copy()
         rollout_buffer.compute_returns_and_advantage(vals, dones)
         callback.on_rollout_end()
         return True
@@ -914,106 +1001,194 @@ class MaskableRecurrentPPO(RecurrentPPO):
         return self.policy.predict(observation, state, episode_start, deterministic, action_masks=action_masks)
 
     @classmethod
+    def _surgical_reconstruct_policy(
+        cls,
+        path: str,
+        env: Optional[GymEnv],
+        device: Union[str, torch.device],
+        custom_objects: Dict[str, Any],
+        tb_log: Optional[str],
+        **kwargs: Any,
+    ):
+        """
+        Build a new model for ``env`` and copy weights from ``path`` with in-place
+        expansion of extra CNN input channels and extra command-head outputs.
+        """
+        from stable_baselines3.common.save_util import load_from_zip_file
+        from stable_baselines3.common.logger import configure
+
+        data, params, _ = load_from_zip_file(path, device, custom_objects)
+        data["policy_class"] = custom_objects["policy_class"]
+
+        if "policy_kwargs" not in data:
+            data["policy_kwargs"] = {}
+        data["policy_kwargs"].update(custom_objects.get("policy_kwargs", {}))
+
+        if tb_log is not None:
+            data["tensorboard_log"] = tb_log
+
+        rnn_type = custom_objects.get("rnn_type") or data.get("rnn_type", "lstm")
+        data["rnn_type"] = rnn_type
+        data["policy_kwargs"]["rnn_type"] = rnn_type
+
+        model = cls(
+            policy=data["policy_class"],
+            env=env,
+            device=device,
+            _init_setup_model=False,
+            rnn_type=rnn_type,
+            **kwargs,
+        )
+
+        if isinstance(model.observation_space, gym.spaces.Dict):
+            from src.agent.models.unit_control_network import UnitControlNetwork
+
+            data.get("policy_kwargs", {})["features_extractor_class"] = UnitControlNetwork
+
+        # Checkpoint ``data`` includes observation_space / action_space from training time.
+        # For curriculum transfer those are *smaller* than the current ``env``; if we merge
+        # them here, ``_setup_model()`` builds CNNs for the old channel counts and surgical
+        # weight copy becomes same-shape (no expansion). Always keep spaces from ``env``.
+        if env is not None:
+            env_obs_space = env.observation_space
+            env_act_space = env.action_space
+            data.pop("observation_space", None)
+            data.pop("action_space", None)
+        else:
+            env_obs_space = None
+            env_act_space = None
+
+        model.__dict__.update(data)
+
+        if env_obs_space is not None:
+            model.observation_space = env_obs_space
+            model.action_space = env_act_space
+
+        if tb_log is not None:
+            new_logger = configure(tb_log, ["stdout", "tensorboard"])
+            model.set_logger(new_logger)
+
+        model._setup_model()
+        p_sd, c_sd = params.get("policy", {}), model.policy.state_dict()
+        new_sd = {}
+        for k, v in p_sd.items():
+            keys = [k]
+            _has_fe_cnn = (
+                "features_extractor.cnn.0.weight" in c_sd
+                or "features_extractor.cnn_trunk.0.weight" in c_sd
+            )
+            _has_pi_cnn = (
+                "pi_features_extractor.cnn.0.weight" in c_sd
+                or "pi_features_extractor.cnn_trunk.0.weight" in c_sd
+            )
+            if k.startswith("pi_features_extractor.") and _has_fe_cnn:
+                keys = [k.replace("pi_features_extractor.", "features_extractor.")]
+            elif k.startswith("features_extractor.") and _has_pi_cnn:
+                keys = [
+                    k.replace("features_extractor.", "pi_features_extractor."),
+                    k.replace("features_extractor.", "vf_features_extractor."),
+                ]
+            for tk in keys:
+                if tk not in c_sd:
+                    continue
+                if v.shape == c_sd[tk].shape:
+                    new_sd[tk] = v
+                elif (
+                    len(v.shape) == 4
+                    and v.shape[1] < c_sd[tk].shape[1]
+                    and v.shape[0] == c_sd[tk].shape[0]
+                    and v.shape[2:] == c_sd[tk].shape[2:]
+                ):
+                    logger.info(f"Expanding CNN channels for {tk}")
+                    exp = c_sd[tk].clone()
+                    exp[:, : v.shape[1], :, :] = v
+                    new_sd[tk] = exp
+                elif (
+                    len(v.shape) == 2
+                    and v.shape[1] < c_sd[tk].shape[1]
+                    and v.shape[0] == c_sd[tk].shape[0]
+                    and "linear" in tk
+                ):
+                    logger.info(
+                        f"Expanding Linear input features for {tk}: {v.shape[1]} -> {c_sd[tk].shape[1]}"
+                    )
+                    exp = c_sd[tk].clone()
+                    exp[:, : v.shape[1]] = v
+                    new_sd[tk] = exp
+                elif "command_head.bias" in tk and len(v.shape) == 1 and len(c_sd[tk].shape) == 1:
+                    if v.shape[0] <= c_sd[tk].shape[0]:
+                        exp = c_sd[tk].clone()
+                        exp[: v.shape[0]] = v
+                        new_sd[tk] = exp
+                        logger.info(
+                            f"Expanded command_head.bias {v.shape[0]} -> {c_sd[tk].shape[0]}"
+                        )
+                elif ("action_net" in tk or tk == "command_head.weight") and len(v.shape) == 2:
+                    if v.shape[1] == c_sd[tk].shape[1]:
+                        logger.info(
+                            f"Partial command / action head load for {tk}: "
+                            f"outputs {v.shape[0]} -> {c_sd[tk].shape[0]}"
+                        )
+                        exp = c_sd[tk].clone()
+                        mi = min(v.shape[0], c_sd[tk].shape[0])
+                        exp[:mi, :] = v[:mi, :]
+                        new_sd[tk] = exp
+                    else:
+                        logger.error(
+                            f"Cannot surgically load {tk}: in_features mismatch "
+                            f"{v.shape[1]} vs {c_sd[tk].shape[1]}"
+                        )
+        model.policy.load_state_dict(new_sd, strict=False)
+        model._setup_lr_schedule()
+        model.policy.optimizer = model.policy.optimizer_class(
+            model.policy.parameters(), lr=model.learning_rate, **model.policy.optimizer_kwargs
+        )
+        return model
+
+    @classmethod
     def load(cls, path, env=None, device="auto", custom_objects=None, **kwargs):
-        if custom_objects is None: custom_objects = {}
+        if custom_objects is None:
+            custom_objects = {}
         from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
+
         custom_objects.setdefault("policy_class", UniversalRecurrentPolicy)
-        
-        # Pop architecture info from kwargs to avoid conflicts with explicit arguments later
+
         pk_override = kwargs.pop("policy_kwargs", {})
         if pk_override:
-            if "policy_kwargs" not in custom_objects: custom_objects["policy_kwargs"] = {}
+            if "policy_kwargs" not in custom_objects:
+                custom_objects["policy_kwargs"] = {}
             custom_objects["policy_kwargs"].update(pk_override)
-        
+
         custom_objects.setdefault("policy_kwargs", {}).setdefault("lstm_hidden_size", 512)
-        
+
         rnn_override = kwargs.pop("rnn_type", None)
         if rnn_override:
             custom_objects["rnn_type"] = rnn_override
-            if "policy_kwargs" not in custom_objects: custom_objects["policy_kwargs"] = {}
+            if "policy_kwargs" not in custom_objects:
+                custom_objects["policy_kwargs"] = {}
             custom_objects["policy_kwargs"]["rnn_type"] = rnn_override
-            
+
         custom_objects["optimizer"] = None
         tb_log = kwargs.pop("tensorboard_log", None)
-        
-        try: 
-            # Try normal load first
+
+        force_surgical = env is not None and checkpoint_obs_action_mismatch_env(path, env)
+
+        if force_surgical:
+            return cls._surgical_reconstruct_policy(
+                path, env, device, custom_objects, tb_log, **kwargs
+            )
+
+        try:
             model = super().load(path, env, device, custom_objects, **kwargs)
             if tb_log is not None:
                 model.tensorboard_log = tb_log
                 from stable_baselines3.common.logger import configure
+
                 new_logger = configure(tb_log, ["stdout", "tensorboard"])
                 model.set_logger(new_logger)
             return model
         except Exception as e:
             logger.warning(f"Surgical reconstruction required: {e}")
-            from stable_baselines3.common.save_util import load_from_zip_file
-            data, params, _ = load_from_zip_file(path, device, custom_objects)
-            data["policy_class"] = custom_objects["policy_class"]
-            
-            # Ensure policy_kwargs in data is updated with our overrides
-            if "policy_kwargs" not in data: data["policy_kwargs"] = {}
-            data["policy_kwargs"].update(custom_objects.get("policy_kwargs", {}))
-            
-            if tb_log is not None:
-                data["tensorboard_log"] = tb_log
-
-            # Reconstruct with the best available information
-            rnn_type = custom_objects.get("rnn_type") or data.get("rnn_type", "lstm")
-            
-            # Ensure rnn_type is also in data for model persistence
-            data["rnn_type"] = rnn_type
-            data["policy_kwargs"]["rnn_type"] = rnn_type
-
-            # Create model instance - kwargs no longer contains rnn_type or policy_kwargs
-            model = cls(policy=data["policy_class"], env=env, device=device, _init_setup_model=False, rnn_type=rnn_type, **kwargs)
-            
-            if isinstance(model.observation_space, gym.spaces.Dict):
-                from src.agent.models.unit_control_network import UnitControlNetwork
-                data.get("policy_kwargs", {})["features_extractor_class"] = UnitControlNetwork
-            
-            model.__dict__.update(data)
-            
-            if tb_log is not None:
-                from stable_baselines3.common.logger import configure
-                new_logger = configure(tb_log, ["stdout", "tensorboard"])
-                model.set_logger(new_logger)
-
-            model._setup_model()
-            p_sd, c_sd = params.get("policy", {}), model.policy.state_dict()
-            new_sd = {}
-            for k, v in p_sd.items():
-                keys = [k]
-                _has_fe_cnn = (
-                    "features_extractor.cnn.0.weight" in c_sd
-                    or "features_extractor.cnn_trunk.0.weight" in c_sd
-                )
-                _has_pi_cnn = (
-                    "pi_features_extractor.cnn.0.weight" in c_sd
-                    or "pi_features_extractor.cnn_trunk.0.weight" in c_sd
-                )
-                if k.startswith("pi_features_extractor.") and _has_fe_cnn:
-                    keys = [k.replace("pi_features_extractor.", "features_extractor.")]
-                elif k.startswith("features_extractor.") and _has_pi_cnn:
-                    keys = [k.replace("features_extractor.", "pi_features_extractor."), k.replace("features_extractor.", "vf_features_extractor.")]
-                for tk in keys:
-                    if tk in c_sd:
-                        if v.shape == c_sd[tk].shape: new_sd[tk] = v
-                        elif len(v.shape) == 4 and v.shape[1] < c_sd[tk].shape[1] and v.shape[0] == c_sd[tk].shape[0] and v.shape[2:] == c_sd[tk].shape[2:]:
-                            logger.info(f"Expanding CNN channels for {tk}"); exp = c_sd[tk].clone(); exp[:, :v.shape[1], :, :] = v; new_sd[tk] = exp
-                        elif len(v.shape) == 2 and v.shape[1] < c_sd[tk].shape[1] and v.shape[0] == c_sd[tk].shape[0] and "linear" in tk:
-                            logger.info(f"Expanding Linear input features for {tk}: {v.shape[1]} -> {c_sd[tk].shape[1]}")
-                            exp = c_sd[tk].clone(); exp[:, :v.shape[1]] = v; new_sd[tk] = exp
-                        elif "action_net" in tk or "command_head" in tk:
-                            if v.shape[1] == c_sd[tk].shape[1]:
-                                logger.warning(f"Partial action head load for {tk}")
-                                exp = c_sd[tk].clone()
-                                mi = min(v.shape[0], c_sd[tk].shape[0])
-                                exp[:mi, :] = v[:mi, :]
-                                new_sd[tk] = exp
-                            else:
-                                logger.error(f"Cannot surgically load {tk} due to hidden size mismatch: {v.shape[1]} vs {c_sd[tk].shape[1]}")
-            model.policy.load_state_dict(new_sd, strict=False)
-            model._setup_lr_schedule()
-            model.policy.optimizer = model.policy.optimizer_class(model.policy.parameters(), lr=model.learning_rate, **model.policy.optimizer_kwargs)
-            return model
+            return cls._surgical_reconstruct_policy(
+                path, env, device, custom_objects, tb_log, **kwargs
+            )

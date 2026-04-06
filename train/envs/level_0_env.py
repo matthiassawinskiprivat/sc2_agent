@@ -26,6 +26,7 @@ from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.config_manager import ConfigManager
 from src.utils.layer_constants import LayerConstants
 from src.utils.proto_utils import ProtoWrapper
+from train.envs.sc2_session_config import use_computer_player
 
 HARD_RESET_COUNT = 100
 
@@ -328,14 +329,7 @@ class Level0Env(gym.Env):
             self._bot.grid_size = self.grid_size
 
         self._log("Creating game...")
-        
-        # Determine if we need a second player (Computer)
-        # Movement-based levels should NOT have a computer because it might kill our units/beacons
-        movement_levels = ["level_0", "level_1", "level_2", "level_3", "level_move_"]
-        is_movement_level = any(self.level_name.startswith(p) for p in movement_levels)
-        
-        # Priority: training_conf['env']['use_computer'] > is_movement_level
-        use_computer = self.training_conf.get("env", {}).get("use_computer", not is_movement_level)
+        use_computer = use_computer_player(self.level_name, self.training_conf)
         
         players = [Bot(Race.Zerg, self._bot)]
         if use_computer:
@@ -502,6 +496,16 @@ class Level0Env(gym.Env):
         if not map_path.exists():
             raise FileNotFoundError(f"Map not found: {map_path}")
         return Map(map_path)
+
+    def get_obs_focus_unit_tag(self) -> int:
+        """
+        Unit tag for the observation the policy is about to see (single-unit levels: the zergling).
+        Used by async/sync recurrent collectors to reset RNN state when the focal unit changes
+        (critical for Level3/Level7 cycling). Return -1 if unknown.
+        """
+        if self._bot and getattr(self._bot, "zergling", None):
+            return int(self._bot.zergling.tag)
+        return -1
 
     def action_masks(self):
         mask = None
