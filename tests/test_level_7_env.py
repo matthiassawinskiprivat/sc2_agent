@@ -1,7 +1,10 @@
 import pytest
+import os
+import yaml
 from train.envs.level_7_env import Level7Env
 from src.level_7_bot import Level7Bot
 from unittest.mock import patch, MagicMock, AsyncMock
+from sc2.ids.unit_typeid import UnitTypeId
 import numpy as np
 
 def test_level_7_env_action_space_is_doubled():
@@ -64,3 +67,36 @@ def test_level_7_bot_reward_logic():
     reward = bot.calculate_combat_reward()
     assert reward == 10.0
     assert 1 not in bot.previous_health
+
+
+def test_level7_resolve_enemies_per_target_zergling_default():
+    assert Level7Bot._resolve_enemies_per_target({}, UnitTypeId.ZERGLING) == 2
+
+
+def test_level7_resolve_enemies_per_target_non_zergling_default():
+    assert Level7Bot._resolve_enemies_per_target({}, UnitTypeId.ROACH) == 1
+
+
+def test_level7_resolve_enemies_per_target_override_top_level():
+    conf = {"enemies_per_target": 1}
+    assert Level7Bot._resolve_enemies_per_target(conf, UnitTypeId.ZERGLING) == 1
+
+
+def test_level7_resolve_enemies_per_target_override_nested_env():
+    conf = {"env": {"enemies_per_target": 3}}
+    assert Level7Bot._resolve_enemies_per_target(conf, UnitTypeId.ROACH) == 3
+
+
+def test_level7_resolve_enemies_per_target_clamped_to_at_least_one():
+    conf = {"enemies_per_target": 0}
+    assert Level7Bot._resolve_enemies_per_target(conf, UnitTypeId.ZERGLING) == 1
+
+
+def test_attack_level_configs_include_micro_bonus():
+    cfg_dir = os.path.join("d:/sc2_unit_agent", "config_universal")
+    for level in ("level_attack_1.yaml", "level_attack_2.yaml", "level_attack_3.yaml"):
+        path = os.path.join(cfg_dir, level)
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        rewards = data.get("env", {}).get("rewards", {})
+        assert rewards.get("micro_bonus") == 2.0

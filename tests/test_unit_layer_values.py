@@ -165,7 +165,7 @@ class TestUnitLayerValues(unittest.TestCase):
         u.shield_max = 0
         u.shield = 0
         layers = self.run_transform(u)
-
+        
         # Expected value is log1p(10/45)
         expected = np.log1p(10.0 / 45.0)
         actual = self.get_val(layers, "allied_health")

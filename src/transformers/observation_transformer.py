@@ -299,6 +299,11 @@ class ObservationTransformer:
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
         layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
         layers[0:dps_start] = np.log1p(layers[0:dps_start])
+        # Health channels are binary damaged indicators; keep them in {0, 1}.
+        allied_hp_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_HEALTH]
+        enemy_hp_idx = LayerConstants.LAYERS[LayerConstants.ENEMY_HEALTH]
+        layers[allied_hp_idx] = (layers[allied_hp_idx] > 0.0).astype(np.float32)
+        layers[enemy_hp_idx] = (layers[enemy_hp_idx] > 0.0).astype(np.float32)
         layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
 
         if self.active_layers:
@@ -543,7 +548,12 @@ class ObservationTransformer:
         idx_hp = self.current_layer_map.get(f"{prefix}_health")
         if idx_hp is not None:
             max_hp = (unit.health_max + unit.shield_max) or 1
-            self._draw_circle_vectorized(layers, idx_hp, px, py, 0, 0, (unit.health+unit.shield)/max_hp, True)
+            hp_ratio = (unit.health + unit.shield) / max_hp
+            # Binary "damaged" signal:
+            # - 0.0 when unit is effectively full health (>=95%)
+            # - 1.0 when unit dropped below 95%
+            hp_signal = 1.0 if hp_ratio < 0.95 else 0.0
+            self._draw_circle_vectorized(layers, idx_hp, px, py, 0, 0, hp_signal, True)
         idx_nrg = self.current_layer_map.get(f"{prefix}_energy")
         if idx_nrg is not None and unit.energy_max > 0:
             self._draw_circle_vectorized(layers, idx_nrg, px, py, 0, 0, unit.energy/unit.energy_max, True)

@@ -236,6 +236,8 @@ def test_command_objective_point2_target():
     map_data = result["map"]
     idx = LayerConstants.LAYERS[LayerConstants.COMMAND_OBJECTIVE]
     assert map_data[idx].sum() > 0
+    # Radius-3 disk should activate a visible local area, not just a single pixel.
+    assert np.count_nonzero(map_data[idx]) >= 20
 
 
 def test_command_objective_beacon_unit_target():
@@ -258,6 +260,50 @@ def test_command_objective_beacon_unit_target():
     assert map_data[idx].max() == pytest.approx(1.0, abs=0.01)
     # Signal should be larger than a single pixel (radius >= 3)
     assert np.count_nonzero(map_data[idx]) > 1
+
+
+def test_health_layer_is_zero_for_full_health_unit():
+    transformer = ObservationTransformer(map_size=(64, 64))
+    unit = create_mock_unit(
+        UnitTypeId.MARINE,
+        Point2((32, 32)),
+        health=100,
+        health_max=100,
+        shield=0,
+        shield_max=0,
+    )
+    raw_obs = {
+        "units": [unit],
+        "enemy_units": [],
+        "effects": [],
+        "game_info": _make_game_info(64, 64),
+        "game_data": None,
+    }
+    result = transformer.transform(raw_obs)
+    idx = LayerConstants.LAYERS[LayerConstants.ALLIED_HEALTH]
+    assert result["map"][idx].max() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_health_layer_is_one_below_95_percent_hp():
+    transformer = ObservationTransformer(map_size=(64, 64))
+    unit = create_mock_unit(
+        UnitTypeId.MARINE,
+        Point2((32, 32)),
+        health=94,
+        health_max=100,
+        shield=0,
+        shield_max=0,
+    )
+    raw_obs = {
+        "units": [unit],
+        "enemy_units": [],
+        "effects": [],
+        "game_info": _make_game_info(64, 64),
+        "game_data": None,
+    }
+    result = transformer.transform(raw_obs)
+    idx = LayerConstants.LAYERS[LayerConstants.ALLIED_HEALTH]
+    assert result["map"][idx].max() == pytest.approx(1.0, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------

@@ -65,3 +65,21 @@ def test_graft_model_weights_shrinks_channels():
     
     assert new_weight.shape == (32, 2, 3, 3)
     assert torch.equal(new_weight, old_weight[:, :2, :, :])
+
+
+def test_graft_model_weights_new_action_bias_is_neutral():
+    """Newly added action logits should start neutral, not strongly biased."""
+    old_bias = torch.tensor([0.2, -0.1], dtype=torch.float32)
+    state_dict = {"action_net.bias": old_bias}
+    target_state = {"action_net.bias": torch.zeros(4, dtype=torch.float32)}
+
+    new_state_dict = graft_model_weights(
+        state_dict,
+        new_in_channels=1,
+        new_action_dim=4,
+        target_state_dict=target_state,
+    )
+
+    new_bias = new_state_dict["action_net.bias"]
+    assert torch.allclose(new_bias[:2], old_bias)
+    assert torch.allclose(new_bias[2:], torch.zeros(2))

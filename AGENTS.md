@@ -19,6 +19,8 @@ When making changes to observations, actions, or config wiring, always consult t
 | Observation tensor construction | `src/transformers/observation_transformer.py` |
 | Base environment and obs space | `train/envs/level_0_env.py` |
 | Universal bot / action decoding | `src/sc2_bot_universal.py` |
+| Universal action masking (flat mask, spatial policy behavior, combat command gating) | `src/sc2_bot_universal.py`, `src/level_7_bot.py` (`action_masks`), `src/agent/models/universal_recurrent_policy.py` (`_disable_spatial_mask`) |
+| Combat bot actuation (`Level7Bot`, universal branch) | `src/level_7_bot.py` (`apply_action`) — must stay agent-faithful; see **Agent-faithful actuation** |
 | Multi-unit beacon assignment (Level 3) | `src/level_3_bot.py`, `train/envs/level_3_env.py` |
 | Network architecture | `src/agent/models/unit_control_network.py` |
 | Universal curriculum | `config_universal/pipeline.yaml` |
@@ -219,6 +221,41 @@ The policy head uses `thought` for the command head and `_spatial_fused` + laten
 
 ---
 
+## Universal action masking
+
+**Mask vector shape:** `action_masks()` returns a **single flat** `bool` array of length `len(action_heads) + 32*32`, concatenated as `[command_slice | spatial_slice]`. This must match `MultiDiscrete.nvec` (`[n_cmds, 1024]`) for stacking in vectorized envs and for `MaskableRecurrentPPO`.
+
+| Piece | Location | Behavior |
+|--------|----------|----------|
+| Base mask builder | `SC2BotUniversal.action_masks` | `command_slice`: all `True` by default. `spatial_slice`: pathing from `UnitControlAgent.get_action_mask(None)` at **32×32** (same resolution as the tactical CNN input). **Flying** active unit (`self.zergling`): spatial mask all `True` (air ignores terrain for this path). Uses `training_conf['action_heads']` (see row below). |
+| Policy forward | `UniversalRecurrentPolicy._disable_spatial_mask` | When masks are passed into the policy, the **spatial tail is forced to all `True`** before sampling. Only **command** logits respect the env mask. **Reason:** one shared `SpatialDecoder` serves every head; per-head spatial masks would contradict that architecture. |
+| Combat (Level 7, universal) | `Level7Bot.action_masks` | Calls `SC2BotUniversal.action_masks`, then sets **`False` for every command index whose head name contains `"attack"`** (case-insensitive) when **no configured enemy** would be drawn in the **32×32 tactical fovea** around the focal ally — same crop and pixel bounds as `ObservationTransformer.transform_tactical` (see that method’s `crop_x` / `crop_y`, `abs(dx)<=17` filter, and `_get_pixel_coords` in-bounds check). Cloaked undetected enemies are skipped unless `is_snapshot`, matching tactical unit drawing. |
+| `action_heads` on bots | `SC2Bot.__init__` / `SC2BotUniversal.__init__` | **`training_conf['action_heads']` (flattened, cumulative) must win** over nested `env['action_heads']`. Per-level YAML only lists **new** heads to append; nested `env.action_heads` is not the full command list. If the bot used only the nested list, **policy `MultiDiscrete` indices and `apply_action` decoding would disagree** (silent combat bugs). |
+
+**Tests:** `tests/test_sc2bot_action_heads_flattened_priority.py`, `tests/test_level_7_tactical_attack_mask.py`.
+
+---
+
+## Agent-faithful actuation (universal) — no hidden “help”
+
+**Principle:** What the policy outputs for a spatial head (command index + cell → world position) must become the **actual** StarCraft order target. The agent is supposed to **learn** targeting and motion from observations and rewards, not inherit a second, hidden decision layer that overrides or substitutes its chosen point or command semantics.
+
+**Do not** (for `agent_architecture: "universal"`, in `apply_action` / actuation paths):
+
+- Remap `attack` to a different target than the decoded world point (e.g. force `unit.attack(enemy_unit)` when the policy chose a coordinate, pick “nearest enemy to click,” or override with Hungarian / sticky combat assignment).
+- Similarly override `move` (or other spatial heads) to a manager-chosen position while still consuming the policy’s action as if it were honored.
+- Add new “convenience” actuation that **replaces** the policy’s spatial choice with heuristics (assignment, closest unit, centroid, etc.) **without** the same choice being explicit in the observation and action space.
+
+**Fine (not actuation overrides):**
+
+- **Observations and rewards** may use assignments, distances to preferred objectives, or other structure—as long as that structure is either fixed by an explicit curriculum contract (see Level 3 beacon assignment) or clearly exposed so learning can account for it.
+- **Pathability / legality** masking (invalid cells) is allowed; that constrains the space, it does not silently replace a valid choice.
+- **Command-head masking** (e.g. disable `attack_*` when no enemy appears in the tactical tensor) narrows which discrete command is legal; it must stay **consistent with what the observation shows** (see **Universal action masking**).
+
+**Regression intent:** Combat and micro levels must not quietly teach a different MDP than the one implied by `action_heads` and the spatial decoder. If you add actuation “help,” you are changing the effective action space without updating the policy or metrics.
+
+---
+
 ## Level YAML structure
 
 Each level file (e.g. `level_move_single_0.yaml`) has three top-level sections:
@@ -316,6 +353,8 @@ If beacon markers appear too small for the CNN to detect (especially after Globa
 6. **Level 3 assignment:** Do not add mid-episode `get_optimal_assignments()` calls (e.g. in `_get_observation` when a beacon disappears) to “rebalance” targets. See **Level3Env / Level3Bot — unit-to-beacon assignment (CRITICAL CONTRACT)** above.
 7. **Level 3 + recurrent PPO:** If you change rollout collection, keep **LSTM/GRU resets on focal-unit change** in sync with `get_obs_focus_unit_tag()`. Dropping that OR turns multi-unit cycling into cross-contaminated hidden state and breaks learning.
 8. **Inherited / shared methods:** Editing base env or bot methods without checking **all callers and subclasses** often breaks other levels. See **Shared code, inheritance, and refactoring discipline** above; when in doubt, **override locally** or **add isolated code** instead of changing shared behavior.
+9. **Universal actuation overrides:** Do not reintroduce hidden retargeting of move/attack orders. See **Agent-faithful actuation (universal) — no hidden “help”** above.
+10. **Nested `env.action_heads` vs cumulative list:** `Level0Env` writes the **full cumulative** `action_heads` onto `training_conf` at the root. Bots must **not** prefer `training_conf['env']['action_heads']` over that flattened list, or command indices from the policy will not match `apply_action`. See **Universal action masking** table row `action_heads` on bots.
 
 ---
 
@@ -332,6 +371,8 @@ Key test files:
 - `tests/test_vec_env_focus.py` — `get_obs_focus_unit_tag` / `vec_env_obs_focus_tags` for recurrent resets when cycling units
 - `tests/test_level_7_env.py` — Level7 combat env
 - `tests/test_level_7_mask_mismatch.py` — action mask shape validation
+- `tests/test_sc2bot_action_heads_flattened_priority.py` — cumulative `action_heads` on `SC2Bot` must beat nested `env` lists
+- `tests/test_level_7_tactical_attack_mask.py` — Level 7 universal: attack heads masked when no enemy in tactical fovea
 
 ---
 

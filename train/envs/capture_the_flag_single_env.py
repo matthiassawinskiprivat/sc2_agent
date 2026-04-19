@@ -124,9 +124,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self._refresh_unit_lists()
 
     async def _refresh_bot_state(self):
-        from sc2.game_state import GameState
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
         obs = await self.bot.client.observation()
-        state = GameState(obs.observation)
+        state = game_state_from_response_observation(obs.observation)
         self.bot._prepare_step(state, self.bot._proto_game_info)
 
     async def _spawn_initial_units(self):

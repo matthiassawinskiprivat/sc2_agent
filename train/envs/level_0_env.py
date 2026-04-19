@@ -256,16 +256,16 @@ class Level0Env(gym.Env):
         self._log("Resetting bot state...")
         await self._client.step()
         observation = await self._client.observation()
-        
-        from sc2.game_state import GameState
-        state = GameState(observation.observation)
-            
+
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
+        state = game_state_from_response_observation(observation.observation)
+
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
         await self._bot.reset_game_state()
         await self._client.step()
         observation = await self._client.observation()
-        
-        state = GameState(observation.observation)
+
+        state = game_state_from_response_observation(observation.observation)
             
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
     
@@ -367,9 +367,9 @@ class Level0Env(gym.Env):
         
         self._bot._prepare_start(client=self._client, player_id=1, game_info=game_info, game_data=game_data)
         initial_observation = await self._client.observation()
-        
-        from sc2.game_state import GameState
-        state = GameState(initial_observation.observation)
+
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
+        state = game_state_from_response_observation(initial_observation.observation)
             
         self._bot._prepare_step(state, ProtoWrapper(game_info._proto))
         try:
@@ -432,9 +432,9 @@ class Level0Env(gym.Env):
         
         # 4. OBSERVE: Download the new game state from the engine
         response = await self._client.observation()
-        
-        from sc2.game_state import GameState
-        state = GameState(response.observation)
+
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
+        state = game_state_from_response_observation(response.observation)
             
         # Update the bot's internal tracking with the fresh state
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))

@@ -20,18 +20,20 @@ class UniversalUnitControlAgent(UnitControlAgent):
     def get_action_mask(self, head_names: Optional[List[str]] = None) -> np.ndarray:
         """
         Universal Masking:
-        1. Command Selector Mask (Always all True for now)
-        2. Shared Spatial Mask (Always all True for speed)
+        1. Command Selector Mask (currently all True)
+        2. Shared Spatial Mask (always all True)
         Returns a flat mask of size: len(head_names) + spatial_resolution^2
         """
         n_spatial = self.spatial_resolution ** 2
+        spatial_mask = np.ones(n_spatial, dtype=bool)
+
         if head_names is None:
-            return np.ones(n_spatial, dtype=bool)
+            return spatial_mask
 
         n_cmds = len(head_names)
         return np.concatenate([
             np.ones(n_cmds, dtype=bool),
-            np.ones(n_spatial, dtype=bool)
+            spatial_mask
         ])
 
     def convert_spatial_action_to_world(self, command_name: str, spatial_idx: int, active_unit: Any = None) -> Tuple[float, float]:

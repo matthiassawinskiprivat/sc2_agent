@@ -972,6 +972,15 @@ def main():
     def build_config_for_level(level_name: str):
         cfg = cm.get_level_config(level_name)
         if not cfg:
+            yaml_path = os.path.join(config_dir, f"{level_name}.yaml")
+            if not os.path.isfile(yaml_path):
+                logger.error(
+                    f"Missing level config (expected {yaml_path}, cwd={os.getcwd()})"
+                )
+            else:
+                logger.error(
+                    f"Level config is empty or invalid YAML: {yaml_path}"
+                )
             return None
         cfg["active_layers"] = cm.get_cumulative_active_layers(level_name)
         cfg["active_tactical_layers"] = cm.get_cumulative_active_tactical_layers(level_name)

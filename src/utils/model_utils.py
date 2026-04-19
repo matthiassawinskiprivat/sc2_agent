@@ -203,7 +203,9 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                 if target_dim < old_dim:
                     new_state_dict[key] = old_weight[:target_dim]
                 else:
-                    new_b = torch.ones(target_dim) * (5.0 if "action_net" in key else 0.0)
+                    # Keep newly-added action logits neutral; a large positive prior
+                    # can dominate policy behavior after grafting.
+                    new_b = torch.zeros(target_dim, dtype=old_weight.dtype, device=old_weight.device)
                     new_b[:old_dim] = old_weight
                     new_state_dict[key] = new_b
         

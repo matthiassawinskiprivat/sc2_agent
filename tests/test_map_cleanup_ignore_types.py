@@ -25,6 +25,36 @@ def test_unit_is_subject_to_map_cleanup_skips_collapsible_rock():
     assert unit_is_subject_to_map_cleanup(u) is False
 
 
+def test_unit_is_subject_to_map_cleanup_skips_collapsible_purifier_tower_diagonal():
+    tower = getattr(UnitTypeId, "COLLAPSIBLEPURIFIERTOWERDIAGONAL", None)
+    if tower is None:
+        pytest.skip("COLLAPSIBLEPURIFIERTOWERDIAGONAL not in UnitTypeId")
+    u = MagicMock()
+    u.alliance = Alliance.Self
+    u.type_id = tower
+    assert unit_is_subject_to_map_cleanup(u) is False
+
+
+def test_unit_is_subject_to_map_cleanup_skips_collapsible_terran_tower_diagonal():
+    tower = getattr(UnitTypeId, "COLLAPSIBLETERRANTOWERDIAGONAL", None)
+    if tower is None:
+        pytest.skip("COLLAPSIBLETERRANTOWERDIAGONAL not in UnitTypeId")
+    u = MagicMock()
+    u.alliance = Alliance.Self
+    u.type_id = tower
+    assert unit_is_subject_to_map_cleanup(u) is False
+
+
+def test_unit_is_subject_to_map_cleanup_skips_collapsible_rock_tower_diagonal():
+    tower = getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERDIAGONAL", None)
+    if tower is None:
+        pytest.skip("COLLAPSIBLEROCKTOWERDIAGONAL not in UnitTypeId")
+    u = MagicMock()
+    u.alliance = Alliance.Self
+    u.type_id = tower
+    assert unit_is_subject_to_map_cleanup(u) is False
+
+
 def test_unit_is_subject_to_map_cleanup_includes_non_neutral_marine():
     u = MagicMock()
     u.alliance = Alliance.Self

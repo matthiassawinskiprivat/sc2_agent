@@ -87,11 +87,11 @@ class CaptureTheFlagEnv(MultiClientEnv):
 
     async def _refresh_bot_states(self):
         """Fetches latest observation and updates bot internal state."""
-        from sc2.game_state import GameState
-        
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
+
         async def refresh(bot, client):
             obs = await client.observation()
-            state = GameState(obs.observation)
+            state = game_state_from_response_observation(obs.observation)
             # BotAIInternal._prepare_step(state, proto_game_info)
             # bot._proto_game_info was stored during prepare_bot
             bot._prepare_step(state, bot._proto_game_info)

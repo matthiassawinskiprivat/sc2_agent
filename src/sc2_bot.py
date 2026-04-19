@@ -25,10 +25,18 @@ MAP_CLEANUP_IGNORE_TYPE_IDS = frozenset(
     tid
     for tid in (
         getattr(UnitTypeId, "COLLAPSIBLEROCKTOWER", None),
+        getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERDIAGONAL", None),
         getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERDEBRIS", None),
         getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERPUSHUNIT", None),
         getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERPUSHUNITRAMPLEFT", None),
         getattr(UnitTypeId, "COLLAPSIBLEROCKTOWERPUSHUNITRAMPRIGHT", None),
+        getattr(UnitTypeId, "COLLAPSIBLETERRANTOWER", None),
+        getattr(UnitTypeId, "COLLAPSIBLETERRANTOWERDIAGONAL", None),
+        # Purifier tower map props are static doodads on some combat maps and are
+        # not scenario units spawned by reset logic.
+        getattr(UnitTypeId, "COLLAPSIBLEPURIFIERTOWERDIAGONAL", None),
+        getattr(UnitTypeId, "COLLAPSIBLEPURIFIERTOWERVERTICAL", None),
+        getattr(UnitTypeId, "COLLAPSIBLEPURIFIERTOWERHORIZONTAL", None),
     )
     if tid is not None
 )
@@ -67,10 +75,16 @@ class SC2Bot(BotAI):
         self.last_target_pos: Optional[Point2] = None
         self._game_state_initialized = False
         
-        # Load Action Heads
+        # Load Action Heads — prefer flattened lists from Level0Env (cumulative pipeline
+        # heads). Nested env.action_heads is only the *new* heads for that YAML; using it
+        # first breaks index alignment with the policy (e.g. level_attack_0 adds attack_local).
         env_conf = self.training_conf.get("env", {})
-        self.action_heads = env_conf.get("action_heads", self.training_conf.get("action_heads", ["move"]))
-        self.categorical_heads = env_conf.get("categorical_heads", self.training_conf.get("categorical_heads", []))
+        self.action_heads = self.training_conf.get("action_heads") or env_conf.get(
+            "action_heads", ["move"]
+        )
+        self.categorical_heads = self.training_conf.get("categorical_heads") or env_conf.get(
+            "categorical_heads", []
+        )
 
         # enemy_race must be set to avoid AttributeError in BotAIInternal._prepare_step
         # when it checks for Race.Random to update it from observations.

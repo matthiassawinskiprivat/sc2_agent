@@ -238,7 +238,9 @@ class UniversalPipelineManager(PipelineManager):
         self.cumulative_config = {
             "agent_architecture": "universal",
             "active_layers": [],
-            "active_tactical_layers": []
+            "active_tactical_layers": [],
+            "action_heads": [],
+            "categorical_heads": [],
         }
 
         # Find the last completed level to start curriculum from
@@ -258,20 +260,33 @@ class UniversalPipelineManager(PipelineManager):
             
             # ADDITIVE LOGIC: Merge level config into cumulative config
             # This ensures subsequent levels 'inherit' layers from previous ones
-            if "active_layers" in level_config:
-                # Add any new layers that aren't already there
-                for layer in level_config["active_layers"]:
+            env_cfg = level_config.get("env", {})
+
+            if "active_layers" in env_cfg:
+                for layer in env_cfg["active_layers"]:
                     if layer not in self.cumulative_config["active_layers"]:
                         self.cumulative_config["active_layers"].append(layer)
-            
-            if "active_tactical_layers" in level_config:
-                for layer in level_config["active_tactical_layers"]:
+
+            if "active_tactical_layers" in env_cfg:
+                for layer in env_cfg["active_tactical_layers"]:
                     if layer not in self.cumulative_config["active_tactical_layers"]:
                         self.cumulative_config["active_tactical_layers"].append(layer)
+
+            if "action_heads" in env_cfg:
+                for head in env_cfg["action_heads"]:
+                    if head not in self.cumulative_config["action_heads"]:
+                        self.cumulative_config["action_heads"].append(head)
+
+            if "categorical_heads" in env_cfg:
+                for head in env_cfg["categorical_heads"]:
+                    if head not in self.cumulative_config["categorical_heads"]:
+                        self.cumulative_config["categorical_heads"].append(head)
 
             # Store the current state for this training session
             level_config["active_layers"] = self.cumulative_config["active_layers"].copy()
             level_config["active_tactical_layers"] = self.cumulative_config["active_tactical_layers"].copy()
+            level_config["action_heads"] = self.cumulative_config["action_heads"].copy()
+            level_config["categorical_heads"] = self.cumulative_config["categorical_heads"].copy()
             
             status, model_path = self.get_level_status(level_name)
             if status == "COMPLETED":

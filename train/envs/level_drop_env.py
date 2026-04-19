@@ -115,9 +115,9 @@ class LevelDropEnv(Level7Env):
         
         self._bot._prepare_start(client=self._client, player_id=1, game_info=game_info, game_data=game_data)
         initial_observation = await self._client.observation()
-        
-        from sc2.game_state import GameState
-        state = GameState(initial_observation.observation)
+
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
+        state = game_state_from_response_observation(initial_observation.observation)
         
         from train.envs.level_0_env import ProtoWrapper
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
@@ -157,8 +157,8 @@ class LevelDropEnv(Level7Env):
         
         # 3. Refresh bot state from new observation
         response = await self._client.observation()
-        from sc2.game_state import GameState
-        state = GameState(response.observation)
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
+        state = game_state_from_response_observation(response.observation)
         from train.envs.level_0_env import ProtoWrapper
         self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
 

@@ -7,7 +7,7 @@ from stable_baselines3.common.type_aliases import Schedule
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentActorCriticPolicy
 from sb3_contrib.common.recurrent.type_aliases import RNNStates
 from src.agent.models.unit_control_network import UnitControlNetwork
-from src.agent.models.spatial_decoder import SpatialDecoder
+from src.agent.models.spatial_decoder import SpatialDecoder, tactical_center_spatial_bias
 
 class UniversalRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
     """
@@ -61,6 +61,8 @@ class UniversalRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
                 device=latent_pi.device, dtype=latent_pi.dtype,
             )
         spatial_logits = self.spatial_decoder(latent_pi, fused)
+        bump = tactical_center_spatial_bias(self.spatial_resolution, latent_pi)
+        spatial_logits = spatial_logits + bump.unsqueeze(0)
         cmd_logits = self.command_head(latent_pi)
         action_logits = torch.cat([cmd_logits, spatial_logits], dim=-1)
         return self.action_dist.proba_distribution(action_logits=action_logits)

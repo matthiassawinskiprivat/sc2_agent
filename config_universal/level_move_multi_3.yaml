@@ -2,7 +2,7 @@
 # Multi-unit movement level for Universal Architecture (16 targets)
 
 training:
-  training_steps: 3_000_000
+  training_steps: 2_000_000
   num_envs: 4
   n_steps: 4096
   batch_size: 1024
@@ -14,7 +14,7 @@ training:
 # Environment parameters
 env:
   env_class: "Level3Env"
-  targets: 12
+  targets: 16
   headless: True
   max_steps: 300
   maps_dir: "train/maps/ladder/no_trigger"

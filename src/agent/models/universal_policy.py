@@ -5,7 +5,7 @@ import gymnasium as gym
 from typing import Any, Optional
 from stable_baselines3.common.type_aliases import Schedule
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
-from src.agent.models.spatial_decoder import SpatialDecoder
+from src.agent.models.spatial_decoder import SpatialDecoder, tactical_center_spatial_bias
 
 class UniversalActorCriticPolicy(MaskableActorCriticPolicy):
     """
@@ -54,6 +54,9 @@ class UniversalActorCriticPolicy(MaskableActorCriticPolicy):
                 device=latent_pi.device, dtype=latent_pi.dtype,
             )
         spatial_logits = self.spatial_decoder(latent_pi, fused)
+        spatial_logits = spatial_logits + tactical_center_spatial_bias(
+            self.spatial_resolution, latent_pi
+        ).unsqueeze(0)
         cmd_logits = self.command_head(latent_pi)
         action_logits = torch.cat([cmd_logits, spatial_logits], dim=-1)
         return self.action_dist.proba_distribution(action_logits=action_logits)

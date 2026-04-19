@@ -78,6 +78,8 @@ Training progresses through a sequence of levels defined in `pipeline.yaml`. Eac
 
 Capabilities are **additive** across the curriculum. Observation layers, action heads, and tactical layers accumulate: each level can add new ones, but never removes what earlier levels defined. This lets the network retain learned features as new capabilities are introduced.
 
+**Universal masking:** how the flat `action_masks` vector lines up with `MultiDiscrete`, why spatial logits are not masked at the policy, Level 7 attack-in-fovea command masking, and why bots must use **cumulative** `training_conf['action_heads']` — see **Universal action masking** in [AGENTS.md](AGENTS.md).
+
 ---
 
 ## Configuration
@@ -160,7 +162,7 @@ Each level YAML specifies which channels to activate. Channels accumulate across
 pytest
 ```
 
-Notable tests: `tests/test_additive_config.py` (config accumulation), action mask / shape tests under `tests/`.
+Notable tests: `tests/test_additive_config.py` (config accumulation), action mask / shape tests under `tests/`, plus `tests/test_sc2bot_action_heads_flattened_priority.py` and `tests/test_level_7_tactical_attack_mask.py` for universal masking contracts.
 
 ---
 

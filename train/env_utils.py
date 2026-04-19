@@ -32,21 +32,20 @@ def create_dummy_env_from_config(config: dict):
     spatial_res = 32
     
     # Matches Universal Architecture spaces
-    # Default to 30 layers if not specified
-    num_layers = 30
-    
-    # Try to refine channel counts from config if available
-    # Check both root level and nested 'env' level just in case
+    # Keep global and tactical channels independent (they can differ).
     active_layers = config.get("active_layers") or config.get("env", {}).get("active_layers", [])
-    
-    if active_layers:
-        num_layers = len(active_layers)
-        
-    print(f"DEBUG: create_dummy_env_from_config -> num_layers = {num_layers}. active_layers = {active_layers}")
+    active_tactical_layers = config.get("active_tactical_layers") or config.get("env", {}).get("active_tactical_layers", [])
+    num_layers = len(active_layers) if active_layers else 30
+    num_tactical_layers = len(active_tactical_layers) if active_tactical_layers else num_layers
+    print(
+        "DEBUG: create_dummy_env_from_config -> "
+        f"map_layers={num_layers}, tactical_layers={num_tactical_layers}, "
+        f"active_layers={active_layers}, active_tactical_layers={active_tactical_layers}"
+    )
         
     obs_dict = {
         "map": spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32),
-        "tactical": spaces.Box(low=0.0, high=1.0, shape=(num_layers, 32, 32), dtype=np.float32),
+        "tactical": spaces.Box(low=0.0, high=1.0, shape=(num_tactical_layers, 32, 32), dtype=np.float32),
         "command": spaces.Box(low=0.0, high=1.0, shape=(10,), dtype=np.float32)
     }
 
@@ -55,8 +54,9 @@ def create_dummy_env_from_config(config: dict):
             super().__init__()
             self.observation_space = spaces.Dict(obs_dict)
             
-            # Use action_heads from config, fallback to default if missing OR empty
-            self.action_heads = config.get("action_heads")
+            # Use accumulated action_heads from top-level config first,
+            # then nested env config as fallback.
+            self.action_heads = config.get("action_heads") or config.get("env", {}).get("action_heads")
             if not self.action_heads:
                 self.action_heads = ["move_global", "move_local"]
                 

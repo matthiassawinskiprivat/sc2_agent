@@ -1119,6 +1119,11 @@ class MaskableRecurrentPPO(RecurrentPPO):
                     if v.shape[0] <= c_sd[tk].shape[0]:
                         exp = c_sd[tk].clone()
                         exp[: v.shape[0]] = v
+                        # New command slots used to keep post-init values (often 0). If copied
+                        # biases are negative, 0 becomes the argmax under greedy sampling — "spam
+                        # new head" right after surgery. Match the scale of existing biases instead.
+                        if v.shape[0] < exp.shape[0]:
+                            exp[v.shape[0] :] = v.mean()
                         new_sd[tk] = exp
                         logger.info(
                             f"Expanded command_head.bias {v.shape[0]} -> {c_sd[tk].shape[0]}"
@@ -1132,6 +1137,9 @@ class MaskableRecurrentPPO(RecurrentPPO):
                         exp = c_sd[tk].clone()
                         mi = min(v.shape[0], c_sd[tk].shape[0])
                         exp[:mi, :] = v[:mi, :]
+                        if mi < exp.shape[0]:
+                            row_mean = v.mean(dim=0, keepdim=True)
+                            exp[mi:] = row_mean.expand(exp.shape[0] - mi, -1)
                         new_sd[tk] = exp
                     else:
                         logger.error(

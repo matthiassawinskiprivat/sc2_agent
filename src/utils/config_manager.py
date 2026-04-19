@@ -1,13 +1,32 @@
 import os
 import yaml
+from pathlib import Path
 from typing import List, Dict, Any
+
+
+def _project_root() -> Path:
+    """Repository root (parent of ``src/``)."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _normalize_config_dir(config_dir: str) -> str:
+    """
+    SubprocVecEnv workers often have a different cwd than the main process. Relative
+    ``config_dir`` must not depend on cwd or ``pipeline.yaml`` is missed, ``levels`` is
+    empty, and cumulative ``action_heads`` collapses to a single level yaml (e.g. only
+    ``attack_local`` → attack-only policy + degenerate spatial).
+    """
+    if os.path.isabs(config_dir):
+        return os.path.normpath(config_dir)
+    return os.path.normpath(str(_project_root() / config_dir))
+
 
 class ConfigManager:
     """
     Manages loading and merging of level configurations, specifically for additive properties.
     """
     def __init__(self, config_dir: str = "config"):
-        self.config_dir = config_dir
+        self.config_dir = _normalize_config_dir(config_dir)
         self.pipeline_config = self._load_yaml("pipeline.yaml")
         self.levels = self.pipeline_config.get("levels", [])
 

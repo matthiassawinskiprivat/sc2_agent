@@ -3,7 +3,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from src.agent.models.unit_control_network import UnitControlNetwork
-from src.agent.models.spatial_decoder import SpatialDecoder
+from src.agent.models.spatial_decoder import SpatialDecoder, tactical_center_spatial_bias
 from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
 
 
@@ -95,3 +95,10 @@ def test_get_action_dist_uses_zero_fallback_when_no_spatial_fused():
     dist = policy._get_action_dist_from_latent(latent_pi)
 
     assert dist is not None
+
+
+def test_tactical_center_spatial_bias_argmax_matches_transformer_unit_cell():
+    ref = torch.zeros((), dtype=torch.float32)
+    b = tactical_center_spatial_bias(32, ref)
+    assert b.shape == (1024,)
+    assert int(b.argmax().item()) == 15 * 32 + 16
