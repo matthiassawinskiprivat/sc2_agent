@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 from unittest.mock import MagicMock, patch
 
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM, build_action_head_manifest
+
 
 def _create_universal_bot(training_conf=None):
     """Instantiate SC2BotUniversal without triggering BotAI.__init__."""
@@ -43,23 +45,29 @@ def _create_universal_bot(training_conf=None):
     bot.unit_command_uses_self_do = False
     bot.actions = []
     bot.unit_tags_received_action = set()
+    bot.action_head_manifest = build_action_head_manifest(
+        bot.training_conf, list(bot.action_heads)
+    )
+    bot.training_conf["action_head_manifest"] = bot.action_head_manifest
     return bot
 
 
 class TestActionMasks:
     def test_fallback_mask_shape(self):
-        """When no agent_system exists, fallback mask should be n_cmds + 1024."""
+        """When no agent_system exists, mask is 64 + 1024; only defined command prefix is legal."""
         bot = _create_universal_bot()
         mask = bot.action_masks()
-        n_cmds = len(bot.action_heads)
-        assert mask.shape == (n_cmds + 1024,)
+        assert mask.shape == (FIXED_UNIVERSAL_COMMAND_DIM + 1024,)
         assert mask.dtype == bool
-        assert mask.all()
+        n_def = len(bot.action_heads)
+        assert mask[:n_def].all()
+        assert not mask[n_def:FIXED_UNIVERSAL_COMMAND_DIM].any()
+        assert mask[FIXED_UNIVERSAL_COMMAND_DIM:].all()
 
-    def test_fallback_mask_all_true(self):
+    def test_fallback_spatial_all_true(self):
         bot = _create_universal_bot()
         mask = bot.action_masks()
-        assert mask.all()
+        assert mask[FIXED_UNIVERSAL_COMMAND_DIM:].all()
 
     def test_mask_with_agent_system(self):
         bot = _create_universal_bot()
@@ -71,7 +79,7 @@ class TestActionMasks:
         bot.zergling = None
 
         mask = bot.action_masks()
-        assert mask.shape == (1026,)
+        assert mask.shape == (FIXED_UNIVERSAL_COMMAND_DIM + 1024,)
 
     def test_mask_shape_with_three_heads(self):
         conf = {
@@ -83,7 +91,9 @@ class TestActionMasks:
         }
         bot = _create_universal_bot(training_conf=conf)
         mask = bot.action_masks()
-        assert mask.shape == (3 + 1024,)
+        assert mask.shape == (FIXED_UNIVERSAL_COMMAND_DIM + 1024,)
+        assert mask[:3].all()
+        assert not mask[3:FIXED_UNIVERSAL_COMMAND_DIM].any()
 
 
 class TestCalculateReward:

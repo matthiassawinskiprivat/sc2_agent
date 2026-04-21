@@ -1,6 +1,7 @@
 import numpy as np
 
 from train.env_utils import create_dummy_env_from_config
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
 
 def test_dummy_env_respects_independent_map_and_tactical_channels():
@@ -16,7 +17,7 @@ def test_dummy_env_respects_independent_map_and_tactical_channels():
         obs_space = env.observation_space
         assert obs_space["map"].shape == (4, 128, 128)
         assert obs_space["tactical"].shape == (2, 32, 32)
-        assert env.action_space.nvec.tolist() == [2, 1024]
+        assert env.action_space.nvec.tolist() == [FIXED_UNIVERSAL_COMMAND_DIM, 1024]
     finally:
         env.close()
 
@@ -35,6 +36,6 @@ def test_dummy_env_uses_nested_env_fallback_for_heads_and_tactical():
         obs_space = env.observation_space
         assert obs_space["map"].shape == (3, 128, 128)
         assert obs_space["tactical"].shape == (1, 32, 32)
-        assert env.action_space.nvec.tolist() == [1, 1024]
+        assert env.action_space.nvec.tolist() == [FIXED_UNIVERSAL_COMMAND_DIM, 1024]
     finally:
         env.close()

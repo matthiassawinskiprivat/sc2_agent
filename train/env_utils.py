@@ -10,6 +10,8 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+
 
 def vec_env_obs_focus_tags(vec_env, n_envs: int) -> np.ndarray:
     """
@@ -59,8 +61,10 @@ def create_dummy_env_from_config(config: dict):
             self.action_heads = config.get("action_heads") or config.get("env", {}).get("action_heads")
             if not self.action_heads:
                 self.action_heads = ["move_global", "move_local"]
-                
-            self.action_space = spaces.MultiDiscrete([len(self.action_heads), spatial_res * spatial_res])
+
+            self.action_space = spaces.MultiDiscrete(
+                [FIXED_UNIVERSAL_COMMAND_DIM, spatial_res * spatial_res]
+            )
 
         def reset(self, seed=None, options=None):
             return self.observation_space.sample(), {}
@@ -68,7 +72,15 @@ def create_dummy_env_from_config(config: dict):
         def step(self, action):
             return self.observation_space.sample(), 0.0, False, False, {}
 
-    return ActionMasker(DummyEnv(), lambda e: [np.ones(d, dtype=bool) for d in e.action_space.nvec])
+    def _dummy_action_masks(env):
+        inner = env.unwrapped
+        cmd = np.zeros(FIXED_UNIVERSAL_COMMAND_DIM, dtype=bool)
+        n_def = len(inner.action_heads)
+        cmd[:n_def] = True
+        spatial = np.ones(spatial_res * spatial_res, dtype=bool)
+        return [cmd, spatial]
+
+    return ActionMasker(DummyEnv(), _dummy_action_masks)
 
 class EnvFactory:
 

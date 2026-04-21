@@ -8,6 +8,7 @@ import numpy as np
 from typing import Any, Tuple, Dict, Optional, List
 from sc2.position import Point2
 from src.agent.unit_control_agent import UnitControlAgent
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
 class UniversalUnitControlAgent(UnitControlAgent):
     def __init__(self, cnn_input_size: Tuple[int, int] = (128, 128), 
@@ -19,10 +20,11 @@ class UniversalUnitControlAgent(UnitControlAgent):
 
     def get_action_mask(self, head_names: Optional[List[str]] = None) -> np.ndarray:
         """
-        Universal Masking:
-        1. Command Selector Mask (currently all True)
-        2. Shared Spatial Mask (always all True)
-        Returns a flat mask of size: len(head_names) + spatial_resolution^2
+        Universal pathing mask (spatial only) when head_names is None.
+
+        When head_names is set (tests / tooling), returns a flat mask of size
+        FIXED_UNIVERSAL_COMMAND_DIM + spatial_resolution^2 with the command prefix
+        True only for indices < len(head_names) (matches env / policy layout).
         """
         n_spatial = self.spatial_resolution ** 2
         spatial_mask = np.ones(n_spatial, dtype=bool)
@@ -30,11 +32,9 @@ class UniversalUnitControlAgent(UnitControlAgent):
         if head_names is None:
             return spatial_mask
 
-        n_cmds = len(head_names)
-        return np.concatenate([
-            np.ones(n_cmds, dtype=bool),
-            spatial_mask
-        ])
+        cmd = np.zeros(FIXED_UNIVERSAL_COMMAND_DIM, dtype=bool)
+        cmd[: len(head_names)] = True
+        return np.concatenate([cmd, spatial_mask])
 
     def convert_spatial_action_to_world(self, command_name: str, spatial_idx: int, active_unit: Any = None) -> Tuple[float, float]:
         """

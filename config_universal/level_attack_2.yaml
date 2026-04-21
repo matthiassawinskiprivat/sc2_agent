@@ -14,26 +14,27 @@ training:
 # Environment parameters
 env:
   env_class: "Level7Env"
-  unit_type: "STALKER"
-  enemy_type: "ROACH"
-  targets: 4
-  enemies_per_target: 1
+  unit_type: "REAPER"
+  enemy_type: "ZERGLING"
+  targets: 3
+  enemies_per_target: 2
   headless: True
   max_steps: 340
   maps_dir: "train/maps/ladder/no_trigger"
   high_level_command: "attack"
   guidance_curriculum: False
 
+
   rewards:
-    step_penalty: -0.045
-    distance_multiplier: 0.06
-    micro_bonus: 2.0
-    damage_reward: 0.055
-    damage_penalty: -0.5
-    kill_reward: 5.0
-    kill_penalty: -8.0
-    win_reward: 3.0
-    loss_penalty: -10.0
+    step_penalty: -0.04
+    distance_multiplier: 0.3
+    micro_bonus: 1.0
+    damage_reward: 0.8
+    damage_penalty: -0.4
+    kill_reward: 15.0
+    kill_penalty: -5.0
+    win_reward: 10.0
+    loss_penalty: -2.0
 
 # Model parameters
 model:

@@ -18,6 +18,10 @@ from sc2.ids.ability_id import AbilityId
 from sc2.position import Point2
 from sc2.unit import Unit
 from src.hierarchical_agent import HierarchicalAgentSystem
+from src.agent.universal_constants import (
+    FIXED_UNIVERSAL_COMMAND_DIM,
+    build_action_head_manifest,
+)
 
 # Map props / destructibles that are not Neutral but do not behave like trainable
 # units: debug_kill often does not remove them, and they are static geometry.
@@ -85,6 +89,11 @@ class SC2Bot(BotAI):
         self.categorical_heads = self.training_conf.get("categorical_heads") or env_conf.get(
             "categorical_heads", []
         )
+
+        if self.training_conf.get("agent_architecture") == "universal":
+            manifest = build_action_head_manifest(self.training_conf, list(self.action_heads))
+            self.training_conf["action_head_manifest"] = manifest
+            self.training_conf.setdefault("fixed_universal_command_dim", FIXED_UNIVERSAL_COMMAND_DIM)
 
         # enemy_race must be set to avoid AttributeError in BotAIInternal._prepare_step
         # when it checks for Race.Random to update it from observations.

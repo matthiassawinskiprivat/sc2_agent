@@ -5,6 +5,7 @@ from gymnasium import spaces
 from train.envs.level_3_env import Level3Env
 from train.envs.level_0_env import Level0Env
 from src.level_3_bot import Level3Bot
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
 @pytest.fixture
 def mock_training_conf():
@@ -39,7 +40,7 @@ def test_level_3_env_universal_space(mock_training_conf):
         assert "command" in env.observation_space.spaces
         
         assert isinstance(env.action_space, spaces.MultiDiscrete)
-        assert np.array_equal(env.action_space.nvec, [2, 1024])
+        assert np.array_equal(env.action_space.nvec, [FIXED_UNIVERSAL_COMMAND_DIM, 1024])
 
 def test_level_3_env_reset_observation_shape(mock_training_conf):
     """Checks if reset returns a dict observation for universal architecture."""

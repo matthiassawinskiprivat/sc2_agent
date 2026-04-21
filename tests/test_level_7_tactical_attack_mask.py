@@ -7,6 +7,7 @@ from sc2.position import Point2
 
 from src.level_7_bot import Level7Bot
 from src.sc2_bot import SC2Bot
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
 
 class _FakeEnemyGroup:
@@ -64,7 +65,10 @@ def test_attack_unmasked_when_enemy_centered_in_tactical(universal_bot):
     bot.enemy_units = MagicMock(return_value=_FakeEnemyGroup([enemy]))
 
     m = bot.action_masks()
+    assert len(m) == FIXED_UNIVERSAL_COMMAND_DIM + 1024
     assert m[0] and m[1] and m[2]
+    assert not m[3:FIXED_UNIVERSAL_COMMAND_DIM].any()
+    assert m[FIXED_UNIVERSAL_COMMAND_DIM:].all()
 
 
 def test_attack_masked_when_enemy_outside_tactical(universal_bot):
@@ -76,8 +80,10 @@ def test_attack_masked_when_enemy_outside_tactical(universal_bot):
     bot.enemy_units = MagicMock(return_value=_FakeEnemyGroup([enemy]))
 
     m = bot.action_masks()
+    assert len(m) == FIXED_UNIVERSAL_COMMAND_DIM + 1024
     assert m[0] and m[1]
     assert not m[2]
+    assert not m[3:FIXED_UNIVERSAL_COMMAND_DIM].any()
 
 
 def test_attack_masked_when_cloaked_undetected(universal_bot):
@@ -91,6 +97,7 @@ def test_attack_masked_when_cloaked_undetected(universal_bot):
 
     m = bot.action_masks()
     assert not m[2]
+    assert not m[3:FIXED_UNIVERSAL_COMMAND_DIM].any()
 
 
 def test_attack_unmasked_for_cloaked_snapshot(universal_bot):
@@ -104,3 +111,4 @@ def test_attack_unmasked_for_cloaked_snapshot(universal_bot):
 
     m = bot.action_masks()
     assert m[2]
+    assert not m[3:FIXED_UNIVERSAL_COMMAND_DIM].any()

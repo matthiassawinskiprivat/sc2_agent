@@ -7,6 +7,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 from gymnasium import spaces
 
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+
 
 def _create_async_buffer(tmp_path):
     """Create an AsyncDiskBuffer with minimal config in an isolated temp dir."""
@@ -16,7 +18,7 @@ def _create_async_buffer(tmp_path):
         "map": spaces.Box(0, 1, (4, 128, 128), dtype=np.float32),
         "command": spaces.Box(0, 1, (10,), dtype=np.float32),
     })
-    action_space = spaces.MultiDiscrete([2, 1024])
+    action_space = spaces.MultiDiscrete([FIXED_UNIVERSAL_COMMAND_DIM, 1024])
 
     buf = AsyncDiskBuffer(
         buffer_size=8,

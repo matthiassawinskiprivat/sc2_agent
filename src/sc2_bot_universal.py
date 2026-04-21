@@ -17,6 +17,11 @@ from sc2.ids.ability_id import AbilityId
 from sc2.position import Point2
 from sc2.unit import Unit
 from src.hierarchical_agent import HierarchicalAgentSystem
+from src.agent.universal_constants import (
+    FIXED_UNIVERSAL_COMMAND_DIM,
+    UNUSED_COMMAND_HEAD,
+    build_action_head_manifest,
+)
 
 
 class SC2BotUniversal(BotAI):
@@ -42,7 +47,12 @@ class SC2BotUniversal(BotAI):
         
         self.categorical_heads = self.training_conf.get("categorical_heads") or \
                                 self.training_conf.get("env", {}).get("categorical_heads", [])
-        
+
+        manifest = build_action_head_manifest(self.training_conf, list(self.action_heads))
+        self.training_conf["action_head_manifest"] = manifest
+        self.training_conf.setdefault("fixed_universal_command_dim", FIXED_UNIVERSAL_COMMAND_DIM)
+        self.action_head_manifest = manifest
+
         self.spatial_res = 32
 
         # `python-sc2` changed internal initialization across versions.
@@ -102,14 +112,21 @@ class SC2BotUniversal(BotAI):
         # 1. Unpack
         head_idx = int(action[0])
         spatial_idx = int(action[1])
-        
-        # Robust attribute access for delegation
+        if head_idx < 0 or head_idx >= FIXED_UNIVERSAL_COMMAND_DIM:
+            return
+
+        manifest = getattr(self, "action_head_manifest", None) or build_action_head_manifest(
+            self.training_conf, list(getattr(self, "action_heads", []))
+        )
+        head_name = manifest[head_idx]
+        if head_name == UNUSED_COMMAND_HEAD:
+            return
+
         action_heads = getattr(self, "action_heads", [])
         categorical_heads = getattr(self, "categorical_heads", [])
 
         if head_idx < len(action_heads):
-            head_name = action_heads[head_idx]
-            # 2. Convert 16x16 to world
+            # 2. Convert spatial grid to world
             world_x, world_y = agent.convert_spatial_action_to_world(head_name, spatial_idx, active_unit=unit)
             target_pos = Point2((world_x, world_y))
             self.last_target_pos = target_pos
@@ -133,10 +150,12 @@ class SC2BotUniversal(BotAI):
                 # Basic load logic
                 candidates = self.units.filter(lambda u: u.distance_to(target_pos) < 3.0)
                 target_transport = next((u for u in candidates if u.cargo_max > 0), None)
-                if target_transport: self.do(unit.smart(target_transport))
-                else: self.do(unit.move(target_pos))
+                if target_transport:
+                    self.do(unit.smart(target_transport))
+                else:
+                    self.do(unit.move(target_pos))
         else:
-            # Categorical
+            # Categorical slots beyond named action_heads (legacy layout)
             cat_idx = head_idx - len(action_heads)
             if cat_idx < len(categorical_heads):
                 cat_name = categorical_heads[cat_idx]
@@ -276,14 +295,18 @@ class SC2BotUniversal(BotAI):
         """
         Universal MultiDiscrete masking requires a FLAT concatenated array for 
         vectorized environment compatibility (np.stack).
-        Space: [N_Commands, Spatial^2] -> Mask Size: N_Commands + Spatial^2
+        Space: [FIXED_UNIVERSAL_COMMAND_DIM, Spatial^2] -> Mask size 64 + 1024.
         """
+        n_spatial = 32 * 32
         if not self.agent_system or "agent_0" not in self.agent_system.unit_agents:
-             # Fallback
-             action_heads = getattr(self, "action_heads", [])
-             n_cmds = len(action_heads)
-             n_spatial = 32 * 32
-             return np.concatenate([np.ones(n_cmds, dtype=bool), np.ones(n_spatial, dtype=bool)])
+            action_heads = self.training_conf.get("action_heads") or getattr(
+                self, "action_heads", []
+            )
+            if not action_heads:
+                action_heads = ["move_global"]
+            cmd_mask = np.zeros(FIXED_UNIVERSAL_COMMAND_DIM, dtype=bool)
+            cmd_mask[: len(action_heads)] = True
+            return np.concatenate([cmd_mask, np.ones(n_spatial, dtype=bool)])
 
         # 1. Base pathing mask from agent system (32x32)
         # Universal architecture handles spatial masking separately.
@@ -313,31 +336,24 @@ class SC2BotUniversal(BotAI):
         # Combine Move and Guidance
         final_spatial_mask = move_mask & guidance_mask
 
-        # 3. Command Head Masking (Categorical)
-        # Universal architecture only uses action_heads for its MultiDiscrete space.
-        # Categorical heads (like unload) are NOT part of the space definition in Level0Env.
-        action_heads = self.training_conf.get('action_heads', [])
-        
+        # 3. Command head masking: fixed 64 slots; only defined heads (prefix) start legal.
+        action_heads = self.training_conf.get("action_heads", [])
         if not action_heads:
-            # Fallback to defaults if not in training_conf
             action_heads = getattr(self, "action_heads", ["move_global"])
-        
-        # Ensure we return a mask of length len(action_heads) + final_spatial_mask.size
-        # This MUST match sum(action_space.nvec) = len(action_heads) + 1024
-        cmd_mask = np.ones(len(action_heads), dtype=bool)
-        
-        # Return a single concatenated array [Cmds, Spatial]
-        # Must match MultiDiscrete nvec: [len(action_heads), 32*32] (not a fixed 2+1024).
+
+        cmd_mask = np.zeros(FIXED_UNIVERSAL_COMMAND_DIM, dtype=bool)
+        cmd_mask[: len(action_heads)] = True
+
         mask_out = np.concatenate([cmd_mask, final_spatial_mask])
         n_spatial_expected = 32 * 32
         if final_spatial_mask.size != n_spatial_expected:
             logger.warning(
                 f"CRITICAL SHAPE: spatial mask size {final_spatial_mask.size} != {n_spatial_expected}, "
-                f"cmd_heads={len(cmd_mask)}, action_heads={action_heads}"
+                f"cmd_dim={len(cmd_mask)}, action_heads={action_heads}"
             )
-        if len(cmd_mask) != len(action_heads):
+        if len(cmd_mask) != FIXED_UNIVERSAL_COMMAND_DIM:
             logger.warning(
-                f"CRITICAL SHAPE: cmd_mask length {len(cmd_mask)} != len(action_heads)={len(action_heads)}"
+                f"CRITICAL SHAPE: cmd_mask length {len(cmd_mask)} != {FIXED_UNIVERSAL_COMMAND_DIM}"
             )
         return mask_out
 

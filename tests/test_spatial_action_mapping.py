@@ -76,17 +76,24 @@ def test_universal_get_action_mask_no_heads_returns_spatial_only():
 
 
 def test_universal_get_action_mask_with_two_heads():
-    """head_names with 2 entries → mask of size 2 + 1024 = 1026."""
+    """head_names with 2 entries → command prefix 64 + spatial 1024."""
+    from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+
     agent = UniversalUnitControlAgent(cnn_input_size=(128, 128), grid_size=32, dilation_size=0)
     mask = agent.get_action_mask(head_names=["move_global", "attack_global"])
-    assert mask.shape == (1026,)
-    assert mask.all()
+    assert mask.shape == (FIXED_UNIVERSAL_COMMAND_DIM + 1024,)
+    assert mask[:2].all()
+    assert not mask[2:FIXED_UNIVERSAL_COMMAND_DIM].any()
+    assert mask[FIXED_UNIVERSAL_COMMAND_DIM:].all()
 
 
 def test_universal_get_action_mask_with_three_heads():
+    from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+
     agent = UniversalUnitControlAgent(cnn_input_size=(128, 128), grid_size=32, dilation_size=0)
     mask = agent.get_action_mask(head_names=["move_global", "move_local", "attack_global"])
-    assert mask.shape == (1027,)
+    assert mask.shape == (FIXED_UNIVERSAL_COMMAND_DIM + 1024,)
     assert mask[:3].all()
-    assert mask[3:].all()
+    assert not mask[3:FIXED_UNIVERSAL_COMMAND_DIM].any()
+    assert mask[FIXED_UNIVERSAL_COMMAND_DIM:].all()
 

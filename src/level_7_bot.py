@@ -4,13 +4,18 @@ from src.level_3_bot import Level3Bot
 from src.utils.command_constants import CommandConstants
 from src.sc2_bot import MapCleanupFailedError, unit_is_subject_to_map_cleanup
 from src.sc2_bot_universal import SC2BotUniversal
+from src.agent.universal_constants import (
+    FIXED_UNIVERSAL_COMMAND_DIM,
+    UNUSED_COMMAND_HEAD,
+    build_action_head_manifest,
+)
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from sc2.unit import Unit
 import random
 import numpy as np
 from loguru import logger
-from typing import Tuple, Dict, List, Any
+from typing import Tuple, Dict, List, Any, Optional
 from scipy.optimize import linear_sum_assignment
 
 
@@ -88,14 +93,19 @@ class Level7Bot(Level3Bot):
             mask = np.asarray(
                 SC2BotUniversal.action_masks(self, curriculum_progress), dtype=bool
             ).copy()
-            action_heads = self.training_conf.get("action_heads") or getattr(
-                self, "action_heads", []
+            manifest = build_action_head_manifest(
+                self.training_conf,
+                list(
+                    self.training_conf.get("action_heads")
+                    or getattr(self, "action_heads", [])
+                ),
             )
             active = self._masking_active_unit_for_universal()
             allow_attack = active is not None and self._any_enemy_in_tactical_fovea(active)
             if not allow_attack:
-                for i, h in enumerate(action_heads):
-                    if "attack" in str(h).lower():
+                for i in range(FIXED_UNIVERSAL_COMMAND_DIM):
+                    h = manifest[i]
+                    if h != UNUSED_COMMAND_HEAD and "attack" in str(h).lower():
                         mask[i] = False
             return mask
         return super().action_masks(curriculum_progress)
@@ -114,11 +124,17 @@ class Level7Bot(Level3Bot):
 
             head_idx = int(action[0])
             spatial_idx = int(action[1])
-            action_heads = getattr(self, "action_heads", []) or self.training_conf.get("action_heads", [])
+            if head_idx < 0 or head_idx >= FIXED_UNIVERSAL_COMMAND_DIM:
+                return
+            action_heads = getattr(self, "action_heads", []) or self.training_conf.get(
+                "action_heads", []
+            )
+            manifest = build_action_head_manifest(self.training_conf, list(action_heads))
+            head_name = manifest[head_idx]
+            if head_name == UNUSED_COMMAND_HEAD:
+                return
             if head_idx >= len(action_heads):
                 return
-
-            head_name = action_heads[head_idx]
             agent = self.agent_system.unit_agents["agent_0"]
             world_x, world_y = agent.convert_spatial_action_to_world(head_name, spatial_idx, active_unit=unit)
             target_pos = Point2((world_x, world_y))
@@ -180,6 +196,97 @@ class Level7Bot(Level3Bot):
         self._kiting_prev_dist: Dict[int, float] = {}
         self._kiting_chain_bonus_pending: Dict[int, float] = {}
         self._combat_reward_suppressed: Dict[int, bool] = {}
+
+        # Filled after a successful combat reset: per-target spawn anchors, enemy tags per
+        # spawn cluster, and each ally's primary target index (nearest spawn start).
+        self._group_anchors: List[Point2] = []
+        self._enemy_tags_by_group: List[set] = []
+        self._ally_primary_group: Dict[int, int] = {}
+
+    def _combat_topology_ready(self) -> bool:
+        ga = getattr(self, "_group_anchors", None)
+        eg = getattr(self, "_enemy_tags_by_group", None)
+        if ga is None or eg is None:
+            return False
+        return (
+            len(ga) == self.targets_count
+            and len(eg) == self.targets_count
+            and self.targets_count > 0
+        )
+
+    def _finalize_combat_spawn_topology(self, locations: List[Point2]) -> None:
+        """Map allies and enemies to per-target groups using spawn layout (pair i ↔ slot i)."""
+        tc = self.targets_count
+        if len(locations) < tc * 2:
+            self._group_anchors = []
+            self._enemy_tags_by_group = []
+            self._ally_primary_group = {}
+            return
+        ends = [locations[tc + i] for i in range(tc)]
+        starts = [locations[i] for i in range(tc)]
+        self._group_anchors = [Point2((float(p.x), float(p.y))) for p in ends]
+
+        enemies = self.enemy_units(self.enemy_unit_type)
+        if not enemies.exists:
+            self._enemy_tags_by_group = [set() for _ in range(tc)]
+            self._ally_primary_group = {}
+            return
+
+        groups: List[set] = [set() for _ in range(tc)]
+        for e in enemies:
+            gi = min(range(tc), key=lambda i: float(e.position.distance_to(ends[i])))
+            groups[gi].add(e.tag)
+        self._enemy_tags_by_group = groups
+
+        self._ally_primary_group = {}
+        for a in self.get_active_units():
+            gi = min(range(tc), key=lambda i: float(a.position.distance_to(starts[i])))
+            self._ally_primary_group[a.tag] = gi
+
+    def _living_enemy_tags_in_group(self, group_idx: int) -> set:
+        if not self._combat_topology_ready() or group_idx < 0 or group_idx >= self.targets_count:
+            return set()
+        alive = set()
+        enemies = self.enemy_units(self.enemy_unit_type)
+        if enemies.exists:
+            alive = {u.tag for u in enemies}
+        return alive & self._enemy_tags_by_group[group_idx]
+
+    def _group_has_living_enemies(self, group_idx: int) -> bool:
+        return len(self._living_enemy_tags_in_group(group_idx)) > 0
+
+    def _active_target_group_for_ally(self, ally_tag: int) -> Optional[int]:
+        """
+        Index of the enemy pack this ally should focus on for command + constrained matching.
+
+        Walk primary slot g0, then g0+1, … while packs still have units; once that chain
+        is cleared, continue in spawn order with indices 0..g0-1 so allies can engage
+        remaining groups. Without this wrap, an ally whose primary pack was cleared out
+        of order (e.g. helped kill a higher-index cluster first) got no active group while
+        enemies still lived — stale empty ``allowed`` sets and a missing command objective.
+        """
+        if not self._combat_topology_ready():
+            return None
+        g0 = self._ally_primary_group.get(ally_tag)
+        if g0 is None:
+            for g in range(self.targets_count):
+                if self._group_has_living_enemies(g):
+                    return g
+            return None
+        g0 = int(g0)
+        for g in range(g0, self.targets_count):
+            if self._group_has_living_enemies(g):
+                return g
+        for g in range(0, g0):
+            if self._group_has_living_enemies(g):
+                return g
+        return None
+
+    def _allowed_enemy_tags_for_ally_combat(self, ally_tag: int) -> set:
+        g = self._active_target_group_for_ally(ally_tag)
+        if g is None:
+            return set()
+        return set(self._living_enemy_tags_in_group(g))
 
     def _distance_to_assigned_enemy_or_none(self, unit_tag: int):
         """Distance from ally `unit_tag` to its combat-assigned enemy, or None."""
@@ -288,6 +395,9 @@ class Level7Bot(Level3Bot):
         self._kiting_prev_dist.clear()
         self._kiting_chain_bonus_pending.clear()
         self._combat_reward_suppressed.clear()
+        self._group_anchors = []
+        self._enemy_tags_by_group = []
+        self._ally_primary_group = {}
 
         # 1. Guarantee Vision and Initial Cleanup
         # debug_show_map is a TOGGLE — calling it twice re-enables fog.
@@ -371,6 +481,7 @@ class Level7Bot(Level3Bot):
             
             if actual_allied == expected_allied and actual_enemy == expected_enemy:
                 logger.info(f"Spawning successful: {actual_allied} allied, {actual_enemy} enemy.")
+                self._finalize_combat_spawn_topology(locations)
                 if self.allied_unit_type == UnitTypeId.COLOSSUS:
                     await self._debug_unlock_colossus_extended_thermal_lance()
                 return
@@ -592,6 +703,15 @@ class Level7Bot(Level3Bot):
     def refresh_combat_assignments(self) -> Dict[int, int]:
         """
         Ensures every active allied unit has a live enemy target whenever enemies exist.
+        With spawn topology (after a successful Level7 reset), each ally is matched to the
+        enemy pack for its target slot; otherwise the legacy global Hungarian matcher is used.
+        """
+        if self._combat_topology_ready():
+            return self._refresh_combat_assignments_grouped()
+        return self._refresh_combat_assignments_global()
+
+    def _refresh_combat_assignments_global(self) -> Dict[int, int]:
+        """
         Recomputes assignments with sticky Hungarian matching after state changes.
         1) Keep previous valid pairs (consistency)
         2) Hungarian-match remaining allies to remaining enemies (one-to-one)
@@ -641,6 +761,72 @@ class Level7Bot(Level3Bot):
             if ally.tag not in assignment:
                 fallback_enemy = min(enemy_list, key=lambda enemy: ally.distance_to(enemy))
                 assignment[ally.tag] = fallback_enemy.tag
+
+        self.current_assignments = assignment
+        return self.current_assignments
+
+    def _refresh_combat_assignments_grouped(self) -> Dict[int, int]:
+        """Sticky Hungarian matching restricted to each ally's current enemy pack."""
+        _ILLEGAL = 1.0e9
+        allies = self.get_active_units()
+        enemies = self.enemy_units(self.enemy_unit_type)
+
+        if not allies or not enemies.exists:
+            self.current_assignments = {}
+            return self.current_assignments
+
+        enemy_list = list(enemies)
+        if not enemy_list:
+            self.current_assignments = {}
+            return self.current_assignments
+
+        ally_by_tag = {ally.tag: ally for ally in allies}
+        enemy_by_tag = {enemy.tag: enemy for enemy in enemy_list}
+
+        allowed: Dict[int, set] = {
+            a.tag: self._allowed_enemy_tags_for_ally_combat(a.tag) for a in allies
+        }
+
+        assignment: Dict[int, int] = {}
+        prev_assignments = dict(getattr(self, "current_assignments", {}) or {})
+
+        for ally_tag, enemy_tag in prev_assignments.items():
+            if ally_tag not in ally_by_tag or enemy_tag not in enemy_by_tag:
+                continue
+            if ally_tag in assignment:
+                continue
+            if enemy_tag in allowed.get(ally_tag, set()):
+                assignment[ally_tag] = enemy_tag
+
+        remaining_allies = [ally for ally in allies if ally.tag not in assignment]
+        assigned_enemy_tags = set(assignment.values())
+        remaining_enemies = [e for e in enemy_list if e.tag not in assigned_enemy_tags]
+
+        if remaining_allies and remaining_enemies:
+            na = len(remaining_allies)
+            ne = len(remaining_enemies)
+            dist_matrix = np.full((na, ne), _ILLEGAL, dtype=np.float32)
+            for i, ally in enumerate(remaining_allies):
+                allow = allowed.get(ally.tag, set())
+                for j, enemy in enumerate(remaining_enemies):
+                    if enemy.tag in allow:
+                        dist_matrix[i, j] = ally.distance_to(enemy)
+            row_ind, col_ind = linear_sum_assignment(dist_matrix)
+            for r, c in zip(row_ind, col_ind):
+                if float(dist_matrix[r, c]) < _ILLEGAL * 0.5:
+                    assignment[remaining_allies[r].tag] = remaining_enemies[c].tag
+
+        for ally in allies:
+            if ally.tag in assignment:
+                continue
+            allow = allowed.get(ally.tag, set())
+            pool = [e for e in enemy_list if e.tag in allow]
+            if pool:
+                best = min(pool, key=lambda e: ally.distance_to(e))
+                assignment[ally.tag] = best.tag
+            elif enemy_list:
+                best = min(enemy_list, key=lambda e: ally.distance_to(e))
+                assignment[ally.tag] = best.tag
 
         self.current_assignments = assignment
         return self.current_assignments
@@ -881,8 +1067,12 @@ class Level7Bot(Level3Bot):
         original_unit = self.zergling
         self.zergling = unit
 
-        target = self._get_enemy_target_for_unit(unit)
-        target_pos = target.position if target else None
+        if self._combat_topology_ready():
+            g = self._active_target_group_for_ally(unit.tag)
+            target_pos = self._group_anchors[g] if g is not None else None
+        else:
+            target = self._get_enemy_target_for_unit(unit)
+            target_pos = target.position if target else None
 
         arch = self.training_conf.get("agent_architecture", "original")
         high_cmd = self.training_conf.get("high_level_command", 0)

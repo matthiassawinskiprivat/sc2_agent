@@ -27,6 +27,10 @@ from src.utils.config_manager import ConfigManager
 from src.utils.layer_constants import LayerConstants
 from src.utils.proto_utils import ProtoWrapper
 from train.envs.sc2_session_config import use_computer_player
+from src.agent.universal_constants import (
+    FIXED_UNIVERSAL_COMMAND_DIM,
+    build_action_head_manifest,
+)
 
 HARD_RESET_COUNT = 100
 
@@ -93,7 +97,12 @@ class Level0Env(gym.Env):
             # Inject into training_conf for bot/agent visibility
             self.training_conf['imitation_data_percentage'] = self.imitation_data_percentage
             self.imitation_data_max_steps = self.imitation_data_max_steps
-            
+
+            if self.agent_architecture == "universal":
+                manifest = build_action_head_manifest(self.training_conf, self.action_heads)
+                self.training_conf["fixed_universal_command_dim"] = FIXED_UNIVERSAL_COMMAND_DIM
+                self.training_conf["action_head_manifest"] = manifest
+
         except Exception as e:
             print(f"Warning: Failed to load config for {self.level_name}: {e}")
             self.active_layers = []
@@ -142,10 +151,11 @@ class Level0Env(gym.Env):
         self.observation_space = spaces.Dict(obs_dict)
         
         if self.agent_architecture == "universal":
-            # Universal: MultiDiscrete([N_Commands, Spatial_Resolution^2])
-            n_heads = len(self.action_heads)
+            # Universal: fixed command axis; unused slots masked via action_head_manifest.
             spatial_res = 32
-            self.action_space = spaces.MultiDiscrete([n_heads, spatial_res * spatial_res])
+            self.action_space = spaces.MultiDiscrete(
+                [FIXED_UNIVERSAL_COMMAND_DIM, spatial_res * spatial_res]
+            )
         else:
             # ORIGINAL FLAT DISCRETE SPACE
             spatial_size = len(self.action_heads) * self.grid_size * self.grid_size

@@ -5,6 +5,7 @@ from gymnasium import spaces
 from src.agent.models.unit_control_network import UnitControlNetwork
 from src.agent.models.spatial_decoder import SpatialDecoder, tactical_center_spatial_bias
 from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
 
 def test_unit_control_network_universal_spatial_fused_shape():
@@ -39,7 +40,7 @@ def test_universal_recurrent_policy_builds():
         "tactical": spaces.Box(0.0, 1.0, (4, 32, 32)),
         "command": spaces.Box(0.0, 1.0, (10,)),
     })
-    action_space = gym.spaces.MultiDiscrete([2, 1024])
+    action_space = gym.spaces.MultiDiscrete([FIXED_UNIVERSAL_COMMAND_DIM, 1024])
     policy = UniversalRecurrentPolicy(obs_space, action_space, lr_schedule=lambda _: 0.001)
     assert hasattr(policy, "command_head")
     assert hasattr(policy, "spatial_decoder")
@@ -53,17 +54,17 @@ def test_disable_spatial_mask_preserves_command_columns():
         "tactical": spaces.Box(0.0, 1.0, (4, 32, 32)),
         "command": spaces.Box(0.0, 1.0, (10,)),
     })
-    action_space = gym.spaces.MultiDiscrete([2, 1024])
+    action_space = gym.spaces.MultiDiscrete([FIXED_UNIVERSAL_COMMAND_DIM, 1024])
     policy = UniversalRecurrentPolicy(obs_space, action_space, lr_schedule=lambda _: 0.001)
 
-    mask = torch.zeros(4, 1026, dtype=torch.bool)
+    mask = torch.zeros(4, FIXED_UNIVERSAL_COMMAND_DIM + 1024, dtype=torch.bool)
     mask[:, 0] = True  # only command 0 allowed
 
     result = policy._disable_spatial_mask(mask)
 
     assert result[:, 0].all(), "Command column 0 should stay True"
     assert not result[:, 1].any(), "Command column 1 should stay False"
-    assert result[:, 2:].all(), "All spatial columns should be forced True"
+    assert result[:, FIXED_UNIVERSAL_COMMAND_DIM:].all(), "All spatial columns should be forced True"
 
 
 def test_disable_spatial_mask_returns_none_for_none():
@@ -72,7 +73,7 @@ def test_disable_spatial_mask_returns_none_for_none():
         "tactical": spaces.Box(0.0, 1.0, (4, 32, 32)),
         "command": spaces.Box(0.0, 1.0, (10,)),
     })
-    action_space = gym.spaces.MultiDiscrete([2, 1024])
+    action_space = gym.spaces.MultiDiscrete([FIXED_UNIVERSAL_COMMAND_DIM, 1024])
     policy = UniversalRecurrentPolicy(obs_space, action_space, lr_schedule=lambda _: 0.001)
 
     assert policy._disable_spatial_mask(None) is None
@@ -85,7 +86,7 @@ def test_get_action_dist_uses_zero_fallback_when_no_spatial_fused():
         "tactical": spaces.Box(0.0, 1.0, (4, 32, 32)),
         "command": spaces.Box(0.0, 1.0, (10,)),
     })
-    action_space = gym.spaces.MultiDiscrete([2, 1024])
+    action_space = gym.spaces.MultiDiscrete([FIXED_UNIVERSAL_COMMAND_DIM, 1024])
     policy = UniversalRecurrentPolicy(obs_space, action_space, lr_schedule=lambda _: 0.001)
 
     if hasattr(policy.features_extractor, "_spatial_fused"):
