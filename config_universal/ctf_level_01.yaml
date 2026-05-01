@@ -1,0 +1,118 @@
+# config_universal/ctf_level_01.yaml
+# CTF Level 01 — Symmetric bio: Marines vs Marines (Protoss pylons as flags)
+#
+# First CTF level in the universal pipeline.  Both sides get an identical
+# mineral-only budget of Marines.  Introduces the pylon-capture objective
+# after the agent has mastered single-unit micro from the attack levels.
+#
+# Map pool: train/maps/capture_the_flag_terran/ (128x128, open field)
+# Env class: CaptureTheFlagEnv (dual-client asymmetric self-play)
+
+training:
+  training_steps: 10_000_000
+  num_envs: 4
+  n_steps: 2048
+  batch_size: 512
+  learning_rate: 0.0003
+  render_beacon: False
+  watchdog_timeout: 3600
+  target_kl: null
+
+env:
+  env_class: "CaptureTheFlagEnv"
+
+  # Map & layout
+  level_name: "capture_the_flag_terran"
+  map_name: "00_128x128_Full"
+  grid_size: 128
+  flag_distance_min: 30.0        # minimum world-unit distance between the two pylons
+
+  # Roster generation
+  mineral_budget: 350            # ~5 Marines or ~3 Marauders
+  vespene_budget: 0
+  unit_pool:
+    - "MARINE"
+    - "MARAUDER"
+
+  max_steps: 1500
+  headless: True
+
+  # Self-play opponent sync (every K episodes across all envs)
+  every_k_episodes: 100
+
+  # Observation layers (cumulative with prior levels)
+  active_layers:
+    - "allied_unit_density"
+    - "enemy_unit_density"
+    - "allied_unit_biological"
+    - "enemy_unit_biological"
+    - "allied_unit_armored"
+    - "enemy_unit_armored"
+    - "allied_health"
+    - "enemy_health"
+    - "allied_g_dps_base"
+    - "enemy_g_dps_base"
+    - "terrain_pathable"
+    - "command_objective"
+
+  active_tactical_layers:
+    - "allied_unit_density"
+    - "enemy_unit_density"
+    - "terrain_pathable"
+    - "command_assignment"
+    - "command_objective"
+    - "allied_g_dps_base"
+    - "enemy_g_dps_base"
+    - "allied_health"
+    - "enemy_health"
+    - "allied_weapon_cooldown"
+    - "enemy_weapon_cooldown"
+
+  action_heads:
+    - "attack_local"
+
+  high_level_command: "attack"
+
+  rewards:
+    # Pylon (flag) signals — primary objective
+    pylon_damage_reward: 2.0      # per HP of damage dealt to enemy pylon
+    pylon_damage_penalty: 2.0     # per HP of damage received by own pylon
+
+    # Unit combat signals
+    damage_reward: 0.2
+    damage_penalty: 0.2
+    kill_reward: 0.5
+    kill_penalty: -0.5
+
+    # Progress signal (dense shaping toward enemy pylon)
+    distance_multiplier: 0.5
+
+    # Episode outcome
+    win_reward: 15.0
+    loss_penalty: -5.0
+    draw_penalty: -2.0
+
+    # Per-step cost to discourage passive play
+    step_penalty: -0.05
+
+model:
+  algorithm: "MaskableRecurrentPPO"
+  policy: "CnnLstmPolicy"
+  rnn_type: "gru"
+  policy_kwargs:
+    features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
+    features_extractor_kwargs:
+      features_dim: 512
+      thinking_steps: 3
+    lstm_hidden_size: 512
+    net_arch: []
+  gamma: 0.995
+  ent_coef: 0.01
+  n_epochs: 4
+
+evaluation:
+  stop_on_metric:
+    monitor: "rollout/ep_rew_mean"
+    threshold: 12.0
+    comparison: ">"
+    patience: 10
