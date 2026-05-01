@@ -7,6 +7,8 @@ from gymnasium import spaces
 import numpy as np
 
 class Level7Env(Level3Env):
+    ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD = 10.0
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Dynamic Action Space based on accumulated heads (now handled by super().__init__)
@@ -132,11 +134,35 @@ class Level7Env(Level3Env):
         return obs, info
 
     def _maybe_flush_global_pool(self, total_reward: float, *, cycle_completed: bool, done: bool) -> float:
-        """Flushes pooled reward on cycle completion or terminal step."""
-        if cycle_completed or done:
+        """Flushes pooled reward only on terminal step."""
+        if done:
             total_reward += float(self._global_reward_pool)
             self._global_reward_pool = 0.0
         return total_reward
+
+    def _is_unit_within_enemy_radius(self, unit_tag: int, radius: float = None) -> bool:
+        """Whether the controlled unit is within `radius` of any configured enemy."""
+        if self._bot is None:
+            return False
+
+        check_radius = (
+            float(radius)
+            if radius is not None
+            else float(self.ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD)
+        )
+
+        unit = self._bot.units.find_by_tag(unit_tag)
+        if unit is None:
+            return False
+
+        enemies = self._bot.enemy_units(self._bot.enemy_unit_type)
+        if not enemies or not getattr(enemies, "exists", False):
+            return False
+
+        for enemy in enemies:
+            if unit.distance_to(enemy) <= check_radius:
+                return True
+        return False
 
     async def _async_step(self, action):
         """
@@ -150,13 +176,11 @@ class Level7Env(Level3Env):
              return self._get_zero_observation(), 0, True, False, {}
 
         current_tag = self.active_unit_tags[self.current_unit_index]
-        # Keepalive attacks disabled for unit-centric attribution.
-
-        self._bot.snapshot_kiting_before_step(current_tag)
 
         # 1. Apply the agent's action
         await self._bot.apply_action(current_tag, action)
-        
+        self._bot.queue_idle_combat_orders(skip_unit_tag=current_tag)
+
         # Send queued actions to the client before stepping
         actions = getattr(self._bot, "_actions", None)
         if actions is None:
@@ -178,17 +202,14 @@ class Level7Env(Level3Env):
         # Keep combat assignments synced with latest living enemies/allies.
         self._bot.refresh_combat_assignments()
 
-        prev_kite_dist = self._bot._kiting_prev_dist.get(current_tag)
-        new_kite_dist = self._bot._distance_to_assigned_enemy_or_none(current_tag)
-        self._bot.update_kiting_chain_after_step(
-            current_tag, action, prev_kite_dist, new_kite_dist
-        )
-
         # 4. Calculate reward (unit-centric where possible)
         attributed_combat, pooled_combat = self._bot.calculate_unit_centric_combat_delta(current_tag)
         pooled_attrition = self._bot.calculate_unattributed_allied_attrition_delta()
 
-        dist_reward = self._bot.calculate_distance_reward(current_tag)
+        if self._is_unit_within_enemy_radius(current_tag):
+            dist_reward = 0.0
+        else:
+            dist_reward = self._bot.calculate_distance_reward(current_tag)
         micro_reward = self._bot.calculate_micro_bonus(current_tag)
         
         rewards_conf = self.training_conf.get('rewards', {})

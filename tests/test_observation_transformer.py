@@ -439,6 +439,34 @@ def test_tactical_dps_follows_active_tactical_not_global_layers():
     assert result[2].max() > 0, "enemy_g_dps tactical channel should receive weapon heatmap"
 
 
+def test_tactical_enemy_weapon_cooldown_layer_draws_enemy_cd():
+    tactical = [
+        LayerConstants.ENEMY_UNIT_DENSITY,
+        LayerConstants.ENEMY_WEAPON_COOLDOWN,
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": [LayerConstants.ALLIED_UNIT_DENSITY],
+            "active_tactical_layers": tactical,
+        },
+    )
+    ally = create_mock_unit(UnitTypeId.ZERGLING, Point2((64, 64)))
+    enemy = create_mock_unit(UnitTypeId.MARINE, Point2((66, 64)), weapon_cooldown=30.0)
+    raw_obs = {
+        "units": [ally],
+        "enemy_units": [enemy],
+        "effects": [],
+        "game_info": _make_game_info(128, 128, with_grids=True),
+        "game_data": None,
+        "selected_units": [ally],
+    }
+    result = transformer.transform_tactical(raw_obs, ally)
+    assert result.shape == (2, 32, 32)
+    # cooldown 30/60 should draw as 0.5 on enemy cooldown channel
+    assert result[1].max() == pytest.approx(0.5, abs=1e-6)
+
+
 def test_tactical_restores_state_after_call():
     """transform_tactical must restore all internal state after returning."""
     transformer = ObservationTransformer(map_size=(128, 128))
@@ -496,3 +524,26 @@ def test_global_slicing_preserves_config_order():
     assert map_data[0].sum() > 0
     # Channel 2 = TERRAIN_PATHABLE (has signal from pathing grid)
     assert map_data[2].sum() > 0
+
+
+def test_dps_weapon_game_radius_prefers_live_ground_range_over_catalog():
+    """Upgraded Colossus / PF / Hydra: API ground_range must expand DPS ring vs unit_data.json."""
+    t = ObservationTransformer(map_size=(32, 32))
+    u = MagicMock()
+    u.radius = 1.0
+    u.ground_range = 9.0
+    u.air_range = 0.0
+    rg, ra = t._dps_weapon_game_radius(u, 6.0)
+    assert rg == pytest.approx(10.0)
+    assert ra == pytest.approx(7.0)
+
+
+def test_dps_weapon_game_radius_prefers_live_air_range():
+    u = MagicMock()
+    u.radius = 0.5
+    u.ground_range = 0.0
+    u.air_range = 7.0
+    t = ObservationTransformer(map_size=(32, 32))
+    rg, ra = t._dps_weapon_game_radius(u, 5.0)
+    assert rg == pytest.approx(5.5)
+    assert ra == pytest.approx(7.5)

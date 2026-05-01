@@ -19,8 +19,11 @@ def build_action_head_manifest(
     if existing and len(existing) == FIXED_UNIVERSAL_COMMAND_DIM:
         return list(existing)
     h = list(action_heads)
-    if len(h) > FIXED_UNIVERSAL_COMMAND_DIM:
+    cats = list(training_conf.get("categorical_heads") or [])
+    merged = h + cats
+    if len(merged) > FIXED_UNIVERSAL_COMMAND_DIM:
         raise ValueError(
-            f"action_heads length {len(h)} exceeds FIXED_UNIVERSAL_COMMAND_DIM={FIXED_UNIVERSAL_COMMAND_DIM}"
+            f"action_heads + categorical_heads length {len(merged)} exceeds "
+            f"FIXED_UNIVERSAL_COMMAND_DIM={FIXED_UNIVERSAL_COMMAND_DIM}"
         )
-    return h + [UNUSED_COMMAND_HEAD] * (FIXED_UNIVERSAL_COMMAND_DIM - len(h))
+    return merged + [UNUSED_COMMAND_HEAD] * (FIXED_UNIVERSAL_COMMAND_DIM - len(merged))

@@ -1,4 +1,4 @@
-"""Shoot → move away → shoot kiting chain (Level7 combat; always on)."""
+"""Level7 combat: consecutive attacks keep combat reward signal."""
 
 import pytest
 from unittest.mock import MagicMock
@@ -19,24 +19,18 @@ def _bare_bot(training_conf: dict) -> Level7Bot:
     bot.last_attack_target_tag_by_unit = {}
     bot.last_action_was_attack_by_unit = {}
     bot._kite_damage_credit_ok = {}
-    bot._kite_phase = {}
-    bot._kite_streak = {}
-    bot._kiting_prev_dist = {}
-    bot._kiting_chain_bonus_pending = {}
-    bot._combat_reward_suppressed = {}
+    bot._micro_clean_attack_streak = {}
+    bot._allied_took_damage_this_step = {}
     return bot
 
 
 def _simulate_attack_gating(bot: Level7Bot, unit_tag: int) -> None:
-    """Mirror universal apply_action kiting gating for tests."""
-    if not bot._kite_damage_credit_ok.get(unit_tag, True):
-        bot._combat_reward_suppressed[unit_tag] = True
-    else:
-        bot._combat_reward_suppressed[unit_tag] = False
+    """Mirror universal apply_action kiting flag updates for tests."""
+    if bot._kite_damage_credit_ok.get(unit_tag, True):
         bot._kite_damage_credit_ok[unit_tag] = False
 
 
-def test_consecutive_attacks_suppress_damage_reward():
+def test_consecutive_attacks_keep_damage_reward():
     bot = _bare_bot(
         {
             "rewards": {
@@ -65,51 +59,4 @@ def test_consecutive_attacks_suppress_damage_reward():
     bot.last_action_was_attack_by_unit[101] = True
     _simulate_attack_gating(bot, 101)
     a2, p2 = bot.calculate_unit_centric_combat_delta(101)
-    assert (a2, p2) == (0.0, 0.0)
-
-
-def test_shoot_move_away_shoot_micro_bonus_escalates():
-    bot = _bare_bot(
-        {
-            "rewards": {"micro_bonus": 2.0},
-        }
-    )
-    bot.last_action_was_attack_by_unit[101] = True
-    bot.update_kiting_chain_after_step(101, None, None, None)
-    assert bot._kite_phase[101] == "after_shoot_need_move"
-    assert bot._kite_streak.get(101, 0) == 0
-    assert bot._kiting_chain_bonus_pending.get(101, 0.0) == 0.0
-
-    bot.last_action_was_attack_by_unit[101] = False
-    bot.update_kiting_chain_after_step(101, None, 10.0, 11.0)
-    assert bot._kite_phase[101] == "after_move_need_shoot"
-
-    bot.last_action_was_attack_by_unit[101] = True
-    bot.update_kiting_chain_after_step(101, None, None, None)
-    assert bot._kiting_chain_bonus_pending.get(101, 0.0) == pytest.approx(2.0)
-    assert bot._kite_streak[101] == 1
-
-    bot.last_action_was_attack_by_unit[101] = False
-    bot.update_kiting_chain_after_step(101, None, 11.0, 12.5)
-
-    bot.last_action_was_attack_by_unit[101] = True
-    bot.update_kiting_chain_after_step(101, None, None, None)
-    assert bot._kiting_chain_bonus_pending.get(101, 0.0) == pytest.approx(2.0 + 4.0)
-
-
-def test_move_closer_resets_kiting_streak():
-    bot = _bare_bot(
-        {"rewards": {"micro_bonus": 2.0}}
-    )
-    bot.last_action_was_attack_by_unit[101] = True
-    bot.update_kiting_chain_after_step(101, None, None, None)
-    bot.last_action_was_attack_by_unit[101] = False
-    bot.update_kiting_chain_after_step(101, None, 10.0, 12.0)
-    bot.last_action_was_attack_by_unit[101] = True
-    bot.update_kiting_chain_after_step(101, None, None, None)
-    assert bot._kite_streak[101] == 1
-
-    bot.last_action_was_attack_by_unit[101] = False
-    bot.update_kiting_chain_after_step(101, None, 12.0, 10.0)
-    assert bot._kite_streak[101] == 0
-    assert bot._kite_phase[101] == "idle"
+    assert (a2, p2) == (pytest.approx(2.0), pytest.approx(0.0))

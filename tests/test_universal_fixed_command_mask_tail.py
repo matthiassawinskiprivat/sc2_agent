@@ -18,6 +18,16 @@ def test_build_action_head_manifest_pads_to_64():
     assert all(h == UNUSED_COMMAND_HEAD for h in m[2:])
 
 
+def test_build_action_head_manifest_includes_categorical_heads():
+    m = build_action_head_manifest(
+        {"categorical_heads": ["unload"]},
+        ["move_local"],
+    )
+    assert m[0] == "move_local"
+    assert m[1] == "unload"
+    assert all(h == UNUSED_COMMAND_HEAD for h in m[2:])
+
+
 def _minimal_universal_bot(training_conf):
     with patch.object(SC2BotUniversal, "__init__", lambda self, *a, **kw: None):
         bot = SC2BotUniversal.__new__(SC2BotUniversal)

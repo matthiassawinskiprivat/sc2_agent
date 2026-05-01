@@ -13,7 +13,7 @@ import numpy as np
 import json
 import os
 import math
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Tuple
 import cv2
 
 # SC2 Dependencies
@@ -388,11 +388,22 @@ class ObservationTransformer:
             r = int(unit.radius * self.scale) if unit.is_structure else 0
 
         val = 1.0
+        cd = float(getattr(unit, "weapon_cooldown", 0.0))
+        cd_norm = min(cd, 60.0) / 60.0
         if not is_enemy:
-            cd = getattr(unit, 'weapon_cooldown', 0.0)
-            val = 1.0 - (0.7 * (min(cd, 60.0) / 60.0))
+            if self.is_tactical_mode:
+                val = 1.0
+            else:
+                val = 1.0 - (0.7 * cd_norm)
 
         self._draw_circle_vectorized(layers, idx_den, px, py, 0, r, val, True)
+
+        if self.is_tactical_mode:
+            idx_cd = self.current_layer_map.get(
+                LayerConstants.ENEMY_WEAPON_COOLDOWN if is_enemy else LayerConstants.ALLIED_WEAPON_COOLDOWN
+            )
+            if idx_cd is not None:
+                self._draw_circle_vectorized(layers, idx_cd, px, py, 0, r, cd_norm, True)
 
         if not self.is_tactical_mode:
             # Attribute Layers (Not in tactical)
@@ -573,6 +584,26 @@ class ObservationTransformer:
         elif unit.type_id == UnitTypeId.SHIELDBATTERY and unit.energy > 3: hps, rng = 50.4, 6.0
         if hps > 0: self._draw_circle_vectorized(layers, idx, px, py, rng, None, hps, True)
 
+    def _dps_weapon_game_radius(self, unit: Unit, catalog_range: float) -> Tuple[float, float]:
+        """
+        Weapon reach in game units for DPS discs: max(catalog range, live API range) + radius.
+
+        ``catalog_range`` is the base weapon range from ``unit_data.json`` (no radius). The SC2
+        observation fills ``unit.ground_range`` / ``unit.air_range`` with **current** values, so
+        upgrades (e.g. Extended Thermal Lance, Hi-Sec Auto Tracking, Grooved Spines, Seismic
+        Spines, Advanced Ballistics, Anion Crystals) match what allies and **enemies** can do.
+
+        Returns (ground_ring_radius, air_ring_radius) in game units (same convention as before:
+        catalog range + unit.radius, but catalog is upgraded by live stats when higher).
+        """
+        ur = float(getattr(unit, "radius", 0.0) or 0.0)
+        base = float(catalog_range)
+        g_live = float(getattr(unit, "ground_range", 0.0) or 0.0)
+        a_live = float(getattr(unit, "air_range", 0.0) or 0.0)
+        rng_g = max(base, g_live) + ur
+        rng_a = max(base, a_live) + ur
+        return rng_g, rng_a
+
     def _draw_unit_dps(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int, game_data: GameData):
         if unit.type_id in [UnitTypeId.LIBERATORAG, UnitTypeId.CARRIER, UnitTypeId.LURKERMP,
                             UnitTypeId.MEDIVAC, UnitTypeId.WARPPRISM, UnitTypeId.OBSERVER,
@@ -582,11 +613,18 @@ class ObservationTransformer:
         weapon_stats = []
         uid = unit.type_id
         if uid == UnitTypeId.WIDOWMINEBURROWED:
-            weapon_stats = [{'base': 80.0 * max(0.0, 1.0 - (getattr(unit, 'weapon_cooldown', 0) / (29.0 * 22.4))), 'rng': 5.0, 'typ': 3}]
+            weapon_stats = [
+                {
+                    'base': 80.0 * max(0.0, 1.0 - (getattr(unit, 'weapon_cooldown', 0) / (29.0 * 22.4))),
+                    'range': 5.0,
+                    'typ': 3,
+                }
+            ]
         elif uid == UnitTypeId.BANELING:
+            # Explosion radius — not driven by unit.ground_range; keep legacy fixed draw size.
             weapon_stats = [{'base': 20.0, 'rng': 2.2, 'typ': 1}]
         elif uid == UnitTypeId.ORACLE and unit.energy >= 25:
-            weapon_stats = [{'base': 24.6, 'rng': 4.0, 'typ': 1}]
+            weapon_stats = [{'base': 24.6, 'range': 4.0, 'typ': 1}]
         else:
             u_name = getattr(unit.type_id, "name", None)
             if u_name:
@@ -594,16 +632,22 @@ class ObservationTransformer:
                 if db:
                     for w in db.get('weapons', []):
                         dps = (w['damage'] * w['attacks']) / (w['period'] or 1.0)
-                        weapon_stats.append({'base': dps, 'rng': w['range'] + unit.radius, 'typ': w['type']})
+                        weapon_stats.append({'base': dps, 'range': float(w['range']), 'typ': w['type']})
 
         for w in weapon_stats:
             p = "enemy" if is_enemy else "allied"
             idx_g = self.current_layer_map.get(f"{p}_g_dps_base")
             idx_a = self.current_layer_map.get(f"{p}_a_dps_base")
-            if w['typ'] in [1, 3] and idx_g is not None:
-                self._draw_circle_vectorized(layers, idx_g, px, py, w['rng'], None, w['base'], True)
-            if w['typ'] in [2, 3] and idx_a is not None:
-                self._draw_circle_vectorized(layers, idx_a, px, py, w['rng'], None, w['base'], True)
+            if 'rng' in w and 'range' not in w:
+                rng_g = float(w['rng'])
+                rng_a = rng_g
+            else:
+                rng_g, rng_a = self._dps_weapon_game_radius(unit, float(w['range']))
+            typ = int(w['typ'])
+            if typ in (1, 3) and idx_g is not None:
+                self._draw_circle_vectorized(layers, idx_g, px, py, rng_g, None, w['base'], True)
+            if typ in (2, 3) and idx_a is not None:
+                self._draw_circle_vectorized(layers, idx_a, px, py, rng_a, None, w['base'], True)
 
     def _draw_effects(self, effects, layers):
         for effect in effects:

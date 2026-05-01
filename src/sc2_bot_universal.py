@@ -293,69 +293,32 @@ class SC2BotUniversal(BotAI):
 
     def action_masks(self, curriculum_progress: float = 1.0) -> np.ndarray:
         """
-        Universal MultiDiscrete masking requires a FLAT concatenated array for 
-        vectorized environment compatibility (np.stack).
-        Space: [FIXED_UNIVERSAL_COMMAND_DIM, Spatial^2] -> Mask size 64 + 1024.
+        Universal MultiDiscrete masking: flat ``[command | spatial]`` for vec-env stack.
+
+        Only **unconfigured** command indices are masked (padding below
+        ``FIXED_UNIVERSAL_COMMAND_DIM``). Configured heads are
+        ``action_heads`` then ``categorical_heads`` from the training pipeline.
+        Spatial logits are not masked here (policy may disable spatial masking separately).
+        ``curriculum_progress`` is unused; kept for call-site compatibility.
         """
+        del curriculum_progress  # pathing / guidance masking removed for universal
         n_spatial = 32 * 32
-        if not self.agent_system or "agent_0" not in self.agent_system.unit_agents:
-            action_heads = self.training_conf.get("action_heads") or getattr(
-                self, "action_heads", []
-            )
-            if not action_heads:
-                action_heads = ["move_global"]
-            cmd_mask = np.zeros(FIXED_UNIVERSAL_COMMAND_DIM, dtype=bool)
-            cmd_mask[: len(action_heads)] = True
-            return np.concatenate([cmd_mask, np.ones(n_spatial, dtype=bool)])
-
-        # 1. Base pathing mask from agent system (32x32)
-        # Universal architecture handles spatial masking separately.
-        # Passing None ensures we get exactly the 32x32 spatial mask (size 1024).
-        move_mask = self.agent_system.unit_agents["agent_0"].get_action_mask(None)
-        
-        # AIR UNIT BYPASS: Flyers can move anywhere (ignore terrain)
-        active_unit = self.zergling # Default for this level
-        if active_unit and active_unit.is_flying:
-            move_mask = np.ones_like(move_mask, dtype=bool)
-
-        # 2. Guidance Curriculum (Circle mask around beacon)
-        guidance_mask = np.ones_like(move_mask, dtype=bool)
-        if self.training_conf.get("guidance_curriculum", False) and self.beacon and curriculum_progress < 1.0:
-            max_grid_dist = 32 * 1.5
-            grid_radius = 10.0 + (curriculum_progress ** 2.0) * (max_grid_dist - 10.0)
-            
-            unit_agent = self.agent_system.unit_agents["agent_0"]
-            beacon_grid_idx = unit_agent.get_grid_index_at_world_pos(self.beacon.position)
-            bx, by = beacon_grid_idx % 32, beacon_grid_idx // 32
-            
-            Y, X = np.ogrid[:32, :32]
-            dist_sq = (X - bx)**2 + (Y - by)**2
-            guidance_mask = (dist_sq <= (grid_radius ** 2)).flatten()
-            guidance_mask[beacon_grid_idx] = True
-
-        # Combine Move and Guidance
-        final_spatial_mask = move_mask & guidance_mask
-
-        # 3. Command head masking: fixed 64 slots; only defined heads (prefix) start legal.
-        action_heads = self.training_conf.get("action_heads", [])
+        action_heads = self.training_conf.get("action_heads") or getattr(
+            self, "action_heads", []
+        )
         if not action_heads:
-            action_heads = getattr(self, "action_heads", ["move_global"])
-
+            action_heads = ["move_global"]
+        categorical_heads = self.training_conf.get("categorical_heads") or getattr(
+            self, "categorical_heads", []
+        )
+        n_configured = min(
+            FIXED_UNIVERSAL_COMMAND_DIM,
+            len(action_heads) + len(categorical_heads),
+        )
         cmd_mask = np.zeros(FIXED_UNIVERSAL_COMMAND_DIM, dtype=bool)
-        cmd_mask[: len(action_heads)] = True
-
-        mask_out = np.concatenate([cmd_mask, final_spatial_mask])
-        n_spatial_expected = 32 * 32
-        if final_spatial_mask.size != n_spatial_expected:
-            logger.warning(
-                f"CRITICAL SHAPE: spatial mask size {final_spatial_mask.size} != {n_spatial_expected}, "
-                f"cmd_dim={len(cmd_mask)}, action_heads={action_heads}"
-            )
-        if len(cmd_mask) != FIXED_UNIVERSAL_COMMAND_DIM:
-            logger.warning(
-                f"CRITICAL SHAPE: cmd_mask length {len(cmd_mask)} != {FIXED_UNIVERSAL_COMMAND_DIM}"
-            )
-        return mask_out
+        cmd_mask[:n_configured] = True
+        spatial_mask = np.ones(n_spatial, dtype=bool)
+        return np.concatenate([cmd_mask, spatial_mask])
 
     def _get_observation(self, active_unit: Optional[Unit] = None) -> Tuple[np.ndarray, Dict]:
         self.zergling = self.units(UnitTypeId.ZERGLING).first if self.units(UnitTypeId.ZERGLING).exists else None

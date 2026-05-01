@@ -1,4 +1,4 @@
-"""Universal Level7: mask attack command heads when no enemy appears in tactical fovea."""
+"""Universal Level7: attack command heads are not masked by tactical fovea (pipeline-only command mask)."""
 
 import numpy as np
 import pytest
@@ -40,7 +40,7 @@ def universal_bot():
     bot.action_heads = training_conf["action_heads"]
 
     mock_agent = MagicMock()
-    mock_agent.get_action_mask.return_value = np.ones(32 * 32, dtype=bool)
+    mock_agent.get_action_mask.return_value = np.zeros(32 * 32, dtype=bool)
     bot.agent_system = MagicMock()
     bot.agent_system.unit_agents = {"agent_0": mock_agent}
 
@@ -71,7 +71,7 @@ def test_attack_unmasked_when_enemy_centered_in_tactical(universal_bot):
     assert m[FIXED_UNIVERSAL_COMMAND_DIM:].all()
 
 
-def test_attack_masked_when_enemy_outside_tactical(universal_bot):
+def test_attack_unmasked_when_enemy_outside_tactical(universal_bot):
     bot = universal_bot
     enemy = MagicMock()
     enemy.position = Point2((60.0, 24.0))
@@ -81,12 +81,12 @@ def test_attack_masked_when_enemy_outside_tactical(universal_bot):
 
     m = bot.action_masks()
     assert len(m) == FIXED_UNIVERSAL_COMMAND_DIM + 1024
-    assert m[0] and m[1]
-    assert not m[2]
+    assert m[0] and m[1] and m[2]
     assert not m[3:FIXED_UNIVERSAL_COMMAND_DIM].any()
+    assert m[FIXED_UNIVERSAL_COMMAND_DIM:].all()
 
 
-def test_attack_masked_when_cloaked_undetected(universal_bot):
+def test_attack_unmasked_when_cloaked_undetected(universal_bot):
     bot = universal_bot
     enemy = MagicMock()
     enemy.position = Point2((20.0, 24.0))
@@ -96,19 +96,15 @@ def test_attack_masked_when_cloaked_undetected(universal_bot):
     bot.enemy_units = MagicMock(return_value=_FakeEnemyGroup([enemy]))
 
     m = bot.action_masks()
-    assert not m[2]
+    assert m[0] and m[1] and m[2]
     assert not m[3:FIXED_UNIVERSAL_COMMAND_DIM].any()
+    assert m[FIXED_UNIVERSAL_COMMAND_DIM:].all()
 
 
-def test_attack_unmasked_for_cloaked_snapshot(universal_bot):
+def test_spatial_mask_all_true_despite_pathing_agent(universal_bot):
+    """Spatial slice stays fully legal; pathing is not applied in universal masks."""
     bot = universal_bot
-    enemy = MagicMock()
-    enemy.position = Point2((20.0, 24.0))
-    enemy.is_cloaked = True
-    enemy.is_detected = False
-    enemy.is_snapshot = True
-    bot.enemy_units = MagicMock(return_value=_FakeEnemyGroup([enemy]))
+    bot.enemy_units = MagicMock(return_value=_FakeEnemyGroup([]))
 
     m = bot.action_masks()
-    assert m[2]
-    assert not m[3:FIXED_UNIVERSAL_COMMAND_DIM].any()
+    assert m[FIXED_UNIVERSAL_COMMAND_DIM:].all()

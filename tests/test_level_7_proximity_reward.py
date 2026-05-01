@@ -18,11 +18,11 @@ def _bare_level7_bot(training_conf: dict) -> Level7Bot:
     bot.previous_danger_counts = {}
     bot.current_assignments = {}
     bot._kite_damage_credit_ok = {}
-    bot._kite_phase = {}
-    bot._kite_streak = {}
-    bot._kiting_prev_dist = {}
-    bot._kiting_chain_bonus_pending = {}
-    bot._combat_reward_suppressed = {}
+    bot._micro_chain_stage = {}
+    bot._micro_chain_attack_danger = {}
+    bot._micro_under_fire_min_dist_prev = {}
+    bot.last_action_was_move_by_unit = {}
+    bot._allied_took_damage_this_step = {}
     return bot
 
 
@@ -158,44 +158,8 @@ def test_level_7_no_threat_penalty_beyond_max_of_ranges():
     assert r == pytest.approx((16.0 - 14.0) * 0.2)
 
 
-def test_micro_bonus_penalizes_enter_and_stay_in_danger_zone():
-    bot, ally, enemy = _make_bot_with_pair(
-        ally_pos=(0, 0),
-        enemy_pos=(6, 0),
-        ally_ground_range=8.0,
-        enemy_ground_range=2.0,
-        micro_bonus=2.0,
-    )
-    # threat radius = max(2, 4) = 4
-    bot.previous_danger_counts = {101: 0}
-    ally.position = Point2((3, 0))
-    enemy.position = Point2((6, 0))
-    enter_reward = bot.calculate_micro_bonus(101)
-    assert enter_reward == pytest.approx(-2.0)
-
-    ally.position = Point2((2.5, 0))
-    stay_reward = bot.calculate_micro_bonus(101)
-    assert stay_reward == pytest.approx(-2.0)
-
-
-def test_micro_bonus_rewards_kiting_sweet_spot():
-    bot, ally, enemy = _make_bot_with_pair(
-        ally_pos=(0, 0),
-        enemy_pos=(6, 0),
-        ally_ground_range=8.0,
-        enemy_ground_range=2.0,
-        micro_bonus=2.0,
-    )
-    # threat radius = max(2, 4) = 4; sweet spot is (4, 8]
-    bot.previous_danger_counts = {101: 0}
-    ally.position = Point2((0, 0))
-    enemy.position = Point2((5.0, 0))
-    r = bot.calculate_micro_bonus(101)
-    assert r == pytest.approx(2.0)
-
-
-def test_ranged_enemy_danger_zone_is_wider_than_melee_geometry():
-    """Ranged enemies (range > cutoff) apply RANGED_ENEMY_DANGER_ZONE_MULT to threat radius."""
+def test_ranged_enemy_danger_zone_has_no_extra_expansion():
+    """Ranged enemies use the same threat radius as melee (no +10% expansion)."""
     bot, ally, enemy = _make_bot_with_pair(
         ally_pos=(0, 0),
         enemy_pos=(6.2, 0),
@@ -204,25 +168,23 @@ def test_ranged_enemy_danger_zone_is_wider_than_melee_geometry():
         micro_bonus=2.0,
         enemy_type="ROACH",
     )
-    assert Level7Bot.RANGED_ENEMY_MICRO_RANGE_CUTOFF == 2.5
-    assert Level7Bot.RANGED_ENEMY_DANGER_ZONE_MULT == pytest.approx(1.1)
-    # Base threat = max(6, 4) = 6; dist 6.2 > 6 -> outside without buff.
-    # Buffed threat = 6 * 1.1 = 6.6; dist 6.2 <= 6.6 -> inside.
-    assert bot._is_in_enemy_danger_zone(ally, enemy) is True
+    # threat = max(6, 4) = 6; dist 6.2 > 6 -> outside.
+    assert bot._is_in_enemy_danger_zone(ally, enemy) is False
 
     enemy.ground_range = 2.0
-    # max(2, 4) = 4; no ranged buff; dist 6.2 > 4 -> outside.
+    # max(2, 4) = 4; dist 6.2 > 4 -> outside.
     assert bot._is_in_enemy_danger_zone(ally, enemy) is False
 
 
-def test_micro_bonus_rewards_exit_scaled_by_previous_enemy_count():
-    bot = _bare_level7_bot(
-        {
-            "unit_type": "MARINE",
-            "enemy_type": "ZERGLING",
-            "rewards": {"distance_multiplier": 0.1, "micro_bonus": 2.0},
-        }
-    )
+def test_danger_zone_count_ignores_enemies_outside_tactical_fovea():
+    """Far enemies in weapon range must not inflate danger count (matches 32×32 tactical crop)."""
+    training_conf = {
+        "unit_type": "ROACH",
+        "enemy_type": "ZERGLING",
+        "rewards": {"micro_bonus": 2.0},
+    }
+    bot = _bare_level7_bot(training_conf)
+
     ally = MagicMock()
     ally.tag = 101
     ally.position = Point2((0, 0))
@@ -231,31 +193,204 @@ def test_micro_bonus_rewards_exit_scaled_by_previous_enemy_count():
     ally.is_flying = False
     ally.distance_to.side_effect = lambda other: ally.position.distance_to(other.position)
 
-    e1 = MagicMock()
-    e1.tag = 201
-    e1.position = Point2((1.0, 0))
-    e1.ground_range = 2.0
-    e1.air_range = 0.0
-    e1.is_flying = False
-    e2 = MagicMock()
-    e2.tag = 202
-    e2.position = Point2((1.5, 0))
-    e2.ground_range = 2.0
-    e2.air_range = 0.0
-    e2.is_flying = False
+    e_close = MagicMock()
+    e_close.tag = 201
+    e_close.position = Point2((3, 0))
+    e_close.ground_range = 2.0
+    e_close.air_range = 0.0
+    e_close.is_flying = False
 
-    allies = MagicMock()
-    allies.__iter__.return_value = [ally]
-    enemies = MagicMock()
-    enemies.__iter__.return_value = [e1, e2]
-    enemies.exists = True
+    e_far = MagicMock()
+    e_far.tag = 202
+    e_far.position = Point2((50, 0))
+    e_far.ground_range = 100.0
+    e_far.air_range = 0.0
+    e_far.is_flying = False
 
-    bot.units = MagicMock(side_effect=lambda unit_type_id: allies if unit_type_id == bot.allied_unit_type else MagicMock())
+    mock_allied = MagicMock()
+    mock_allied.__iter__.return_value = [ally]
+    mock_allied.amount = 1
+
+    mock_enemy_grp = MagicMock()
+    mock_enemy_grp.__iter__.return_value = [e_close, e_far]
+    mock_enemy_grp.amount = 2
+    mock_enemy_grp.exists = True
+
+    def units_side_effect(unit_type_id):
+        if unit_type_id == bot.allied_unit_type:
+            return mock_allied
+        return MagicMock()
+
+    def enemy_units_side_effect(unit_type_id):
+        if unit_type_id == bot.enemy_unit_type:
+            return mock_enemy_grp
+        return MagicMock()
+
+    bot.units = MagicMock(side_effect=units_side_effect)
     bot.units.find_by_tag.side_effect = lambda tag: ally if tag == 101 else None
-    bot.enemy_units = MagicMock(side_effect=lambda unit_type_id: enemies if unit_type_id == bot.enemy_unit_type else MagicMock())
+    bot.enemy_units = MagicMock(side_effect=enemy_units_side_effect)
 
-    # Transition from inside 2 zones to outside all zones -> +1.5 * 2 * micro_bonus
-    bot.previous_danger_counts = {101: 2}
-    ally.position = Point2((20, 20))
+    assert bot._is_in_enemy_danger_zone(ally, e_close) is True
+    assert bot._is_in_enemy_danger_zone(ally, e_far) is True
+    assert bot._count_enemy_danger_zones_for_unit(ally) == 1
+
+
+def test_micro_bonus_requires_disengage_between_attacks():
+    bot, _ally, _enemy = _make_bot_with_pair(
+        ally_pos=(0, 0),
+        enemy_pos=(6, 0),
+        ally_ground_range=8.0,
+        enemy_ground_range=2.0,
+        micro_bonus=2.0,
+    )
+    bot._allied_took_damage_this_step = {}
+    bot.last_action_was_attack_by_unit = {101: True}
+
+    first = bot.calculate_micro_bonus(101)
+    second = bot.calculate_micro_bonus(101)
+
+    assert first == pytest.approx(0.0)
+    assert second == pytest.approx(0.0)
+
+
+def test_micro_bonus_requires_attack_disengage_attack_chain_without_damage():
+    bot, ally, _enemy = _make_bot_with_pair(
+        ally_pos=(0, 0),
+        enemy_pos=(3, 0),
+        ally_ground_range=8.0,
+        enemy_ground_range=2.0,
+        micro_bonus=2.0,
+    )
+    bot._allied_took_damage_this_step = {101: False}
+    bot.last_action_was_attack_by_unit = {101: True}
+    first = bot.calculate_micro_bonus(101)
+    assert first == pytest.approx(0.0)
+
+    # Move outside enemy danger zone to satisfy disengage.
+    ally.position = Point2((11, 0))
+    bot.last_action_was_attack_by_unit[101] = False
+    bot._allied_took_damage_this_step[101] = False
+    mid = bot.calculate_micro_bonus(101)
+    assert mid == pytest.approx(0.0)
+
+    bot.last_action_was_attack_by_unit[101] = True
+    bot._allied_took_damage_this_step[101] = False
+    final = bot.calculate_micro_bonus(101)
+    assert final == pytest.approx(2.0)
+
+def test_micro_bonus_resets_when_unit_takes_damage_during_chain():
+    bot, ally, _enemy = _make_bot_with_pair(
+        ally_pos=(0, 0),
+        enemy_pos=(3, 0),
+        ally_ground_range=8.0,
+        enemy_ground_range=2.0,
+        micro_bonus=2.0,
+    )
+    bot._allied_took_damage_this_step = {101: False}
+    bot.last_action_was_attack_by_unit = {101: True}
+    _ = bot.calculate_micro_bonus(101)
+
+    ally.position = Point2((11, 0))
+    bot.last_action_was_attack_by_unit[101] = False
+    bot._allied_took_damage_this_step[101] = True
     r = bot.calculate_micro_bonus(101)
-    assert r == pytest.approx(6.0)
+    assert r == pytest.approx(0.0)
+    assert bot._micro_chain_stage[101] == 0
+
+
+def test_micro_bonus_progresses_on_non_attack_disengage_step():
+    bot, _ally, _enemy = _make_bot_with_pair(
+        ally_pos=(0, 0),
+        enemy_pos=(6, 0),
+        ally_ground_range=8.0,
+        enemy_ground_range=2.0,
+        micro_bonus=2.0,
+    )
+    bot._micro_chain_stage = {101: 1}
+    bot._micro_chain_attack_danger = {101: 1}
+    bot._allied_took_damage_this_step = {101: False}
+    bot.last_action_was_attack_by_unit = {101: False}
+    bot.last_action_was_move_by_unit = {101: False}
+
+    r = bot.calculate_micro_bonus(101)
+    assert r == pytest.approx(0.0)
+    assert bot._micro_chain_stage[101] == 2
+
+
+def test_micro_penalty_when_moving_closer_under_enemy_fire_in_fovea():
+    """Move that reduces distance to shooting enemies (tactical fovea) costs -micro_bonus."""
+    training_conf = {
+        "unit_type": "ROACH",
+        "enemy_type": "ZERGLING",
+        "rewards": {"micro_bonus": 2.0},
+    }
+    bot = _bare_level7_bot(training_conf)
+
+    ally = MagicMock()
+    ally.tag = 101
+    ally.position = Point2((0, 0))
+    ally.ground_range = 8.0
+    ally.air_range = 0.0
+    ally.is_flying = False
+    ally.distance_to.side_effect = lambda other: ally.position.distance_to(other.position)
+
+    enemy = MagicMock()
+    enemy.tag = 201
+    enemy.position = Point2((4, 0))
+    enemy.ground_range = 6.0
+    enemy.air_range = 0.0
+    enemy.is_flying = False
+
+    mock_allied = MagicMock()
+    mock_allied.__iter__.return_value = [ally]
+    mock_allied.amount = 1
+
+    mock_enemy_grp = MagicMock()
+    mock_enemy_grp.__iter__.return_value = [enemy]
+    mock_enemy_grp.amount = 1
+    mock_enemy_grp.exists = True
+
+    def units_side_effect(unit_type_id):
+        if unit_type_id == bot.allied_unit_type:
+            return mock_allied
+        return MagicMock()
+
+    def enemy_units_side_effect(unit_type_id):
+        if unit_type_id == bot.enemy_unit_type:
+            return mock_enemy_grp
+        return MagicMock()
+
+    bot.units = MagicMock(side_effect=units_side_effect)
+    bot.units.find_by_tag.side_effect = lambda tag: ally if tag == 101 else None
+    bot.enemy_units = MagicMock(side_effect=enemy_units_side_effect)
+
+    bot._allied_took_damage_this_step = {101: False}
+    bot.last_action_was_attack_by_unit = {101: False}
+    bot.last_action_was_move_by_unit = {101: False}
+    _ = bot.calculate_micro_bonus(101)
+    assert bot._micro_under_fire_min_dist_prev.get(101) == pytest.approx(4.0)
+
+    ally.position = Point2((2, 0))
+    bot.last_action_was_move_by_unit[101] = True
+    r = bot.calculate_micro_bonus(101)
+    assert r == pytest.approx(-2.0)
+
+
+def test_no_micro_penalty_when_moving_closer_without_move_action_flag():
+    bot, ally, enemy = _make_bot_with_pair(
+        ally_pos=(0, 0),
+        enemy_pos=(4, 0),
+        ally_ground_range=8.0,
+        enemy_ground_range=6.0,
+        micro_bonus=2.0,
+    )
+    enemy.position = Point2((4, 0))
+    bot._allied_took_damage_this_step = {101: False}
+    bot.last_action_was_attack_by_unit = {101: False}
+    bot.last_action_was_move_by_unit = {101: False}
+    _ = bot.calculate_micro_bonus(101)
+
+    ally.position = Point2((2, 0))
+    bot.last_action_was_move_by_unit[101] = False
+    r = bot.calculate_micro_bonus(101)
+    assert r == pytest.approx(0.0)

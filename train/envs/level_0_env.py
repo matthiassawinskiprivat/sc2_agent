@@ -6,7 +6,20 @@ import random
 import psutil
 import asyncio
 import aiohttp
+from aiohttp.client_exceptions import ClientConnectionError, ServerDisconnectedError
 from typing import Dict
+
+# aiohttp >=3.9 exposes ClientConnectionResetError (subclass of ClientConnectionError on some versions).
+_STEP_SC2_CONN_LOST = (
+    ClientConnectionError,
+    ServerDisconnectedError,
+)
+try:
+    from aiohttp.client_exceptions import ClientConnectionResetError
+
+    _STEP_SC2_CONN_LOST = _STEP_SC2_CONN_LOST + (ClientConnectionResetError,)
+except ImportError:
+    pass
 from pathlib import Path
 from gymnasium import spaces
 from unittest.mock import MagicMock
@@ -399,7 +412,10 @@ class Level0Env(gym.Env):
         try:
             # 1. Run the async logic in our dedicated event loop
             obs, reward, done, truncated, info = self._loop.run_until_complete(self._async_step(action))
-        except (ProtocolError, ConnectionAlreadyClosed) as e:
+        except (ProtocolError, ConnectionAlreadyClosed) + _STEP_SC2_CONN_LOST as e:
+            # When the SC2 websocket drops, python-sc2 may map some failures to
+            # ConnectionAlreadyClosed; aiohttp may raise ClientConnectionResetError /
+            # ClientConnectionError ("Cannot write to closing transport").
             self._log(f"Connection to game lost: {e}")
             # Robust dummy observation for Dict spaces
             dummy_obs = {}

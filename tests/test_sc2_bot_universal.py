@@ -72,7 +72,7 @@ class TestActionMasks:
     def test_mask_with_agent_system(self):
         bot = _create_universal_bot()
         mock_agent = MagicMock()
-        mock_agent.get_action_mask.return_value = np.ones(1024, dtype=bool)
+        mock_agent.get_action_mask.return_value = np.zeros(1024, dtype=bool)
 
         bot.agent_system = MagicMock()
         bot.agent_system.unit_agents = {"agent_0": mock_agent}
@@ -80,6 +80,21 @@ class TestActionMasks:
 
         mask = bot.action_masks()
         assert mask.shape == (FIXED_UNIVERSAL_COMMAND_DIM + 1024,)
+        assert mask[FIXED_UNIVERSAL_COMMAND_DIM:].all()
+
+    def test_categorical_heads_count_as_configured_commands(self):
+        conf = {
+            "agent_architecture": "universal",
+            "action_heads": ["move_global"],
+            "categorical_heads": ["unload", "hold"],
+            "active_layers": ["allied_unit_density"],
+            "rewards": {},
+        }
+        bot = _create_universal_bot(training_conf=conf)
+        mask = bot.action_masks()
+        assert mask[:3].all()
+        assert not mask[3:FIXED_UNIVERSAL_COMMAND_DIM].any()
+        assert mask[FIXED_UNIVERSAL_COMMAND_DIM:].all()
 
     def test_mask_shape_with_three_heads(self):
         conf = {

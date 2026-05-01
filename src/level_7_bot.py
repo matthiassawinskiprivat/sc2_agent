@@ -25,10 +25,10 @@ class Level7Bot(Level3Bot):
     Controls a specific unit type against an enemy unit type.
     """
 
-    # Micro danger disk: enemies with weapon range above this (vs the ally) count as "ranged"
-    # and get a wider danger zone (kiting / micro reward geometry).
-    RANGED_ENEMY_MICRO_RANGE_CUTOFF = 2.5
-    RANGED_ENEMY_DANGER_ZONE_MULT = 1.1
+    # Must match ``ObservationTransformer.transform_tactical`` allied/enemy draw culling
+    # (|dx| > HALF or |dy| > HALF → outside the 32×32 fovea centered on the active unit).
+    _TACTICAL_FOVEA_MAX_DELTA: float = 17.0
+
     @staticmethod
     def _resolve_enemies_per_target(training_conf: dict, enemy_unit_type: UnitTypeId) -> int:
         """
@@ -44,70 +44,10 @@ class Level7Bot(Level3Bot):
         )
         return max(1, int(raw))
 
-    def _masking_active_unit_for_universal(self) -> Any:
-        """Resolve the focal ally for universal masking (matches env focal unit)."""
-        tag = getattr(self, "active_unit_tag", None)
-        if tag is not None and hasattr(self, "units"):
-            u = self.units.find_by_tag(tag)
-            if u is not None:
-                return u
-        active = self.get_active_units()
-        idx = int(getattr(self, "current_unit_index", 0) or 0)
-        if active and 0 <= idx < len(active):
-            return active[idx]
-        return None
-
-    def _any_enemy_in_tactical_fovea(self, ally: Unit) -> bool:
-        """
-        True if any configured enemy would be drawn in the 32×32 tactical crop around ``ally``
-        (same geometry as ``ObservationTransformer.transform_tactical``).
-        """
-        if ally is None:
-            return False
-        enemies = self.enemy_units(self.enemy_unit_type)
-        if not enemies.exists:
-            return False
-
-        ux = float(ally.position.x)
-        uy = float(ally.position.y)
-        crop_x = ux - 16.0
-        crop_y = uy - 16.0
-
-        for e in enemies:
-            if getattr(e, "is_cloaked", False) and not getattr(e, "is_detected", True):
-                if not getattr(e, "is_snapshot", False):
-                    continue
-            dx = abs(float(e.position.x) - ux)
-            dy = abs(float(e.position.y) - uy)
-            if dx > 17.0 or dy > 17.0:
-                continue
-            px = int(e.position.x - crop_x)
-            py = int(31 - (e.position.y - crop_y))
-            if 0 <= px < 32 and 0 <= py < 32:
-                return True
-        return False
-
     def action_masks(self, curriculum_progress: float = 1.0) -> Any:
         arch = self.training_conf.get("agent_architecture", "original")
         if arch == "universal":
-            mask = np.asarray(
-                SC2BotUniversal.action_masks(self, curriculum_progress), dtype=bool
-            ).copy()
-            manifest = build_action_head_manifest(
-                self.training_conf,
-                list(
-                    self.training_conf.get("action_heads")
-                    or getattr(self, "action_heads", [])
-                ),
-            )
-            active = self._masking_active_unit_for_universal()
-            allow_attack = active is not None and self._any_enemy_in_tactical_fovea(active)
-            if not allow_attack:
-                for i in range(FIXED_UNIVERSAL_COMMAND_DIM):
-                    h = manifest[i]
-                    if h != UNUSED_COMMAND_HEAD and "attack" in str(h).lower():
-                        mask[i] = False
-            return mask
+            return SC2BotUniversal.action_masks(self, curriculum_progress)
         return super().action_masks(curriculum_progress)
 
     async def apply_action(self, unit_tag, action):
@@ -120,6 +60,7 @@ class Level7Bot(Level3Bot):
                 return
             # Default: no attributed target unless we issue unit.attack(enemy_unit).
             self.last_action_was_attack_by_unit[unit_tag] = False
+            self.last_action_was_move_by_unit[unit_tag] = False
             self.last_attack_target_tag_by_unit.pop(unit_tag, None)
 
             head_idx = int(action[0])
@@ -141,19 +82,26 @@ class Level7Bot(Level3Bot):
             self.last_target_pos = target_pos
 
             if "move" in head_name:
-                self._combat_reward_suppressed.pop(unit_tag, None)
+                self._kite_damage_credit_ok[unit_tag] = True
+                self.last_action_was_move_by_unit[unit_tag] = True
                 self.do(unit.move(target_pos))
                 return
 
             if "attack" in head_name:
-                if not self._kite_damage_credit_ok.get(unit_tag, True):
-                    self._combat_reward_suppressed[unit_tag] = True
-                else:
-                    self._combat_reward_suppressed[unit_tag] = False
+                if self._kite_damage_credit_ok.get(unit_tag, True):
                     self._kite_damage_credit_ok[unit_tag] = False
                 self.last_action_was_attack_by_unit[unit_tag] = True
-                # Issue attack at the agent-chosen world position (no assignment / nearest-enemy remap).
-                self.last_attack_target_tag_by_unit[unit_tag] = None
+                # Track nearest enemy to the policy-chosen point for reward attribution bookkeeping.
+                enemies = self.enemy_units(self.enemy_unit_type)
+                if enemies is not None and getattr(enemies, "exists", False):
+                    nearest_enemy = min(
+                        enemies,
+                        key=lambda enemy: float(enemy.position.distance_to(target_pos)),
+                    )
+                    self.last_attack_target_tag_by_unit[unit_tag] = nearest_enemy.tag
+                else:
+                    self.last_attack_target_tag_by_unit[unit_tag] = None
+                # Issue attack at the agent-chosen world position (no actuation remap).
                 self.do(unit.attack(target_pos))
                 return
             return
@@ -166,6 +114,7 @@ class Level7Bot(Level3Bot):
         self.previous_danger_counts = {} # tag -> enemy danger-zone count
         self.last_attack_target_tag_by_unit = {} # ally_tag -> enemy_tag (only when attacking a unit)
         self.last_action_was_attack_by_unit = {} # ally_tag -> bool
+        self.last_action_was_move_by_unit: Dict[int, bool] = {}  # universal: last policy step was move
         
         # Resolve unit types from configuration
         # Look in training_conf root first, then in 'env' section
@@ -189,13 +138,14 @@ class Level7Bot(Level3Bot):
             self.training_conf, self.enemy_unit_type
         )
 
-        # shoot ↔ move-away kiting chain (Level7 combat; always on)
         self._kite_damage_credit_ok: Dict[int, bool] = {}
-        self._kite_phase: Dict[int, str] = {}
-        self._kite_streak: Dict[int, int] = {}
-        self._kiting_prev_dist: Dict[int, float] = {}
-        self._kiting_chain_bonus_pending: Dict[int, float] = {}
-        self._combat_reward_suppressed: Dict[int, bool] = {}
+        # Micro bonus state machine per ally:
+        # 0 = idle, 1 = clean first attack registered, 2 = disengaged after first attack.
+        self._micro_chain_stage: Dict[int, int] = {}
+        self._micro_chain_attack_danger: Dict[int, int] = {}
+        # End of prior step: min distance to enemies in tactical fovea that can shoot this ally.
+        self._micro_under_fire_min_dist_prev: Dict[int, Optional[float]] = {}
+        self._allied_took_damage_this_step: Dict[int, bool] = {}
 
         # Filled after a successful combat reset: per-target spawn anchors, enemy tags per
         # spawn cluster, and each ally's primary target index (nearest spawn start).
@@ -305,65 +255,16 @@ class Level7Bot(Level3Bot):
             return None
         return float(unit.distance_to(enemy))
 
-    def snapshot_kiting_before_step(self, unit_tag: int) -> None:
-        if unit_tag is None:
-            return
-        d = self._distance_to_assigned_enemy_or_none(unit_tag)
-        if d is not None:
-            self._kiting_prev_dist[unit_tag] = d
-
-    def update_kiting_chain_after_step(
-        self, unit_tag: int, action, prev_dist, new_dist
-    ) -> None:
-        """
-        After physics: update kiting FSM, pending shoot→move→shoot micro bonus, and
-        re-enable damage credit after a move-away step.
-        """
-        if unit_tag is None:
-            return
-
-        was_attack = bool(self.last_action_was_attack_by_unit.get(unit_tag, False))
-        rewards_conf = self.training_conf.get("rewards", {})
-        micro = float(rewards_conf.get("micro_bonus", 2.0))
-
-        if prev_dist is not None and new_dist is not None and not was_attack:
-            eps = 1e-3
-            moved_away = new_dist > prev_dist + eps
-            moved_closer = new_dist < prev_dist - eps
-            if moved_closer:
-                self._kite_streak[unit_tag] = 0
-                self._kite_phase[unit_tag] = "idle"
-            elif moved_away:
-                self._kite_damage_credit_ok[unit_tag] = True
-                if self._kite_phase.get(unit_tag, "idle") == "after_shoot_need_move":
-                    self._kite_phase[unit_tag] = "after_move_need_shoot"
-
-        if was_attack:
-            phase = self._kite_phase.get(unit_tag, "idle")
-            streak = int(self._kite_streak.get(unit_tag, 0))
-            if phase == "after_move_need_shoot":
-                bonus = (streak + 1) * micro
-                self._kiting_chain_bonus_pending[unit_tag] = (
-                    float(self._kiting_chain_bonus_pending.get(unit_tag, 0.0)) + bonus
-                )
-                self._kite_streak[unit_tag] = streak + 1
-                self._kite_phase[unit_tag] = "after_shoot_need_move"
-            elif phase == "after_shoot_need_move":
-                self._kite_streak[unit_tag] = 0
-                self._kite_phase[unit_tag] = "after_shoot_need_move"
-            else:
-                self._kite_phase[unit_tag] = "after_shoot_need_move"
-
     def _clear_kiting_state_for_tag(self, unit_tag: int) -> None:
         for d in (
             self._kite_damage_credit_ok,
-            self._kite_phase,
-            self._kite_streak,
-            self._kiting_prev_dist,
-            self._kiting_chain_bonus_pending,
-            self._combat_reward_suppressed,
+            self._micro_chain_stage,
+            self._micro_chain_attack_danger,
+            self._micro_under_fire_min_dist_prev,
+            self._allied_took_damage_this_step,
         ):
             d.pop(unit_tag, None)
+        self.last_action_was_move_by_unit.pop(unit_tag, None)
 
     async def _debug_unlock_colossus_extended_thermal_lance(self):
         """
@@ -389,12 +290,12 @@ class Level7Bot(Level3Bot):
         self.previous_danger_counts = {}
         self.last_attack_target_tag_by_unit = {}
         self.last_action_was_attack_by_unit = {}
+        self.last_action_was_move_by_unit.clear()
         self._kite_damage_credit_ok.clear()
-        self._kite_phase.clear()
-        self._kite_streak.clear()
-        self._kiting_prev_dist.clear()
-        self._kiting_chain_bonus_pending.clear()
-        self._combat_reward_suppressed.clear()
+        self._micro_chain_stage.clear()
+        self._micro_chain_attack_danger.clear()
+        self._micro_under_fire_min_dist_prev.clear()
+        self._allied_took_damage_this_step.clear()
         self._group_anchors = []
         self._enemy_tags_by_group = []
         self._ally_primary_group = {}
@@ -551,11 +452,11 @@ class Level7Bot(Level3Bot):
         """
         Returns (attributed_reward_for_acting_unit, pooled_reward_delta).
 
-        Attribution is conservative / "100% certain":
-        - Only attribute damage/kill when the acting unit issued `attack` on a specific enemy Unit
-          (`last_action_was_attack_by_unit[tag]` and a non-None `last_attack_target_tag_by_unit[tag]`),
-          and the step's enemy damage/kill deltas are uniquely attributable to that target.
-        - Everything else is pooled.
+        Attribution rules:
+        - When the acting unit issued an attack and `last_attack_target_tag_by_unit` holds a
+          valid tag (nearest enemy to the chosen position), damage/kill for that enemy is
+          attributed to the actor; all other deltas in the same step are pooled.
+        - When no valid target tag is present, all combat deltas are pooled.
         """
         rewards_conf = self.training_conf.get("rewards", {})
         damage_reward = float(rewards_conf.get("damage_reward", 0.1))
@@ -599,23 +500,23 @@ class Level7Bot(Level3Bot):
         attributed = 0.0
         pooled = 0.0
 
-        # Damage: attribute only if exactly one damaged enemy and it matches target.
-        if target_tag is not None and len(damage_rewards_by_tag) == 1 and target_tag in damage_rewards_by_tag:
+        # Damage: attribute matching target when available; pool the rest.
+        if target_tag is not None and target_tag in damage_rewards_by_tag:
             attributed += damage_rewards_by_tag[target_tag]
+            pooled += sum(
+                reward for tag, reward in damage_rewards_by_tag.items() if tag != target_tag
+            )
         else:
             pooled += sum(damage_rewards_by_tag.values())
 
-        # Kills: attribute only if exactly one death and it matches target.
-        if target_tag is not None and len(kill_rewards_by_tag) == 1 and target_tag in kill_rewards_by_tag:
+        # Kills: attribute matching target when available; pool the rest.
+        if target_tag is not None and target_tag in kill_rewards_by_tag:
             attributed += kill_rewards_by_tag[target_tag]
+            pooled += sum(
+                reward for tag, reward in kill_rewards_by_tag.items() if tag != target_tag
+            )
         else:
             pooled += sum(kill_rewards_by_tag.values())
-
-        if (
-            acting_unit_tag is not None
-            and self._combat_reward_suppressed.pop(acting_unit_tag, False)
-        ):
-            return 0.0, 0.0
 
         return attributed, pooled
 
@@ -633,10 +534,12 @@ class Level7Bot(Level3Bot):
         current_allied_tags = {u.tag for u in allies}
         
         # 1. Track Allied Damage
+        self._allied_took_damage_this_step = {}
         for u in allies:
             prev = self.previous_allied_health.get(u.tag, u.health_max + u.shield_max)
             curr = u.health + u.shield
             damage = max(0, prev - curr)
+            self._allied_took_damage_this_step[u.tag] = damage > 0
             if damage > 0:
                 total_penalty += damage * damage_penalty
             self.previous_allied_health[u.tag] = curr
@@ -646,6 +549,7 @@ class Level7Bot(Level3Bot):
         died_tags = tracked_tags - current_allied_tags
         
         for tag in died_tags:
+            self._allied_took_damage_this_step[tag] = True
             total_penalty += kill_penalty
             del self.previous_allied_health[tag]
             
@@ -887,8 +791,6 @@ class Level7Bot(Level3Bot):
         """
         Whether `ally` is currently in `enemy`'s effective danger zone.
         Danger zone radius is max(enemy_range_vs_ally, 0.5 * ally_range_vs_enemy).
-        For ranged enemies (see `RANGED_ENEMY_MICRO_RANGE_CUTOFF`), that radius is multiplied
-        by `RANGED_ENEMY_DANGER_ZONE_MULT` (default +10%).
         """
         if ally is None or enemy is None:
             return False
@@ -897,12 +799,45 @@ class Level7Bot(Level3Bot):
         ally_range = self._weapon_range_attacker_vs_defender(ally, enemy)
         enemy_range = self._weapon_range_attacker_vs_defender(enemy, ally)
         threat_radius = max(enemy_range, 0.5 * ally_range)
-        if enemy_range > float(self.RANGED_ENEMY_MICRO_RANGE_CUTOFF):
-            threat_radius *= float(self.RANGED_ENEMY_DANGER_ZONE_MULT)
         return dist <= threat_radius + eps
 
+    def _is_enemy_in_tactical_fovea(self, focal: Unit, enemy: Unit) -> bool:
+        """True if ``enemy`` would be drawn in the active unit's 32×32 tactical obs (not off-map)."""
+        if focal is None or enemy is None:
+            return False
+        h = float(self._TACTICAL_FOVEA_MAX_DELTA)
+        dx = abs(float(enemy.position.x) - float(focal.position.x))
+        dy = abs(float(enemy.position.y) - float(focal.position.y))
+        return dx <= h and dy <= h
+
+    def _min_dist_to_shooting_enemies_in_fovea(self, ally: Unit) -> Optional[float]:
+        """
+        Minimum distance from ``ally`` to an enemy in the tactical fovea that can shoot ``ally``
+        (ally within that enemy's weapon range). None if no such enemy.
+        """
+        if ally is None:
+            return None
+        enemies = self.enemy_units(self.enemy_unit_type)
+        if not enemies.exists:
+            return None
+        eps = 1e-4
+        best: Optional[float] = None
+        for enemy in enemies:
+            if enemy is None:
+                continue
+            if not self._is_enemy_in_tactical_fovea(ally, enemy):
+                continue
+            dist = float(ally.distance_to(enemy))
+            enemy_range = self._weapon_range_attacker_vs_defender(enemy, ally)
+            if dist <= enemy_range + eps:
+                best = dist if best is None else min(best, dist)
+        return best
+
     def _count_enemy_danger_zones_for_unit(self, unit: Unit) -> int:
-        """Counts how many enemy units currently include `unit` in their danger zone."""
+        """
+        Counts enemies in the tactical fovea whose danger zone currently contains ``unit``.
+        Enemies outside the 32×32-style crop around ``unit`` are ignored (matches tactical obs).
+        """
         if unit is None:
             return 0
         enemies = self.enemy_units(self.enemy_unit_type)
@@ -910,6 +845,8 @@ class Level7Bot(Level3Bot):
             return 0
         count = 0
         for enemy in enemies:
+            if not self._is_enemy_in_tactical_fovea(unit, enemy):
+                continue
             if self._is_in_enemy_danger_zone(unit, enemy):
                 count += 1
         return count
@@ -937,41 +874,71 @@ class Level7Bot(Level3Bot):
 
     def calculate_micro_bonus(self, unit_tag: int) -> float:
         """
-        Kiting reward channel:
-        - Sweet spot (can shoot while outside danger): +micro_bonus * sweet_spot_count
-        - Inside danger this step: -micro_bonus * current_danger_count
-        - Exited danger (prev>0 and now==0): +1.5 * micro_bonus * prev_danger_count
+        Micro shaping (scalar ``micro_bonus`` from config):
+        - Positive chain: attack → disengage (lower tactical-fovea danger count) → attack again,
+          with no damage during the chain.
+        - Negative: on a **move** while at least one tactical-fovea enemy could already shoot the
+          ally, if the move **decreases** the minimum distance to such enemies vs the prior step,
+          add ``-micro_bonus``.
         """
         if unit_tag is None:
             return 0.0
 
         unit = self.units.find_by_tag(unit_tag)
         if unit is None:
-            self.previous_danger_counts.pop(unit_tag, None)
             self._clear_kiting_state_for_tag(unit_tag)
             return 0.0
 
         rewards_conf = self.training_conf.get("rewards", {})
         micro_bonus = float(rewards_conf.get("micro_bonus", 2.0))
+
+        curr_under = self._min_dist_to_shooting_enemies_in_fovea(unit)
+        prev_under = self._micro_under_fire_min_dist_prev.get(unit_tag)
+        moved_now = bool(self.last_action_was_move_by_unit.get(unit_tag, False))
+
+        close_in_penalty = 0.0
+        if (
+            micro_bonus != 0.0
+            and moved_now
+            and prev_under is not None
+            and curr_under is not None
+            and float(curr_under) < float(prev_under) - 1e-3
+        ):
+            close_in_penalty = -micro_bonus
+
         if micro_bonus == 0.0:
-            self.previous_danger_counts[unit_tag] = self._count_enemy_danger_zones_for_unit(unit)
-            return float(self._kiting_chain_bonus_pending.pop(unit_tag, 0.0))
+            self._micro_chain_stage[unit_tag] = 0
+            self._micro_chain_attack_danger.pop(unit_tag, None)
+            self._micro_under_fire_min_dist_prev[unit_tag] = curr_under
+            return 0.0
 
-        prev_count = int(self.previous_danger_counts.get(unit_tag, 0))
-        current_count = int(self._count_enemy_danger_zones_for_unit(unit))
-        sweet_spot_count = int(self._count_kiting_sweet_spots_for_unit(unit))
+        attacked_now = bool(self.last_action_was_attack_by_unit.get(unit_tag, False))
+        took_damage_now = bool(self._allied_took_damage_this_step.get(unit_tag, False))
+        danger_now = int(self._count_enemy_danger_zones_for_unit(unit))
 
-        reward = 0.0
-        if current_count == 0 and sweet_spot_count > 0:
-            reward += micro_bonus * sweet_spot_count
-        if current_count > 0:
-            reward -= micro_bonus * current_count
-        elif prev_count > 0:
-            reward += 1.5 * micro_bonus * prev_count
+        chain_reward = 0.0
+        if took_damage_now:
+            self._micro_chain_stage[unit_tag] = 0
+            self._micro_chain_attack_danger.pop(unit_tag, None)
+            self._micro_under_fire_min_dist_prev[unit_tag] = curr_under
+            return chain_reward + close_in_penalty
 
-        self.previous_danger_counts[unit_tag] = current_count
-        reward += float(self._kiting_chain_bonus_pending.pop(unit_tag, 0.0))
-        return reward
+        stage = int(self._micro_chain_stage.get(unit_tag, 0))
+        if attacked_now:
+            if stage == 2:
+                self._micro_chain_stage[unit_tag] = 1
+                self._micro_chain_attack_danger[unit_tag] = danger_now
+                chain_reward = micro_bonus
+            else:
+                self._micro_chain_stage[unit_tag] = 1
+                self._micro_chain_attack_danger[unit_tag] = danger_now
+        elif stage == 1:
+            start_danger = int(self._micro_chain_attack_danger.get(unit_tag, danger_now))
+            if danger_now < start_danger:
+                self._micro_chain_stage[unit_tag] = 2
+
+        self._micro_under_fire_min_dist_prev[unit_tag] = curr_under
+        return chain_reward + close_in_penalty
 
     def _compute_distance_reward_for_assigned_pair(self, unit_tag: int, dist_multiplier: float) -> float:
         """
@@ -1074,13 +1041,11 @@ class Level7Bot(Level3Bot):
             target = self._get_enemy_target_for_unit(unit)
             target_pos = target.position if target else None
 
-        arch = self.training_conf.get("agent_architecture", "original")
-        high_cmd = self.training_conf.get("high_level_command", 0)
-        # Universal micro: a fixed "attack" directive makes command_vector[ATTACK]=1 every
-        # step, which strongly correlates with the attack action head. Use a neutral scout
-        # slot; objective location still comes from enemy layers and command_target.
-        if arch == "universal":
-            high_cmd = CommandConstants.SCOUT
+        raw_hc = self.training_conf.get("high_level_command", 0)
+        if isinstance(raw_hc, str):
+            high_cmd = CommandConstants.get_index(raw_hc)
+        else:
+            high_cmd = int(raw_hc)
 
         raw_obs = {
             'units': self.units,

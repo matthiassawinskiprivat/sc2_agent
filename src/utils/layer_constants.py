@@ -128,6 +128,11 @@ class LayerConstants:
     TRANSPORT_SLOTS    = "transport_slots"
     PASSENGER_DENSITY  = "passenger_density"
 
+    # Layer 44: Allied weapon cooldown (tactical split from density; 0=ready, 1=max capped cd)
+    ALLIED_WEAPON_COOLDOWN = "allied_weapon_cooldown"
+    # Layer 45: Enemy weapon cooldown (tactical-only combat timing signal)
+    ENEMY_WEAPON_COOLDOWN = "enemy_weapon_cooldown"
+
     # --- INDEX MAPPING ---
     LAYERS = {
         ALLIED_UNIT_DENSITY: 0,
@@ -156,7 +161,9 @@ class LayerConstants:
 
         COMMAND_ASSIGNMENT: 40, COMMAND_OBJECTIVE: 41,
         
-        TRANSPORT_SLOTS: 42, PASSENGER_DENSITY: 43
+        TRANSPORT_SLOTS: 42, PASSENGER_DENSITY: 43,
+        ALLIED_WEAPON_COOLDOWN: 44,
+        ENEMY_WEAPON_COOLDOWN: 45,
     }
 
     # Reduced set for tactical/micro view
@@ -171,12 +178,14 @@ class LayerConstants:
         ALLIED_HEALTH: 7,
         ENEMY_HEALTH: 8,
         TERRAIN_CREEP: 9,
+        ALLIED_WEAPON_COOLDOWN: 10,
+        ENEMY_WEAPON_COOLDOWN: 11,
     }
 
     @classmethod
     def get_num_layers(cls) -> int:
-        return 44
+        return 46
 
     @classmethod
     def get_num_tactical_layers(cls) -> int:
-        return 10
+        return 12

@@ -2,11 +2,11 @@
 # Combat: 1 Colossus vs 1 Roach (see env.unit_type / enemy_type).
 
 training:
-  training_steps: 3_000_000
+  training_steps: 8_000_000
   num_envs: 8
   n_steps: 4096
   batch_size: 1024
-  learning_rate: 0.0003
+  learning_rate: 0.0005
   render_beacon: False
   watchdog_timeout: 3600
   target_kl: null
@@ -33,19 +33,21 @@ env:
     - "enemy_g_dps_base"
     - "allied_health"
     - "enemy_health"
+    - "allied_weapon_cooldown"
+    - "enemy_weapon_cooldown"
   action_heads:
     - "attack_local"
 
   rewards:
-    step_penalty: -0.04
-    distance_multiplier: 0.08
-    micro_bonus: 1.0
-    damage_reward: 0.5
-    damage_penalty: -0.2
-    kill_reward: 5.0
-    kill_penalty: -8.0
-    win_reward: 3.0
-    loss_penalty: -10.0
+    step_penalty: -0.075
+    distance_multiplier: 0.8
+    micro_bonus: 0.2
+    damage_reward: 0.2
+    damage_penalty: -0.3
+    kill_reward: 0.5
+    kill_penalty: -1.0
+    win_reward: 2.0
+    loss_penalty: -5.0
 
 # Model parameters
 model:

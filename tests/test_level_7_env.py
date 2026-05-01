@@ -100,3 +100,43 @@ def test_attack_level_configs_include_micro_bonus():
             data = yaml.safe_load(f)
         rewards = data.get("env", {}).get("rewards", {})
         assert rewards.get("micro_bonus") == 2.0
+
+
+def test_level7_distance_multiplier_disabled_when_enemy_within_radius():
+    env = object.__new__(Level7Env)
+    env.ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD = 10.0
+    env._bot = MagicMock()
+    env._bot.enemy_unit_type = UnitTypeId.ZERGLING
+
+    unit = MagicMock()
+    enemy = MagicMock()
+    unit.distance_to.return_value = 9.5
+
+    enemies = MagicMock()
+    enemies.exists = True
+    enemies.__iter__.return_value = [enemy]
+
+    env._bot.units.find_by_tag.return_value = unit
+    env._bot.enemy_units.return_value = enemies
+
+    assert env._is_unit_within_enemy_radius(101) is True
+
+
+def test_level7_distance_multiplier_kept_when_enemy_outside_radius():
+    env = object.__new__(Level7Env)
+    env.ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD = 10.0
+    env._bot = MagicMock()
+    env._bot.enemy_unit_type = UnitTypeId.ZERGLING
+
+    unit = MagicMock()
+    enemy = MagicMock()
+    unit.distance_to.return_value = 10.1
+
+    enemies = MagicMock()
+    enemies.exists = True
+    enemies.__iter__.return_value = [enemy]
+
+    env._bot.units.find_by_tag.return_value = unit
+    env._bot.enemy_units.return_value = enemies
+
+    assert env._is_unit_within_enemy_radius(101) is False

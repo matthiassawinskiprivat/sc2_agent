@@ -223,13 +223,13 @@ The policy head uses `thought` for the command head and `_spatial_fused` + laten
 
 ## Universal action masking
 
-**Mask vector shape:** `action_masks()` returns a **single flat** `bool` array of length `len(action_heads) + 32*32`, concatenated as `[command_slice | spatial_slice]`. This must match `MultiDiscrete.nvec` (`[n_cmds, 1024]`) for stacking in vectorized envs and for `MaskableRecurrentPPO`.
+**Mask vector shape:** `action_masks()` returns a **single flat** `bool` array of length `FIXED_UNIVERSAL_COMMAND_DIM + 32*32` (64 + 1024), concatenated as `[command_slice | spatial_slice]`. This must match `MultiDiscrete.nvec` (`[64, 1024]`) for stacking in vectorized envs and for `MaskableRecurrentPPO`.
 
 | Piece | Location | Behavior |
 |--------|----------|----------|
-| Base mask builder | `SC2BotUniversal.action_masks` | `command_slice`: all `True` by default. `spatial_slice`: pathing from `UnitControlAgent.get_action_mask(None)` at **32×32** (same resolution as the tactical CNN input). **Flying** active unit (`self.zergling`): spatial mask all `True` (air ignores terrain for this path). Uses `training_conf['action_heads']` (see row below). |
+| Base mask builder | `SC2BotUniversal.action_masks` | **Command slice:** `True` for the first `len(action_heads) + len(categorical_heads)` indices (pipeline-configured heads), `False` for padded `_unused` slots only. **Spatial slice:** all `True` (no pathing or guidance masking in the env mask). |
 | Policy forward | `UniversalRecurrentPolicy._disable_spatial_mask` | When masks are passed into the policy, the **spatial tail is forced to all `True`** before sampling. Only **command** logits respect the env mask. **Reason:** one shared `SpatialDecoder` serves every head; per-head spatial masks would contradict that architecture. |
-| Combat (Level 7, universal) | `Level7Bot.action_masks` | Calls `SC2BotUniversal.action_masks`, then sets **`False` for every command index whose head name contains `"attack"`** (case-insensitive) when **no configured enemy** would be drawn in the **32×32 tactical fovea** around the focal ally — same crop and pixel bounds as `ObservationTransformer.transform_tactical` (see that method’s `crop_x` / `crop_y`, `abs(dx)<=17` filter, and `_get_pixel_coords` in-bounds check). Cloaked undetected enemies are skipped unless `is_snapshot`, matching tactical unit drawing. |
+| Combat (Level 7, universal) | `Level7Bot.action_masks` | Same as `SC2BotUniversal.action_masks` (no extra attack / tactical-fovea command masking). |
 | `action_heads` on bots | `SC2Bot.__init__` / `SC2BotUniversal.__init__` | **`training_conf['action_heads']` (flattened, cumulative) must win** over nested `env['action_heads']`. Per-level YAML only lists **new** heads to append; nested `env.action_heads` is not the full command list. If the bot used only the nested list, **policy `MultiDiscrete` indices and `apply_action` decoding would disagree** (silent combat bugs). |
 
 **Tests:** `tests/test_sc2bot_action_heads_flattened_priority.py`, `tests/test_level_7_tactical_attack_mask.py`.
@@ -249,8 +249,8 @@ The policy head uses `thought` for the command head and `_spatial_fused` + laten
 **Fine (not actuation overrides):**
 
 - **Observations and rewards** may use assignments, distances to preferred objectives, or other structure—as long as that structure is either fixed by an explicit curriculum contract (see Level 3 beacon assignment) or clearly exposed so learning can account for it.
-- **Pathability / legality** masking (invalid cells) is allowed; that constrains the space, it does not silently replace a valid choice.
-- **Command-head masking** (e.g. disable `attack_*` when no enemy appears in the tactical tensor) narrows which discrete command is legal; it must stay **consistent with what the observation shows** (see **Universal action masking**).
+- **Pathability / legality** masking (invalid cells) may be enforced outside the universal env mask if you add an explicit curriculum mechanism; the default universal env mask does not gate spatial cells.
+- **Command-head masking** in the default universal path only hides **unconfigured** padded command indices (`_unused`); configured heads from the pipeline are not masked by observation-derived heuristics.
 
 **Regression intent:** Combat and micro levels must not quietly teach a different MDP than the one implied by `action_heads` and the spatial decoder. If you add actuation “help,” you are changing the effective action space without updating the policy or metrics.
 
@@ -372,7 +372,7 @@ Key test files:
 - `tests/test_level_7_env.py` — Level7 combat env
 - `tests/test_level_7_mask_mismatch.py` — action mask shape validation
 - `tests/test_sc2bot_action_heads_flattened_priority.py` — cumulative `action_heads` on `SC2Bot` must beat nested `env` lists
-- `tests/test_level_7_tactical_attack_mask.py` — Level 7 universal: attack heads masked when no enemy in tactical fovea
+- `tests/test_level_7_tactical_attack_mask.py` — Level 7 universal: attack heads not masked by tactical fovea; spatial tail all-`True`
 
 ---
 

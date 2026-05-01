@@ -201,8 +201,8 @@ def test_enemy_target_fallback_when_greedy_assignment_misses_unit():
     assert raw_obs["high_level_command"] == CommandConstants.SCOUT
 
 
-def test_universal_observation_neutralizes_yaml_attack_directive():
-    """YAML may say attack for curriculum naming; universal micro obs must not fix command_vector to ATTACK."""
+def test_universal_observation_uses_config_high_level_command():
+    """Universal arch: high_level_command in YAML is resolved to command_vector index (e.g. attack -> ATTACK)."""
     bot = object.__new__(Level7Bot)
     bot.training_conf = {
         "agent_architecture": "universal",
@@ -246,7 +246,7 @@ def test_universal_observation_neutralizes_yaml_attack_directive():
     bot.get_observation_for_unit(u1.tag)
 
     raw_obs = bot.agent_system.process_observation.call_args.kwargs["observation"]
-    assert raw_obs["high_level_command"] == CommandConstants.SCOUT
+    assert raw_obs["high_level_command"] == CommandConstants.ATTACK
 
 
 def test_original_arch_passes_through_high_level_command():
@@ -289,7 +289,7 @@ def test_original_arch_passes_through_high_level_command():
     bot.get_observation_for_unit(u1.tag)
 
     raw_obs = bot.agent_system.process_observation.call_args.kwargs["observation"]
-    assert raw_obs["high_level_command"] == "attack"
+    assert raw_obs["high_level_command"] == CommandConstants.ATTACK
 
 
 def test_refresh_combat_assignments_covers_all_active_allies():
@@ -427,7 +427,6 @@ def test_apply_action_attack_uses_agent_world_target_not_assignment():
     bot.last_action_was_attack_by_unit = {}
     bot.last_attack_target_tag_by_unit = {}
     bot._kite_damage_credit_ok = {}
-    bot._combat_reward_suppressed = {}
 
     # attack_local head index = 1
     asyncio.run(bot.apply_action(1, np.array([1, 0], dtype=np.int64)))
