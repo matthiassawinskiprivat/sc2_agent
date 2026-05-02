@@ -27,6 +27,20 @@ from sc2.ids.ability_id import AbilityId
 from src.utils.layer_constants import LayerConstants
 from src.utils.command_constants import CommandConstants
 
+# Units with passive cliff traversal (Colossus: Cliff Walk, Reaper: jet-pack jumps).
+# Used by the observation transformer to automatically widen the terrain_pathable layer
+# for these unit types — no bot needs to set cliff_walker explicitly in raw_obs.
+_CLIFF_WALKER_NAMES: frozenset = frozenset({'COLOSSUS', 'REAPER'})
+
+# Fixed display value for cliff-edge walkable cells in the terrain_pathable layer.
+# Shown at the midpoint of [0.2, 1.0] so cliff edges appear as a medium-gray band
+# creating a visible gradient: low ground (≈0.2) → cliff edge (0.6) → high ground (≈1.0).
+_CLIFF_FACE_DISPLAY_VALUE: float = 0.6
+
+# 4-connected cross structuring element — used for binary erosion when finding
+# walkable cells at the walkable boundary (adjacent to any non-walkable cell).
+_FOUR_CONNECTED = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+
 # Playable size (game units) used as reference so COMMAND_ASSIGNMENT stays as visible as on 128×128 maps.
 _ASSIGNMENT_REFERENCE_PLAYABLE = 128
 
@@ -71,12 +85,19 @@ class ObservationTransformer:
 
         self._update_active_indices()
 
-        # Caching
-        self._terrain_cache = None
+        # Terrain caching — keyed by traversal type: "standard" or "cliff_walker"
+        self._terrain_caches: Dict[str, Optional[np.ndarray]] = {}
         self._last_map_name = None
         self._last_structure_count = 0
         self._h_min = None
         self._h_max = None
+        # Cliff face mask cache — depends only on the static pathing/height grid,
+        # so it is valid for the lifetime of a map (recomputed on map change only).
+        self._cliff_face_cache: Optional[np.ndarray] = None
+        self._cliff_face_cache_map: Optional[str] = None
+        # Per-cell display height for cliff face cells: local maximum walkable
+        # height in a 5x5 window (= high-ground brightness for each cliff cell).
+        self._cliff_display_heights: Optional[np.ndarray] = None
 
         # Pre-allocated grids
         self._grid_y = np.arange(self.feature_map_height).reshape(-1, 1)
@@ -166,7 +187,8 @@ class ObservationTransformer:
             effects = raw_obs.get('effects') or []
             
             # Draw
-            self._draw_terrain_pathing(game_info, layers)
+            cliff_walker = self._detect_cliff_walker(raw_obs, active_unit=active_unit)
+            self._draw_terrain_pathing(game_info, layers, cliff_walker=cliff_walker)
             self._draw_terrain_creep(raw_obs, layers)
 
             # Allied
@@ -271,7 +293,8 @@ class ObservationTransformer:
 
         # 2. Draw
         current_struct_count = len(allied_structures) + len(enemy_structures)
-        self._draw_terrain_pathing(game_info, layers, current_struct_count)
+        cliff_walker = self._detect_cliff_walker(raw_obs)
+        self._draw_terrain_pathing(game_info, layers, current_struct_count, cliff_walker=cliff_walker)
         self._draw_terrain_creep(raw_obs, layers)
 
         self._liberator_positions = {'allied': [], 'enemy': []}
@@ -462,17 +485,121 @@ class ObservationTransformer:
                 if px is not None:
                     self._draw_circle_vectorized(layers, idx_obj, px, py, 0, r, val, False)
 
-    def _draw_terrain_pathing(self, game_info, layers, current_structure_count=0):
+    def _detect_cliff_walker(self, raw_obs: dict, active_unit=None) -> bool:
+        """Return True if the focal unit has passive cliff traversal (Colossus or Reaper).
+
+        Resolution order:
+        1. ``active_unit`` parameter (most specific — used by transform_tactical).
+        2. First entry of ``raw_obs['selected_units']`` (used by transform global view).
+        3. ``raw_obs['cliff_walker']`` explicit override (backward-compat fallback).
+        """
+        focal = active_unit
+        if focal is None:
+            selected = raw_obs.get('selected_units') or []
+            focal = selected[0] if selected else None
+        if focal is not None:
+            return getattr(focal.type_id, 'name', '').upper() in _CLIFF_WALKER_NAMES
+        return bool(raw_obs.get('cliff_walker', False))
+
+
+    @staticmethod
+    def _compute_climber_grid(path_data, height_data):
+        """
+        Exact NumPy port of the SC2MapAnalysis C-extension climber_grid algorithm
+        (eladyaniv01/SC2MapAnalysis, MapAnalyzer/cext/src/ma_ext.c, get_map_data()).
+
+        Returns a boolean array (same shape as path_data) where True marks non-walkable
+        cells that Reaper / Colossus can traverse (exactly one SC2 cliff tier of height
+        difference = 16 between the walkable areas on both sides).
+
+        A cell is included only when it is CLIMBABLE and has at least one adjacent
+        CLIMBABLE neighbour (connectivity filter removes isolated edge artefacts).
+        """
+        LEVEL_DIFFERENCE = 16
+        h, w = path_data.shape
+        walkable = (path_data > 0).astype(np.uint8)
+        heights = height_data.astype(np.int32)
+        climbable = np.zeros((h, w), dtype=bool)
+
+        # 4 asymmetric directions from the C source:
+        #   dirs[8] = { -1, -1,  1, -1,  1, 0,  0, 1 }
+        # (xdir, ydir): (-1,-1), (1,-1), (1,0), (0,1)
+        # Together these cover all cardinal and diagonal cliff orientations:
+        # each bridge (walkable–nonwalkable–walkable with height diff 16) is
+        # detectable from one of its walkable-side neighbours.
+        for xdir, ydir in [(-1, -1), (1, -1), (1, 0), (0, 1)]:
+            y0s, y0e = 2, h - 2
+            x0s, x0e = 2, w - 2
+            # Keep (x + 2*xdir) and (y + 2*ydir) inside the array.
+            if xdir > 0:
+                x0e = min(x0e, w - 1 - 2 * xdir)
+            elif xdir < 0:
+                x0s = max(x0s, -2 * xdir)
+            if ydir > 0:
+                y0e = min(y0e, h - 1 - 2 * ydir)
+            elif ydir < 0:
+                y0s = max(y0s, -2 * ydir)
+            # Keep (x1+1) and (y1+1) in bounds (2x2 height block around cliff cell).
+            if xdir >= 0:
+                x0e = min(x0e, w - 2 - xdir)
+            if ydir >= 0:
+                y0e = min(y0e, h - 2 - ydir)
+            if y0s >= y0e or x0s >= x0e:
+                continue
+
+            W0 = walkable[y0s:y0e,                 x0s:x0e]
+            W1 = walkable[y0s+ydir:y0e+ydir,       x0s+xdir:x0e+xdir]
+            W2 = walkable[y0s+2*ydir:y0e+2*ydir,   x0s+2*xdir:x0e+2*xdir]
+            base = (W0 == 1) & (W1 == 0) & (W2 == 1)
+
+            # 2x2 height block around cliff-face cell (x1, y1):
+            #   H0 = heights[y1+1, x1],  H1 = heights[y1+1, x1+1]
+            #   H2 = heights[y1,   x1],  H3 = heights[y1,   x1+1]
+            H0 = heights[y0s+ydir+1:y0e+ydir+1, x0s+xdir:x0e+xdir]
+            H1 = heights[y0s+ydir+1:y0e+ydir+1, x0s+xdir+1:x0e+xdir+1]
+            H2 = heights[y0s+ydir:y0e+ydir,     x0s+xdir:x0e+xdir]
+            H3 = heights[y0s+ydir:y0e+ydir,     x0s+xdir+1:x0e+xdir+1]
+
+            LD = LEVEL_DIFFERENCE
+            climb = np.zeros(base.shape, dtype=bool)
+
+            if xdir != 0 and ydir != 0:
+                if xdir == ydir:    # (-1,-1) — SW diagonal
+                    climb |= (((H0 == H1) | (H0 == H2)) & (H2 == H1 + LD) & (H0 == H3))
+                    climb |= ((H0 == H1) & (H0 == H3) & (H0 == H2 + LD))
+                    climb |= ((H0 == H2) & (H0 == H3) & (H1 == H2 + LD))
+                else:               # (1,-1) — SE diagonal
+                    climb |= ((H1 == H2) & (H1 == H3) & (H1 == H0 + LD))
+                    climb |= ((H0 == H1) & (H0 == H2) & (H3 == H0 + LD))
+                    climb |= ((H0 == H1) & (H0 == H2) & (H0 == H3 + LD))
+                    climb |= ((H1 == H2) & (H1 == H3) & (H0 == H3 + LD))
+            elif xdir != 0:         # (1, 0) — horizontal
+                climb |= ((H0 == H2) & (H1 == H3) & (H0 + LD == H1))
+                climb |= ((H0 == H2) & (H1 == H3) & (H0 == H1 + LD))
+            else:                   # (0, 1) — vertical
+                climb |= ((H0 == H1) & (H2 == H3) & (H0 + LD == H2))
+                climb |= ((H0 == H1) & (H2 == H3) & (H0 == H2 + LD))
+
+            climbable[y0s+ydir:y0e+ydir, x0s+xdir:x0e+xdir] |= (base & climb)
+
+        # Connectivity filter: only keep cells adjacent to another climbable cell.
+        from scipy.ndimage import binary_dilation
+        nbr = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=bool)
+        return climbable & binary_dilation(climbable, structure=nbr)
+
+    def _draw_terrain_pathing(self, game_info, layers, current_structure_count=0, cliff_walker: bool = False):
         layer_idx = self.current_layer_map.get(LayerConstants.TERRAIN_PATHABLE)
         if layer_idx is None: return
 
         current_map_name = getattr(game_info, 'map_name', '')
+        cache_key = "cliff_walker" if cliff_walker else "standard"
+
         # Global View Cache (Only if not in tactical mode)
         if not self.is_tactical_mode:
-            if (self._terrain_cache is not None and
+            if (cache_key in self._terrain_caches and
                 self._last_map_name == current_map_name and
                 self._last_structure_count == current_structure_count):
-                layers[layer_idx] = self._terrain_cache
+                layers[layer_idx] = self._terrain_caches[cache_key]
                 return
 
         if not hasattr(game_info, 'pathing_grid') or not hasattr(game_info, 'terrain_height'):
@@ -480,7 +607,7 @@ class ObservationTransformer:
 
         path_data = self._get_numpy_data(game_info.pathing_grid)
         height_data = self._get_numpy_data(game_info.terrain_height)
-        
+
         # Calculate Global Walkable Range once for consistency
         if self._h_min is None or self._h_max is None:
             walkable_mask = path_data > 0
@@ -502,22 +629,55 @@ class ObservationTransformer:
 
         X_map, Y_map = np.meshgrid(sc2_x.astype(int), sc2_y.astype(int))
         valid_mask = (X_map >= 0) & (X_map < total_w) & (Y_map >= 0) & (Y_map < total_h)
-        
+
         if np.any(valid_mask):
             v_x, v_y = X_map[valid_mask], Y_map[valid_mask]
             sampled_path = path_data[v_y, v_x]
             sampled_height = height_data[v_y, v_x]
-            
+
             h_range = max(self._h_max - self._h_min, 1.0)
             # Base value 0.2 to 1.0 for better visibility in UI and Agent
             norm_height = 0.2 + ((sampled_height - self._h_min) / h_range) * 0.8
-            
+
             res = np.zeros((self.feature_map_height, self.feature_map_width), dtype=np.float32)
-            res[valid_mask] = norm_height * (sampled_path > 0).astype(np.float32)
+
+            if cliff_walker:
+                # Use the exact SC2MapAnalysis climber_grid algorithm (ported from C):
+                # non-walkable cells with exactly LEVEL_DIFFERENCE=16 height units between
+                # the walkable areas on both sides are marked as cliff-traversable.
+                # Results cached per map (static terrain never changes mid-game).
+                if self._cliff_face_cache is None or self._cliff_face_cache_map != current_map_name:
+                    self._cliff_face_cache = self._compute_climber_grid(path_data, height_data)
+                    # For each cliff face cell, display at the mean of the local
+                    # low-ground and high-ground heights (5x5 window on each side).
+                    # This places cliff cells visually between low and high ground,
+                    # creating a clear gradient: dark (low) → mid (cliff) → bright (high).
+                    from scipy.ndimage import maximum_filter, minimum_filter
+                    h_f = height_data.astype(np.float32)
+                    large = float(h_f.max()) + 1.0
+                    local_high_h = maximum_filter(
+                        np.where(path_data > 0, h_f, 0.0), size=5)
+                    local_low_h = minimum_filter(
+                        np.where(path_data > 0, h_f, large), size=5)
+                    cliff_mean_h = (local_high_h + local_low_h) * 0.5
+                    h_rng = max(float(self._h_max) - float(self._h_min), 1.0)
+                    self._cliff_display_heights = np.clip(
+                        0.2 + (cliff_mean_h - float(self._h_min)) / h_rng * 0.8,
+                        0.2, 1.0
+                    ).astype(np.float32)
+                    self._cliff_face_cache_map = current_map_name
+
+                sampled_cliff = self._cliff_face_cache[v_y, v_x]
+                cliff_brightness = self._cliff_display_heights[v_y, v_x]
+                standard_terrain = norm_height * (sampled_path > 0).astype(np.float32)
+                res[valid_mask] = np.where(sampled_cliff, cliff_brightness, standard_terrain)
+            else:
+                res[valid_mask] = norm_height * (sampled_path > 0).astype(np.float32)
+
             layers[layer_idx] = res
 
             if not self.is_tactical_mode:
-                self._terrain_cache = res.copy()
+                self._terrain_caches[cache_key] = res.copy()
                 self._last_map_name = current_map_name
                 self._last_structure_count = current_structure_count
 

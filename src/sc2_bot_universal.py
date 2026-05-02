@@ -360,7 +360,7 @@ class SC2BotUniversal(BotAI):
             'creep': getattr(self.state, "creep", None),
             'command_target': target_pos,
             'high_level_command': self.training_conf.get('high_level_command', 0),
-            'selected_units': [active_unit] if active_unit else ([self.zergling] if self.zergling else [])
+            'selected_units': [active_unit] if active_unit else ([self.zergling] if self.zergling else []),
         }
         # Default active unit for tactical view
         if active_unit is None:
