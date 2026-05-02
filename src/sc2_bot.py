@@ -561,7 +561,7 @@ class SC2Bot(BotAI):
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
-            'command_target': target_pos
+            'command_target': target_pos,
         }
         
         # 4. Agent Selection (Level 1+): Model sees which specific unit it is commanding

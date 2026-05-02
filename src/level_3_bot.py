@@ -427,7 +427,7 @@ class Level3Bot(SC2Bot):
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
             'creep': getattr(self.state, "creep", None),
             'high_level_command': self.training_conf.get('high_level_command', 0),
-            'command_target': [target_beacon] if target_beacon else []
+            'command_target': [target_beacon] if target_beacon else [],
         }
         
         if self.agent_system:
