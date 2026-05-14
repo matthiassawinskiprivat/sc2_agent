@@ -1,7 +1,7 @@
 training:
-  training_steps: 2_000_000
+  training_steps: 1_500_000
   num_envs: 8
-  n_steps: 4096
+  n_steps: 2048
   batch_size: 1024
   learning_rate: 0.0002
   render_beacon: True

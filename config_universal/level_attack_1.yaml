@@ -1,12 +1,12 @@
-# config_universal/level_attack_0.yaml
-# Combat level: 1 Roach vs 2 Zerglings on 128x128 maps
+# config_universal/level_attack_1.yaml
+# Combat: 2 Hellions vs 2 Zerglings. Hellion speed advantage makes kiting tractable.
  
 training:
-  training_steps: 8_000_000
+  training_steps: 3_000_000
   num_envs: 8
   n_steps: 2048
   batch_size: 1024
-  learning_rate: 0.0003
+  learning_rate: 0.0002
   render_beacon: False
   watchdog_timeout: 3600
   target_kl: null
@@ -14,10 +14,10 @@ training:
 # Environment parameters
 env:
   env_class: "Level7Env"
-  unit_type: "MARINE"
+  unit_type: "HELLION"
   enemy_type: "ZERGLING"
   targets: 2
-  enemies_per_target: 1
+  enemies_per_target: 2
   headless: True
   max_steps: 320
   maps_dir: "train/maps/ladder/no_trigger"
@@ -27,14 +27,17 @@ env:
   rewards:
     step_penalty: -0.075
     distance_multiplier: 0.7
-    micro_bonus: 0.2
+    retreat_shaping_scale: 0.5
+    kiting_close_in_penalty: 0.4
+    weapon_ready_attack_bonus: 0.0
+    sweet_spot_bonus: 0.05
+    in_danger_penalty: 2.0
     damage_reward: 0.375
-    damage_penalty: -0.3
-    kill_reward: 1.0
+    damage_penalty: -0.5
+    kill_reward: 5.0
     kill_penalty: -1.0
     win_reward: 15.0
     loss_penalty: -5.0
-
 
 # Model parameters
 model:
@@ -52,10 +55,3 @@ model:
   ent_coef: 0.01
   n_epochs: 4
 
-# Evaluation parameters
-evaluation:
-  stop_on_metric:
-    monitor: "rollout/ep_rew_mean"
-    threshold: 15.0
-    comparison: ">"
-    patience: 10

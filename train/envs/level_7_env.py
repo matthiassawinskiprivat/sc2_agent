@@ -11,9 +11,6 @@ class Level7Env(Level3Env):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Dynamic Action Space based on accumulated heads (now handled by super().__init__)
-        self._global_reward_pool = 0.0
-        
         # Unit and Enemy types from config — read from flat root first (set by Level0Env's
         # flattening of env params), then fall back to nested env dict for direct instantiation.
         self.unit_type = (
@@ -123,8 +120,7 @@ class Level7Env(Level3Env):
 
     def reset(self, seed=None, options=None):
         obs, info = super().reset(seed, options)
-        self._global_reward_pool = 0.0
-        
+
         if self._bot:
              self.active_unit_tags = [u.tag for u in self._bot.get_active_units()]
              self.current_unit_index = 0
@@ -132,13 +128,6 @@ class Level7Env(Level3Env):
                  obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
         
         return obs, info
-
-    def _maybe_flush_global_pool(self, total_reward: float, *, cycle_completed: bool, done: bool) -> float:
-        """Flushes pooled reward only on terminal step."""
-        if done:
-            total_reward += float(self._global_reward_pool)
-            self._global_reward_pool = 0.0
-        return total_reward
 
     def _is_unit_within_enemy_radius(self, unit_tag: int, radius: float = None) -> bool:
         """Whether the controlled unit is within `radius` of any configured enemy."""
@@ -177,7 +166,13 @@ class Level7Env(Level3Env):
 
         current_tag = self.active_unit_tags[self.current_unit_index]
 
-        # 1. Apply the agent's action
+        # 1. Snapshot pre-action kiting state so the retreat reward compares
+        #    post-step distance against the distance the agent observed (single-step
+        #    delta), not against the end of this unit's previous turn which can be
+        #    N game steps ago in multi-unit cycling.
+        self._bot.record_pre_action_kiting_state(current_tag)
+
+        # 2. Apply the agent's action
         await self._bot.apply_action(current_tag, action)
         self._bot.queue_idle_combat_orders(skip_unit_tag=current_tag)
 
@@ -190,10 +185,10 @@ class Level7Env(Level3Env):
             await self._client.actions(actions[:])
             actions.clear()
         
-        # 2. Advance game physics immediately
+        # 3. Advance game physics
         await self._client.step()
         
-        # 3. Refresh bot state from new observation
+        # 4. Refresh bot state from new observation
         response = await self._client.observation()
         from src.utils.sc2_observation_compat import game_state_from_response_observation
         state = game_state_from_response_observation(response.observation)
@@ -202,26 +197,32 @@ class Level7Env(Level3Env):
         # Keep combat assignments synced with latest living enemies/allies.
         self._bot.refresh_combat_assignments()
 
-        # 4. Calculate reward (unit-centric where possible)
-        attributed_combat, pooled_combat = self._bot.calculate_unit_centric_combat_delta(current_tag)
-        pooled_attrition = self._bot.calculate_unattributed_allied_attrition_delta()
+        # 5. Calculate reward
+        attributed_combat, _ = self._bot.calculate_unit_centric_combat_delta(current_tag)
+        allied_attrition = self._bot.calculate_allied_attrition_penalty()
 
         if self._is_unit_within_enemy_radius(current_tag):
             dist_reward = 0.0
         else:
             dist_reward = self._bot.calculate_distance_reward(current_tag)
-        micro_reward = self._bot.calculate_micro_bonus(current_tag)
-        
+
+        shaping_reward = self._bot.calculate_kiting_simple_shaping(current_tag)
+
         rewards_conf = self.training_conf.get('rewards', {})
         step_penalty = rewards_conf.get('step_penalty', -0.05)
-        
-        total_reward = attributed_combat + dist_reward + micro_reward + step_penalty
-        self._global_reward_pool += float(pooled_combat) + float(pooled_attrition)
-        
+
+        total_reward = (
+            attributed_combat
+            + allied_attrition
+            + dist_reward
+            + shaping_reward
+            + step_penalty
+        )
+
         # Check Win/Loss Conditions
         allied_count = self._bot.units(self._bot.allied_unit_type).amount
         enemy_count = self._bot.enemy_units(self._bot.enemy_unit_type).amount
-        
+
         done = False
         if enemy_count == 0:
             done = True
@@ -229,9 +230,6 @@ class Level7Env(Level3Env):
         elif allied_count == 0:
             done = True
             total_reward += rewards_conf.get('loss_penalty', -10.0)
-
-        # If the episode ends mid-cycle, flush pooled rewards immediately.
-        total_reward = self._maybe_flush_global_pool(total_reward, cycle_completed=False, done=done)
             
         # 5. Handle Cycle Advancement and Unit Deaths
         self.current_unit_index += 1
@@ -240,44 +238,39 @@ class Level7Env(Level3Env):
         if not all_active_tags:
             done = True
 
-        cycle_completed = False
         if done:
             obs = self._get_zero_observation()
             self.current_unit_index = 0
             self.active_unit_tags = all_active_tags
-            cycle_completed = True
         elif self.current_unit_index < len(self.active_unit_tags):
-            # Skip any units that died in the last step
+            # Skip any units that died in the last step.
             while self.current_unit_index < len(self.active_unit_tags):
                 next_tag = self.active_unit_tags[self.current_unit_index]
                 if next_tag in all_active_tags:
                     break
                 self.current_unit_index += 1
-            
+
             if self.current_unit_index < len(self.active_unit_tags):
                 next_tag = self.active_unit_tags[self.current_unit_index]
                 obs, _ = self._bot.get_observation_for_unit(next_tag)
             else:
-                # End of cycle reached early due to deaths
+                # End of cycle reached early due to deaths.
                 self.current_unit_index = 0
                 self.active_unit_tags = all_active_tags
-                cycle_completed = True
                 if self.active_unit_tags:
                     obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
                 else:
                     obs = self._get_zero_observation()
                     done = True
         else:
-            # End of cycle reached normally
+            # End of cycle reached normally.
             self.current_unit_index = 0
             self.active_unit_tags = all_active_tags
-            cycle_completed = True
             if self.active_unit_tags:
                 obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
             else:
                 obs = self._get_zero_observation()
                 done = True
 
-        total_reward = self._maybe_flush_global_pool(total_reward, cycle_completed=cycle_completed, done=done)
         return obs, total_reward, done, False, {}
 

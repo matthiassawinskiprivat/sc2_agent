@@ -425,8 +425,9 @@ def test_apply_action_attack_uses_agent_world_target_not_assignment():
     bot.refresh_combat_assignments = MagicMock(return_value={1: 101})
     bot.do = MagicMock()
     bot.last_action_was_attack_by_unit = {}
+    bot.last_action_was_move_by_unit = {}
     bot.last_attack_target_tag_by_unit = {}
-    bot._kite_damage_credit_ok = {}
+    bot._attack_order_weapon_cd_before = {}
 
     # attack_local head index = 1
     asyncio.run(bot.apply_action(1, np.array([1, 0], dtype=np.int64)))
