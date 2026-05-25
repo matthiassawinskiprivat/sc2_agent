@@ -1,5 +1,5 @@
 # config_universal/level_attack_2.yaml
-# Combat: 3 Hellions vs 6 Zerglings (2 per slot).
+# Combat: 2 Hellions vs 6 Zerglings (3 per slot). Higher pressure, melee enemy.
 
 training:
   training_steps: 3_000_000
@@ -27,17 +27,17 @@ env:
   rewards:
     step_penalty: -0.075
     distance_multiplier: 0.7
-    retreat_shaping_scale: 0.8
-    kiting_close_in_penalty: 0.4
-    weapon_ready_attack_bonus: 0.0
-    sweet_spot_bonus: 0.05
-    in_danger_penalty: 0.4
-    damage_reward: 0.375
-    damage_penalty: -0.3
+    retreat_shaping_scale: 1.0
+    kiting_close_in_penalty: 2.0
+    weapon_ready_attack_bonus: 0.3
+    sweet_spot_bonus: 0.2
+    in_danger_penalty: 2.5
+    damage_reward: 1.0
+    damage_penalty: -0.5
     kill_reward: 5.0
     kill_penalty: -1.0
     win_reward: 50.0
-    loss_penalty: -25.0
+    loss_penalty: -50.0
 
 # Model parameters
 model:
@@ -51,7 +51,7 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.997
   ent_coef: 0.01
   n_epochs: 4
 

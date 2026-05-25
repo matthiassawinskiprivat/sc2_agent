@@ -158,6 +158,31 @@ def test_level_7_no_threat_penalty_beyond_max_of_ranges():
     assert r == pytest.approx((16.0 - 14.0) * 0.2)
 
 
+def test_distance_reward_fires_in_formerly_dead_zone():
+    """
+    Regression: approach shaping must fire when the ally is between its own weapon range
+    and the old 10-unit proximity cutoff (e.g. dist=8, ally_range=6).
+
+    Before fix 1, Level7Env._async_step suppressed dist_reward for any unit within 10
+    units of an enemy, creating a dead zone from ~6 to 10 units where no reward fired.
+    The proximity gate has been removed; _compute_distance_reward_for_assigned_pair
+    already stops shaping once the ally is within its own attack range, so this zone
+    now correctly produces a positive approach reward.
+    """
+    bot, ally, _ = _make_bot_with_pair(
+        ally_pos=(0, 0),
+        enemy_pos=(8, 0),
+        ally_ground_range=6.0,
+        enemy_ground_range=1.0,
+        dist_mult=0.7,
+    )
+    # Previous distance was 9 — ally approached to 8 (still outside weapon range 6).
+    bot.previous_distances = {101: 9.0}
+    r = bot.calculate_distance_reward(unit_tag=101)
+    # dist=8 > ally_range=6 → approach shaping fires: (9.0 - 8.0) * 0.7 = 0.7
+    assert r == pytest.approx((9.0 - 8.0) * 0.7)
+
+
 def test_ranged_enemy_danger_zone_has_no_extra_expansion():
     """Ranged enemies use the same threat radius as melee (no +10% expansion)."""
     bot, ally, enemy = _make_bot_with_pair(

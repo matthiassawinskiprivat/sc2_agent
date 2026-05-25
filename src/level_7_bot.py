@@ -1049,8 +1049,10 @@ class Level7Bot(Level3Bot):
             if cd_before is not None and float(cd_before) <= eps:
                 reward += weapon_ready_bonus
 
-        # Sweet-spot bonus: reward the kiting geometry (in range to shoot, out of enemy range).
-        if sweet_spot_bonus != 0.0:
+        # Sweet-spot bonus: reward attacking from the kiting geometry (in range to shoot,
+        # out of enemy range). Gated on attacked_now so it rewards the action of firing
+        # from sweet spot rather than passive positioning at that distance.
+        if sweet_spot_bonus != 0.0 and attacked_now:
             sweet_spots = self._count_kiting_sweet_spots_for_unit(unit)
             reward += sweet_spot_bonus * sweet_spots
 

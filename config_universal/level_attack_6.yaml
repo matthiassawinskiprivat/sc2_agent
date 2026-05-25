@@ -1,8 +1,8 @@
-# config_universal/level_attack_6.yaml
-# Combat: 3 Hellions vs 12 Zerglings (4 per slot). Speed-kiting stress test.
+# config_universal/level_attack_5.yaml
+# Combat: 3 Cyclones vs 6 HellionTanks (2 per slot). Ranged vs ranged, Cyclone range advantage.
 
 training:
-  training_steps: 2_000_000
+  training_steps: 3_000_000
   num_envs: 8
   n_steps: 2048
   batch_size: 1024
@@ -14,10 +14,10 @@ training:
 # Environment parameters
 env:
   env_class: "Level7Env"
-  unit_type: "HELLION"
-  enemy_type: "ZERGLING"
-  targets: 3
-  enemies_per_target: 4
+  unit_type: "CYCLONE"
+  enemy_type: "HELLIONTANK"
+  targets: 2
+  enemies_per_target: 3
   headless: True
   max_steps: 340
   maps_dir: "train/maps/ladder/no_trigger"
@@ -27,17 +27,17 @@ env:
   rewards:
     step_penalty: -0.075
     distance_multiplier: 0.7
-    retreat_shaping_scale: 0.5
-    kiting_close_in_penalty: 0.4
-    weapon_ready_attack_bonus: 0.0
-    sweet_spot_bonus: 0.05
-    in_danger_penalty: 0.1
-    damage_reward: 0.35
-    damage_penalty: -0.5
+    retreat_shaping_scale: 1.0
+    kiting_close_in_penalty: 0.5
+    weapon_ready_attack_bonus: 0.3
+    sweet_spot_bonus: 0.2
+    in_danger_penalty: 2.0
+    damage_reward: 1.0
+    damage_penalty: -0.4
     kill_reward: 5.0
     kill_penalty: -1.0
-    win_reward: 15.0
-    loss_penalty: -5.0
+    win_reward: 50.0
+    loss_penalty: -50.0
 
 # Model parameters
 model:
@@ -51,7 +51,6 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.997
   ent_coef: 0.01
   n_epochs: 4
-

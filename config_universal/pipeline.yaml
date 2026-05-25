@@ -29,7 +29,7 @@
 # Cyclone, Zealot, Immortal, Colossus, Disruptor, Dark Templar, 
 # Hydralisk, Roach, Infestor, Lurker 2.25
 # Thor, High Templer, Archon 1.88
-# Königin 0.94
+# Queen 0.94
 
 
 agent_architecture: universal
@@ -49,3 +49,9 @@ levels:
   - "level_attack_4"
   - "level_attack_5"
   - "level_attack_6"
+  - "level_attack_7"
+  - "level_attack_8"
+  - "level_attack_9"
+  - "level_attack_10"
+  - "level_attack_11"
+  - "level_attack_12"

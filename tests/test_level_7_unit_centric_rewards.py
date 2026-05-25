@@ -166,6 +166,51 @@ def test_kill_of_direct_target_attributed_to_acting_unit():
     assert pooled == pytest.approx(0.0)
 
 
+def test_orphaned_pending_rewards_flushed_to_attributed_combat_on_ally_death():
+    """
+    Regression for fix 1: pending rewards buffered under a dead ally's tag must be
+    reclaimed and added to `attributed_combat` for the current acting unit, not silently
+    discarded.
+
+    This mirrors the flush snippet added to Level7Env._async_step:
+        alive_ally_tags = {u.tag for u in self._bot.get_active_units()}
+        for dead_tag in list(self._bot._pending_rewards.keys()):
+            if dead_tag != current_tag and dead_tag not in alive_ally_tags:
+                attributed_combat += self._bot._pending_rewards.pop(dead_tag)
+    """
+    bot = _bare_bot({"rewards": {"damage_reward": 1.0, "kill_reward": 5.0}})
+
+    # Simulate a pending reward buffered under a dead ally (tag 102).
+    bot._pending_rewards[102] = 7.5
+
+    # Acting unit is 101 (alive). Unit 102 has died and is no longer in get_active_units.
+    alive_ally = MagicMock()
+    alive_ally.tag = 101
+    bot.get_active_units = MagicMock(return_value=[alive_ally])
+
+    # No new combat this step — enemies are unchanged.
+    enemies = MagicMock()
+    enemies.exists = True
+    enemies.__iter__.return_value = []
+    bot.enemy_units = MagicMock(return_value=enemies)
+    bot.last_action_was_attack_by_unit[101] = False
+
+    # calculate_unit_centric_combat_delta flushes 101's own buffer (0.0 here).
+    attributed_combat, _ = bot.calculate_unit_centric_combat_delta(101)
+    assert attributed_combat == pytest.approx(0.0)
+
+    # The env flush: dead ally 102's pending reward must be reclaimed.
+    alive_ally_tags = {u.tag for u in bot.get_active_units()}
+    for dead_tag in list(bot._pending_rewards.keys()):
+        if dead_tag != 101 and dead_tag not in alive_ally_tags:
+            attributed_combat += bot._pending_rewards.pop(dead_tag)
+
+    assert attributed_combat == pytest.approx(7.5), (
+        "Orphaned pending reward for dead ally was not flushed to the acting unit"
+    )
+    assert 102 not in bot._pending_rewards, "Dead ally's pending reward entry was not removed"
+
+
 def test_apply_action_attack_records_nearest_enemy_tag_for_attribution():
     bot = _bare_bot(
         {

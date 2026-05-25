@@ -7,7 +7,6 @@ from gymnasium import spaces
 import numpy as np
 
 class Level7Env(Level3Env):
-    ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD = 10.0
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -129,30 +128,6 @@ class Level7Env(Level3Env):
         
         return obs, info
 
-    def _is_unit_within_enemy_radius(self, unit_tag: int, radius: float = None) -> bool:
-        """Whether the controlled unit is within `radius` of any configured enemy."""
-        if self._bot is None:
-            return False
-
-        check_radius = (
-            float(radius)
-            if radius is not None
-            else float(self.ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD)
-        )
-
-        unit = self._bot.units.find_by_tag(unit_tag)
-        if unit is None:
-            return False
-
-        enemies = self._bot.enemy_units(self._bot.enemy_unit_type)
-        if not enemies or not getattr(enemies, "exists", False):
-            return False
-
-        for enemy in enemies:
-            if unit.distance_to(enemy) <= check_radius:
-                return True
-        return False
-
     async def _async_step(self, action):
         """
         Modified step logic for Level 7: Individual Unit Attribution.
@@ -201,10 +176,14 @@ class Level7Env(Level3Env):
         attributed_combat, _ = self._bot.calculate_unit_centric_combat_delta(current_tag)
         allied_attrition = self._bot.calculate_allied_attrition_penalty()
 
-        if self._is_unit_within_enemy_radius(current_tag):
-            dist_reward = 0.0
-        else:
-            dist_reward = self._bot.calculate_distance_reward(current_tag)
+        # Flush any pending rewards buffered under dead ally tags (they will never
+        # become current_tag again, so their credit would otherwise be silently lost).
+        alive_ally_tags = {u.tag for u in self._bot.get_active_units()}
+        for dead_tag in list(self._bot._pending_rewards.keys()):
+            if dead_tag != current_tag and dead_tag not in alive_ally_tags:
+                attributed_combat += self._bot._pending_rewards.pop(dead_tag)
+
+        dist_reward = self._bot.calculate_distance_reward(current_tag)
 
         shaping_reward = self._bot.calculate_kiting_simple_shaping(current_tag)
 

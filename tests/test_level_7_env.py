@@ -134,41 +134,23 @@ def test_attack_level_configs_include_kiting_shaping_keys():
             assert isinstance(rewards[key], (int, float))
 
 
-def test_level7_distance_multiplier_disabled_when_enemy_within_radius():
+def test_level7_proximity_gate_removed_no_class_constant():
+    """
+    Regression for fix 1: the hard-coded 10-unit proximity gate has been removed from
+    Level7Env. ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD must no longer exist as a
+    class attribute, confirming the dead zone is gone.
+    """
+    assert not hasattr(Level7Env, "ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD"), (
+        "ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD still present — proximity gate not removed"
+    )
+
+
+def test_level7_proximity_gate_removed_no_instance_method():
+    """
+    Regression for fix 1: _is_unit_within_enemy_radius was the implementation of the
+    proximity gate; it must no longer exist on Level7Env instances.
+    """
     env = object.__new__(Level7Env)
-    env.ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD = 10.0
-    env._bot = MagicMock()
-    env._bot.enemy_unit_type = UnitTypeId.ZERGLING
-
-    unit = MagicMock()
-    enemy = MagicMock()
-    unit.distance_to.return_value = 9.5
-
-    enemies = MagicMock()
-    enemies.exists = True
-    enemies.__iter__.return_value = [enemy]
-
-    env._bot.units.find_by_tag.return_value = unit
-    env._bot.enemy_units.return_value = enemies
-
-    assert env._is_unit_within_enemy_radius(101) is True
-
-
-def test_level7_distance_multiplier_kept_when_enemy_outside_radius():
-    env = object.__new__(Level7Env)
-    env.ENEMY_PROXIMITY_RADIUS_FOR_DISTANCE_REWARD = 10.0
-    env._bot = MagicMock()
-    env._bot.enemy_unit_type = UnitTypeId.ZERGLING
-
-    unit = MagicMock()
-    enemy = MagicMock()
-    unit.distance_to.return_value = 10.1
-
-    enemies = MagicMock()
-    enemies.exists = True
-    enemies.__iter__.return_value = [enemy]
-
-    env._bot.units.find_by_tag.return_value = unit
-    env._bot.enemy_units.return_value = enemies
-
-    assert env._is_unit_within_enemy_radius(101) is False
+    assert not hasattr(env, "_is_unit_within_enemy_radius"), (
+        "_is_unit_within_enemy_radius still present — proximity gate not fully removed"
+    )

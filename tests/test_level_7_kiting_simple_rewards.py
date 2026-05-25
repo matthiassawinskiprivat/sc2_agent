@@ -171,9 +171,9 @@ def test_retreat_shaping_no_fire_past_own_weapon_range():
     assert r == pytest.approx(0.0)
 
 
-def test_sweet_spot_bonus_fires_in_sweet_spot():
-    """Sweet-spot bonus fires when the unit is within own weapon range but outside enemy's attack range."""
-    training_conf = {"rewards": {"sweet_spot_bonus": 0.1, "retreat_shaping_scale": 0.0}}
+def _sweet_spot_bot_pair(sweet_spot_bonus=0.1):
+    """Shared setup: ally at (0,0) with range 6, enemy at (4,0) with range 1 → sweet spot."""
+    training_conf = {"rewards": {"sweet_spot_bonus": sweet_spot_bonus, "retreat_shaping_scale": 0.0}}
     bot = _bare_bot(training_conf)
 
     ally = MagicMock()
@@ -199,10 +199,41 @@ def test_sweet_spot_bonus_fires_in_sweet_spot():
     bot.units.find_by_tag.return_value = ally
     bot.enemy_units = MagicMock(return_value=mock_enemy_grp)
     bot.refresh_combat_assignments = MagicMock()
+    return bot
 
+
+def test_sweet_spot_bonus_fires_in_sweet_spot():
+    """Sweet-spot bonus fires when the unit attacks from within own weapon range but outside enemy's attack range."""
+    bot = _sweet_spot_bot_pair(sweet_spot_bonus=0.1)
+    # Must set attacked_now=True: bonus is gated on the attack action (fix 2).
+    bot.last_action_was_attack_by_unit[101] = True
     r = bot.calculate_kiting_simple_shaping(101)
     # 1 enemy in sweet spot → 0.1 * 1 = 0.1
     assert r == pytest.approx(0.1)
+
+
+def test_sweet_spot_bonus_no_fire_when_move_action():
+    """Sweet-spot bonus must NOT fire when the agent chose move instead of attack.
+
+    Regression for fix 2: before the fix, the bonus fired unconditionally every step
+    at the correct geometry, rewarding passive orbiting rather than attacking.
+    """
+    bot = _sweet_spot_bot_pair(sweet_spot_bonus=0.1)
+    bot.last_action_was_attack_by_unit[101] = False
+    bot.last_action_was_move_by_unit[101] = True
+    r = bot.calculate_kiting_simple_shaping(101)
+    assert r == pytest.approx(0.0), (
+        "sweet_spot_bonus fired without an attack action — passive orbiting exploit not fixed"
+    )
+
+
+def test_sweet_spot_bonus_fires_when_attack_action():
+    """Sweet-spot bonus fires when the attack action is issued from the sweet spot."""
+    bot = _sweet_spot_bot_pair(sweet_spot_bonus=0.2)
+    bot.last_action_was_attack_by_unit[101] = True
+    bot.last_action_was_move_by_unit[101] = False
+    r = bot.calculate_kiting_simple_shaping(101)
+    assert r == pytest.approx(0.2)
 
 
 def test_in_danger_penalty_fires_when_in_enemy_range():
