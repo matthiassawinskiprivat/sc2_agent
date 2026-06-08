@@ -8,6 +8,7 @@ from sc2.ids.unit_typeid import UnitTypeId
 from unittest.mock import patch, MagicMock
 
 from src.level_7_bot import Level7Bot
+from train.envs.level_0_env import Level0Env
 from train.envs.level_7_env import Level7Env
 
 def test_level_7_env_action_space_is_doubled():
@@ -59,6 +60,75 @@ def test_level7_universal_apply_action_move_vs_attack_heads():
     asyncio.run(bot.apply_action(1, [1, 0]))
     unit.attack.assert_called_once()
     unit.move.assert_not_called()
+
+
+def test_level7_timeout_with_living_enemies_is_failure():
+    env = object.__new__(Level7Env)
+    env.steps = 2
+    env.max_steps = 3
+    env.total_steps_in_level = 0
+    env.training_conf = {"rewards": {"timeout_penalty": -42.0, "loss_penalty": -50.0}}
+    env._async_step = MagicMock(return_value=("obs", 2.0, False, False, {"kept": True}))
+    env._loop = MagicMock()
+    env._loop.run_until_complete.return_value = ("obs", 2.0, False, False, {"kept": True})
+
+    enemies = MagicMock()
+    enemies.amount = 1
+    bot = MagicMock()
+    bot.enemy_unit_type = UnitTypeId.ZERGLING
+    bot.enemy_units.return_value = enemies
+    env._bot = bot
+
+    obs, reward, done, truncated, info = env.step(action=0)
+
+    assert obs == "obs"
+    assert reward == pytest.approx(-40.0)
+    assert done is True
+    assert truncated is False
+    assert info["timeout_failure"] is True
+    assert info["kept"] is True
+
+
+def test_level7_timeout_without_living_enemies_keeps_base_result():
+    env = object.__new__(Level7Env)
+    env.steps = 2
+    env.max_steps = 3
+    env.total_steps_in_level = 0
+    env.training_conf = {"rewards": {"timeout_penalty": -42.0, "loss_penalty": -50.0}}
+    env._async_step = MagicMock(return_value=("obs", 2.0, False, False, {}))
+    env._loop = MagicMock()
+    env._loop.run_until_complete.return_value = ("obs", 2.0, False, False, {})
+
+    enemies = MagicMock()
+    enemies.amount = 0
+    bot = MagicMock()
+    bot.enemy_unit_type = UnitTypeId.ZERGLING
+    bot.enemy_units.return_value = enemies
+    env._bot = bot
+
+    _, reward, done, truncated, info = env.step(action=0)
+
+    assert reward == pytest.approx(2.0)
+    assert done is False
+    assert truncated is True
+    assert "timeout_failure" not in info
+
+
+def test_base_level0_timeout_behavior_is_unchanged():
+    env = object.__new__(Level0Env)
+    env.steps = 2
+    env.max_steps = 3
+    env.total_steps_in_level = 0
+    env._async_step = MagicMock(return_value=("obs", 2.0, False, False, {}))
+    env._loop = MagicMock()
+    env._loop.run_until_complete.return_value = ("obs", 2.0, False, False, {})
+
+    _, reward, done, truncated, info = env.step(action=0)
+
+    assert reward == pytest.approx(2.0)
+    assert done is False
+    assert truncated is True
+    assert info == {}
 
 
 def test_level_7_bot_reward_logic():

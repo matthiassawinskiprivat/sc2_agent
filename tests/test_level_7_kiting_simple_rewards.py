@@ -20,12 +20,15 @@ def _bare_bot(training_conf: dict) -> Level7Bot:
     bot.last_attack_target_tag_by_unit = {}
     bot.last_action_was_attack_by_unit = {}
     bot.last_action_was_move_by_unit = {}
+    bot.last_move_head_by_unit = {}
+    bot._pre_action_enemy_within_use_global_radius = {}
     bot._micro_under_fire_min_dist_prev = {}
     bot._allied_took_damage_this_step = {}
     bot._kiting_simple_prev_dist = {}
     bot._prev_enemy_in_attack_range = {}
     bot._prev_kiting_enemy_tag = {}
     bot._attack_order_weapon_cd_before = {}
+    bot._pre_action_weapon_cd_by_unit = {}
     bot._pending_rewards = {}
     bot._enemy_last_known_pos = {}
     bot.current_assignments = {101: 201}
@@ -167,6 +170,97 @@ def test_retreat_shaping_no_fire_past_own_weapon_range():
     bot.last_action_was_move_by_unit[101] = True
 
     # Current dist=10 > prev_dist=9 (moved away), but dist=10 > ally_range=6 → no reward
+    r = bot.calculate_kiting_simple_shaping(101)
+    assert r == pytest.approx(0.0)
+
+
+def test_cooldown_retreat_reward_fires_before_enemy_contact():
+    """Moving away during weapon cooldown is rewarded even before melee contact."""
+    training_conf = {
+        "rewards": {
+            "retreat_shaping_scale": 0.0,
+            "cooldown_retreat_scale": 0.75,
+        }
+    }
+    bot = _bare_bot(training_conf)
+
+    ally = MagicMock()
+    ally.tag = 101
+    ally.position = Point2((4.5, 0.0))
+    ally.ground_range = 5.0
+    ally.air_range = 0.0
+    ally.is_flying = False
+    ally.distance_to.side_effect = lambda other: ally.position.distance_to(other.position)
+
+    enemy = MagicMock()
+    enemy.tag = 201
+    enemy.position = Point2((0.0, 0.0))
+    enemy.ground_range = 0.1
+    enemy.air_range = 0.0
+    enemy.is_flying = False
+
+    mock_enemy_grp = MagicMock()
+    mock_enemy_grp.exists = True
+    mock_enemy_grp.__iter__.return_value = [enemy]
+    mock_enemy_grp.find_by_tag = MagicMock(return_value=enemy)
+
+    bot.units = MagicMock()
+    bot.units.find_by_tag.return_value = ally
+    bot.enemy_units = MagicMock(return_value=mock_enemy_grp)
+    bot.refresh_combat_assignments = MagicMock()
+
+    # Previous distance was inside own weapon range but outside enemy melee/contact range.
+    bot._kiting_simple_prev_dist[101] = 4.0
+    bot._prev_enemy_in_attack_range[101] = False
+    bot._prev_kiting_enemy_tag[101] = 201
+    bot._pre_action_weapon_cd_by_unit[101] = 7.0
+    bot.last_action_was_move_by_unit[101] = True
+
+    r = bot.calculate_kiting_simple_shaping(101)
+    assert r == pytest.approx(0.75 * 0.5)
+
+
+def test_cooldown_retreat_reward_no_fire_past_own_weapon_range():
+    """Cooldown retreat cannot be exploited by fleeing beyond weapon range."""
+    training_conf = {
+        "rewards": {
+            "retreat_shaping_scale": 0.0,
+            "cooldown_retreat_scale": 0.75,
+        }
+    }
+    bot = _bare_bot(training_conf)
+
+    ally = MagicMock()
+    ally.tag = 101
+    ally.position = Point2((6.0, 0.0))
+    ally.ground_range = 5.0
+    ally.air_range = 0.0
+    ally.is_flying = False
+    ally.distance_to.side_effect = lambda other: ally.position.distance_to(other.position)
+
+    enemy = MagicMock()
+    enemy.tag = 201
+    enemy.position = Point2((0.0, 0.0))
+    enemy.ground_range = 0.1
+    enemy.air_range = 0.0
+    enemy.is_flying = False
+
+    mock_enemy_grp = MagicMock()
+    mock_enemy_grp.exists = True
+    mock_enemy_grp.__iter__.return_value = [enemy]
+    mock_enemy_grp.find_by_tag = MagicMock(return_value=enemy)
+
+    bot.units = MagicMock()
+    bot.units.find_by_tag.return_value = ally
+    bot.enemy_units = MagicMock(return_value=mock_enemy_grp)
+    bot.refresh_combat_assignments = MagicMock()
+
+    bot._kiting_simple_prev_dist[101] = 4.5
+    bot._prev_enemy_in_attack_range[101] = False
+    bot._prev_kiting_enemy_tag[101] = 201
+    bot._pre_action_weapon_cd_by_unit[101] = 7.0
+    bot.last_action_was_move_by_unit[101] = True
+
     r = bot.calculate_kiting_simple_shaping(101)
     assert r == pytest.approx(0.0)
 
@@ -353,6 +447,48 @@ def test_weapon_ready_attack_bonus_fires_when_cooldown_zero():
 
     r = bot.calculate_kiting_simple_shaping(101)
     assert r == pytest.approx(0.5)
+
+
+def test_attack_on_cooldown_penalty_fires_when_enabled():
+    """Attack spam during weapon cooldown is penalized when configured."""
+    training_conf = {
+        "rewards": {
+            "attack_on_cooldown_penalty": 0.4,
+            "retreat_shaping_scale": 0.0,
+            "weapon_ready_attack_bonus": 0.5,
+        }
+    }
+    bot = _bare_bot(training_conf)
+
+    ally = MagicMock()
+    ally.tag = 101
+    ally.position = Point2((0, 0))
+    ally.ground_range = 6.0
+    ally.air_range = 0.0
+    ally.is_flying = False
+
+    enemy = MagicMock(tag=201, position=Point2((5, 0)))
+    enemy.ground_range = 1.0
+    enemy.air_range = 0.0
+    enemy.is_flying = False
+    ally.distance_to.side_effect = lambda other: ally.position.distance_to(other.position)
+
+    mock_enemy_grp = MagicMock()
+    mock_enemy_grp.exists = True
+    mock_enemy_grp.__iter__.return_value = [enemy]
+    mock_enemy_grp.find_by_tag = MagicMock(return_value=enemy)
+
+    bot.units = MagicMock()
+    bot.units.find_by_tag.return_value = ally
+    bot.enemy_units = MagicMock(return_value=mock_enemy_grp)
+    bot.refresh_combat_assignments = MagicMock()
+
+    bot.last_action_was_attack_by_unit[101] = True
+    bot.last_action_was_move_by_unit[101] = False
+    bot._attack_order_weapon_cd_before[101] = 8.0
+
+    r = bot.calculate_kiting_simple_shaping(101)
+    assert r == pytest.approx(-0.4)
 
 
 # ---------------------------------------------------------------------------
@@ -572,3 +708,58 @@ def test_kiting_state_cleared_on_assignment_change():
     assert r == pytest.approx(0.0), (
         "Spurious retreat reward fired with stale state from old enemy after assignment change"
     )
+
+
+def test_use_global_reward_fires_on_move_global_when_no_enemy_nearby():
+    bot = _bare_bot({"rewards": {"use_global": 0.25}})
+    bot.last_move_head_by_unit[101] = "move_global"
+    bot._pre_action_enemy_within_use_global_radius[101] = False
+
+    assert bot.calculate_use_global_reward(101) == pytest.approx(0.25)
+
+
+def test_use_global_reward_default_is_zero():
+    bot = _bare_bot({"rewards": {}})
+    bot.last_move_head_by_unit[101] = "move_global"
+    bot._pre_action_enemy_within_use_global_radius[101] = False
+
+    assert bot.calculate_use_global_reward(101) == pytest.approx(0.0)
+
+
+def test_use_global_reward_not_given_for_move_local():
+    bot = _bare_bot({"rewards": {"use_global": 0.25}})
+    bot.last_move_head_by_unit[101] = "move_local"
+    bot._pre_action_enemy_within_use_global_radius[101] = False
+
+    assert bot.calculate_use_global_reward(101) == pytest.approx(0.0)
+
+
+def test_use_global_reward_not_given_when_enemy_within_radius():
+    bot = _bare_bot({"rewards": {"use_global": 0.25}})
+    bot.last_move_head_by_unit[101] = "move_global"
+    bot._pre_action_enemy_within_use_global_radius[101] = True
+
+    assert bot.calculate_use_global_reward(101) == pytest.approx(0.0)
+
+
+def test_any_enemy_within_radius_checks_all_enemies():
+    bot = _bare_bot({"rewards": {}})
+
+    ally = MagicMock()
+    ally.tag = 101
+    ally.position = Point2((0, 0))
+    ally.distance_to.side_effect = lambda other: ally.position.distance_to(other.position)
+
+    far_enemy = MagicMock()
+    far_enemy.position = Point2((25, 0))
+    near_enemy = MagicMock()
+    near_enemy.position = Point2((15, 0))
+
+    enemies = MagicMock()
+    enemies.exists = True
+    enemies.__iter__.return_value = [far_enemy, near_enemy]
+    bot.enemy_units = MagicMock(return_value=enemies)
+
+    assert bot._any_enemy_within_radius(ally, 20.0) is True
+    near_enemy.position = Point2((21, 0))
+    assert bot._any_enemy_within_radius(ally, 20.0) is False

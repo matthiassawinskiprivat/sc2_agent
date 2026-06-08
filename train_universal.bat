@@ -1,23 +1,30 @@
 @echo off
-setlocal
+setlocal EnableExtensions
+
 echo Starting Universal (Command + Spatial) SC2 Training Pipeline...
 echo Using conda env: sc2_agent_cuda
 
-where conda >nul 2>&1
-if errorlevel 1 (
-  echo ERROR: conda is not on PATH. Open Anaconda Prompt, run conda init cmd.exe, or add conda to PATH.
+if defined SC2_REPO_ROOT (
+  set "REPO_ROOT=%SC2_REPO_ROOT%"
+) else (
+  set "REPO_ROOT=%~dp0"
+)
+if "%REPO_ROOT:~-1%"=="\" set "REPO_ROOT=%REPO_ROOT:~0,-1%"
+
+if exist "%USERPROFILE%\anaconda3\envs\sc2_agent_cuda\python.exe" (
+  set "PYTHON_EXE=%USERPROFILE%\anaconda3\envs\sc2_agent_cuda\python.exe"
+) else if exist "%USERPROFILE%\miniconda3\envs\sc2_agent_cuda\python.exe" (
+  set "PYTHON_EXE=%USERPROFILE%\miniconda3\envs\sc2_agent_cuda\python.exe"
+) else (
+  echo ERROR: sc2_agent_cuda not found.
   pause
   exit /b 1
 )
 
-set PYTHONPATH=%PYTHONPATH%;%CD%
+cd /d "%REPO_ROOT%"
+set "PYTHONPATH=%REPO_ROOT%"
 set SC2_SKIP_KILL_SWITCH=1
-conda run -n sc2_agent_cuda --no-capture-output python train/train_universal.py
-if errorlevel 1 (
-  echo.
-  echo If the environment is missing, create it from the repo root:
-  echo   conda env create -f environment_cuda.yml
-  echo Verify GPU after install:
-  echo   conda run -n sc2_agent_cuda python scripts/verify_torch_cuda.py
-)
+
+"%PYTHON_EXE%" -u "%REPO_ROOT%\train\train_universal.py"
 pause
+exit /b %ERRORLEVEL%

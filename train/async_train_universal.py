@@ -1,5 +1,6 @@
 import errno
 import os
+import subprocess
 import sys
 import time
 from collections import deque
@@ -38,6 +39,164 @@ TEMP_DIR = os.path.normpath(os.environ.get("SC2_ASYNC_BUFFER_DIR", _DEFAULT_ASYN
 # Collector loads from this path. Never read `latest_learner_model.zip` directly — the learner
 # replaces that file; simultaneous open on Windows causes Errno 13 / sharing violations.
 COLLECTOR_WEIGHTS_STAGING_ZIP = os.path.join(TEMP_DIR, "latest_learner_model_collector_staging.zip")
+
+
+def _tensorboard_preflight() -> None:
+    """Fail fast when TensorBoard cannot import (common: setuptools>=81 drops pkg_resources)."""
+    try:
+        import pkg_resources  # noqa: F401 — required by tensorboard<=2.20 on setuptools>=81
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "TensorBoard needs pkg_resources. Pin setuptools in the conda env: "
+            "pip install 'setuptools<81'"
+        ) from e
+    import tensorboard  # noqa: F401
+
+
+def resolve_async_log_dir(level_name: str, training_params: dict) -> str:
+    """
+    TensorBoard/SB3 log directory for one async level.
+
+    Default: logs_universal/<level_name>/ (one TB run per level, easy to find in UI).
+    Optional YAML override: training.tensorboard_subdir (e.g. \"async\" for legacy layout).
+    """
+    tb_subdir = training_params.get("tensorboard_subdir", "")
+    if tb_subdir:
+        return os.path.join("logs_universal", level_name, tb_subdir)
+    return os.path.join("logs_universal", level_name)
+
+
+def _tensorboard_port_open(port: int) -> bool:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def free_port(port: int) -> int:
+    """Terminate any process listening on TCP *port*. Returns how many were stopped."""
+    stopped = 0
+    seen_pids = set()
+    for conn in psutil.net_connections(kind="inet"):
+        if not conn.laddr or conn.laddr.port != port:
+            continue
+        if conn.status != psutil.CONN_LISTEN:
+            continue
+        if conn.pid in seen_pids:
+            continue
+        seen_pids.add(conn.pid)
+        try:
+            proc = psutil.Process(conn.pid)
+            logger.info(
+                f"Freeing port {port}: stopping pid={proc.pid} ({proc.name()})"
+            )
+            proc.terminate()
+            proc.wait(timeout=5)
+            stopped += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+            continue
+    if stopped:
+        time.sleep(1.0)
+    return stopped
+
+
+def _start_tensorboard(log_dir_base: str = "logs_universal", port: int = 6006) -> None:
+    """Launch TensorBoard in the background if nothing is listening on *port*."""
+    try:
+        _tensorboard_preflight()
+    except RuntimeError as e:
+        logger.error(f"TensorBoard not started: {e}")
+        return
+
+    log_dir = os.path.abspath(log_dir_base)
+    os.makedirs(log_dir, exist_ok=True)
+
+    run_hint = "In TensorBoard, select runs named level_attack_0, level_move_single_0, etc."
+
+    if _tensorboard_port_open(port):
+        logger.info(
+            f"TensorBoard already running at http://localhost:{port} — not starting a "
+            f"second instance. {run_hint}"
+        )
+        return
+
+    if os.environ.get("SC2_RESTART_TENSORBOARD", "").lower() in ("1", "true", "yes"):
+        free_port(port)
+
+    tb_log = os.path.join(log_dir, "tensorboard_startup.log")
+    cmd = [
+        sys.executable,
+        "-m",
+        "tensorboard.main",
+        "--logdir",
+        log_dir,
+        "--port",
+        str(port),
+        "--bind_all",
+        "--reload_interval",
+        "15",
+    ]
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    try:
+        with open(tb_log, "a", encoding="utf-8") as log_fp:
+            log_fp.write(f"\n--- launch {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+            log_fp.flush()
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fp,
+                stderr=subprocess.STDOUT,
+                creationflags=creationflags,
+            )
+        time.sleep(2.0)
+        if proc.poll() is not None:
+            logger.error(
+                f"TensorBoard exited immediately (code {proc.returncode}). "
+                f"See {tb_log}"
+            )
+            return
+        if not _tensorboard_port_open(port):
+            logger.error(
+                f"TensorBoard process started but port {port} is not listening. See {tb_log}"
+            )
+            return
+        logger.info(
+            f"TensorBoard at http://localhost:{port} (logdir={log_dir}). {run_hint}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to start TensorBoard: {e}")
+
+
+def refresh_tensorboard(
+    log_dir_base: str = "logs_universal",
+    port: int = 6006,
+    *,
+    active_level: str | None = None,
+) -> None:
+    """
+    Restart TensorBoard so new curriculum levels (e.g. level_attack_1) appear in the UI.
+
+    TensorBoard started at pipeline begin often does not list runs created hours later
+    under a new logs_universal/<level>/ folder until the server is restarted.
+    """
+    if os.environ.get("SC2_DISABLE_TENSORBOARD", "").lower() in ("1", "true", "yes"):
+        return
+    if os.environ.get("SC2_NO_TENSORBOARD_LEVEL_REFRESH", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+
+    free_port(port)
+    _start_tensorboard(log_dir_base, port)
+    if active_level:
+        logger.info(
+            f"TensorBoard refreshed for level '{active_level}': "
+            f"http://localhost:{port} — enable run '{active_level}' in the left sidebar "
+            f"(logs: logs_universal/{active_level}/)"
+        )
 
 
 def force_kill_sc2():
@@ -539,8 +698,7 @@ class AsyncLearner:
         self.resume_timesteps_from_save = resume_timesteps_from_save
         self.latest_model_path = os.path.join(TEMP_DIR, "latest_learner_model.zip")
         training_params = config.get("training", {})
-        tb_subdir = training_params.get("tensorboard_subdir", "async")
-        self.log_dir = os.path.join("logs_universal", level_name, tb_subdir)
+        self.log_dir = resolve_async_log_dir(level_name, training_params)
         os.makedirs(self.log_dir, exist_ok=True)
         # Ensure model directory exists
         self.model_dir = os.path.join("models_universal", level_name)
@@ -902,6 +1060,9 @@ def run_single_async_training_session(
     if model_to_load:
         logger.info(f"--- [ASYNC] Loading weights from: {model_to_load} ---")
 
+    tb_port = int(os.environ.get("SC2_TENSORBOARD_PORT", "6006"))
+    refresh_tensorboard("logs_universal", tb_port, active_level=level_name)
+
     force_kill_sc2()
     clear_temp_dir()
 
@@ -1052,9 +1213,8 @@ def main():
             # pipeline is restarted before a first checkpoint exists (NEEDS_TRAINING),
             # that call wipes the new run's event file on every restart — leaving only
             # the 88-byte TensorBoard header and an empty progress.csv.
-            async_log_dir = os.path.join(
-                "logs_universal", level_name,
-                config.get("training", {}).get("tensorboard_subdir", "async"),
+            async_log_dir = resolve_async_log_dir(
+                level_name, config.get("training", {})
             )
             if os.path.exists(async_log_dir):
                 try:

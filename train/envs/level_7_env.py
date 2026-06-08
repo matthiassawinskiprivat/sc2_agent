@@ -128,6 +128,46 @@ class Level7Env(Level3Env):
         
         return obs, info
 
+    def _has_living_combat_enemies(self) -> bool:
+        """True when a combat timeout still left enemies alive."""
+        if not self._bot:
+            return False
+        try:
+            enemies = self._bot.enemy_units(self._bot.enemy_unit_type)
+        except Exception:
+            return False
+
+        amount = getattr(enemies, "amount", None)
+        if amount is not None:
+            return int(amount) > 0
+        if getattr(enemies, "exists", False):
+            return True
+        return False
+
+    def step(self, action):
+        obs, reward, done, truncated, info = super().step(action)
+
+        # Movement levels keep Level0Env's bootstrap-on-time-limit behavior. Combat levels
+        # should not learn that safely waiting out the clock is acceptable when enemies live.
+        if (
+            self.steps >= self.max_steps
+            and truncated
+            and not done
+            and self._has_living_combat_enemies()
+        ):
+            rewards_conf = self.training_conf.get("rewards", {})
+            timeout_penalty = rewards_conf.get(
+                "timeout_penalty",
+                rewards_conf.get("loss_penalty", -50.0),
+            )
+            reward += timeout_penalty
+            done = True
+            truncated = False
+            info = dict(info or {})
+            info["timeout_failure"] = True
+
+        return obs, reward, done, truncated, info
+
     async def _async_step(self, action):
         """
         Modified step logic for Level 7: Individual Unit Attribution.
@@ -148,8 +188,11 @@ class Level7Env(Level3Env):
         self._bot.record_pre_action_kiting_state(current_tag)
 
         # 2. Apply the agent's action
+        # The policy is the sole source of unit orders; no bot-side auto-attack helper
+        # fills in idle non-acting units. Removing the helper avoids a hidden actuation
+        # path that overrode the agent's chosen kiting moves and inflated reward credit
+        # for units the policy never directed (agent-faithful actuation, AGENTS.md).
         await self._bot.apply_action(current_tag, action)
-        self._bot.queue_idle_combat_orders(skip_unit_tag=current_tag)
 
         # Send queued actions to the client before stepping
         actions = getattr(self._bot, "_actions", None)
@@ -186,6 +229,7 @@ class Level7Env(Level3Env):
         dist_reward = self._bot.calculate_distance_reward(current_tag)
 
         shaping_reward = self._bot.calculate_kiting_simple_shaping(current_tag)
+        use_global_reward = self._bot.calculate_use_global_reward(current_tag)
 
         rewards_conf = self.training_conf.get('rewards', {})
         step_penalty = rewards_conf.get('step_penalty', -0.05)
@@ -195,6 +239,7 @@ class Level7Env(Level3Env):
             + allied_attrition
             + dist_reward
             + shaping_reward
+            + use_global_reward
             + step_penalty
         )
 

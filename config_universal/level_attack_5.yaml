@@ -1,8 +1,8 @@
-# config_universal/level_attack_7.yaml
-# Combat: 2 Colossuses vs 6 Roaches (3 per slot). Large range advantage vs medium-range enemy.
+# config_universal/level_attack_5.yaml
+# Combat: 3 Cyclones vs 6 HellionTanks (2 per slot). Ranged vs ranged, Cyclone range advantage.
 
 training:
-  training_steps: 3_000_000
+  training_steps: 1_500_000
   num_envs: 8
   n_steps: 2048
   batch_size: 1024
@@ -14,10 +14,10 @@ training:
 # Environment parameters
 env:
   env_class: "Level7Env"
-  unit_type: "COLOSSUS"
-  enemy_type: "ROACH"
+  unit_type: "CYCLONE"
+  enemy_type: "HELLIONTANK"
   targets: 2
-  enemies_per_target: 5
+  enemies_per_target: 3
   headless: True
   max_steps: 340
   maps_dir: "train/maps/ladder/no_trigger"
@@ -25,19 +25,23 @@ env:
   guidance_curriculum: False
 
   rewards:
-    step_penalty: -0.075
-    distance_multiplier: 0.7
-    retreat_shaping_scale: 1.0
-    kiting_close_in_penalty: 0.4
+    step_penalty: -0.1
+    distance_multiplier: 1.0
+    retreat_shaping_scale: 1.2
+    cooldown_retreat_scale: 0.8
+    attack_on_cooldown_penalty: 0.3
+    kiting_close_in_penalty: 1.5
     weapon_ready_attack_bonus: 0.3
     sweet_spot_bonus: 0.2
     in_danger_penalty: 1.5
-    damage_reward: 1.0
-    damage_penalty: -0.3
-    kill_reward: 5.0
-    kill_penalty: -1.0
-    win_reward: 50.0
-    loss_penalty: -50.0
+    damage_reward: 1.2
+    damage_penalty: -0.5
+    kill_reward: 10.0
+    kill_penalty: -1.5
+    win_reward: 20.0
+    loss_penalty: -15.0
+    timeout_penalty: -25.0
+    use_global: 0.5
 
 # Model parameters
 model:
@@ -52,5 +56,5 @@ model:
     lstm_hidden_size: 512
     net_arch: []
   gamma: 0.997
-  ent_coef: 0.01
-  n_epochs: 4
+  ent_coef: 0.001
+  n_epochs: 2

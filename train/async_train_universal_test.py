@@ -470,8 +470,9 @@ class AsyncLearner:
         self.resume_timesteps_from_save = resume_timesteps_from_save
         self.latest_model_path = os.path.join(TEMP_DIR, "latest_learner_model.zip")
         training_params = config.get("training", {})
-        tb_subdir = training_params.get("tensorboard_subdir", "async")
-        self.log_dir = os.path.join("logs_universal", level_name, tb_subdir)
+        from train.async_train_universal import resolve_async_log_dir
+
+        self.log_dir = resolve_async_log_dir(level_name, training_params)
         os.makedirs(self.log_dir, exist_ok=True)
         # Ensure model directory exists
         self.model_dir = os.path.join("models_universal", level_name)
@@ -963,9 +964,10 @@ def main():
             # pipeline is restarted before a first checkpoint exists (NEEDS_TRAINING),
             # that call wipes the new run's event file on every restart — leaving only
             # the 88-byte TensorBoard header and an empty progress.csv.
-            async_log_dir = os.path.join(
-                "logs_universal", level_name,
-                config.get("training", {}).get("tensorboard_subdir", "async"),
+            from train.async_train_universal import resolve_async_log_dir
+
+            async_log_dir = resolve_async_log_dir(
+                level_name, config.get("training", {})
             )
             if os.path.exists(async_log_dir):
                 try:

@@ -28,6 +28,7 @@ class Level7Bot(Level3Bot):
     # Must match ``ObservationTransformer.transform_tactical`` allied/enemy draw culling
     # (|dx| > HALF or |dy| > HALF → outside the 32×32 fovea centered on the active unit).
     _TACTICAL_FOVEA_MAX_DELTA: float = 17.0
+    _USE_GLOBAL_NO_ENEMY_RADIUS: float = 20.0
 
     @staticmethod
     def _resolve_enemies_per_target(training_conf: dict, enemy_unit_type: UnitTypeId) -> int:
@@ -61,6 +62,7 @@ class Level7Bot(Level3Bot):
             # Default: no attributed target unless we issue unit.attack(enemy_unit).
             self.last_action_was_attack_by_unit[unit_tag] = False
             self.last_action_was_move_by_unit[unit_tag] = False
+            self.last_move_head_by_unit[unit_tag] = None
             self.last_attack_target_tag_by_unit.pop(unit_tag, None)
 
             head_idx = int(action[0])
@@ -83,6 +85,7 @@ class Level7Bot(Level3Bot):
 
             if "move" in head_name:
                 self.last_action_was_move_by_unit[unit_tag] = True
+                self.last_move_head_by_unit[unit_tag] = head_name
                 self._attack_order_weapon_cd_before.pop(unit_tag, None)
                 self.do(unit.move(target_pos))
                 return
@@ -116,6 +119,8 @@ class Level7Bot(Level3Bot):
         self.last_attack_target_tag_by_unit = {} # ally_tag -> enemy_tag (only when attacking a unit)
         self.last_action_was_attack_by_unit = {} # ally_tag -> bool
         self.last_action_was_move_by_unit: Dict[int, bool] = {}  # universal: last policy step was move
+        self.last_move_head_by_unit: Dict[int, Optional[str]] = {}  # universal: move head name used
+        self._pre_action_enemy_within_use_global_radius: Dict[int, bool] = {}
         
         # Resolve unit types from configuration
         # Look in training_conf root first, then in 'env' section
@@ -150,8 +155,12 @@ class Level7Bot(Level3Bot):
         self._prev_enemy_in_attack_range: Dict[int, bool] = {}         # enemy in contact range at step start
         self._micro_under_fire_min_dist_prev: Dict[int, Optional[float]] = {}  # min shooting-enemy dist at step start
         self._attack_order_weapon_cd_before: Dict[int, float] = {}
+        self._pre_action_weapon_cd_by_unit: Dict[int, float] = {}
         # Per-unit combat reward buffer: damage/kill credit accumulates here and is flushed
-        # the next time that unit becomes the acting unit (handles cross-step auto-attack rewards).
+        # the next time that unit becomes the acting unit. Even without a bot-side auto-attack
+        # helper, SC2's default stance lets a unit auto-fire at enemies in range while its
+        # previous order is winding down (e.g. attack-move completing on a dead target), so
+        # damage can still land between this unit's consecutive policy turns.
         self._pending_rewards: Dict[int, float] = {}
         # Last observed position per enemy tag — used to attribute kills to closest ally.
         self._enemy_last_known_pos: Dict[int, Any] = {}
@@ -274,10 +283,23 @@ class Level7Bot(Level3Bot):
             self._kiting_simple_prev_dist,
             self._prev_enemy_in_attack_range,
             self._attack_order_weapon_cd_before,
+            self._pre_action_weapon_cd_by_unit,
             self._prev_kiting_enemy_tag,
         ):
             d.pop(unit_tag, None)
         self.last_action_was_move_by_unit.pop(unit_tag, None)
+        self.last_move_head_by_unit.pop(unit_tag, None)
+        self._pre_action_enemy_within_use_global_radius.pop(unit_tag, None)
+
+    def _any_enemy_within_radius(self, unit: Unit, radius: float) -> bool:
+        enemies = self.enemy_units(self.enemy_unit_type)
+        if enemies is None or not getattr(enemies, "exists", False):
+            return False
+        eps = 1e-3
+        for enemy in enemies:
+            if float(unit.distance_to(enemy)) <= radius + eps:
+                return True
+        return False
 
     async def _debug_unlock_colossus_extended_thermal_lance(self):
         """
@@ -304,11 +326,14 @@ class Level7Bot(Level3Bot):
         self.last_attack_target_tag_by_unit = {}
         self.last_action_was_attack_by_unit = {}
         self.last_action_was_move_by_unit.clear()
+        self.last_move_head_by_unit.clear()
+        self._pre_action_enemy_within_use_global_radius.clear()
         self._micro_under_fire_min_dist_prev.clear()
         self._allied_took_damage_this_step.clear()
         self._kiting_simple_prev_dist.clear()
         self._prev_enemy_in_attack_range.clear()
         self._attack_order_weapon_cd_before.clear()
+        self._pre_action_weapon_cd_by_unit.clear()
         self._pending_rewards.clear()
         self._enemy_last_known_pos.clear()
         self._prev_kiting_enemy_tag.clear()
@@ -488,8 +513,9 @@ class Level7Bot(Level3Bot):
         Cross-step buffering
         --------------------
         Rewards accumulate in ``_pending_rewards[ally_tag]`` and are not consumed until
-        that ally becomes the acting unit. This correctly attributes rewards earned by a
-        queued auto-attack that fires during a different unit's policy step.
+        that ally becomes the acting unit. This correctly attributes rewards earned by
+        SC2's default-stance auto-fire (a unit shooting an in-range enemy while its prior
+        order is still resolving) that lands during a different unit's policy step.
 
         Return value: ``(acting_unit_attributed_reward, 0.0)`` — the second element is
         always zero and is kept only for call-site compatibility.
@@ -925,8 +951,17 @@ class Level7Bot(Level3Bot):
             self._kiting_simple_prev_dist.pop(unit_tag, None)
             self._prev_enemy_in_attack_range.pop(unit_tag, None)
             self._micro_under_fire_min_dist_prev.pop(unit_tag, None)
+            self._pre_action_weapon_cd_by_unit.pop(unit_tag, None)
             self._prev_kiting_enemy_tag.pop(unit_tag, None)
+            self._pre_action_enemy_within_use_global_radius.pop(unit_tag, None)
             return
+
+        self._pre_action_weapon_cd_by_unit[unit_tag] = float(
+            getattr(unit, "weapon_cooldown", 0.0) or 0.0
+        )
+        self._pre_action_enemy_within_use_global_radius[unit_tag] = self._any_enemy_within_radius(
+            unit, self._USE_GLOBAL_NO_ENEMY_RADIUS
+        )
 
         self.refresh_combat_assignments()
         e_tag = self.current_assignments.get(unit_tag)
@@ -936,6 +971,7 @@ class Level7Bot(Level3Bot):
             self._kiting_simple_prev_dist.pop(unit_tag, None)
             self._prev_enemy_in_attack_range.pop(unit_tag, None)
             self._micro_under_fire_min_dist_prev.pop(unit_tag, None)
+            self._pre_action_weapon_cd_by_unit.pop(unit_tag, None)
             self._prev_kiting_enemy_tag.pop(unit_tag, None)
             return
 
@@ -960,6 +996,11 @@ class Level7Bot(Level3Bot):
           while fleeing to the map edge — retreat is only meaningful while the unit can still
           shoot back. Does NOT require the previous action to be an attack, so it fires in
           multi-unit cycling where several other units' steps separate attack and retreat.
+        - Cooldown-retreat reward: moving away while this unit's weapon is on cooldown,
+          while staying close enough to keep fighting. This rewards the actual kite rhythm
+          (shoot, back up during cooldown, shoot again) before a melee enemy reaches contact.
+        - Attack-on-cooldown penalty: discourages repeatedly issuing attack commands while
+          the weapon cannot fire yet.
         - Close-in penalty (proportional): penalises moving closer to a currently-shooting
           enemy by `kiting_close_in_penalty * delta_distance_closer`.
         - Sweet-spot bonus: per-step reward for each enemy the unit can shoot (within own
@@ -985,6 +1026,8 @@ class Level7Bot(Level3Bot):
         weapon_ready_bonus = float(rewards_conf.get("weapon_ready_attack_bonus", 0.0))
         sweet_spot_bonus = float(rewards_conf.get("sweet_spot_bonus", 0.0))
         in_danger_penalty = float(rewards_conf.get("in_danger_penalty", 0.0))
+        cooldown_retreat_scale = float(rewards_conf.get("cooldown_retreat_scale", 0.0))
+        attack_on_cooldown_penalty = float(rewards_conf.get("attack_on_cooldown_penalty", 0.0))
 
         self.refresh_combat_assignments()
         e_tag = self.current_assignments.get(unit_tag)
@@ -1013,6 +1056,7 @@ class Level7Bot(Level3Bot):
         # Pre-action baseline recorded by record_pre_action_kiting_state (single-step).
         prev_dist = self._kiting_simple_prev_dist.get(unit_tag)
         prev_enemy_in_range = self._prev_enemy_in_attack_range.get(unit_tag, False)
+        pre_action_cd = getattr(self, "_pre_action_weapon_cd_by_unit", {}).get(unit_tag)
 
         moved_now = bool(self.last_action_was_move_by_unit.get(unit_tag, False))
         attacked_now = bool(self.last_action_was_attack_by_unit.get(unit_tag, False))
@@ -1030,6 +1074,22 @@ class Level7Bot(Level3Bot):
         if retreat_scale != 0.0 and moved_now and prev_enemy_in_range and prev_dist is not None:
             if dist > prev_dist + eps and dist <= ally_range + eps:
                 reward += retreat_scale * (dist - prev_dist)
+
+        # Cooldown-retreat reward: after firing, the correct kiting move is often to
+        # back up before the enemy reaches contact range. This uses the same
+        # single-step distance baseline as retreat shaping, but gates on weapon
+        # cooldown instead of enemy contact.
+        if (
+            cooldown_retreat_scale != 0.0
+            and moved_now
+            and pre_action_cd is not None
+            and float(pre_action_cd) > eps
+            and prev_dist is not None
+            and prev_dist <= ally_range + eps
+            and dist > prev_dist + eps
+            and dist <= ally_range + eps
+        ):
+            reward += cooldown_retreat_scale * (dist - prev_dist)
 
         # Close-in penalty (proportional): penalise moving closer to a currently-shooting enemy.
         if close_penalty != 0.0:
@@ -1049,6 +1109,13 @@ class Level7Bot(Level3Bot):
             if cd_before is not None and float(cd_before) <= eps:
                 reward += weapon_ready_bonus
 
+        # Attack commands during cooldown usually just make the unit stand and wait,
+        # which is the anti-kiting behavior we want the policy to avoid.
+        if attack_on_cooldown_penalty != 0.0 and attacked_now:
+            cd_before = self._attack_order_weapon_cd_before.get(unit_tag, pre_action_cd)
+            if cd_before is not None and float(cd_before) > eps:
+                reward -= attack_on_cooldown_penalty
+
         # Sweet-spot bonus: reward attacking from the kiting geometry (in range to shoot,
         # out of enemy range). Gated on attacked_now so it rewards the action of firing
         # from sweet spot rather than passive positioning at that distance.
@@ -1065,8 +1132,31 @@ class Level7Bot(Level3Bot):
         # _micro_under_fire_min_dist_prev, _prev_kiting_enemy_tag) are populated by
         # record_pre_action_kiting_state() before the NEXT step — not updated here.
         self._attack_order_weapon_cd_before.pop(unit_tag, None)
+        if hasattr(self, "_pre_action_weapon_cd_by_unit"):
+            self._pre_action_weapon_cd_by_unit.pop(unit_tag, None)
 
         return reward
+
+    def calculate_use_global_reward(self, unit_tag: int) -> float:
+        """
+        Bonus for choosing move_global when no enemy is within
+        ``_USE_GLOBAL_NO_ENEMY_RADIUS`` of the acting unit (pre-action snapshot).
+        """
+        if unit_tag is None:
+            return 0.0
+
+        rewards_conf = self.training_conf.get("rewards", {})
+        use_global_bonus = float(rewards_conf.get("use_global", 0.0))
+        if use_global_bonus == 0.0:
+            return 0.0
+
+        if self.last_move_head_by_unit.get(unit_tag) != "move_global":
+            return 0.0
+
+        if self._pre_action_enemy_within_use_global_radius.get(unit_tag, True):
+            return 0.0
+
+        return use_global_bonus
 
     def _compute_distance_reward_for_assigned_pair(self, unit_tag: int, dist_multiplier: float) -> float:
         """
@@ -1098,38 +1188,6 @@ class Level7Bot(Level3Bot):
 
         self.previous_distances[unit_tag] = dist
         return shaping
-
-    def queue_idle_combat_orders(self, skip_unit_tag: int = None) -> int:
-        """
-        Keep assigned allies engaged between their policy turns.
-        Queues attack orders only for units that are currently idle.
-        """
-        assignments = self.refresh_combat_assignments()
-        if not assignments:
-            return 0
-
-        enemies = self.enemy_units(self.enemy_unit_type)
-        if not enemies.exists:
-            return 0
-
-        queued = 0
-        for ally in self.get_active_units():
-            if skip_unit_tag is not None and ally.tag == skip_unit_tag:
-                continue
-            if ally.tag not in assignments:
-                continue
-
-            # Do not override ongoing unit orders; just fill true idles.
-            if getattr(ally, "orders", None):
-                continue
-
-            enemy = enemies.find_by_tag(assignments[ally.tag])
-            if enemy is None:
-                continue
-            self.do(ally.attack(enemy))
-            queued += 1
-        return queued
-
 
     def calculate_distance_reward(self, unit_tag: int = None) -> float:
         """
