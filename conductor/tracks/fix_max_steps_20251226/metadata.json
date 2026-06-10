@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_max_steps_20251226",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2025-12-26T21:04:00Z",
-  "updated_at": "2025-12-26T21:04:00Z",
-  "description": "The train_pipeline uses yaml files in /config to configure the training level environment. The config has a parameter 'max_steps' that defines when the environment should be soft reset. It is currently being ignored."
-}

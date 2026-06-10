@@ -1,8 +1,0 @@
-{
-  "track_id": "randomized_ctf_spawning_20260103",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2026-01-03T23:30:00Z",
-  "updated_at": "2026-01-03T23:30:00Z",
-  "description": "Implement robust, consistent Pylon randomization for both single-client and multi-client CTF environments."
-}

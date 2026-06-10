@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_level_7_spawning_20260101",
-  "type": "fix",
-  "status": "new",
-  "created_at": "2026-01-02T00:20:00Z",
-  "updated_at": "2026-01-02T00:20:00Z",
-  "description": "Fix Level 7/8 spawning logic to handle 2-to-1 Zergling ratios and improve cleanup reliability."
-}

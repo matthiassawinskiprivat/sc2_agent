@@ -77,7 +77,16 @@ class SingleClientEnv(gym.Env):
         from pathlib import Path
         import os
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        maps_dir = Path(current_dir).parent / "maps" / self.level_name
+        config_maps_dir = (
+            self.training_conf.get("maps_dir")
+            or self.training_conf.get("env", {}).get("maps_dir")
+        )
+        if config_maps_dir:
+            maps_dir = Path(config_maps_dir)
+            if not maps_dir.is_absolute():
+                maps_dir = Path(current_dir).parent.parent / config_maps_dir
+        else:
+            maps_dir = Path(current_dir).parent / "maps" / self.level_name
         if not maps_dir.exists():
             return []
         map_files = [f.stem for f in maps_dir.glob("*.SC2Map")]
@@ -88,14 +97,36 @@ class SingleClientEnv(gym.Env):
         from pathlib import Path
         from sc2.maps import Map
         import sc2
-        try:
-            return sc2.maps.get(map_name)
-        except KeyError:
+
+        # Priority 1: maps_dir from training_conf (CTF and other non-standard levels).
+        # Check both the flattened top level and the nested env dict since
+        # SingleClientEnv-based envs don't flatten the config the way Level0Env does.
+        config_maps_dir = (
+            self.training_conf.get("maps_dir")
+            or self.training_conf.get("env", {}).get("maps_dir")
+        )
+        if config_maps_dir:
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            map_path = Path(current_dir).parent / "maps" / self.level_name / f"{map_name}.SC2Map"
+            maps_dir = Path(config_maps_dir)
+            if not maps_dir.is_absolute():
+                maps_dir = Path(current_dir).parent.parent / config_maps_dir
+            map_path = maps_dir / f"{map_name}.SC2Map"
             if not map_path.exists():
                 raise FileNotFoundError(f"Map not found: {map_path}")
             return Map(map_path)
+
+        # Priority 2: SC2 library map registry
+        try:
+            return sc2.maps.get(map_name)
+        except (KeyError, FileNotFoundError, OSError):
+            pass
+
+        # Priority 3: project maps directory
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        map_path = Path(current_dir).parent / "maps" / self.level_name / f"{map_name}.SC2Map"
+        if not map_path.exists():
+            raise FileNotFoundError(f"Map not found: {map_path}")
+        return Map(map_path)
 
     def _log(self, message):
         print(f"[Worker {self.worker_id}] {message}")
@@ -107,39 +138,79 @@ class SingleClientEnv(gym.Env):
         except:
             pass
 
+    def _startup_max_retries(self) -> int:
+        env_conf = self.training_conf.get("env", {})
+        return int(
+            self.training_conf.get("startup_max_retries")
+            or env_conf.get("startup_max_retries", 3)
+        )
+
+    def _startup_timeout_sec(self) -> float:
+        env_conf = self.training_conf.get("env", {})
+        return float(
+            self.training_conf.get("startup_timeout_sec")
+            or env_conf.get("startup_timeout_sec", 60.0)
+        )
+
+    async def _startup_session(self):
+        """Launch SC2, join the game, and fetch the first observation."""
+        client_count = getattr(self, "client_count", 1)
+        self._log(f"Launching SC2 process with {client_count} client(s)...")
+        await self._manager.launch_process(
+            client_count=client_count,
+            visualize=self.visualize,
+            fullscreen=self.fullscreen,
+        )
+        self._log("Setting up game session...")
+        await self._setup_game_session()
+        self._log("Getting initial observation...")
+        return await self._get_joint_observation()
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._log(f"reset() called (Level: {self.level_name})")
-        
+
         if self._manager.clients:
-             self._log("Cleaning up previous session...")
-             self.close()
-             
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        
-        try:
-            client_count = getattr(self, "client_count", 1)
-            self._log(f"Launching SC2 process with {client_count} clients...")
-            self._loop.run_until_complete(self._manager.launch_process(
-                client_count=client_count, 
-                visualize=self.visualize, 
-                fullscreen=self.fullscreen
-            ))
-            self._log("Setting up game session...")
-            self._loop.run_until_complete(self._setup_game_session())
-            
-            self._log("Getting initial observation...")
-            obs = self._loop.run_until_complete(self._get_joint_observation())
-            self._last_obs = obs
-            self.game_ended = False
-            return obs, {}
-        except Exception as e:
-            self._log(f"CRITICAL: Error during reset: {e}")
-            import traceback
-            self._log(traceback.format_exc())
+            self._log("Cleaning up previous session...")
             self.close()
-            raise e
+
+        max_retries = self._startup_max_retries()
+        timeout_sec = self._startup_timeout_sec()
+        last_error: Optional[Exception] = None
+
+        for attempt in range(max_retries):
+            try:
+                self._loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self._loop)
+                self._log(
+                    f"Starting SC2 session (attempt {attempt + 1}/{max_retries}, "
+                    f"worker {self.worker_index})..."
+                )
+                obs = self._loop.run_until_complete(
+                    asyncio.wait_for(self._startup_session(), timeout=timeout_sec)
+                )
+                self._last_obs = obs
+                self.game_ended = False
+                self._log("reset() complete.")
+                return obs, {}
+            except Exception as e:
+                import traceback
+                last_error = e
+                self._log(
+                    f"SC2 startup failed (attempt {attempt + 1}/{max_retries}, "
+                    f"worker {self.worker_index}): {e}"
+                )
+                self._log(traceback.format_exc())
+                self.close()
+                if attempt < max_retries - 1:
+                    time.sleep(2.0)
+
+        assert last_error is not None
+        self._log(
+            f"Max startup retries ({max_retries}) exhausted for level "
+            f"'{self.level_name}' (worker {self.worker_index})."
+        )
+        raise last_error
 
     def step(self, action: Any):
         from sc2.protocol import ProtocolError
@@ -191,6 +262,9 @@ class SingleClientEnv(gym.Env):
         return 0.0, {"error": error_msg}
 
     def close(self):
-        if self._loop and not self._loop.is_closed():
-            self._loop.run_until_complete(self._manager.close())
-            self._loop.close()
+        try:
+            if self._loop and not self._loop.is_closed():
+                self._loop.run_until_complete(self._manager.close())
+                self._loop.close()
+        except Exception as e:
+            self._log(f"Error during close: {e}")

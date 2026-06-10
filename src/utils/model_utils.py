@@ -4,7 +4,7 @@ import copy
 import math
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Union
 from loguru import logger
 
 def interpolate_spatial_weights(weights: torch.Tensor, old_size: int, new_size: int) -> torch.Tensor:
@@ -217,6 +217,90 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                 new_state_dict[key] = target_state_dict[key]
 
     return new_state_dict
+
+def non_finite_state_dict_keys(
+    state_dict: Dict[str, Any], *, max_keys: int = 8
+) -> List[str]:
+    """Return state_dict keys whose tensor/array values contain NaN or inf."""
+    bad: List[str] = []
+    for key, value in state_dict.items():
+        if isinstance(value, torch.Tensor):
+            finite = torch.isfinite(value).all()
+        elif isinstance(value, np.ndarray):
+            finite = np.isfinite(value).all()
+        else:
+            continue
+        if not finite:
+            bad.append(key)
+        if len(bad) >= max_keys:
+            break
+    return bad
+
+
+def policy_state_dict_finite(state_dict: Dict[str, Any]) -> bool:
+    """True when every tensor/array in a policy state_dict has only finite values."""
+    return not non_finite_state_dict_keys(state_dict, max_keys=1)
+
+
+def inspect_checkpoint_policy_weights(
+    zip_path: str, *, max_keys: int = 8
+) -> Tuple[bool, str, List[str]]:
+    """
+    Validate an SB3 checkpoint's policy weights.
+
+    Returns (ok, reason, non_finite_keys). Reasons include ``ok``, ``missing_file``,
+    ``not_a_zip``, ``load_failed:...``, ``no_policy_key``, and ``non_finite``.
+    """
+    import os
+    import zipfile
+
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    if not os.path.isfile(zip_path):
+        return False, "missing_file", []
+    if not zipfile.is_zipfile(zip_path):
+        return False, "not_a_zip", []
+    try:
+        _, params, _ = load_from_zip_file(zip_path, device="cpu", load_data=False)
+    except Exception as exc:
+        return False, f"load_failed:{exc}", []
+    p_sd = params.get("policy")
+    if p_sd is None:
+        return False, "no_policy_key", []
+    bad = non_finite_state_dict_keys(p_sd, max_keys=max_keys)
+    if bad:
+        return False, "non_finite", bad
+    return True, "ok", []
+
+
+def checkpoint_policy_weights_finite(zip_path: str) -> bool:
+    """Check policy tensors inside an SB3 zip before hot-reloading into the collector."""
+    ok, _, _ = inspect_checkpoint_policy_weights(zip_path)
+    return ok
+
+
+def load_policy_weights_from_zip(
+    policy: torch.nn.Module,
+    zip_path: str,
+    device: Union[str, torch.device] = "auto",
+    *,
+    strict: bool = False,
+) -> Tuple[bool, List[str], List[str]]:
+    """
+    Load only the policy ``state_dict`` from an SB3 ``.zip`` checkpoint.
+
+    Safer than ``model.set_parameters`` for rollout snapshots: avoids optimizer /
+    ``exact_match`` failures leaving the learner on stale random weights.
+    """
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    _, params, _ = load_from_zip_file(zip_path, device=device, load_data=False)
+    p_sd = params.get("policy")
+    if p_sd is None:
+        return False, [], []
+    missing, unexpected = policy.load_state_dict(p_sd, strict=strict)
+    return True, list(missing), list(unexpected)
+
 
 def calculate_distance_matrix(points_a: np.ndarray, points_b: np.ndarray) -> np.ndarray:
     diff = points_a[:, np.newaxis, :] - points_b[np.newaxis, :, :]

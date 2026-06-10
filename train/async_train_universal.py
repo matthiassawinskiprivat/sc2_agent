@@ -9,6 +9,7 @@ import numpy as np
 import yaml
 import json
 import gc
+from typing import Optional
 from loguru import logger
 import multiprocessing as mp
 from gymnasium import spaces
@@ -25,6 +26,12 @@ from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
 from src.agent.models.universal_policy import UniversalActorCriticPolicy
 from src.agent.models.unit_control_network import UnitControlNetwork
 from src.utils.training_device import resolve_training_device, warmup_cuda_if_needed
+from src.utils.rollout_buffer_factory import async_rollout_buffer_class
+from src.utils.async_buffer_setup import (
+    configure_collector_static_buffer,
+    prepare_learner_placeholder_buffer,
+)
+from src.agent.utils.async_shared_ram_buffer import AsyncSharedRamBuffer
 from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
 
 import shutil
@@ -284,6 +291,17 @@ def copy_file_retry(src: str, dst: str, *, retries: int = 50, delay_sec: float =
     raise last
 
 
+def push_opponent_checkpoint_to_envs(vec_env, checkpoint_path: Optional[str] = None) -> None:
+    """Load opponent weights inside each vec-env worker (Subproc-safe path string)."""
+    try:
+        if checkpoint_path:
+            vec_env.env_method("sync_opponent_model", checkpoint_path)
+        else:
+            vec_env.env_method("sync_opponent_model")
+    except Exception as e:
+        logger.warning(f"Collector: opponent sync on env workers failed: {e}")
+
+
 def stage_learner_zip_for_collector(src_zip: str, staging_zip: str) -> None:
     """
     Atomically publish a private copy for the collector: copy to *.part then replace staging.
@@ -292,6 +310,112 @@ def stage_learner_zip_for_collector(src_zip: str, staging_zip: str) -> None:
     part = staging_zip + ".part"
     copy_file_retry(src_zip, part)
     replace_file_retry(part, staging_zip)
+
+
+COLLECTOR_WEIGHT_RELOAD_POLL_SEC = 0.1
+
+
+def maybe_poll_collector_weights(
+    weight_sync: "CollectorWeightSync",
+    model,
+    vec_env,
+    poll_state: dict,
+) -> None:
+    """
+    Poll learner zip mtime every 100 ms during rollout collection.
+
+    CTF spends many env steps on opponent squads (no buffer rows); polling only
+    at rollout boundaries lets stale weights persist for ~one full rollout.
+    """
+    now = time.perf_counter()
+    if now - poll_state.get("last_poll", 0.0) < COLLECTOR_WEIGHT_RELOAD_POLL_SEC:
+        return
+    poll_state["last_poll"] = now
+    weight_sync.try_reload(model, vec_env, sync_opponent=False, log_success=True)
+
+
+class CollectorWeightSync:
+    """
+    Hot-reload learner weights into the collector process.
+
+    Async double-buffering fills the *other* buffer while the learner trains, so checking
+    only at rollout boundaries can leave the collector on a stale policy for an entire
+    rollout (~tens of seconds on CTF). Mid-rollout mtime polls fix that.
+    """
+
+    def __init__(self) -> None:
+        self.last_model_load_time: Optional[float] = None
+
+    def try_reload(
+        self,
+        model,
+        vec_env,
+        *,
+        sync_opponent: bool = True,
+        log_success: bool = True,
+    ) -> bool:
+        updated_model_path = os.path.join(TEMP_DIR, "latest_learner_model.zip")
+        if not os.path.exists(updated_model_path):
+            return False
+        try:
+            mtime = os.path.getmtime(updated_model_path)
+            if self.last_model_load_time is not None and mtime <= self.last_model_load_time:
+                return False
+            if log_success:
+                logger.info(f"Collector found new weights (mtime={mtime}). Staging copy...")
+            from src.utils.model_utils import inspect_checkpoint_policy_weights
+
+            src_ok, src_reason, src_bad = inspect_checkpoint_policy_weights(
+                updated_model_path
+            )
+            if not src_ok:
+                if src_reason == "non_finite":
+                    logger.error(
+                        "Collector skipped learner hot-swap: non-finite policy in "
+                        f"{updated_model_path!r} (keys={src_bad})"
+                    )
+                elif src_reason.startswith("load_failed") or src_reason == "not_a_zip":
+                    logger.warning(
+                        "Collector skipped learner hot-swap: unreadable checkpoint "
+                        f"({src_reason}) in {updated_model_path!r}"
+                    )
+                else:
+                    logger.warning(
+                        f"Collector skipped learner hot-swap: {src_reason} "
+                        f"in {updated_model_path!r}"
+                    )
+                self.last_model_load_time = mtime
+                return False
+
+            stage_learner_zip_for_collector(
+                updated_model_path, COLLECTOR_WEIGHTS_STAGING_ZIP
+            )
+            staged_ok, staged_reason, staged_bad = inspect_checkpoint_policy_weights(
+                COLLECTOR_WEIGHTS_STAGING_ZIP
+            )
+            if not staged_ok:
+                if staged_reason == "non_finite":
+                    logger.error(
+                        "Collector rejected staged weights: non-finite policy parameters "
+                        f"(keys={staged_bad}) in {COLLECTOR_WEIGHTS_STAGING_ZIP!r}"
+                    )
+                else:
+                    logger.warning(
+                        "Collector rejected staged weights: "
+                        f"{staged_reason} in {COLLECTOR_WEIGHTS_STAGING_ZIP!r}"
+                    )
+                self.last_model_load_time = mtime
+                return False
+            set_parameters_with_retry(model, COLLECTOR_WEIGHTS_STAGING_ZIP, model.device)
+            self.last_model_load_time = mtime
+            if log_success:
+                logger.info("Collector: Successfully loaded fresh weights from Learner.")
+            if sync_opponent:
+                push_opponent_checkpoint_to_envs(vec_env, COLLECTOR_WEIGHTS_STAGING_ZIP)
+            return True
+        except Exception as e:
+            logger.error(f"Collector failed to load weights: {e}")
+            return False
 
 
 def set_parameters_with_retry(model, load_path: str, device: torch.device, *, retries: int = 12, delay_sec: float = 0.12) -> None:
@@ -362,10 +486,11 @@ class AsyncCollector(mp.Process):
         
         # 1. Setup Env (Simplified from _train_level)
         training_params = self.config["training"]
+        env_params = self.config["env"]
+        AsyncBufferClass = async_rollout_buffer_class(training_params, env_params)
         train_device = resolve_training_device(training_params)
         warmup_cuda_if_needed(train_device)
         logger.info(f"Collector policy device: {train_device}")
-        env_params = self.config["env"]
         num_envs = training_params["num_envs"]
         
         # Use the bot specified in the environment or registry
@@ -373,7 +498,12 @@ class AsyncCollector(mp.Process):
         
         # Use existing factory to build env
         from train.train_pipeline import MaskableSubprocVecEnv, MaskableSyncVecEnv
-        from train.env_utils import EnvFactory, vec_env_obs_focus_tags
+        from train.env_utils import EnvFactory, vec_env_obs_focus_tags, vec_env_requires_policy_action
+        from train.squad_batch_inference import (
+            SquadBatchRolloutHelper,
+            ensure_collector_lstm_states,
+            write_rollout_rows_to_buffer,
+        )
         from train.train_pipeline import ENV_REGISTRY
         
         EnvClass = ENV_REGISTRY.get(env_params.get("env_class", "Level0Env"))
@@ -442,6 +572,9 @@ class AsyncCollector(mp.Process):
         else:
             model = AlgoClass(**algo_kwargs)
 
+        if isinstance(model, MaskableRecurrentPPO):
+            ensure_collector_lstm_states(model, num_envs)
+
         if self.model_path and not self.resume_timesteps_from_save:
             model.num_timesteps = 0
 
@@ -458,6 +591,7 @@ class AsyncCollector(mp.Process):
         initial_path = os.path.join(TEMP_DIR, "initial_model.zip")
         model.save(initial_path)
         logger.info("Collector: Saved initial weights for Learner synchronization.")
+        push_opponent_checkpoint_to_envs(vec_env, initial_path)
         
         # 3. Static Double-Buffer Initialization
         # We manually create fixed directories buffer_0 and buffer_1
@@ -466,53 +600,34 @@ class AsyncCollector(mp.Process):
         for i in range(2):
             static_path = os.path.join(TEMP_DIR, f"buffer_{i}")
             # We must instantiate the buffer to create the structure
-            buf = AsyncDiskBuffer(
-                training_params["n_steps"], 
-                vec_env.observation_space, 
-                vec_env.action_space, 
-                n_envs=num_envs, 
-                temp_dir=TEMP_DIR, 
-                rnn_type=rnn_type, 
-                hidden_size=hidden_size
+            buf = AsyncBufferClass(
+                training_params["n_steps"],
+                vec_env.observation_space,
+                vec_env.action_space,
+                n_envs=num_envs,
+                temp_dir=TEMP_DIR,
+                rnn_type=rnn_type,
+                hidden_size=hidden_size,
             )
-            # Force the instance dir to be static
-            # Cleanup old one if needed
-            if os.path.exists(buf.instance_dir):
-                try: os.rmdir(buf.instance_dir) 
-                except: pass
-            
-            # Re-point to static dir
             buf.instance_id = f"buffer_{i}"
-            buf.instance_dir = static_path
-            os.makedirs(buf.instance_dir, exist_ok=True)
-            
-            # Re-initialize memmaps in the new static location
-            buf.disk_files = {}
-            for key, subspace in vec_env.observation_space.spaces.items():
-                if "map" in key or "tactical" in key:
-                    filename = os.path.join(buf.instance_dir, f"obs_{key}.bin")
-                    shape = (buf.buffer_size, buf.n_envs, *subspace.shape)
-                    # Close old map if exists from init
-                    if key in buf.observations and isinstance(buf.observations[key], np.memmap):
-                        buf.observations[key]._mmap.close()
-                    
-                    # Create new static map
-                    buf.observations[key] = np.memmap(filename, dtype=np.float32, mode='w+', shape=shape)
-                    buf.disk_files[key] = filename
-            
+            configure_collector_static_buffer(
+                buf, vec_env.observation_space, static_path
+            )
             buffers.append(buf)
 
         logger.info("Collector entering main loop...")
         _reset_out = vec_env.reset()
         obs = _reset_out[0] if isinstance(_reset_out, tuple) else _reset_out
         self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
+        squad_batch_helper = SquadBatchRolloutHelper(num_envs)
         
         # Track metrics manually to avoid wrapper attribute errors
         episode_rewards = np.zeros(num_envs)
         episode_lengths = np.zeros(num_envs)
         recent_ep_rewards = []
         recent_ep_lengths = []
-        
+        weight_sync = CollectorWeightSync()
+
         while not self.stop_event.is_set():
             current_buffer = buffers[buffer_idx % 2]
             
@@ -523,22 +638,16 @@ class AsyncCollector(mp.Process):
                 time.sleep(5)
                 continue
 
-            # Check for updated model weights from Learner
-            updated_model_path = os.path.join(TEMP_DIR, "latest_learner_model.zip")
-            if os.path.exists(updated_model_path):
-                try:
-                    # Atomic check: only load if it's new
-                    mtime = os.path.getmtime(updated_model_path)
-                    if not hasattr(self, 'last_model_load_time') or mtime > self.last_model_load_time:
-                        # Stage to a private zip: opening latest_learner_model.zip while the learner
-                        # replaces it (or AV scans it) causes Permission denied on Windows.
-                        logger.info(f"Collector found new weights (mtime={mtime}). Staging copy...")
-                        stage_learner_zip_for_collector(updated_model_path, COLLECTOR_WEIGHTS_STAGING_ZIP)
-                        set_parameters_with_retry(model, COLLECTOR_WEIGHTS_STAGING_ZIP, model.device)
-                        self.last_model_load_time = mtime
-                        logger.info("Collector: Successfully loaded fresh weights from Learner.")
-                except Exception as e:
-                    logger.error(f"Collector failed to load weights: {e}")
+            weight_sync.try_reload(model, vec_env)
+
+            # Snapshot policy weights *before* filling — learner must evaluate the same
+            # weights that produced old_log_prob. A post-fill reload here would publish a
+            # newer learner zip into rollout_policy.zip while the buffer still holds the
+            # previous policy's log_probs (approx_kl ~6+).
+            rollout_policy_path = os.path.join(
+                current_buffer.instance_dir, "rollout_policy.zip"
+            )
+            model.save(rollout_policy_path)
 
             # FILL BUFFER
             current_buffer.reset()
@@ -546,57 +655,69 @@ class AsyncCollector(mp.Process):
             # some model objects may carry compatibility attributes even when
             # running non-recurrent PPO.
             is_recurrent = isinstance(model, MaskableRecurrentPPO)
-            for step in range(training_params["n_steps"]):
-                lstm_starts = None
-                # Get actions, values, and log_probs from model
-                # We need torch tensors for the policy.forward call
+            if isinstance(vec_env.action_space, spaces.MultiDiscrete):
+                dummy_actions = np.zeros(
+                    (num_envs, len(vec_env.action_space.nvec)), dtype=np.int64
+                )
+            else:
+                dummy_actions = np.zeros((num_envs,), dtype=np.int64)
+
+            model.policy.set_training_mode(False)
+            filled = 0
+            n_rollout_steps = training_params["n_steps"]
+            while filled < n_rollout_steps:
+                requires_policy = vec_env_requires_policy_action(vec_env, num_envs)
+
+                if not requires_policy.any():
+                    new_obs, rewards, dones, infos = vec_env.step(dummy_actions)
+                    episode_rewards += rewards
+                    episode_lengths += 1
+                    for i, done in enumerate(dones):
+                        if done:
+                            squad_batch_helper.clear_env(i)
+                            recent_ep_rewards.append(episode_rewards[i])
+                            recent_ep_lengths.append(episode_lengths[i])
+                            episode_rewards[i] = 0
+                            episode_lengths[i] = 0
+                            if len(recent_ep_rewards) > 100:
+                                recent_ep_rewards.pop(0)
+                                recent_ep_lengths.pop(0)
+                    obs = new_obs
+                    self.last_dones = dones
+                    continue
+
+                if not hasattr(self, "last_dones"):
+                    self.last_dones = np.ones(num_envs, dtype=bool)
+
+                pre_step_obs = obs
                 with torch.no_grad():
-                    obs_tensor = model.policy.obs_to_tensor(obs)[0]
-                    # We assume episode_starts are False initially or tracked
-                    # Match SB3 OnPolicyAlgorithm: episode_starts for an observation is True on the
-                    # first step after reset; initial value must be ones (not zeros).
-                    if not hasattr(self, "last_dones"):
-                        self.last_dones = np.ones(num_envs, dtype=bool)
-                    focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
-                    masks = np.array(vec_env.env_method("action_masks"))
-                    masks_tensor = torch.as_tensor(masks).to(model.device)
+                    resolution = squad_batch_helper.resolve_rollout(
+                        vec_env=vec_env,
+                        num_envs=num_envs,
+                        obs=obs,
+                        requires_policy=requires_policy,
+                        model=model,
+                        is_recurrent=is_recurrent,
+                        last_dones=self.last_dones,
+                        prev_focus_tags=self._prev_obs_focus_tags,
+                        lstm_states=model._last_lstm_states if is_recurrent else None,
+                        device=model.device,
+                    )
 
-                    # Call forward to get EVERYTHING we need for the buffer
-                    if is_recurrent:
-                        # Level3/7 cycle different units each env step; reset RNN when focal unit changes
-                        # (last_dones alone only resets at true episode boundary).
-                        lstm_starts = np.logical_or(
-                            self.last_dones,
-                            focus_tags != self._prev_obs_focus_tags,
-                        ).astype(np.float32)
-                        starts_tensor = torch.as_tensor(lstm_starts).to(model.device)
-                        actions_tensor, values_tensor, log_probs_tensor, new_lstm_states = model.policy.forward(
-                            obs_tensor, model._last_lstm_states, starts_tensor, action_masks=masks_tensor
-                        )
-                    else:
-                        actions_tensor, values_tensor, log_probs_tensor = model.policy.forward(
-                            obs_tensor, deterministic=False, action_masks=masks_tensor
-                        )
-                        new_lstm_states = None
-                    
-                    actions = actions_tensor.cpu().numpy()
-                    values = values_tensor.cpu().numpy()
-                    log_probs = log_probs_tensor.cpu().numpy()
+                for env_idx, batch in resolution.squad_batch_actions.items():
+                    vec_env.env_method(
+                        "set_squad_batch_actions", batch, indices=[env_idx]
+                    )
 
-                # Step env
-                new_obs, rewards, dones, infos = vec_env.step(actions)
-                
-                # Update manual metrics
+                new_obs, rewards, dones, infos = vec_env.step(resolution.step_actions)
+
                 episode_rewards += rewards
                 episode_lengths += 1
-                
-                # Buffer for custom info metrics (success rates, distance, etc.)
-                # deque(maxlen=) avoids O(n) list.pop(0) churn as training runs for hours.
+
                 if not hasattr(self, 'custom_metrics'):
                     self.custom_metrics = {}
 
                 for i, done in enumerate(dones):
-                    # Capture metrics from the info dict (e.g., success, etc.)
                     info = infos[i]
                     for key, val in info.items():
                         if isinstance(val, (int, float, np.number)):
@@ -609,33 +730,28 @@ class AsyncCollector(mp.Process):
                         recent_ep_lengths.append(episode_lengths[i])
                         episode_rewards[i] = 0
                         episode_lengths[i] = 0
-                        # Keep only last 100 episodes
                         if len(recent_ep_rewards) > 100:
                             recent_ep_rewards.pop(0)
                             recent_ep_lengths.pop(0)
 
-                # Add to buffer with ALL required fields
-                lstm_episode_starts = (
-                    lstm_starts
-                    if is_recurrent
-                    else self.last_dones.astype(np.float32)
+                rows_written = write_rollout_rows_to_buffer(
+                    buffer=current_buffer,
+                    resolution=resolution,
+                    pre_step_obs=pre_step_obs,
+                    rewards=rewards,
+                    num_envs=num_envs,
+                    is_recurrent=is_recurrent,
+                    fallback_lstm=model._last_lstm_states if is_recurrent else None,
+                    last_dones=self.last_dones,
+                    max_rows=n_rollout_steps - filled,
                 )
-                current_buffer.add(
-                    obs, 
-                    actions, 
-                    rewards, 
-                    lstm_episode_starts, 
-                    values_tensor, 
-                    log_probs_tensor, 
-                    model._last_lstm_states if is_recurrent else None,
-                    masks
-                )
-                
+
                 obs = new_obs
                 self.last_dones = dones
                 if is_recurrent:
-                    model._last_lstm_states = new_lstm_states
-                    self._prev_obs_focus_tags = focus_tags.copy()
+                    model._last_lstm_states = resolution.updated_lstm
+                    self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
+                filled += rows_written
 
             # CRITICAL: Compute GAE (Advantages & Returns) before sending to Learner
             # We need the value of the LAST observation to bootstrap
@@ -666,8 +782,9 @@ class AsyncCollector(mp.Process):
             
             # SIGNAL LEARNER
             signal_meta = {
-                "level": self.level_name, 
-                "steps": training_params["n_steps"]
+                "level": self.level_name,
+                "steps": training_params["n_steps"],
+                "filled_steps": int(current_buffer.pos),
             }
             
             if recent_ep_rewards:
@@ -720,6 +837,8 @@ class AsyncLearner:
     def run(self):
         logger.info(f"Learner started for level: {self.level_name}")
         training_params = self.config["training"]
+        env_params = self.config.get("env", {})
+        AsyncBufferClass = async_rollout_buffer_class(training_params, env_params)
         train_device = resolve_training_device(training_params)
         warmup_cuda_if_needed(train_device)
         logger.info(
@@ -730,7 +849,7 @@ class AsyncLearner:
         
         # 1. Setup Dummy Env for Model
         from train.env_utils import create_dummy_env_from_config
-        dummy_env = create_dummy_env_from_config(self.config)
+        dummy_env = create_dummy_env_from_config(self.config, level_name=self.level_name)
         
         algo_name = model_params.get("algorithm", "MaskablePPO")
         rnn_type = model_params.get("rnn_type", "gru")
@@ -756,10 +875,8 @@ class AsyncLearner:
             "policy_kwargs": policy_kwargs,
             "device": train_device,
             "tensorboard_log": self.log_dir,
-            # Default None: run full n_epochs (sync universal also omits this). Hardcoded 0.015 caused
-            # early exit on "easy" rollouts → far fewer minibatches vs hard settings. Override in YAML:
-            # model: { target_kl: 0.015 }
-            "target_kl": model_params.get("target_kl"),
+            # Default None: run full n_epochs. YAML may set training.target_kl or model.target_kl.
+            "target_kl": training_params.get("target_kl", model_params.get("target_kl")),
         }
         if AlgoClass == MaskableRecurrentPPO:
             algo_kwargs["rnn_type"] = rnn_type
@@ -791,7 +908,20 @@ class AsyncLearner:
         for _ in range(60): # Wait up to 60 seconds
             if os.path.exists(initial_path):
                 try:
-                    model.set_parameters(initial_path, device=train_device)
+                    from src.utils.model_utils import load_policy_weights_from_zip
+
+                    try:
+                        model.set_parameters(initial_path, device=train_device)
+                    except Exception as init_exc:
+                        ok, missing, _ = load_policy_weights_from_zip(
+                            model.policy, initial_path, train_device, strict=False
+                        )
+                        if not ok or missing:
+                            raise init_exc
+                        logger.warning(
+                            "Learner: set_parameters(initial) failed; loaded policy weights only "
+                            f"(missing={len(missing)})"
+                        )
 
                     import zipfile
                     with zipfile.ZipFile(initial_path, 'r') as archive:
@@ -835,35 +965,22 @@ class AsyncLearner:
             
             # We construct the buffer manually to ensure it points to the right place
             # without creating NEW subdirectories
-            buf = AsyncDiskBuffer(
+            buf = AsyncBufferClass(
                 buffer_size=training_params["n_steps"],
                 observation_space=dummy_env.observation_space,
                 action_space=dummy_env.action_space,
                 n_envs=training_params["num_envs"],
                 temp_dir=TEMP_DIR,
                 rnn_type=rnn_type,
-                hidden_size=hidden_size
+                hidden_size=hidden_size,
             )
-            
-            # Force re-point to the static directory 
-            # (AsyncDiskBuffer init creates a random dir, we delete it and swap)
-            try: os.rmdir(buf.instance_dir)
-            except: pass
-            
+            try:
+                os.rmdir(buf.instance_dir)
+            except OSError:
+                pass
             buf.instance_id = instance_id
             buf.instance_dir = instance_dir
-            
-            # Close and remove dummy memmaps created by AsyncDiskBuffer.__init__
-            buf.disk_files = {}
-            for key in list(buf.observations.keys()):
-                if isinstance(buf.observations[key], np.memmap):
-                    try:
-                        buf.observations[key]._mmap.close()
-                    except:
-                        pass
-                    del buf.observations[key]
-            
-            # Placeholder to be filled when files actually exist
+            prepare_learner_placeholder_buffer(buf)
             self.learner_buffers[instance_id] = buf
 
         logger.info("Learner waiting for first buffer...")
@@ -887,7 +1004,8 @@ class AsyncLearner:
                         continue
 
                     # Update internal timestep for logging
-                    num_steps = meta["buffer_size"] * meta["n_envs"]
+                    filled = int(meta.get("filled_steps", meta["buffer_size"]))
+                    num_steps = filled * meta["n_envs"]
                     total_steps_trained += num_steps
                     model.num_timesteps = total_steps_trained
 
@@ -928,6 +1046,8 @@ class AsyncLearner:
                                     except Exception as e:
                                         logger.error(f"Failed on action_masks: {target_buffer.action_masks.flags}")
                                         raise e
+                                if 'policy_active' in payload and payload['policy_active'].size > 0:
+                                    target_buffer.policy_active = payload['policy_active'].copy()
 
                                 # Load RAM-based observations (e.g., 'command')
                                 for key in payload.files:
@@ -951,22 +1071,61 @@ class AsyncLearner:
                         logger.warning(f"Payload not found for {d}, skipping")
                         continue
 
-                    # Ensure memmaps are bound (Lazy binding on first use)
-                    for key in dummy_env.observation_space.keys():
-                        if key in ["map", "tactical"]:
-                            if key not in target_buffer.observations or not isinstance(target_buffer.observations[key], np.memmap):
-                                filename = os.path.join(instance_dir, f"obs_{key}.bin")
-                                if os.path.exists(filename):
-                                    subspace = dummy_env.observation_space.spaces[key]
-                                    shape = (meta["buffer_size"], meta["n_envs"], *subspace.shape)
-                                    target_buffer.observations[key] = np.memmap(filename, dtype=np.float32, mode='r+', shape=shape)
-                        elif key not in target_buffer.observations:
-                            subspace = dummy_env.observation_space.spaces[key]
-                            target_buffer.observations[key] = np.zeros((meta["buffer_size"], meta["n_envs"], *subspace.shape), dtype=np.float32)
+                    if meta.get("ipc_backend") == "shared_memory":
+                        AsyncSharedRamBuffer.attach_shared_observations(
+                            target_buffer, meta
+                        )
+                    else:
+                        AsyncDiskBuffer.attach_disk_observations(
+                            target_buffer, instance_dir, meta
+                        )
+                        for key in dummy_env.observation_space.keys():
+                            if key in ("map", "tactical"):
+                                continue
+                            if key not in target_buffer.observations:
+                                subspace = dummy_env.observation_space.spaces[key]
+                                target_buffer.observations[key] = np.zeros(
+                                    (
+                                        meta["buffer_size"],
+                                        meta["n_envs"],
+                                        *subspace.shape,
+                                    ),
+                                    dtype=np.float32,
+                                )
 
                     model.rollout_buffer = target_buffer
                     model.rollout_buffer.full = True
-                    model.rollout_buffer.pos = meta["buffer_size"]
+                    model.rollout_buffer.pos = int(
+                        meta.get("filled_steps", meta["buffer_size"])
+                    )
+
+                    rollout_policy_path = os.path.join(instance_dir, "rollout_policy.zip")
+                    rollout_load_ok = 0.0
+                    if os.path.exists(rollout_policy_path):
+                        from src.utils.model_utils import load_policy_weights_from_zip
+
+                        ok, missing, unexpected = load_policy_weights_from_zip(
+                            model.policy, rollout_policy_path, train_device, strict=False
+                        )
+                        if ok and not missing:
+                            rollout_load_ok = 1.0
+                            logger.info(
+                                "Learner: loaded rollout_policy.zip (collector snapshot for this buffer)"
+                            )
+                        else:
+                            if not ok:
+                                logger.error(
+                                    "Learner: rollout_policy.zip has no policy weights"
+                                )
+                            else:
+                                logger.error(
+                                    f"Learner: rollout_policy partial load missing={missing[:8]} "
+                                    f"unexpected={unexpected[:8]}"
+                                )
+                    else:
+                        logger.error(
+                            f"Learner: rollout_policy.zip missing at {rollout_policy_path}"
+                        )
                     
                     # Log ALL metrics passed from Collector
                     for key, val in meta.items():
@@ -976,6 +1135,8 @@ class AsyncLearner:
                             # Log anything else that looks like a metric
                             if isinstance(val, (int, float, np.number)):
                                 model.logger.record(f"metrics/{key}", val)
+
+                    model.logger.record("train/rollout_policy_load_ok", rollout_load_ok)
 
                     # 2. PERFORM PPO UPDATE (+ timings: explains low GPU % = PCIe/Python vs kernel)
                     # Per-minibatch profiling: training.learner_profile in YAML (see parse_learner_profile_option).
@@ -1004,20 +1165,58 @@ class AsyncLearner:
 
                     # 3. Save updated weights for Collector (Hot Swap)
                     t_before_save = time.perf_counter()
-                    tmp_save = self.latest_model_path + ".tmp"
-                    model.save(tmp_save)
-                    # os.replace overwrites dst; retries handle WinError 32 if collector still
-                    # has latest_learner_model.zip open after set_parameters().
-                    replace_file_retry(tmp_save, self.latest_model_path)
+                    from src.utils.model_utils import (
+                        non_finite_state_dict_keys,
+                        policy_state_dict_finite,
+                    )
+
+                    policy_sd = model.policy.state_dict()
+                    weights_ok = policy_state_dict_finite(policy_sd)
+                    if not weights_ok:
+                        bad_keys = non_finite_state_dict_keys(policy_sd)
+                        logger.error(
+                            "Learner: non-finite policy weights after train(); "
+                            f"skipping hot-swap publish (keys={bad_keys}). "
+                            "Collector keeps previous weights."
+                        )
+                        if os.path.exists(self.latest_model_path):
+                            from src.utils.model_utils import load_policy_weights_from_zip
+
+                            restored, missing, _ = load_policy_weights_from_zip(
+                                model.policy,
+                                self.latest_model_path,
+                                train_device,
+                                strict=False,
+                            )
+                            if restored and not missing:
+                                logger.warning(
+                                    "Learner: restored policy from last good hot-swap "
+                                    f"({self.latest_model_path})"
+                                )
+                            else:
+                                logger.error(
+                                    "Learner: could not restore last good weights; "
+                                    "policy may stay non-finite until restart"
+                                )
+                    else:
+                        tmp_save = self.latest_model_path + ".tmp"
+                        model.save(tmp_save)
+                        # os.replace overwrites dst; retries handle WinError 32 if collector
+                        # still has latest_learner_model.zip open after set_parameters().
+                        replace_file_retry(tmp_save, self.latest_model_path)
                     t_after_hot = time.perf_counter()
 
                     # 4. Save Checkpoint (Permanent Storage)
                     steps_before = total_steps_trained - num_steps
                     did_ckpt = (total_steps_trained // self.save_freq) > (steps_before // self.save_freq)
-                    if did_ckpt:
+                    if did_ckpt and weights_ok:
                         ckpt_path = os.path.join(self.model_dir, f"universal_{total_steps_trained}_steps.zip")
                         model.save(ckpt_path)
                         logger.info(f"Saved checkpoint: {ckpt_path}")
+                    elif did_ckpt:
+                        logger.warning(
+                            "Learner: skipped periodic checkpoint save (non-finite policy weights)"
+                        )
 
                     t_end = time.perf_counter()
                     logger.info(

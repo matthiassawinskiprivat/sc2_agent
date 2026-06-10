@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_ctf_model_loading_crash_20260112",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-12T21:09:00Z",
-  "updated_at": "2026-01-12T21:09:00Z",
-  "description": "It seems like my ctf environment can't load the models anymore. Training pipeline crashes with BrokenPipeError / EOFError when loading/resuming levels."
-}

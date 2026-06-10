@@ -265,6 +265,51 @@ def test_cooldown_retreat_reward_no_fire_past_own_weapon_range():
     assert r == pytest.approx(0.0)
 
 
+def test_cooldown_retreat_skipped_for_melee_unit():
+    """Melee attackers do not receive cooldown-retreat shaping."""
+    training_conf = {
+        "rewards": {
+            "retreat_shaping_scale": 0.0,
+            "cooldown_retreat_scale": 0.75,
+        }
+    }
+    bot = _bare_bot(training_conf)
+
+    ally = MagicMock()
+    ally.tag = 101
+    ally.position = Point2((1.0, 0.0))
+    ally.ground_range = 0.1
+    ally.air_range = 0.0
+    ally.is_flying = False
+    ally.distance_to.side_effect = lambda other: ally.position.distance_to(other.position)
+
+    enemy = MagicMock()
+    enemy.tag = 201
+    enemy.position = Point2((0.0, 0.0))
+    enemy.ground_range = 5.0
+    enemy.air_range = 0.0
+    enemy.is_flying = False
+
+    mock_enemy_grp = MagicMock()
+    mock_enemy_grp.exists = True
+    mock_enemy_grp.__iter__.return_value = [enemy]
+    mock_enemy_grp.find_by_tag = MagicMock(return_value=enemy)
+
+    bot.units = MagicMock()
+    bot.units.find_by_tag.return_value = ally
+    bot.enemy_units = MagicMock(return_value=mock_enemy_grp)
+    bot.refresh_combat_assignments = MagicMock()
+
+    bot._kiting_simple_prev_dist[101] = 0.5
+    bot._prev_enemy_in_attack_range[101] = False
+    bot._prev_kiting_enemy_tag[101] = 201
+    bot._pre_action_weapon_cd_by_unit[101] = 7.0
+    bot.last_action_was_move_by_unit[101] = True
+
+    r = bot.calculate_kiting_simple_shaping(101)
+    assert r == pytest.approx(0.0)
+
+
 def _sweet_spot_bot_pair(sweet_spot_bonus=0.1):
     """Shared setup: ally at (0,0) with range 6, enemy at (4,0) with range 1 → sweet spot."""
     training_conf = {"rewards": {"sweet_spot_bonus": sweet_spot_bonus, "retreat_shaping_scale": 0.0}}

@@ -1,8 +1,0 @@
-{
-  "track_id": "revert_hardcoded_env_limit_20260112",
-  "type": "refactor",
-  "status": "new",
-  "created_at": "2026-01-12T22:01:00Z",
-  "updated_at": "2026-01-12T22:01:00Z",
-  "description": "Revert the hard-coded num_envs=1 limit in train_pipeline.py and instead set num_envs: 1 in all relevant config files for Windows stability, allowing easy future scaling on Linux."
-}

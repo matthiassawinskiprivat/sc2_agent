@@ -202,11 +202,13 @@ class MaskableRecurrentRolloutBuffer(RecurrentRolloutBuffer):
         else:
              raise NotImplementedError("Action space not supported")
         self.action_masks = np.ones((self.buffer_size, self.n_envs, action_dim), dtype=bool)
+        self.policy_active = np.ones((self.buffer_size, self.n_envs), dtype=np.float32)
         self.vram_cache: Dict[str, torch.Tensor] = {}
 
     def reset(self):
         super().reset()
         if hasattr(self, "action_masks"): self.action_masks.fill(True)
+        if hasattr(self, "policy_active"): self.policy_active.fill(1.0)
         self.vram_cache = {}
 
     def clear_vram_cache(self):
@@ -229,6 +231,7 @@ class MaskableRecurrentRolloutBuffer(RecurrentRolloutBuffer):
         self.vram_cache["returns"] = swap_and_flatten_gpu(self.returns)
         self.vram_cache["episode_starts"] = swap_and_flatten_gpu(self.episode_starts)
         self.vram_cache["action_masks"] = swap_and_flatten_gpu(self.action_masks)
+        self.vram_cache["policy_active"] = swap_and_flatten_gpu(self.policy_active)
         
         h_pi = self.hidden_states_pi.swapaxes(1, 2)
         h_vf = self.hidden_states_vf.swapaxes(1, 2)
@@ -240,8 +243,12 @@ class MaskableRecurrentRolloutBuffer(RecurrentRolloutBuffer):
             self.vram_cache["cell_states_pi"] = swap_and_flatten_gpu(c_pi)
             self.vram_cache["cell_states_vf"] = swap_and_flatten_gpu(c_vf)
 
-    def add(self, obs, action, reward, episode_start, value, log_prob, lstm_states, action_masks=None):
+    def add(self, obs, action, reward, episode_start, value, log_prob, lstm_states, action_masks=None, policy_active=None):
         if action_masks is not None: self.action_masks[self.pos] = action_masks.copy()
+        if policy_active is not None:
+            self.policy_active[self.pos] = np.asarray(policy_active, dtype=np.float32).reshape(self.n_envs)
+        else:
+            self.policy_active[self.pos] = 1.0
         self.hidden_states_pi[self.pos] = lstm_states.pi[0].detach().cpu().numpy()
         self.hidden_states_vf[self.pos] = lstm_states.vf[0].detach().cpu().numpy()
         if len(lstm_states.pi) > 1:
@@ -350,7 +357,7 @@ class MaskableRecurrentRolloutBuffer(RecurrentRolloutBuffer):
             returns=local_pad("returns").reshape(-1),
             lstm_states=RNNStates(get_states_gpu("hidden_states_pi", "cell_states_pi"), get_states_gpu("hidden_states_vf", "cell_states_vf")),
             episode_starts=local_pad("episode_starts").reshape(-1),
-            mask=torch.ones(padded_batch_size, device=device), # Simplified mask for the mini-batch
+            mask=local_pad("policy_active").reshape(-1),
             action_masks=local_pad("action_masks").reshape(padded_batch_size, -1))
 
     def _get_samples(self, batch_inds, env_change, env=None):
@@ -388,7 +395,7 @@ class MaskableRecurrentRolloutBuffer(RecurrentRolloutBuffer):
             returns=self.pad_and_flatten(self.vram_cache["returns"][all_indices]),
             lstm_states=RNNStates(get_states_gpu("hidden_states_pi", "cell_states_pi"), get_states_gpu("hidden_states_vf", "cell_states_vf")),
             episode_starts=self.pad_and_flatten(self.vram_cache["episode_starts"][all_indices]),
-            mask=self.pad_and_flatten(torch.ones_like(self.vram_cache["returns"][all_indices])),
+            mask=self.pad_and_flatten(self.vram_cache["policy_active"][all_indices]),
             action_masks=self.pad_and_flatten(self.vram_cache["action_masks"][all_indices]))
 
     def _get_samples_standard(self, batch_inds, env_change, env=None):
@@ -422,7 +429,7 @@ class MaskableRecurrentRolloutBuffer(RecurrentRolloutBuffer):
             returns=self.pad_and_flatten(torch.as_tensor(flat(self.returns), device=self.device)),
             lstm_states=RNNStates(get_states(self.hidden_states_pi, self.cell_states_pi), get_states(self.hidden_states_vf, self.cell_states_vf)),
             episode_starts=self.pad_and_flatten(torch.as_tensor(starts, device=self.device)),
-            mask=self.pad_and_flatten(torch.ones_like(torch.as_tensor(starts, device=self.device))),
+            mask=self.pad_and_flatten(torch.as_tensor(flat(self.policy_active), device=self.device)),
             action_masks=self.pad_and_flatten(torch.as_tensor(flat(self.action_masks), device=self.device)))
 
 class MaskableRecurrentDictRolloutBuffer(MaskableRecurrentRolloutBuffer):
@@ -436,8 +443,12 @@ class MaskableRecurrentDictRolloutBuffer(MaskableRecurrentRolloutBuffer):
         self.rnn_type = kwargs.pop("rnn_type", "lstm")
         super().__init__(*args, **kwargs)
 
-    def add(self, obs, action, reward, episode_start, value, log_prob, lstm_states, action_masks=None):
+    def add(self, obs, action, reward, episode_start, value, log_prob, lstm_states, action_masks=None, policy_active=None):
         if action_masks is not None: self.action_masks[self.pos] = action_masks.copy()
+        if policy_active is not None:
+            self.policy_active[self.pos] = np.asarray(policy_active, dtype=np.float32).reshape(self.n_envs)
+        else:
+            self.policy_active[self.pos] = 1.0
         self.hidden_states_pi[self.pos] = lstm_states.pi[0].detach().cpu().numpy()
         self.hidden_states_vf[self.pos] = lstm_states.vf[0].detach().cpu().numpy()
         if len(lstm_states.pi) > 1:
@@ -479,6 +490,7 @@ class MaskableRecurrentDictRolloutBuffer(MaskableRecurrentRolloutBuffer):
         elif isinstance(self.action_space, gym.spaces.MultiDiscrete): m_dim = sum(self.action_space.nvec)
         else: m_dim = 1
         self.action_masks = np.ones((self.buffer_size, self.n_envs, m_dim), dtype=bool)
+        self.policy_active = np.ones((self.buffer_size, self.n_envs), dtype=np.float32)
         self.vram_cache = {}
 
     def to_device(self, device: torch.device):
@@ -489,7 +501,7 @@ class MaskableRecurrentDictRolloutBuffer(MaskableRecurrentRolloutBuffer):
             return torch.as_tensor(res.reshape((shape[0] * shape[1], *shape[2:])), device=device)
             
         self.vram_cache["observations"] = {k: swap_and_flatten_gpu(v) for k, v in self.observations.items()}
-        for attr in ["actions", "values", "log_probs", "advantages", "returns", "episode_starts", "action_masks"]:
+        for attr in ["actions", "values", "log_probs", "advantages", "returns", "episode_starts", "action_masks", "policy_active"]:
             self.vram_cache[attr] = swap_and_flatten_gpu(getattr(self, attr))
             
         # Hidden states: (buffer_size, n_layers, n_envs, dim) -> (n_envs, buffer_size, n_layers, dim) -> (n_envs * buffer_size, n_layers, dim)
@@ -563,7 +575,7 @@ class MaskableRecurrentDictRolloutBuffer(MaskableRecurrentRolloutBuffer):
             returns=local_pad(self.vram_cache["returns"]).reshape(-1),
             lstm_states=RNNStates(get_states_gpu("hidden_states_pi", "cell_states_pi"), get_states_gpu("hidden_states_vf", "cell_states_vf")),
             episode_starts=local_pad(self.vram_cache["episode_starts"]).reshape(-1),
-            mask=torch.ones(padded_batch_size, device=device),
+            mask=local_pad(self.vram_cache["policy_active"]).reshape(-1),
             action_masks=local_pad(self.vram_cache["action_masks"]).reshape(padded_batch_size, -1))
 
 class MaskableRecurrentActorCriticPolicy(RecurrentActorCriticPolicy):
@@ -720,10 +732,13 @@ class MaskableRecurrentPPO(RecurrentPPO):
                  clip_range=0.2, clip_range_vf=None, normalize_advantage=True, ent_coef=0.0, vf_coef=0.5, max_grad_norm=0.5,
                  use_sde=False, sde_sample_freq=-1, target_kl=None, stats_window_size=100, tensorboard_log=None,
                  policy_kwargs=None, verbose=0, seed=None, device="auto", _init_setup_model=True, rnn_type="lstm",
-                 imitation_data_percentage=0.0, imitation_data_max_steps=0, imitation_coef=0.5, level_name=None, **kwargs):
+                 imitation_data_percentage=0.0, imitation_data_max_steps=0, imitation_coef=0.5, level_name=None,
+                 rollout_buffer_class=None, rollout_buffer_kwargs=None, **kwargs):
         self.rnn_type = rnn_type.lower()
         if policy_kwargs is None: policy_kwargs = {}
         policy_kwargs["rnn_type"] = self.rnn_type
+        self.rollout_buffer_class = rollout_buffer_class
+        self.rollout_buffer_kwargs = rollout_buffer_kwargs or {}
         super().__init__(policy, env, learning_rate, n_steps, batch_size, n_epochs, gamma, gae_lambda, clip_range, clip_range_vf,
                          normalize_advantage, ent_coef, vf_coef, max_grad_norm, use_sde, sde_sample_freq, target_kl,
                          stats_window_size, tensorboard_log, policy_kwargs, int(verbose), seed, device, _init_setup_model)
@@ -771,45 +786,126 @@ class MaskableRecurrentPPO(RecurrentPPO):
             return (h, torch.zeros(s_shape, device=self.device)) if self.rnn_type == "lstm" else (h,)
         self._last_lstm_states = RNNStates(r_tuple(), r_tuple())
         h_buf_shape = (self.n_steps, lstm.num_layers, self.n_envs, lstm.hidden_size)
-        b_cls = MaskableRecurrentDictRolloutBuffer if isinstance(self.observation_space, gym.spaces.Dict) else MaskableRecurrentRolloutBuffer
-        self.rollout_buffer = b_cls(self.n_steps, self.observation_space, self.action_space, h_buf_shape, self.device, self.gamma, self.gae_lambda, self.n_envs, rnn_type=self.rnn_type)
+        from src.agent.utils.disk_buffer import DiskDictRolloutBuffer
+
+        if self.rollout_buffer_class is not None and issubclass(
+            self.rollout_buffer_class, DiskDictRolloutBuffer
+        ):
+            self.rollout_buffer = self.rollout_buffer_class(
+                self.n_steps,
+                self.observation_space,
+                self.action_space,
+                self.device,
+                self.gae_lambda,
+                self.gamma,
+                self.n_envs,
+                rnn_type=self.rnn_type,
+                hidden_size=lstm.hidden_size,
+                **self.rollout_buffer_kwargs,
+            )
+        else:
+            b_cls = (
+                MaskableRecurrentDictRolloutBuffer
+                if isinstance(self.observation_space, gym.spaces.Dict)
+                else MaskableRecurrentRolloutBuffer
+            )
+            self.rollout_buffer = b_cls(
+                self.n_steps,
+                self.observation_space,
+                self.action_space,
+                h_buf_shape,
+                self.device,
+                self.gamma,
+                self.gae_lambda,
+                self.n_envs,
+                rnn_type=self.rnn_type,
+            )
         self.clip_range = get_schedule_fn(self.clip_range)
         if self.clip_range_vf: self.clip_range_vf = get_schedule_fn(self.clip_range_vf)
 
     def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps):
-        from train.env_utils import vec_env_obs_focus_tags
+        from train.env_utils import vec_env_obs_focus_tags, vec_env_requires_policy_action
+        from train.squad_batch_inference import (
+            SquadBatchRolloutHelper,
+            write_rollout_rows_to_buffer,
+        )
 
         assert self._last_obs is not None
         self.policy.set_training_mode(False)
-        n_steps = 0
         rollout_buffer.reset()
         callback.on_rollout_start()
         lstm_states = deepcopy(self._last_lstm_states)
         n_envs = env.num_envs
+        is_recurrent = isinstance(self, MaskableRecurrentPPO)
+        squad_batch_helper = SquadBatchRolloutHelper(n_envs)
         if not hasattr(self, "_prev_obs_focus_tags"):
             self._prev_obs_focus_tags = vec_env_obs_focus_tags(env, n_envs)
+        if isinstance(env.action_space, gym.spaces.MultiDiscrete):
+            dummy_actions = np.zeros(
+                (n_envs, len(env.action_space.nvec)), dtype=np.int64
+            )
+        else:
+            dummy_actions = np.zeros((n_envs,), dtype=np.int64)
         with torch.no_grad():
-            while n_steps < n_rollout_steps:
-                m = get_action_masks(env) if is_masking_supported(env) else None
-                obs_t = self.policy.obs_to_tensor(self._last_obs)[0]
-                focus_tags = vec_env_obs_focus_tags(env, n_envs)
-                lstm_starts_np = np.logical_or(
-                    self._last_episode_starts,
-                    focus_tags != self._prev_obs_focus_tags,
-                ).astype(np.float32)
-                starts_t = torch.as_tensor(lstm_starts_np).float().to(self.device)
-                m_t = torch.as_tensor(m).to(self.device) if m is not None else None
-                acts, vals, log_ps, lstm_states = self.policy.forward(obs_t, lstm_states, starts_t, action_masks=m_t)
-                res_acts = acts.cpu().numpy()
-                new_obs, rewards, dones, infos = env.step(res_acts)
+            filled = 0
+            while filled < n_rollout_steps:
+                requires_policy = vec_env_requires_policy_action(env, n_envs)
+                if not requires_policy.any():
+                    new_obs, rewards, dones, infos = env.step(dummy_actions)
+                    self.num_timesteps += env.num_envs
+                    if callback.on_step() is False:
+                        return False
+                    self._update_info_buffer(infos)
+                    self._last_obs = new_obs
+                    self._last_episode_starts = dones
+                    for i, done in enumerate(dones):
+                        if done:
+                            squad_batch_helper.clear_env(i)
+                    continue
+
+                pre_step_obs = self._last_obs
+                resolution = squad_batch_helper.resolve_rollout(
+                    vec_env=env,
+                    num_envs=n_envs,
+                    obs=self._last_obs,
+                    requires_policy=requires_policy,
+                    model=self,
+                    is_recurrent=is_recurrent,
+                    last_dones=self._last_episode_starts,
+                    prev_focus_tags=self._prev_obs_focus_tags,
+                    lstm_states=lstm_states if is_recurrent else None,
+                    device=self.device,
+                )
+
+                for env_idx, batch in resolution.squad_batch_actions.items():
+                    env.env_method(
+                        "set_squad_batch_actions", batch, indices=[env_idx]
+                    )
+
+                new_obs, rewards, dones, infos = env.step(resolution.step_actions)
                 self.num_timesteps += env.num_envs
-                if callback.on_step() is False: return False
+                if callback.on_step() is False:
+                    return False
                 self._update_info_buffer(infos)
-                n_steps += 1
-                rollout_buffer.add(self._last_obs, acts.cpu().numpy() if not isinstance(self.action_space, gym.spaces.Discrete) else acts.cpu().numpy().reshape(-1, 1),
-                                   rewards, lstm_starts_np, vals, log_ps, self._last_lstm_states, m)
-                self._last_obs, self._last_episode_starts, self._last_lstm_states = new_obs, dones, lstm_states
-                self._prev_obs_focus_tags = focus_tags.copy()
+
+                rows_written = write_rollout_rows_to_buffer(
+                    buffer=rollout_buffer,
+                    resolution=resolution,
+                    pre_step_obs=pre_step_obs,
+                    rewards=rewards,
+                    num_envs=n_envs,
+                    is_recurrent=is_recurrent,
+                    fallback_lstm=self._last_lstm_states if is_recurrent else None,
+                    last_dones=self._last_episode_starts,
+                    max_rows=n_rollout_steps - filled,
+                )
+                filled += rows_written
+
+                self._last_obs, self._last_episode_starts = new_obs, dones
+                if is_recurrent:
+                    self._last_lstm_states = resolution.updated_lstm
+                    lstm_states = resolution.updated_lstm
+                    self._prev_obs_focus_tags = vec_env_obs_focus_tags(env, n_envs)
         with torch.no_grad():
             focus_last = vec_env_obs_focus_tags(env, n_envs)
             lstm_starts_last = np.logical_or(
@@ -848,6 +944,8 @@ class MaskableRecurrentPPO(RecurrentPPO):
         entropy_losses, pg_losses, value_losses, approx_kls, clip_fractions, imitation_losses, loss_ls = [], [], [], [], [], [], []
         
         continue_training = True
+        logged_logp_check = False
+        skipped_nonfinite_batches = 0
         for epoch in range(self.n_epochs):
             for r_data in self.rollout_buffer.get(self.batch_size):
                 t_batch0 = time.perf_counter()
@@ -856,15 +954,49 @@ class MaskableRecurrentPPO(RecurrentPPO):
                         torch.cuda.synchronize()
                     t_fwd0 = time.perf_counter()
 
-                acts = r_data.actions.long().flatten() if isinstance(self.action_space, gym.spaces.Discrete) else r_data.actions
-                vals, log_p, entropy = self.policy.evaluate_actions(r_data.observations, acts, r_data.lstm_states, r_data.episode_starts, r_data.action_masks)
-                
-                # ... (rest of standard PPO logic) ...
-                mask = r_data.mask > 1e-8
-                adv = r_data.advantages
-                if self.normalize_advantage: adv = (adv - adv[mask].mean()) / (adv[mask].std() + 1e-8)
-                
-                ratio = torch.exp(log_p - r_data.old_log_prob)
+                if isinstance(self.action_space, gym.spaces.Discrete):
+                    acts = r_data.actions.long().flatten()
+                elif isinstance(self.action_space, gym.spaces.MultiDiscrete):
+                    acts = r_data.actions.long()
+                else:
+                    acts = r_data.actions
+                obs = r_data.observations
+                if isinstance(obs, dict):
+                    obs = {
+                        k: torch.nan_to_num(v, nan=0.0, posinf=1.0, neginf=0.0)
+                        for k, v in obs.items()
+                    }
+                else:
+                    obs = torch.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0)
+                vals, log_p, entropy = self.policy.evaluate_actions(
+                    obs,
+                    acts,
+                    r_data.lstm_states,
+                    r_data.episode_starts,
+                    r_data.action_masks,
+                )
+
+                log_p = log_p.reshape(-1)
+                old_log_prob = r_data.old_log_prob.reshape(-1)
+
+                mask = (r_data.mask.reshape(-1) > 1e-8)
+                if not logged_logp_check and mask.any():
+                    with torch.no_grad():
+                        self._log_prob_abs_err = (
+                            (log_p - old_log_prob)[mask].abs().mean().item()
+                        )
+                    logged_logp_check = True
+                adv = r_data.advantages.reshape(-1)
+                if self.normalize_advantage and mask.any():
+                    adv_sel = adv[mask]
+                    adv_mean = adv_sel.mean()
+                    adv_std = adv_sel.std()
+                    if torch.isfinite(adv_std) and adv_std > 1e-8:
+                        adv = (adv - adv_mean) / (adv_std + 1e-8)
+                    elif torch.isfinite(adv_mean):
+                        adv = adv - adv_mean
+
+                ratio = torch.exp(log_p - old_log_prob)
                 
                 # Policy loss
                 pg_1 = adv * ratio
@@ -934,6 +1066,15 @@ class MaskableRecurrentPPO(RecurrentPPO):
                             imitation_losses.append(imitation_loss.item())
 
                 loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss + imitation_loss
+                if not torch.isfinite(loss):
+                    skipped_nonfinite_batches += 1
+                    if profile_phases:
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        forward_times.append(time.perf_counter() - t_fwd0)
+                    if profile_enabled:
+                        batch_times.append(time.perf_counter() - t_batch0)
+                    continue
                 loss_ls.append(loss.item())
 
                 if profile_phases:
@@ -944,7 +1085,17 @@ class MaskableRecurrentPPO(RecurrentPPO):
 
                 self.policy.optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                if not torch.isfinite(grad_norm):
+                    skipped_nonfinite_batches += 1
+                    self.policy.optimizer.zero_grad()
+                    if profile_phases:
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        backward_times.append(time.perf_counter() - t_bwd0)
+                    if profile_enabled:
+                        batch_times.append(time.perf_counter() - t_batch0)
+                    continue
                 self.policy.optimizer.step()
 
                 if profile_phases:
@@ -985,9 +1136,16 @@ class MaskableRecurrentPPO(RecurrentPPO):
         self.logger.record("train/entropy_loss", np.mean(entropy_losses))
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
-        self.logger.record("train/approx_kl", np.mean(approx_kls))
-        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
-        self.logger.record("train/loss", np.mean(loss_ls))
+        self.logger.record("train/approx_kl", np.mean(approx_kls) if approx_kls else 0.0)
+        if approx_kls and hasattr(self, "_log_prob_abs_err"):
+            self.logger.record("train/rollout_log_prob_abs_err", self._log_prob_abs_err)
+            del self._log_prob_abs_err
+        self.logger.record("train/clip_fraction", np.mean(clip_fractions) if clip_fractions else 0.0)
+        if kl_skipped_backward:
+            self.logger.record("train/kl_early_stop_batches", kl_skipped_backward)
+        if skipped_nonfinite_batches:
+            self.logger.record("train/skipped_nonfinite_batches", skipped_nonfinite_batches)
+        self.logger.record("train/loss", np.mean(loss_ls) if loss_ls else float("nan"))
         self.logger.record("train/explained_variance", expl_var)
         if len(imitation_losses) > 0:
             self.logger.record("train/imitation_loss", np.mean(imitation_losses))

@@ -1,8 +1,0 @@
-{
-  "track_id": "dynamic_unit_costs_20260103",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2026-01-03T22:19:00Z",
-  "updated_at": "2026-01-03T22:19:00Z",
-  "description": "Implement dynamic unit cost loading from game data to support configurable unit pools in the 'Capture the Flag' environment, replacing static cost definitions."
-}

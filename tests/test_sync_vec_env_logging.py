@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+from gymnasium import spaces
 from train.sync_vec_env import SyncVecEnv
 from unittest.mock import MagicMock, patch
 
@@ -8,14 +9,17 @@ class TestSyncVecEnvLogging:
     def test_step_wait_logging(self, mock_logger):
         """Test logging inside step_wait."""
         # Setup mock environments
+        obs_space = spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32)
         mock_env1 = MagicMock()
-        mock_env1.step.return_value = (np.zeros(1), 0, False, False, {})
-        mock_env1.observation_space = MagicMock()
-        mock_env1.action_space = MagicMock()
+        mock_env1.step.return_value = (np.zeros(1, dtype=np.float32), 0, False, False, {})
+        mock_env1.observation_space = obs_space
+        mock_env1.action_space = spaces.Discrete(2)
         mock_env1.render_mode = None
         
         mock_env2 = MagicMock()
-        mock_env2.step.return_value = (np.zeros(1), 0, False, False, {})
+        mock_env2.step.return_value = (np.zeros(1, dtype=np.float32), 0, False, False, {})
+        mock_env2.observation_space = obs_space
+        mock_env2.action_space = spaces.Discrete(2)
         mock_env2.render_mode = None
         
         env_fns = [lambda: mock_env1, lambda: mock_env2]
@@ -34,9 +38,9 @@ class TestSyncVecEnvLogging:
     def test_reset_logging(self, mock_logger):
         """Test logging inside reset."""
         mock_env = MagicMock()
-        mock_env.reset.return_value = (np.zeros(1), {})
-        mock_env.observation_space = MagicMock()
-        mock_env.action_space = MagicMock()
+        mock_env.reset.return_value = (np.zeros(1, dtype=np.float32), {})
+        mock_env.observation_space = spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32)
+        mock_env.action_space = spaces.Discrete(2)
         
         env_fns = [lambda: mock_env]
         venv = SyncVecEnv(env_fns)
@@ -51,8 +55,8 @@ class TestSyncVecEnvLogging:
     def test_close_logging(self, mock_logger):
         """Test logging inside close."""
         mock_env = MagicMock()
-        mock_env.observation_space = MagicMock()
-        mock_env.action_space = MagicMock()
+        mock_env.observation_space = spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32)
+        mock_env.action_space = spaces.Discrete(2)
         
         env_fns = [lambda: mock_env]
         venv = SyncVecEnv(env_fns)

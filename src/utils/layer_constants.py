@@ -180,6 +180,22 @@ class LayerConstants:
         TERRAIN_CREEP: 9,
         ALLIED_WEAPON_COOLDOWN: 10,
         ENEMY_WEAPON_COOLDOWN: 11,
+        # Unit attribute flags (mirrors LAYERS group 1/2)
+        ALLIED_UNIT_BIOLOGICAL: 12,
+        ENEMY_UNIT_BIOLOGICAL: 13,
+        ALLIED_UNIT_MECHANICAL: 14,
+        ENEMY_UNIT_MECHANICAL: 15,
+        ALLIED_UNIT_ARMORED: 16,
+        ENEMY_UNIT_ARMORED: 17,
+        ALLIED_UNIT_MASSIVE: 18,
+        ENEMY_UNIT_MASSIVE: 19,
+        # Typed DPS bonus channels (bonus damage per target attribute)
+        ALLIED_G_DPS_LIGHT: 20,
+        ENEMY_G_DPS_LIGHT: 21,
+        ALLIED_G_DPS_ARMOR: 22,
+        ENEMY_G_DPS_ARMOR: 23,
+        ALLIED_G_DPS_MASSIVE: 24,
+        ENEMY_G_DPS_MASSIVE: 25,
     }
 
     @classmethod
@@ -188,4 +204,4 @@ class LayerConstants:
 
     @classmethod
     def get_num_tactical_layers(cls) -> int:
-        return 12
+        return 26

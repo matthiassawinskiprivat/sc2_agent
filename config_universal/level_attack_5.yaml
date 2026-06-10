@@ -2,7 +2,7 @@
 # Combat: 3 Cyclones vs 6 HellionTanks (2 per slot). Ranged vs ranged, Cyclone range advantage.
 
 training:
-  training_steps: 1_500_000
+  training_steps: 1_000_000
   num_envs: 8
   n_steps: 2048
   batch_size: 1024

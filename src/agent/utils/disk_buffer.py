@@ -11,10 +11,52 @@ from loguru import logger
 
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentRolloutBufferSamples, RNNStates
 
+
+def build_recurrent_sequence_spans(
+    n_envs: int,
+    buffer_size: int,
+    episode_starts: np.ndarray,
+    max_seq_len: int = 32,
+    policy_active: Optional[np.ndarray] = None,
+) -> list[tuple[int, int, int]]:
+    """
+    RNN minibatch sequence boundaries per env column.
+
+    Splits on focal-unit / episode resets (``episode_starts``), skips timesteps where
+    ``policy_active`` is 0 (another env owned that buffer row), and caps length at
+    ``max_seq_len``. Inactive rows must not sit inside a sequence or the RNN hidden
+    state drifts from what collection used when computing ``old_log_prob``.
+    """
+    spans: list[tuple[int, int, int]] = []
+    for env_idx in range(n_envs):
+        t = 0
+        while t < buffer_size:
+            while t < buffer_size:
+                if policy_active is None or policy_active[t, env_idx] > 1e-8:
+                    break
+                t += 1
+            if t >= buffer_size:
+                break
+            start = t
+            length = 0
+            while t < buffer_size and length < max_seq_len:
+                if policy_active is not None and policy_active[t, env_idx] <= 1e-8:
+                    break
+                if t > start and episode_starts[t, env_idx]:
+                    break
+                length += 1
+                t += 1
+            if length > 0:
+                spans.append((env_idx, start, length))
+    return spans
+
+
 class DiskDictRolloutBuffer(DictRolloutBuffer):
     """
-    A sequence-aware DictRolloutBuffer that stores large arrays in memory-mapped files.
-    Optimized for recurrent policies and low RAM usage.
+    Recurrent DictRolloutBuffer with optional memmap offload for map/tactical tensors.
+
+    ``storage_backend="disk"`` (default): large observation channels use memmap files.
+    ``storage_backend="ram"``: all observations stay in RAM (same add/get API).
     """
     def __init__(
         self,
@@ -27,18 +69,29 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
         n_envs: int = 1,
         temp_dir: str = "C:/temp/sc2_buffer_cache",
         rnn_type: str = "gru",
-        hidden_size: int = 512
+        hidden_size: int = 512,
+        storage_backend: str = "disk",
     ):
         super(DiskDictRolloutBuffer, self).__init__(buffer_size, observation_space, action_space, device, gae_lambda, gamma, n_envs)
-        
+
+        self.storage_backend = str(storage_backend).strip().lower()
+        if self.storage_backend not in ("disk", "ram"):
+            raise ValueError(
+                f"storage_backend must be 'disk' or 'ram', got {storage_backend!r}"
+            )
+
         self.temp_dir = temp_dir
         self.rnn_type = rnn_type
         self.hidden_size = hidden_size
         self.instance_id = f"{os.getpid()}_{id(self)}"
         self.instance_dir = os.path.join(self.temp_dir, self.instance_id)
-        os.makedirs(self.instance_dir, exist_ok=True)
-        
-        logger.info(f"DiskDictRolloutBuffer initialized: {self.rnn_type.upper()}, Hidden: {self.hidden_size}")
+        if self.storage_backend == "disk":
+            os.makedirs(self.instance_dir, exist_ok=True)
+
+        logger.info(
+            f"DictRolloutBuffer ({self.storage_backend}) initialized: "
+            f"{self.rnn_type.upper()}, Hidden: {self.hidden_size}"
+        )
 
         # Recurrent state storage (buffer_size, n_layers, n_envs, hidden_dim)
         self.hidden_states_pi = np.zeros((self.buffer_size, 1, self.n_envs, self.hidden_size), dtype=np.float32)
@@ -55,15 +108,19 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
         else:
             m_dim = 1
         self.action_masks = np.ones((self.buffer_size, self.n_envs, m_dim), dtype=bool)
+        self.policy_active = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
 
-        # Offload large observations to disk
+        # Offload large observations to memmap files (disk backend only).
         self.disk_files = {}
-        for key, subspace in observation_space.spaces.items():
-            if "map" in key or "tactical" in key:
-                filename = os.path.join(self.instance_dir, f"obs_{key}.bin")
-                shape = (self.buffer_size, self.n_envs, *subspace.shape)
-                self.observations[key] = np.memmap(filename, dtype=np.float32, mode='w+', shape=shape)
-                self.disk_files[key] = filename
+        if self.storage_backend == "disk":
+            for key, subspace in observation_space.spaces.items():
+                if "map" in key or "tactical" in key:
+                    filename = os.path.join(self.instance_dir, f"obs_{key}.bin")
+                    shape = (self.buffer_size, self.n_envs, *subspace.shape)
+                    self.observations[key] = np.memmap(
+                        filename, dtype=np.float32, mode="w+", shape=shape
+                    )
+                    self.disk_files[key] = filename
 
     def reset(self) -> None:
         """
@@ -78,6 +135,8 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
                     subspace = self.observation_space.spaces[key]
                     shape = (self.buffer_size, self.n_envs, *subspace.shape)
                     self.observations[key] = np.memmap(filename, dtype=np.float32, mode='r+', shape=shape)
+        if hasattr(self, "policy_active"):
+            self.policy_active.fill(0.0)
 
     def to_device(self, device: torch.device):
         self.device = device
@@ -108,10 +167,15 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
         log_prob: torch.Tensor,
         lstm_states: RNNStates = None,
         action_masks: Optional[np.ndarray] = None,
+        policy_active: Optional[np.ndarray] = None,
     ) -> None:
         if action_masks is not None:
             self.action_masks[self.pos] = action_masks.copy()
-        
+        if policy_active is not None:
+            self.policy_active[self.pos] = np.asarray(policy_active, dtype=np.float32).reshape(self.n_envs)
+        else:
+            self.policy_active[self.pos] = 1.0
+
         if lstm_states is not None:
             # Robustly normalize incoming RNN states to (1, n_envs, hidden_size).
             # In async collectors, state tensors may occasionally come in as single-env
@@ -171,66 +235,72 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
 
     def get(self, batch_size: Optional[int] = None) -> Generator[MaskableRecurrentRolloutBufferSamples, None, None]:
         """
-        OVERRIDE: Instead of random steps, we yield SEQUENCES.
-        This is critical for Recurrent policies.
+        Yield RNN sequence minibatches. Splits on ``episode_starts`` (focal-unit /
+        squad resets) and caps each span at 32 steps for BPTT memory.
         """
         assert self.full, "Buffer must be full"
-        
-        # Determine sequence boundaries
-        # We force sequences to be at most 32 steps long
-        max_seq_len = 32
-        
-        # Create a list of all sequence start points (env_idx, start_step)
-        sequence_starts = []
-        for env_idx in range(self.n_envs):
-            for start_step in range(0, self.buffer_size, max_seq_len):
-                sequence_starts.append((env_idx, start_step))
-        
-        # Shuffle sequences
-        np.random.shuffle(sequence_starts)
-        
-        # Group into mini-batches of sequences
-        # batch_size here refers to total steps, so num_sequences = batch_size // max_seq_len
-        num_seq_per_batch = max(1, batch_size // max_seq_len) if batch_size else len(sequence_starts)
-        
-        for i in range(0, len(sequence_starts), num_seq_per_batch):
-            batch_seqs = sequence_starts[i : i + num_seq_per_batch]
-            yield self._get_samples_by_sequences(batch_seqs, max_seq_len)
 
-    def _get_samples_by_sequences(self, batch_seqs, seq_len) -> MaskableRecurrentRolloutBufferSamples:
-        """Collects and pads a batch of sequences."""
-        actual_batch_size = len(batch_seqs) * seq_len
-        
-        # Prepare storage
+        max_seq_len = 32
+        filled_steps = int(self.pos) if self.pos > 0 else self.buffer_size
+        sequence_spans = build_recurrent_sequence_spans(
+            self.n_envs,
+            filled_steps,
+            self.episode_starts,
+            max_seq_len,
+            policy_active=getattr(self, "policy_active", None),
+        )
+        np.random.shuffle(sequence_spans)
+
+        if not sequence_spans:
+            return
+
+        if batch_size:
+            batches: list[list[tuple[int, int, int]]] = []
+            current: list[tuple[int, int, int]] = []
+            current_steps = 0
+            for span in sequence_spans:
+                span_len = span[2]
+                if current and current_steps + span_len > batch_size:
+                    batches.append(current)
+                    current = []
+                    current_steps = 0
+                current.append(span)
+                current_steps += span_len
+            if current:
+                batches.append(current)
+        else:
+            batches = [sequence_spans]
+
+        for batch_spans in batches:
+            yield self._get_samples_by_sequences(batch_spans)
+
+    def _get_samples_by_sequences(
+        self, batch_spans: list[tuple[int, int, int]]
+    ) -> MaskableRecurrentRolloutBufferSamples:
+        """Collect and pad a batch of variable-length RNN sequences."""
+        seq_len = max(length for _, _, length in batch_spans)
+
         obs_batch = {k: [] for k in self.observation_space.keys()}
         act_batch, val_batch, logp_batch, adv_batch, ret_batch, start_batch, mask_batch = [], [], [], [], [], [], []
-        
-        # Hidden states at the START of each sequence
         h_pi_starts, h_vf_starts = [], []
         c_pi_starts, c_vf_starts = [], []
 
-        for env_idx, start_step in batch_seqs:
-            end_step = min(start_step + seq_len, self.buffer_size)
-            actual_len = end_step - start_step
-            
-            # Observations
+        for env_idx, start_step, actual_len in batch_spans:
+            end_step = start_step + actual_len
+
             for k in obs_batch.keys():
-                # We pull from memmap directly. This is the only place it hits RAM.
                 chunk = self.observations[k][start_step:end_step, env_idx]
                 if actual_len < seq_len:
-                    # Pad if needed
                     pad_shape = (seq_len - actual_len, *chunk.shape[1:])
                     chunk = np.concatenate([chunk, np.zeros(pad_shape, dtype=np.float32)])
                 obs_batch[k].append(chunk)
-            
-            # Hidden states (pick the one at start_step)
+
             h_pi_starts.append(self.hidden_states_pi[start_step, :, env_idx, :])
             h_vf_starts.append(self.hidden_states_vf[start_step, :, env_idx, :])
             if self.rnn_type == "lstm":
                 c_pi_starts.append(self.cell_states_pi[start_step, :, env_idx, :])
                 c_vf_starts.append(self.cell_states_vf[start_step, :, env_idx, :])
 
-            # Others (Actions, rewards, etc.)
             def get_and_pad(arr, is_2d=False):
                 chunk = arr[start_step:end_step, env_idx]
                 if actual_len < seq_len:
@@ -244,13 +314,12 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
             adv_batch.append(get_and_pad(self.advantages))
             ret_batch.append(get_and_pad(self.returns))
             start_batch.append(get_and_pad(self.episode_starts))
-            
-            # Mask for valid steps (handle padding)
+
             m = np.ones(seq_len, dtype=np.float32)
             m[actual_len:] = 0.0
-            mask_batch.append(m)
+            pa = get_and_pad(self.policy_active)
+            mask_batch.append(m * pa)
 
-        # Convert to Tensors
         def _np_stack_to_device(arr_list, flatten=True):
             res = th.as_tensor(np.stack(arr_list))
             res = res.to(self.device, non_blocking=True)
@@ -259,7 +328,6 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
         def to_t(list_of_arr, flatten=True):
             return _np_stack_to_device(list_of_arr, flatten=flatten)
 
-        # RNN States: (n_layers, n_seq, dim)
         h_pi = _np_stack_to_device(h_pi_starts, flatten=False).transpose(0, 1).contiguous()
         h_vf = _np_stack_to_device(h_vf_starts, flatten=False).transpose(0, 1).contiguous()
         if self.rnn_type == "lstm":
@@ -267,15 +335,14 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
             c_vf = _np_stack_to_device(c_vf_starts, flatten=False).transpose(0, 1).contiguous()
             lstm_states = RNNStates((h_pi, c_pi), (h_vf, c_vf))
         else:
-            lstm_states = RNNStates(h_pi, h_vf)
+            lstm_states = RNNStates((h_pi,), (h_vf,))
 
-        # Action masks (also need sequence handling)
         m_list = []
-        for env_idx, start_step in batch_seqs:
-            end_step = min(start_step + seq_len, self.buffer_size)
+        for env_idx, start_step, actual_len in batch_spans:
+            end_step = start_step + actual_len
             chunk = self.action_masks[start_step:end_step, env_idx]
-            if (end_step - start_step) < seq_len:
-                pad = np.ones((seq_len - (end_step - start_step), chunk.shape[-1]), dtype=bool)
+            if actual_len < seq_len:
+                pad = np.ones((seq_len - actual_len, chunk.shape[-1]), dtype=bool)
                 chunk = np.concatenate([chunk, pad])
             m_list.append(chunk)
         batch_action_masks = to_t(m_list)
@@ -290,18 +357,23 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
             lstm_states=lstm_states,
             episode_starts=to_t(start_batch),
             mask=to_t(mask_batch),
-            action_masks=batch_action_masks
+            action_masks=batch_action_masks,
         )
 
     def __del__(self):
         self.close_memmaps()
-        if hasattr(self, 'disk_files'):
+        if getattr(self, "storage_backend", "disk") != "disk":
+            return
+        if hasattr(self, "disk_files"):
             for key, filename in self.disk_files.items():
                 if os.path.exists(filename):
                     try:
                         del self.observations[key]
                         os.remove(filename)
-                    except: pass
-            if hasattr(self, 'instance_dir') and os.path.exists(self.instance_dir):
-                try: os.rmdir(self.instance_dir)
-                except: pass
+                    except Exception:
+                        pass
+            if hasattr(self, "instance_dir") and os.path.exists(self.instance_dir):
+                try:
+                    os.rmdir(self.instance_dir)
+                except Exception:
+                    pass

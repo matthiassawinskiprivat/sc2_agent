@@ -1,8 +1,0 @@
-{
-  "track_id": "analyze_ctf_right_edge_bug_20260104",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-04T12:46:00Z",
-  "updated_at": "2026-01-04T12:46:00Z",
-  "description": "Analyze and fix the bug where CTF agents target the right edge of the map."
-}

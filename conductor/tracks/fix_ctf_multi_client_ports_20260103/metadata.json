@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_ctf_multi_client_ports_20260103",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-03T00:26:00Z",
-  "updated_at": "2026-01-03T00:26:00Z",
-  "description": "Fix EOFError/BrokenPipeError in CTF environment by implementing Portconfig for multi-client communication."
-}

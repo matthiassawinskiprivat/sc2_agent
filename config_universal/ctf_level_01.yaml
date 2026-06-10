@@ -1,82 +1,92 @@
-# config_universal/ctf_level_01.yaml
-# CTF Level 01 — Symmetric bio: Marines vs Marines (Protoss pylons as flags)
-#
-# First CTF level in the universal pipeline.  Both sides get an identical
-# mineral-only budget of Marines.  Introduces the pylon-capture objective
-# after the agent has mastered single-unit micro from the attack levels.
-#
-# Map pool: train/maps/capture_the_flag_terran/ (128x128, open field)
-# Env class: CaptureTheFlagEnv (dual-client asymmetric self-play)
-
 training:
-  training_steps: 10_000_000
-  num_envs: 4
+  training_steps: 500_000
+  num_envs: 5
   n_steps: 2048
   batch_size: 512
   learning_rate: 0.0003
   render_beacon: False
   watchdog_timeout: 3600
-  target_kl: null
+  target_kl: 0.02
+  # Async IPC: memmap map/tactical (override factory CTF default of shared RAM).
+  rollout_buffer: disk
 
 env:
   env_class: "CaptureTheFlagEnv"
+  max_steps: 350
+  headless: True
+  # Self-play opponent sync (every K episodes across all envs)
+  every_k_episodes: 250
 
   # Map & layout
-  level_name: "capture_the_flag_terran"
-  map_name: "00_128x128_Full"
-  grid_size: 128
-  flag_distance_min: 30.0        # minimum world-unit distance between the two pylons
+  maps_dir: "train/maps/ladder/with_region"
+  unit_pools:
+    - high_level_command: "attack"
+      agent: True
+      mineral_budget: 600   
+      vespene_budget: 150
+      unit_pool:
+        - "MARINE"
+        - "MARAUDER"
+      region: "A"
+    - high_level_command: "defend"
+      mineral_budget: 350       
+      vespene_budget: 100
+      unit_pool:
+        - "ZERGLING"
+        - "ROACH"
+      region: "A"
+    - high_level_command: "defend"
+      agent: True
+      mineral_budget: 350  
+      vespene_budget: 100
+      unit_pool:
+        - "ZERGLING"
+        - "ROACH"
+      region: "B"
+    - high_level_command: "attack"
+      mineral_budget: 600 
+      vespene_budget: 150
+      unit_pool:
+        - "MARINE"
+        - "MARAUDER"
+      region: "B"
 
-  # Roster generation
-  mineral_budget: 350            # ~5 Marines or ~3 Marauders
-  vespene_budget: 0
-  unit_pool:
-    - "MARINE"
-    - "MARAUDER"
-
-  max_steps: 1500
-  headless: True
-
-  # Self-play opponent sync (every K episodes across all envs)
-  every_k_episodes: 100
-
-  # Observation layers (cumulative with prior levels)
   active_layers:
-    - "allied_unit_density"
-    - "enemy_unit_density"
     - "allied_unit_biological"
     - "enemy_unit_biological"
+    - "allied_unit_mechanical"
+    - "enemy_unit_mechanical"
     - "allied_unit_armored"
     - "enemy_unit_armored"
-    - "allied_health"
-    - "enemy_health"
-    - "allied_g_dps_base"
-    - "enemy_g_dps_base"
-    - "terrain_pathable"
-    - "command_objective"
+    - "allied_unit_massive"
+    - "enemy_unit_massive"
+    - "allied_g_dps_light"
+    - "enemy_g_dps_light"
+    - "allied_g_dps_armor"
+    - "enemy_g_dps_armor"
+    - "allied_g_dps_massive"
+    - "enemy_g_dps_massive"
 
   active_tactical_layers:
-    - "allied_unit_density"
-    - "enemy_unit_density"
-    - "terrain_pathable"
-    - "command_assignment"
-    - "command_objective"
-    - "allied_g_dps_base"
-    - "enemy_g_dps_base"
-    - "allied_health"
-    - "enemy_health"
-    - "allied_weapon_cooldown"
-    - "enemy_weapon_cooldown"
-
-  action_heads:
-    - "attack_local"
-
-  high_level_command: "attack"
+    - "allied_unit_biological"
+    - "enemy_unit_biological"
+    - "allied_unit_mechanical"
+    - "enemy_unit_mechanical"
+    - "allied_unit_armored"
+    - "enemy_unit_armored"
+    - "allied_unit_massive"
+    - "enemy_unit_massive"
+    - "allied_g_dps_light"
+    - "enemy_g_dps_light"
+    - "allied_g_dps_armor"
+    - "enemy_g_dps_armor"
+    - "allied_g_dps_massive"
+    - "enemy_g_dps_massive"
 
   rewards:
     # Pylon (flag) signals — primary objective
-    pylon_damage_reward: 2.0      # per HP of damage dealt to enemy pylon
-    pylon_damage_penalty: 2.0     # per HP of damage received by own pylon
+    pylon_damage_reward: 1.0      # per HP of damage dealt to enemy pylon
+    pylon_damage_penalty: 1.0     # per HP of damage received by own pylon
 
     # Unit combat signals
     damage_reward: 0.2
@@ -84,16 +94,23 @@ env:
     kill_reward: 0.5
     kill_penalty: -0.5
 
-    # Progress signal (dense shaping toward enemy pylon)
-    distance_multiplier: 0.5
+    # Distance shaping: attackers — squad CoM progress toward enemy pylon;
+    # defenders — per-unit penalty when outside defender_zone_radius and moving away
+    distance_multiplier: 1.0
+    # Defenders are penalized for moving away from their pylon beyond this radius
+    defender_zone_radius: 10.0
+
+    # Kiting: reward backing away from enemy CoM in tactical fovea while on cooldown
+    cooldown_retreat_scale: 1.1
 
     # Episode outcome
     win_reward: 15.0
-    loss_penalty: -5.0
-    draw_penalty: -2.0
+    loss_penalty: -5.0   # also applied on timeout when agent attack squads still alive
+    draw_penalty: -2.0   # timeout when only defenders (or no units) remain
 
-    # Per-step cost to discourage passive play
-    step_penalty: -0.05
+    # Per-step role signals
+    step_penalty: -0.05          # applied to attacker units each step (discourages passivity)
+    defender_step_reward: 0.001  # applied to defender units each step (rewards survival)
 
 model:
   algorithm: "MaskableRecurrentPPO"
@@ -106,13 +123,6 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
-  ent_coef: 0.01
-  n_epochs: 4
-
-evaluation:
-  stop_on_metric:
-    monitor: "rollout/ep_rew_mean"
-    threshold: 12.0
-    comparison: ">"
-    patience: 10
+  gamma: 0.996
+  ent_coef: 0.001
+  n_epochs: 2

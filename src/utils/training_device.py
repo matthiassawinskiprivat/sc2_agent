@@ -49,6 +49,34 @@ def resolve_training_device(training_config: Optional[Mapping[str, Any]] = None)
     )
 
 
+def resolve_opponent_device(training_config: Optional[Mapping[str, Any]] = None) -> torch.device:
+    """
+    Device for opponent inference inside vec-env worker subprocesses.
+
+    Defaults to CUDA (same as collector when a GPU is available).
+    Override via ``training.opponent_device``, ``env.opponent_device``, or
+    ``SC2_OPPONENT_DEVICE`` (``cpu`` / ``cuda`` / ``auto``).
+    """
+    cfg = dict(training_config or {})
+    env_cfg = cfg.get("env") or {}
+    raw = os.environ.get("SC2_OPPONENT_DEVICE", "").strip().lower()
+    if not raw:
+        raw = str(
+            cfg.get("opponent_device") or env_cfg.get("opponent_device") or "cuda"
+        ).strip().lower()
+
+    if raw in ("cuda", "gpu"):
+        return resolve_training_device({"device": "cuda"})
+    if raw == "cpu":
+        return torch.device("cpu")
+    if raw in ("auto", "", "default"):
+        return resolve_training_device(cfg)
+    raise ValueError(
+        f"Invalid opponent device {raw!r}. Use 'cpu', 'cuda', or 'auto' "
+        "(SC2_OPPONENT_DEVICE, training.opponent_device, or env.opponent_device)."
+    )
+
+
 def warmup_cuda_if_needed(device: torch.device) -> None:
     """Eager CUDA context creation in the current process (helps lazy init on some Windows setups)."""
     if device.type != "cuda":

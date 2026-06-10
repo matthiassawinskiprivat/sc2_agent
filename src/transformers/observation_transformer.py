@@ -224,8 +224,13 @@ class ObservationTransformer:
 
             if effects: self._draw_effects(effects, layers)
 
-            # Normalize DPS layers with tanh (matches global transform)
-            for dps_layer_name in [LayerConstants.ALLIED_G_DPS_BASE, LayerConstants.ENEMY_G_DPS_BASE]:
+            # Normalize all DPS channels with tanh (matches global transform)
+            for dps_layer_name in [
+                LayerConstants.ALLIED_G_DPS_BASE, LayerConstants.ENEMY_G_DPS_BASE,
+                LayerConstants.ALLIED_G_DPS_LIGHT, LayerConstants.ENEMY_G_DPS_LIGHT,
+                LayerConstants.ALLIED_G_DPS_ARMOR, LayerConstants.ENEMY_G_DPS_ARMOR,
+                LayerConstants.ALLIED_G_DPS_MASSIVE, LayerConstants.ENEMY_G_DPS_MASSIVE,
+            ]:
                 dps_layer_idx = LayerConstants.TACTICAL_LAYERS.get(dps_layer_name)
                 if dps_layer_idx is not None:
                     layers[dps_layer_idx] = np.tanh(layers[dps_layer_idx] / 50.0)
@@ -428,12 +433,14 @@ class ObservationTransformer:
             if idx_cd is not None:
                 self._draw_circle_vectorized(layers, idx_cd, px, py, 0, r, cd_norm, True)
 
-        if not self.is_tactical_mode:
-            # Attribute Layers (Not in tactical)
-            for attr in ["biological", "mechanical", "armored", "massive", "flying"]:
-                idx = self.current_layer_map.get(f"{prefix}_unit_{attr}")
-                if idx is not None and getattr(unit, f"is_{attr}", False):
-                    self._draw_circle_vectorized(layers, idx, px, py, 0, r, 1.0, True)
+        # Attribute flags — rendered in both global and tactical modes.
+        # In tactical mode current_layer_map == TACTICAL_LAYERS; idx is None
+        # for any attribute not configured there, so the idx-is-None guard
+        # handles missing entries safely without an extra mode check.
+        for attr in ["biological", "mechanical", "armored", "massive", "flying"]:
+            idx = self.current_layer_map.get(f"{prefix}_unit_{attr}")
+            if idx is not None and getattr(unit, f"is_{attr}", False):
+                self._draw_circle_vectorized(layers, idx, px, py, 0, r, 1.0, True)
 
     def _draw_command_info(self, raw_obs, layers):
         idx_sel = self.current_layer_map.get(LayerConstants.COMMAND_ASSIGNMENT)
@@ -791,8 +798,21 @@ class ObservationTransformer:
                 db = self._get_unit_data_from_json(u_name)
                 if db:
                     for w in db.get('weapons', []):
-                        dps = (w['damage'] * w['attacks']) / (w['period'] or 1.0)
-                        weapon_stats.append({'base': dps, 'range': float(w['range']), 'typ': w['type']})
+                        period = w.get('period') or 1.0
+                        dps = (w['damage'] * w['attacks']) / period
+                        weapon_stats.append({
+                            'base': dps,
+                            'range': float(w['range']),
+                            'typ': w['type'],
+                            'period': period,
+                            'bonuses': w.get('bonuses', []),
+                        })
+
+        # Weapon bonus type → typed-DPS layer suffix.
+        # Values confirmed from unit_data.json samples:
+        #   1=Light (Colossus, Hellion, Baneling), 2=Armored (Marauder, SiegeTank),
+        #   7=Massive (Corruptor, Tempest).  Type 3=Biological has no typed layer.
+        _BONUS_TYPE_SUFFIX = {1: "light", 2: "armor", 7: "massive"}
 
         for w in weapon_stats:
             p = "enemy" if is_enemy else "allied"
@@ -808,6 +828,24 @@ class ObservationTransformer:
                 self._draw_circle_vectorized(layers, idx_g, px, py, rng_g, None, w['base'], True)
             if typ in (2, 3) and idx_a is not None:
                 self._draw_circle_vectorized(layers, idx_a, px, py, rng_a, None, w['base'], True)
+
+            # Typed DPS bonus channels — bonus damage per target attribute.
+            # Each entry is the extra DPS dealt only against targets with that attribute;
+            # the base DPS is already covered by the _dps_base channels above.
+            period = w.get('period', 1.0) or 1.0
+            for bonus in w.get('bonuses', []):
+                suffix = _BONUS_TYPE_SUFFIX.get(bonus.get('type'))
+                if suffix is None:
+                    continue
+                bonus_dps = bonus.get('bonus', 0.0) / period
+                if typ in (1, 3):
+                    idx_gb = self.current_layer_map.get(f"{p}_g_dps_{suffix}")
+                    if idx_gb is not None:
+                        self._draw_circle_vectorized(layers, idx_gb, px, py, rng_g, None, bonus_dps, True)
+                if typ in (2, 3):
+                    idx_ab = self.current_layer_map.get(f"{p}_a_dps_{suffix}")
+                    if idx_ab is not None:
+                        self._draw_circle_vectorized(layers, idx_ab, px, py, rng_a, None, bonus_dps, True)
 
     def _draw_effects(self, effects, layers):
         for effect in effects:

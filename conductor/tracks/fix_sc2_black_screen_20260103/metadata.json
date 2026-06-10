@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_sc2_black_screen_20260103",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-03T00:43:00Z",
-  "updated_at": "2026-01-03T00:43:00Z",
-  "description": "Fix black screen in SC2 game window when visualization is enabled and resolve fullscreen bug."
-}

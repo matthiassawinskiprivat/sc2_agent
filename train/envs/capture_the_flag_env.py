@@ -1,5 +1,6 @@
 import gymnasium as gym
 import asyncio
+import re
 import numpy as np
 from typing import Tuple, List, Dict, Any, Optional
 import random
@@ -10,9 +11,14 @@ import os
 
 from train.envs.multi_client_env import MultiClientEnv
 from src.utils.layer_constants import LayerConstants
+from src.utils.config_manager import ConfigManager
 from src.agent.ctf_bot import CaptureTheFlagBot
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 from sc2.ids.unit_typeid import UnitTypeId
 from src.utils.spawning_utils import SpawningUtils
+from train.envs.ctf.region_loader import RegionLoader
+
+_PAIR_RE = re.compile(r"^(\d+)_(a|d)$")
 
 class CaptureTheFlagEnv(MultiClientEnv):
     def __init__(self, 
@@ -26,11 +32,20 @@ class CaptureTheFlagEnv(MultiClientEnv):
                  training_conf: Dict = None,
                  level_name: str = "capture_the_flag_0",
                  **kwargs):
-        super().__init__(map_name=map_name, level_name=level_name, **kwargs)
+        super().__init__(map_name=map_name, level_name=level_name, training_conf=training_conf, **kwargs)
         self.training_conf = training_conf or {}
         
         # Robustly load parameters from training_conf (handling flattened vs nested)
         env_conf = self.training_conf.get("env", {})
+
+        # Structured per-group roster config (new path).  Falls back to legacy flat params.
+        self.unit_pools_config: List[Dict] = (
+            self.training_conf.get("unit_pools")
+            or env_conf.get("unit_pools")
+            or []
+        )
+
+        # Legacy flat params — kept for backward compat when unit_pools_config is absent.
         self.mineral_budget = self.training_conf.get("mineral_budget", 
                                  env_conf.get("mineral_budget", mineral_budget))
         self.vespene_budget = self.training_conf.get("vespene_budget", 
@@ -46,22 +61,47 @@ class CaptureTheFlagEnv(MultiClientEnv):
         self.max_steps = max_steps
         self.steps_count = 0
         
+        # Use the config directory from training_conf (universal pipeline passes "config_universal").
+        # MultiClientEnv defaults to "config" so we override here.
+        config_dir = self.training_conf.get("config_dir", "config_universal")
+        self.config_manager = ConfigManager(config_dir)
+
+        self.agent_architecture = self.config_manager.get_agent_architecture()
+        self.training_conf.setdefault("agent_architecture", self.agent_architecture)
+
         # Dynamic Observation Layers from Curriculum
         self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
-        
-        # Inject combined layers into training_conf for the bots/agent system
         self.training_conf["active_layers"] = self.active_layers
-        
+
         # Dynamic Action Heads from Curriculum
         self.action_heads = self.config_manager.get_cumulative_action_heads(self.level_name)
         if not self.action_heads:
             self.action_heads = env_conf.get("action_heads", ["move", "attack"])
+        self.categorical_heads = self.config_manager.get_cumulative_categorical_heads(self.level_name)
         self.training_conf["action_heads"] = self.action_heads
+        self.training_conf["categorical_heads"] = self.categorical_heads
 
         num_layers = len(self.active_layers) if self.active_layers else LayerConstants.get_num_layers()
-        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32)
-        
-        # Action space is initialized in base class Level0Env (via MultiClientEnv)
+        obs_dict = {
+            "map": spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32),
+            "command": spaces.Box(low=0.0, high=1.0, shape=(10,), dtype=np.float32),
+        }
+
+        if self.agent_architecture == "universal":
+            self.active_tactical_layers = self.config_manager.get_cumulative_active_tactical_layers(self.level_name)
+            if not self.active_tactical_layers:
+                self.active_tactical_layers = self.active_layers
+            self.training_conf["active_tactical_layers"] = self.active_tactical_layers
+            self.training_conf["fixed_universal_command_dim"] = FIXED_UNIVERSAL_COMMAND_DIM
+            n_tactical = len(self.active_tactical_layers)
+            obs_dict["tactical"] = spaces.Box(low=0.0, high=1.0, shape=(n_tactical, 32, 32), dtype=np.float32)
+            self.observation_space = spaces.Dict(obs_dict)
+            self.action_space = spaces.MultiDiscrete([FIXED_UNIVERSAL_COMMAND_DIM, 32 * 32])
+        else:
+            self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32)
+            spatial_size = len(self.action_heads) * self.grid_size * self.grid_size
+            categorical_size = len(self.categorical_heads)
+            self.action_space = spaces.Discrete(spatial_size + categorical_size)
         
         self.bot1: Optional[CaptureTheFlagBot] = None
         self.bot2: Optional[CaptureTheFlagBot] = None
@@ -84,6 +124,64 @@ class CaptureTheFlagEnv(MultiClientEnv):
     def set_model(self, model):
         """Sets the model for self-play inference."""
         self.model = model
+
+    # ------------------------------------------------------------------
+    # Region helpers
+    # ------------------------------------------------------------------
+
+    def _load_region_pairs(self, map_path: str) -> Dict[int, Dict[str, Any]]:
+        """
+        Parse map regions and return only COMPLETE pairs following the {n}_{a|d}
+        naming scheme (both an '_a' and a '_d' side must be present).
+
+        Pairs where only one side exists (e.g. a defender-only marker) are
+        silently skipped — they cannot be used for spawning.
+
+        Returns:
+            {pair_index: {"a": RegionDef, "d": RegionDef}}
+        """
+        regions = RegionLoader().load(map_path)
+        raw: Dict[int, Dict[str, Any]] = {}
+        for name, region_def in regions.items():
+            m = _PAIR_RE.match(name)
+            if m:
+                idx = int(m.group(1))
+                raw.setdefault(idx, {})[m.group(2)] = region_def
+
+        complete = {idx: sides for idx, sides in raw.items() if set(sides) == {"a", "d"}}
+        incomplete = [idx for idx in raw if idx not in complete]
+        if incomplete:
+            logger.warning(
+                f"Map '{map_path}': skipping incomplete region pairs {sorted(incomplete)} "
+                "(each usable pair must have both '_a' and '_d' regions)."
+            )
+        return complete
+
+    def _assign_region_pairs(
+        self,
+        available_pairs: Dict[int, Dict[str, Any]],
+        unit_pools_config: List[Dict],
+    ) -> Dict[str, int]:
+        """
+        Randomly assign a distinct region pair index to each unique region label
+        found in *unit_pools_config*.
+
+        Labels are processed in sorted order so the mapping is deterministic for
+        a given random seed.  Raises RuntimeError if there are fewer available
+        pairs than distinct labels.
+
+        Returns:
+            {"A": 3, "B": 7, ...}  — label → pair index
+        """
+        labels = sorted({pool["region"] for pool in unit_pools_config})
+        pair_indices = list(available_pairs.keys())
+        if len(pair_indices) < len(labels):
+            raise RuntimeError(
+                f"Need {len(labels)} region pairs for labels {labels} but map "
+                f"only has {len(pair_indices)}: {sorted(pair_indices)}"
+            )
+        chosen = random.sample(pair_indices, len(labels))
+        return dict(zip(labels, chosen))
 
     async def _refresh_bot_states(self):
         """Fetches latest observation and updates bot internal state."""
@@ -160,15 +258,15 @@ class CaptureTheFlagEnv(MultiClientEnv):
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
         import math
-        
-        # 1. Clear Map (Optional for MultiClient if fresh session, but good for stability)
+
+        # 1. Clear Map
         if self.bot1.all_units.exists:
             await self.bot1.client.debug_kill_unit(self.bot1.all_units.tags)
             await self._synchronized_step()
             await self._refresh_bot_states()
 
         grid = self.bot1.game_info.pathing_grid
-        
+
         def is_pathable(pos: Point2):
             gx, gy = int(pos.x), int(pos.y)
             if 0 <= gx < grid.width and 0 <= gy < grid.height:
@@ -176,79 +274,197 @@ class CaptureTheFlagEnv(MultiClientEnv):
             return False
 
         def get_valid_pos(base_pos: Point2, max_dist=10.0):
-            if is_pathable(base_pos): return base_pos
+            if is_pathable(base_pos):
+                return base_pos
             for d in range(1, int(max_dist)):
                 for angle in range(0, 360, 45):
                     rad = math.radians(angle)
                     p = Point2((base_pos.x + d * math.cos(rad), base_pos.y + d * math.sin(rad)))
-                    if is_pathable(p): return p
+                    if is_pathable(p):
+                        return p
             return base_pos
 
-        w, h = self.bot1.game_info.playable_area.width, self.bot1.game_info.playable_area.height
-        offset_x, offset_y = self.bot1.game_info.playable_area.x, self.bot1.game_info.playable_area.y
-        
-        # 2. Generate Randomized Positions
-        requested_dist = self.training_conf.get("env", {}).get("flag_distance_min", self.flag_distance_min)
-        safe_dist = SpawningUtils.calculate_safe_distance(w, h, requested_dist)
-        
-        rel_pos1, rel_pos2 = SpawningUtils.get_random_pylon_positions(w, h, safe_dist, margin=1.0)
-        
-        # Convert to absolute and ensure pathable
-        pos1 = get_valid_pos(Point2((rel_pos1.x + offset_x, rel_pos1.y + offset_y)))
-        pos2 = get_valid_pos(Point2((rel_pos2.x + offset_x, rel_pos2.y + offset_y)))
-        
-        # 3. Spawn Pylons
-        await asyncio.gather(
-            self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]]),
-            self.bot2.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]])
-        )
-        
-        # 4. Resource spawning
-        spawns1 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
-        spawns2 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
-        
-        def to_id(name): return getattr(UnitTypeId, name)
-        
+        def to_id(name):
+            return getattr(UnitTypeId, name)
+
         def get_offset_pos(base_pos, index, total):
             angle = (2 * math.pi * index) / max(total, 1)
             dist = 3.0
             p = Point2((base_pos.x + dist * math.cos(angle), base_pos.y + dist * math.sin(angle)))
             return get_valid_pos(p)
 
-        cmds1 = [[to_id(u), 1, get_offset_pos(pos1, i, len(spawns1)), 1] for i, u in enumerate(spawns1)]
-        cmds2 = [[to_id(u), 1, get_offset_pos(pos2, i, len(spawns2)), 2] for i, u in enumerate(spawns2)]
-        
-        await asyncio.gather(
-            self.bot1.client.debug_create_unit(cmds1),
-            self.bot2.client.debug_create_unit(cmds2)
-        )
-        
-        # Advance physics multiple steps to ensure all units materialize
+        pool_spawn_centers: List[Tuple[int, str, Any]] = []
+        if self.unit_pools_config:
+            pool_spawn_centers = await self._spawn_from_unit_pools(
+                get_valid_pos, get_offset_pos, to_id
+            )
+        else:
+            await self._spawn_legacy(get_valid_pos, get_offset_pos, to_id)
+
+        # Advance physics to materialise all units
         for _ in range(3):
             await self._synchronized_step()
             await self._refresh_bot_states()
-        
-        # 5. Set reduced health for Pylons (10 HP + 10 Shield)
+
+        # Assign unit_command_map on each bot using proximity to spawn centers
+        if pool_spawn_centers:
+            self._assign_unit_commands(pool_spawn_centers)
+
+        # Set reduced pylon HP (10 HP + 10 Shield) — applies to all pylons
         p1_pylons = self.bot1.structures(UnitTypeId.PYLON)
         p2_pylons = self.bot2.structures(UnitTypeId.PYLON)
-        
         if p1_pylons.exists and p2_pylons.exists:
-            # Sequential calls to avoid 'Concurrent call to receive()' in aiohttp
             tags = [p1_pylons.first.tag, p2_pylons.first.tag]
-            await self.bot1.client.debug_set_unit_value(tags, 2, 10.0) # 2 = Health
-            await self.bot1.client.debug_set_unit_value(tags, 3, 10.0) # 3 = Shield
-            
-        # Final sync
+            await self.bot1.client.debug_set_unit_value(tags, 2, 10.0)  # Health
+            await self.bot1.client.debug_set_unit_value(tags, 3, 10.0)  # Shield
+
+        # Final syncs
         await self._synchronized_step()
         await self._refresh_bot_states()
-            
-        # Final sync
         await self._synchronized_step()
         await self._refresh_bot_states()
 
+    async def _spawn_from_unit_pools(
+        self, get_valid_pos, get_offset_pos, to_id
+    ) -> List[Tuple[int, str, Any]]:
+        """
+        Region-based spawn path driven by ``unit_pools_config``.
+
+        Region label → SC2 player mapping: sorted unique labels → player 1, 2, …
+        For each pool:
+          - high_level_command "attack" → spawn at {pair_index}_a
+          - high_level_command "defend" → spawn at {pair_index}_d + place pylon
+
+        Returns a list of (player_id, high_level_command, spawn_center_Point2) tuples
+        so the caller can populate each bot's unit_command_map after units materialise.
+        """
+        from sc2.ids.unit_typeid import UnitTypeId
+        from sc2.position import Point2
+
+        # Resolve the current map file path from the sc2 Map object
+        game_map = self._resolve_map(self.map_name)
+        map_path = str(game_map.path)
+
+        pairs = self._load_region_pairs(map_path)
+        label_to_pair = self._assign_region_pairs(pairs, self.unit_pools_config)
+
+        # Player assignment: agent:True → player 1 (trainee), absent/False → player 2.
+        # Region label identifies the battle arena — pools from different teams can
+        # share a label so their units spawn close to each other and fight.
+        client_map = {1: self._manager.clients[0], 2: self._manager.clients[1]}
+        cmds_by_player: Dict[int, List] = {1: [], 2: []}
+        pool_spawn_centers: List[Tuple[int, str, Any]] = []
+
+        for pool in self.unit_pools_config:
+            label = pool["region"]
+            player_id = 1 if pool.get("agent", False) else 2
+            pair_idx = label_to_pair[label]
+            command = pool.get("high_level_command", "attack")
+            side_char = "a" if command == "attack" else "d"
+            region_def = pairs[pair_idx][side_char]
+
+            center = region_def.center
+            spawn_center = Point2((center.x, center.y))
+            pool_spawn_centers.append((player_id, command, spawn_center))
+
+            unit_names = self._calculate_spawns_for_pool(pool)
+            for i, name in enumerate(unit_names):
+                pos = get_offset_pos(spawn_center, i, len(unit_names))
+                cmds_by_player[player_id].append([to_id(name), 1, pos, player_id])
+
+            # Defender pools also own the flag (pylon) at the region centre
+            if side_char == "d":
+                pylon_pos = get_valid_pos(spawn_center)
+                cmds_by_player[player_id].append(
+                    [UnitTypeId.PYLON, 1, pylon_pos, player_id]
+                )
+
+        # Issue spawn commands
+        for player_id, cmds in cmds_by_player.items():
+            if cmds:
+                await client_map[player_id].debug_create_unit(cmds)
+
+        return pool_spawn_centers
+
+    def _assign_unit_commands(
+        self, pool_spawn_centers: List[Tuple[int, str, Any]]
+    ) -> None:
+        """
+        Populate ``bot.unit_command_map`` by assigning each spawned unit to the
+        pool whose spawn center is nearest to the unit's current position.
+
+        Called after units have materialised (post-sync) so that
+        ``bot.units`` reflects the newly spawned roster.
+
+        Args:
+            pool_spawn_centers: list of (player_id, high_level_command, Point2 center)
+                returned by ``_spawn_from_unit_pools``.
+        """
+        import math
+        from sc2.position import Point2
+
+        bot_map = {1: self.bot1, 2: self.bot2}
+
+        for player_id, bot in bot_map.items():
+            bot.unit_command_map = {}
+            # Centers relevant to this player
+            player_centers = [
+                (cmd, center)
+                for pid, cmd, center in pool_spawn_centers
+                if pid == player_id
+            ]
+            if not player_centers:
+                continue
+
+            for unit in bot.units:
+                best_cmd = player_centers[0][0]
+                best_dist = math.inf
+                for cmd, center in player_centers:
+                    d = unit.distance_to(Point2((center.x, center.y)))
+                    if d < best_dist:
+                        best_dist = d
+                        best_cmd = cmd
+                bot.unit_command_map[unit.tag] = best_cmd
+
+    async def _spawn_legacy(self, get_valid_pos, get_offset_pos, to_id):
+        """Original random-position pylon + budget spawn path (backward compat)."""
+        from sc2.ids.unit_typeid import UnitTypeId
+        from sc2.position import Point2
+
+        w = self.bot1.game_info.playable_area.width
+        h = self.bot1.game_info.playable_area.height
+        offset_x = self.bot1.game_info.playable_area.x
+        offset_y = self.bot1.game_info.playable_area.y
+
+        requested_dist = self.training_conf.get("env", {}).get(
+            "flag_distance_min", self.flag_distance_min
+        )
+        safe_dist = SpawningUtils.calculate_safe_distance(w, h, requested_dist)
+        rel_pos1, rel_pos2 = SpawningUtils.get_random_pylon_positions(w, h, safe_dist, margin=1.0)
+
+        pos1 = get_valid_pos(Point2((rel_pos1.x + offset_x, rel_pos1.y + offset_y)))
+        pos2 = get_valid_pos(Point2((rel_pos2.x + offset_x, rel_pos2.y + offset_y)))
+
+        await asyncio.gather(
+            self.bot1.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos1, 1]]),
+            self.bot2.client.debug_create_unit([[UnitTypeId.PYLON, 1, pos2, 2]]),
+        )
+
+        spawns1 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
+        spawns2 = self._calculate_spawns(self.mineral_budget, self.vespene_budget)
+
+        cmds1 = [[to_id(u), 1, get_offset_pos(pos1, i, len(spawns1)), 1] for i, u in enumerate(spawns1)]
+        cmds2 = [[to_id(u), 1, get_offset_pos(pos2, i, len(spawns2)), 2] for i, u in enumerate(spawns2)]
+
+        await asyncio.gather(
+            self.bot1.client.debug_create_unit(cmds1),
+            self.bot2.client.debug_create_unit(cmds2),
+        )
+
     def _calculate_spawns(self, m, v):
+        """Legacy budget-greedy spawn for the flat unit_pool path."""
         spawns = []
-        
+
         def can_afford(u):
             if u not in self.unit_data:
                 logger.error(f"Unit {u} not found in unit_data.json. Skipping.")
@@ -264,7 +480,30 @@ class CaptureTheFlagEnv(MultiClientEnv):
             m -= cost["minerals"]
             v -= cost["vespene"]
             affordable = [u for u in self.unit_pool if can_afford(u)]
-            
+        return spawns
+
+    def _calculate_spawns_for_pool(self, pool: Dict) -> List[str]:
+        """Budget-greedy spawn list derived from a single unit_pools entry."""
+        m = pool.get("mineral_budget", 0)
+        v = pool.get("vespene_budget", 0)
+        unit_pool = pool.get("unit_pool", [])
+
+        def can_afford(u):
+            if u not in self.unit_data:
+                logger.error(f"Unit {u} not found in unit_data.json. Skipping.")
+                return False
+            cost = self.unit_data[u]["cost"]
+            return cost["minerals"] <= m and cost["vespene"] <= v
+
+        spawns = []
+        affordable = [u for u in unit_pool if can_afford(u)]
+        while affordable:
+            u = random.choice(affordable)
+            spawns.append(u)
+            cost = self.unit_data[u]["cost"]
+            m -= cost["minerals"]
+            v -= cost["vespene"]
+            affordable = [u for u in unit_pool if can_afford(u)]
         return spawns
 
     async def _refresh_unit_lists(self):
@@ -411,6 +650,28 @@ class CaptureTheFlagEnv(MultiClientEnv):
         
         return combat_units.amount > 0
 
+    def _trainee_has_mixed_roles(self) -> bool:
+        """
+        Returns True when the trainee player has BOTH an "attack" and a "defend"
+        pool in unit_pools_config (i.e. a mixed-role team).
+
+        In that case a timeout (draw) is not a pure failure — defenders may have
+        kept the pylon alive intentionally — so draw_penalty should be suppressed.
+        """
+        if not self.unit_pools_config:
+            return False
+
+        sorted_labels = sorted({p["region"] for p in self.unit_pools_config})
+        label_to_player = {label: i + 1 for i, label in enumerate(sorted_labels)}
+        trainee_player_id = 1 if self.bot1.is_trainee else 2
+
+        trainee_commands = {
+            pool["high_level_command"]
+            for pool in self.unit_pools_config
+            if label_to_player.get(pool["region"]) == trainee_player_id
+        }
+        return "attack" in trainee_commands and "defend" in trainee_commands
+
     def _check_termination(self) -> Tuple[bool, bool, float]:
         """Checks if the game should end and returns (done, truncated, reward_delta)."""
         p1_pylons = self.bot1.structures(UnitTypeId.PYLON)
@@ -454,8 +715,13 @@ class CaptureTheFlagEnv(MultiClientEnv):
             
         truncated = self.steps_count >= self.max_steps
         if truncated and not done:
-            reward_delta += draw_penalty
-            
+            # Only apply draw_penalty when the trainee is a pure attacker.
+            # If the team has mixed roles (both "attack" and "defend" pools),
+            # a timeout is not a failure — the defenders may have done their job
+            # by keeping the pylon alive — so the penalty is suppressed.
+            if not self._trainee_has_mixed_roles():
+                reward_delta += draw_penalty
+
         return done, truncated, reward_delta
 
 
@@ -464,8 +730,10 @@ class CaptureTheFlagEnv(MultiClientEnv):
         active_bot = self.bot1 if self.active_player_id == 1 else self.bot2
         if active_bot:
             return active_bot.action_masks()
-        
-        # Fallback
+
+        # Fallback before bots are ready
+        if isinstance(self.action_space, spaces.MultiDiscrete):
+            return np.ones(int(np.sum(self.action_space.nvec)), dtype=bool)
         return np.ones(self.action_space.n, dtype=bool)
 
     def _determine_winner(self) -> Optional[int]:

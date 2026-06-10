@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_level_0_pickle_error_20260104",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-04T14:13:00Z",
-  "updated_at": "2026-01-04T14:13:00Z",
-  "description": "Fix AttributeError: Can't pickle local object in train_pipeline.py when starting level 0."
-}

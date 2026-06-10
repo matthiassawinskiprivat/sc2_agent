@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_loading_ability_20260117",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2026-01-17T19:18:00Z",
-  "updated_at": "2026-01-17T19:18:00Z",
-  "description": "Change the load function to use AbilityId for all races, supporting both units entering transports and transports picking up units."
-}

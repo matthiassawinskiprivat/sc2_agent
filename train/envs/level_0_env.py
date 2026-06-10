@@ -533,6 +533,18 @@ class Level0Env(gym.Env):
             return int(self._bot.zergling.tag)
         return -1
 
+    def requires_policy_action(self) -> bool:
+        """Non-CTF envs always need a policy forward each step."""
+        return True
+
+    def prepare_squad_policy_batch(self):
+        """CTF-only batching hook; other levels use per-step inference."""
+        return None
+
+    def prepare_policy_batch(self):
+        """Unified batching hook; non-CTF envs always return None."""
+        return self.prepare_squad_policy_batch()
+
     def action_masks(self):
         mask = None
         if self._bot and hasattr(self._bot, "action_masks"):

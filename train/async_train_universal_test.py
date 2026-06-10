@@ -524,7 +524,7 @@ class AsyncLearner:
             "policy_kwargs": policy_kwargs,
             "device": "cuda" if torch.cuda.is_available() else "cpu",
             "tensorboard_log": self.log_dir,
-            "target_kl": model_params.get("target_kl"),
+            "target_kl": training_params.get("target_kl", model_params.get("target_kl")),
         }
         if AlgoClass == MaskableRecurrentPPO:
             algo_kwargs["rnn_type"] = rnn_type
@@ -714,22 +714,33 @@ class AsyncLearner:
                         logger.warning(f"Payload not found for {d}, skipping")
                         continue
 
-                    # Ensure memmaps are bound (Lazy binding on first use)
-                    for key in dummy_env.observation_space.keys():
-                        if key in ["map", "tactical"]:
-                            if key not in target_buffer.observations or not isinstance(target_buffer.observations[key], np.memmap):
-                                filename = os.path.join(instance_dir, f"obs_{key}.bin")
-                                if os.path.exists(filename):
-                                    subspace = dummy_env.observation_space.spaces[key]
-                                    shape = (meta["buffer_size"], meta["n_envs"], *subspace.shape)
-                                    target_buffer.observations[key] = np.memmap(filename, dtype=np.float32, mode='r+', shape=shape)
-                        elif key not in target_buffer.observations:
-                            subspace = dummy_env.observation_space.spaces[key]
-                            target_buffer.observations[key] = np.zeros((meta["buffer_size"], meta["n_envs"], *subspace.shape), dtype=np.float32)
+                    from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
+
+                    if meta.get("ipc_backend") == "shared_memory":
+                        from src.agent.utils.async_shared_ram_buffer import AsyncSharedRamBuffer
+
+                        AsyncSharedRamBuffer.attach_shared_observations(
+                            target_buffer, meta
+                        )
+                    else:
+                        AsyncDiskBuffer.attach_disk_observations(
+                            target_buffer, instance_dir, meta
+                        )
+                        for key in dummy_env.observation_space.keys():
+                            if key in ("map", "tactical"):
+                                continue
+                            if key not in target_buffer.observations:
+                                subspace = dummy_env.observation_space.spaces[key]
+                                target_buffer.observations[key] = np.zeros(
+                                    (meta["buffer_size"], meta["n_envs"], *subspace.shape),
+                                    dtype=np.float32,
+                                )
 
                     model.rollout_buffer = target_buffer
                     model.rollout_buffer.full = True
-                    model.rollout_buffer.pos = meta["buffer_size"]
+                    model.rollout_buffer.pos = int(
+                        meta.get("filled_steps", meta["buffer_size"])
+                    )
                     
                     # Log ALL metrics passed from Collector
                     for key, val in meta.items():

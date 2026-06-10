@@ -1081,6 +1081,7 @@ class Level7Bot(Level3Bot):
         # cooldown instead of enemy contact.
         if (
             cooldown_retreat_scale != 0.0
+            and ally_range > 1.5
             and moved_now
             and pre_action_cd is not None
             and float(pre_action_cd) > eps
