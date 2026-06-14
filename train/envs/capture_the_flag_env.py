@@ -109,6 +109,9 @@ class CaptureTheFlagEnv(MultiClientEnv):
         self.active_player_id = 1
         self.current_unit_index = 0
         self.player_units = {1: [], 2: []}
+
+        # Arena label → defender (_d) center; used for spawn-time unit_target_map.
+        self.label_to_defender_pos: Dict[str, Any] = {}
         
         # Self-play model
         self.model = None
@@ -293,22 +296,27 @@ class CaptureTheFlagEnv(MultiClientEnv):
             p = Point2((base_pos.x + dist * math.cos(angle), base_pos.y + dist * math.sin(angle)))
             return get_valid_pos(p)
 
-        pool_spawn_centers: List[Tuple[int, str, Any]] = []
+        pool_spawn_centers: List[Tuple[int, str, Any, str]] = []
+        label_to_defender_pos: Dict[str, Any] = {}
+        legacy_targets = None
         if self.unit_pools_config:
-            pool_spawn_centers = await self._spawn_from_unit_pools(
+            pool_spawn_centers, label_to_defender_pos = await self._spawn_from_unit_pools(
                 get_valid_pos, get_offset_pos, to_id
             )
         else:
-            await self._spawn_legacy(get_valid_pos, get_offset_pos, to_id)
+            legacy_targets = await self._spawn_legacy(get_valid_pos, get_offset_pos, to_id)
 
         # Advance physics to materialise all units
         for _ in range(3):
             await self._synchronized_step()
             await self._refresh_bot_states()
 
-        # Assign unit_command_map on each bot using proximity to spawn centers
+        # Assign unit_command_map / unit_target_map on each bot after materialisation.
         if pool_spawn_centers:
-            self._assign_unit_commands(pool_spawn_centers)
+            self.label_to_defender_pos = label_to_defender_pos
+            self._assign_unit_commands(pool_spawn_centers, label_to_defender_pos)
+        elif legacy_targets:
+            self._assign_legacy_unit_targets(*legacy_targets)
 
         # Set reduced pylon HP (10 HP + 10 Shield) — applies to all pylons
         p1_pylons = self.bot1.structures(UnitTypeId.PYLON)
@@ -326,7 +334,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
 
     async def _spawn_from_unit_pools(
         self, get_valid_pos, get_offset_pos, to_id
-    ) -> List[Tuple[int, str, Any]]:
+    ) -> Tuple[List[Tuple[int, str, Any, str]], Dict[str, Any]]:
         """
         Region-based spawn path driven by ``unit_pools_config``.
 
@@ -335,8 +343,9 @@ class CaptureTheFlagEnv(MultiClientEnv):
           - high_level_command "attack" → spawn at {pair_index}_a
           - high_level_command "defend" → spawn at {pair_index}_d + place pylon
 
-        Returns a list of (player_id, high_level_command, spawn_center_Point2) tuples
-        so the caller can populate each bot's unit_command_map after units materialise.
+        Returns:
+            pool_spawn_centers: (player_id, high_level_command, spawn_center, region_label)
+            label_to_defender_pos: arena label → Point2 of the _d center (flag objective)
         """
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
@@ -348,12 +357,21 @@ class CaptureTheFlagEnv(MultiClientEnv):
         pairs = self._load_region_pairs(map_path)
         label_to_pair = self._assign_region_pairs(pairs, self.unit_pools_config)
 
+        label_to_defender_pos: Dict[str, Any] = {}
+        for pool in self.unit_pools_config:
+            if pool.get("high_level_command", "attack") == "defend":
+                label = pool["region"]
+                if label not in label_to_defender_pos:
+                    pair_idx = label_to_pair[label]
+                    d_center = pairs[pair_idx]["d"].center
+                    label_to_defender_pos[label] = Point2((d_center.x, d_center.y))
+
         # Player assignment: agent:True → player 1 (trainee), absent/False → player 2.
         # Region label identifies the battle arena — pools from different teams can
         # share a label so their units spawn close to each other and fight.
         client_map = {1: self._manager.clients[0], 2: self._manager.clients[1]}
         cmds_by_player: Dict[int, List] = {1: [], 2: []}
-        pool_spawn_centers: List[Tuple[int, str, Any]] = []
+        pool_spawn_centers: List[Tuple[int, str, Any, str]] = []
 
         for pool in self.unit_pools_config:
             label = pool["region"]
@@ -365,7 +383,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
 
             center = region_def.center
             spawn_center = Point2((center.x, center.y))
-            pool_spawn_centers.append((player_id, command, spawn_center))
+            pool_spawn_centers.append((player_id, command, spawn_center, label))
 
             unit_names = self._calculate_spawns_for_pool(pool)
             for i, name in enumerate(unit_names):
@@ -384,21 +402,23 @@ class CaptureTheFlagEnv(MultiClientEnv):
             if cmds:
                 await client_map[player_id].debug_create_unit(cmds)
 
-        return pool_spawn_centers
+        return pool_spawn_centers, label_to_defender_pos
 
     def _assign_unit_commands(
-        self, pool_spawn_centers: List[Tuple[int, str, Any]]
+        self,
+        pool_spawn_centers: List[Tuple[int, str, Any, str]],
+        label_to_defender_pos: Dict[str, Any],
     ) -> None:
         """
-        Populate ``bot.unit_command_map`` by assigning each spawned unit to the
-        pool whose spawn center is nearest to the unit's current position.
+        Populate ``bot.unit_command_map`` and ``bot.unit_target_map`` by assigning
+        each spawned unit to the pool whose spawn center is nearest.
 
-        Called after units have materialised (post-sync) so that
-        ``bot.units`` reflects the newly spawned roster.
+        ``unit_target_map[tag]`` is the _d (defender pylon) center for that unit's
+        arena — the navigation objective for attackers and defenders alike.
 
         Args:
-            pool_spawn_centers: list of (player_id, high_level_command, Point2 center)
-                returned by ``_spawn_from_unit_pools``.
+            pool_spawn_centers: (player_id, high_level_command, Point2 center, label)
+            label_to_defender_pos: arena label → defender center Point2
         """
         import math
         from sc2.position import Point2
@@ -407,24 +427,46 @@ class CaptureTheFlagEnv(MultiClientEnv):
 
         for player_id, bot in bot_map.items():
             bot.unit_command_map = {}
-            # Centers relevant to this player
+            bot.unit_target_map = {}
             player_centers = [
-                (cmd, center)
-                for pid, cmd, center in pool_spawn_centers
+                (cmd, center, label)
+                for pid, cmd, center, label in pool_spawn_centers
                 if pid == player_id
             ]
             if not player_centers:
                 continue
 
             for unit in bot.units:
+                if unit.is_structure:
+                    continue
                 best_cmd = player_centers[0][0]
+                best_label = player_centers[0][2]
                 best_dist = math.inf
-                for cmd, center in player_centers:
+                for cmd, center, label in player_centers:
                     d = unit.distance_to(Point2((center.x, center.y)))
                     if d < best_dist:
                         best_dist = d
                         best_cmd = cmd
+                        best_label = label
                 bot.unit_command_map[unit.tag] = best_cmd
+                if best_label in label_to_defender_pos:
+                    bot.unit_target_map[unit.tag] = label_to_defender_pos[best_label]
+
+    def _assign_legacy_unit_targets(
+        self, p1_pylon_pos: Any, p2_pylon_pos: Any
+    ) -> None:
+        """Legacy spawn: each player's units target the opponent's pylon."""
+        for bot, enemy_pylon_pos in (
+            (self.bot1, p2_pylon_pos),
+            (self.bot2, p1_pylon_pos),
+        ):
+            bot.unit_command_map = {}
+            bot.unit_target_map = {}
+            for unit in bot.units:
+                if unit.is_structure:
+                    continue
+                bot.unit_command_map[unit.tag] = "attack"
+                bot.unit_target_map[unit.tag] = enemy_pylon_pos
 
     async def _spawn_legacy(self, get_valid_pos, get_offset_pos, to_id):
         """Original random-position pylon + budget spawn path (backward compat)."""
@@ -460,6 +502,7 @@ class CaptureTheFlagEnv(MultiClientEnv):
             self.bot1.client.debug_create_unit(cmds1),
             self.bot2.client.debug_create_unit(cmds2),
         )
+        return pos1, pos2
 
     def _calculate_spawns(self, m, v):
         """Legacy budget-greedy spawn for the flat unit_pool path."""

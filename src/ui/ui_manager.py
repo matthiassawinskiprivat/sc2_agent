@@ -24,19 +24,26 @@ from src.utils.layer_constants import LayerConstants
 class UIManager:
     """Manages UI functionality separate from core agent"""
 
-    def __init__(self, agent: UnitControlAgent, display_size: tuple[int, int] = (512, 512)):
+    def __init__(
+        self,
+        agent: UnitControlAgent,
+        global_display_size: tuple[int, int] = (768, 768),
+        tactical_display_size: tuple[int, int] = (512, 512),
+    ):
         """
         Initialize UI Manager
 
         Args:
             agent: Core unit control agent
-            display_size: (width, height) for UI display. Default 512x512 (4x upscale for 128x128).
+            global_display_size: Upscaled size for the 128×128 global view.
+            tactical_display_size: Upscaled size for the 32×32 tactical view.
         """
         self.agent = agent
-        self.display_size = display_size
+        self.global_display_size = global_display_size
+        self.tactical_display_size = tactical_display_size
 
-        # UI components
-        self.ui_transformer = RealTimeUITransformer(display_size=display_size)
+        self.global_ui_transformer = RealTimeUITransformer(display_size=global_display_size)
+        self.tactical_ui_transformer = RealTimeUITransformer(display_size=tactical_display_size)
 
         # Robustly load layers directly from the dictionary keys
         self.enabled_layers = list(LayerConstants.LAYERS.keys())
@@ -93,11 +100,11 @@ class UIManager:
 
                     if global_obs is not None:
                         # Create UI visualization for global map
-                        global_frame = self.ui_transformer.update_display(
+                        global_frame = self.global_ui_transformer.update_display(
                             global_obs,
                             self.enabled_layers,
                             fps=self.current_fps,
-                            active_layers=getattr(self.agent, "active_layers", self.active_layers)
+                            active_layers=getattr(self.agent, "active_layers", self.active_layers),
                         )
                         
                         # Create UI visualization for tactical map (if available)
@@ -111,7 +118,7 @@ class UIManager:
                                 tact_active = sorted(LayerConstants.TACTICAL_LAYERS.keys(), 
                                                    key=lambda k: LayerConstants.TACTICAL_LAYERS[k])
                                                    
-                            tactical_frame = self.ui_transformer.update_display(
+                            tactical_frame = self.tactical_ui_transformer.update_display(
                                 tactical_obs,
                                 self.enabled_tactical_layers,
                                 active_layers=tact_active
@@ -186,7 +193,9 @@ class UIManager:
             info = {
                 'name': layer_name,
                 'enabled': layer_name in enabled_list,
-                'color': self.ui_transformer.layer_colors.get(layer_name, [1.0, 1.0, 1.0]),
+                'color': self.global_ui_transformer.layer_colors.get(
+                    layer_name, [1.0, 1.0, 1.0]
+                ),
                 'description': ""
             }
             layer_info.append(info)

@@ -366,7 +366,7 @@
       "vespene": 125,
       "supply": 3.0
     },
-    "radius": 0.875,
+    "radius": 2.0,
     "sight": 9.0,
     "detect": 0.0,
     "weapons": [
@@ -376,6 +376,7 @@
         "attacks": 1,
         "period": 3.0,
         "range": 13.0,
+        "min_range": 2.0,
         "upgrade_bonus": 3,
         "bonuses": [
           {
@@ -607,7 +608,7 @@
       "vespene": 200,
       "supply": 6.0
     },
-    "radius": 0.0,
+    "radius": 1.875,
     "sight": 9.0,
     "detect": 0.0,
     "weapons": [

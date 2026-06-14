@@ -9,6 +9,7 @@ from typing import Any, Tuple, Dict, Optional, List
 from sc2.position import Point2
 from src.agent.unit_control_agent import UnitControlAgent
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+from src.utils.obs_geometry import world_to_tactical_obs_pixel
 
 class UniversalUnitControlAgent(UnitControlAgent):
     def __init__(self, cnn_input_size: Tuple[int, int] = (128, 128), 
@@ -85,3 +86,45 @@ class UniversalUnitControlAgent(UnitControlAgent):
             return super().convert_spatial_action_to_world(spatial_idx, active_unit=active_unit)
         finally:
             self.grid_size = old_grid_size
+
+    def world_to_tactical_cnn_pixel(self, world_x: float, world_y: float, active_unit: Any) -> Tuple[int, int]:
+        """Map a game-world point to tactical observation pixel indices (32×32)."""
+        if active_unit is None:
+            return 16, 15
+        pos = active_unit.position
+        return world_to_tactical_obs_pixel(
+            world_x, world_y, float(pos.x), float(pos.y)
+        )
+
+    @staticmethod
+    def _debug_world_key(wx: float, wy: float) -> Tuple[float, float]:
+        """Stable world target key — SC2 order targets can jitter sub-unit between steps."""
+        return (round(float(wx), 1), round(float(wy), 1))
+
+    def clear_debug_click_pin(self) -> None:
+        """Drop stored click overlay (e.g. when the current order ends)."""
+        self.last_debug_click = None
+
+    def record_debug_click(self, world_pos: Any, active_unit: Any) -> None:
+        """Store the latest player order target for debug UI overlays."""
+        wx, wy = float(world_pos.x), float(world_pos.y)
+        world_key = self._debug_world_key(wx, wy)
+        tactical_px, tactical_py = self.world_to_tactical_cnn_pixel(wx, wy, active_unit)
+        global_px, global_py = self.world_to_cnn_pixel(wx, wy)
+
+        old_grid = self.grid_size
+        self.grid_size = self.spatial_resolution
+        try:
+            global_spatial = self.get_grid_index_at_world_pos(world_pos)
+        finally:
+            self.grid_size = old_grid
+
+        res = self.spatial_resolution
+        self.last_debug_click = {
+            "world": world_key,
+            "global_cnn": (global_px, global_py),
+            "tactical_cnn": (tactical_px, tactical_py),
+            "global_spatial": int(global_spatial),
+            "tactical_spatial": int(tactical_py * res + tactical_px),
+        }
+        self.last_action = [0, int(global_spatial)]

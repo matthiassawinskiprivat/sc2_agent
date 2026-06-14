@@ -5,7 +5,7 @@ and handles the communication with the main process.
 
 import numpy as np
 from collections import Counter
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 import multiprocessing
 import multiprocessing.connection
 import random
@@ -260,15 +260,26 @@ class SC2Bot(BotAI):
             # Actually send the byte-packet to the StarCraft II engine
             self.do(cmd)
 
-    async def reset_game_state(self, verify: bool = True, strict_empty_map: bool = True):
+    async def reset_game_state(
+        self,
+        verify: bool = True,
+        strict_empty_map: bool = True,
+        cleanup_predicate: Optional[Callable[[Any], bool]] = None,
+    ):
         """
-        Base reset logic: full vision and kill all non-neutral units.
+        Base reset logic: full vision and kill units matched by ``cleanup_predicate``.
+
+        Default predicate removes all non-neutral units except static map props in
+        ``MAP_CLEANUP_IGNORE_TYPE_IDS``. Level3 movement on 1v1 ladder maps passes
+        a narrower predicate (own zerglings/beacons only) so pre-placed enemy-slot
+        map units are not counted or targeted.
 
         Some ladder/editor maps leave non-neutral units that do not disappear in
         time (or ignore debug_kill). Level3 multi-unit training sets
         strict_empty_map=False so we still run cleanup but can spawn the scripted
         scenario afterward without killing the worker.
         """
+        predicate = cleanup_predicate or unit_is_subject_to_map_cleanup
         self.previous_distance = None
         self.unit_tags_received_action.clear()
         
@@ -286,23 +297,30 @@ class SC2Bot(BotAI):
         for attempt in range(max_cleanup_attempts):
             # IMPORTANT: We only try to kill units that ARE killable.
             # Neutral units (minerals, etc) cannot be killed and will cause the loop to fail if we include them.
-            killable_units = self.all_units.filter(unit_is_subject_to_map_cleanup)
+            killable_units = self.all_units.filter(predicate)
             
             if not killable_units:
                 break
-                
-            logger.info(f"Cleanup attempt {attempt+1}: Killing {killable_units.amount} units.")
+
+            alliance_hist = Counter(
+                getattr(getattr(u, "alliance", None), "name", str(getattr(u, "alliance", "?")))
+                for u in killable_units
+            )
+            logger.info(
+                f"Cleanup attempt {attempt+1}: Killing {killable_units.amount} units "
+                f"(alliance={dict(alliance_hist)})."
+            )
             await self.client.debug_kill_unit([u.tag for u in killable_units])
             for _ in range(steps_after_kill):
                 await self.client.step()
             await self._refresh_state()
             
             # Re-check killable units
-            killable_units = self.all_units.filter(unit_is_subject_to_map_cleanup)
+            killable_units = self.all_units.filter(predicate)
             if not killable_units:
                 break
         
-        remaining_killable = self.all_units.filter(unit_is_subject_to_map_cleanup)
+        remaining_killable = self.all_units.filter(predicate)
         if remaining_killable:
             n = remaining_killable.amount
             type_hist = Counter(
@@ -520,8 +538,8 @@ class SC2Bot(BotAI):
         # For multi-unit levels (Level 3+), we pick the beacon CLOSEST to the active unit.
         self.beacon = None
         
-        # Collect all potential beacons/targets
-        potential_beacons = self.all_units.filter(lambda u: u.type_id in {
+        # Own beacons / placement pylons only — never enemy structures (e.g. Protoss pylon).
+        potential_beacons = self.units.filter(lambda u: u.type_id in {
             UnitTypeId.BEACON_TERRANSMALL, UnitTypeId.PYLON
         })
         
@@ -540,7 +558,11 @@ class SC2Bot(BotAI):
 
         # 2. Layer Preparation: Beacons must be in 'enemy_units' layer for training parity
         enemies = list(self.enemy_units)
-        if self.beacon and self.beacon not in self.enemy_units:
+        if (
+            self.beacon
+            and self.beacon not in self.enemy_units
+            and not getattr(self.beacon, "is_structure", False)
+        ):
             enemies.append(self.beacon)
         
         # command_target is the GOAL (Beacon/Target), not the last action.
@@ -557,6 +579,8 @@ class SC2Bot(BotAI):
             'enemy_units': enemies,
             'structures': self.structures,
             'enemy_structures': self.enemy_structures,
+            'mineral_field': list(getattr(self, "mineral_field", []) or []),
+            'vespene_geyser': list(getattr(self, "vespene_geyser", []) or []),
             'effects': getattr(self.state, "effects", []),
             'game_info': getattr(self, "game_info", getattr(self, "_game_info", None)),
             'game_data': getattr(self, "game_data", getattr(self, "_game_data", None)),
@@ -642,6 +666,78 @@ def resolve_tactical_active_unit_for_debug(bot: Any) -> Tuple[Optional[Unit], Op
     return active, tag
 
 
+def sync_agent_debug_click_overlay(
+    agent: Any,
+    active_unit: Optional[Unit],
+    *,
+    cache: Any = None,
+    cache_attr: str = "_last_debug_order_key",
+) -> None:
+    """Mirror the active unit's current order target onto a debug UI agent."""
+    agent.debug_active_unit = active_unit
+    if active_unit is None or not hasattr(agent, "record_debug_click"):
+        if cache is not None:
+            setattr(cache, cache_attr, None)
+        if hasattr(agent, "clear_debug_click_pin"):
+            agent.clear_debug_click_pin()
+        return
+
+    target = _extract_order_target(active_unit)
+    if target is None:
+        if cache is not None:
+            setattr(cache, cache_attr, None)
+        if hasattr(agent, "clear_debug_click_pin"):
+            agent.clear_debug_click_pin()
+        return
+
+    order_key = (
+        active_unit.tag,
+        round(float(target.x), 1),
+        round(float(target.y), 1),
+    )
+    prev = getattr(cache, cache_attr, None) if cache is not None else None
+    if order_key == prev:
+        return
+    if cache is not None:
+        setattr(cache, cache_attr, order_key)
+    agent.record_debug_click(target, active_unit)
+
+
+def _extract_order_target(unit: Unit) -> Optional[Point2]:
+    """Return the world target of the unit's current order, if any.
+
+    Reads ``unit._proto.orders`` directly so unknown ``ability_id`` values (e.g. probe
+    gather on newer clients) do not crash ``UnitOrder.from_proto`` / ``unit.orders``.
+    """
+    proto = getattr(unit, "_proto", None)
+    proto_orders = getattr(proto, "orders", None) if proto is not None else None
+    if not proto_orders:
+        return None
+    order = proto_orders[0]
+    has_field = getattr(order, "HasField", None)
+    if callable(has_field) and has_field("target_world_space_pos"):
+        pos = order.target_world_space_pos
+        return Point2((float(pos.x), float(pos.y)))
+    unit_tag = int(getattr(order, "target_unit_tag", 0) or 0)
+    if unit_tag:
+        bot = getattr(unit, "_bot_object", None)
+        if bot is not None:
+            target_unit = None
+            for collection_name in ("units", "structures", "all_units"):
+                collection = getattr(bot, collection_name, None)
+                if collection is None:
+                    continue
+                finder = getattr(collection, "find_by_tag", None)
+                if callable(finder):
+                    target_unit = finder(unit_tag)
+                if target_unit is not None:
+                    break
+            if target_unit is not None and hasattr(target_unit, "position"):
+                pos = target_unit.position
+                return Point2((float(pos.x), float(pos.y)))
+    return None
+
+
 class UnitControlBot(BotAI):
     """
     Standalone bot implementation for visualizer and demo modes.
@@ -651,11 +747,61 @@ class UnitControlBot(BotAI):
         super().__init__()
         self.agent_system = agent_system
         self.agent_id = agent_id
-        
+        self._last_debug_order_key: Optional[Tuple[int, Any]] = None
+        self._manual_spatial_moves: list = []
+
+    def queue_manual_spatial_move(self, command_name: str, gx: int, gy: int) -> None:
+        """Queue a debug UI spatial move (same decode path as universal policy actuation)."""
+        self._manual_spatial_moves.append((str(command_name), int(gx), int(gy)))
+
+    async def on_start(self) -> None:
+        """New map — drop cached observations/terrain from the previous game."""
+        self.agent_system.shared_transformer.clear_cache()
+        tr = self.agent_system.shared_transformer.transformer
+        tr._terrain_caches.clear()
+        tr._last_map_name = None
+        tr._map_terrain_h_min = None
+        tr._map_terrain_tier_max = None
+        tr._map_terrain_h_scale_map = None
+
+    def _track_debug_click(self, agent: Any, active_unit: Optional[Unit]) -> None:
+        sync_agent_debug_click_overlay(agent, active_unit, cache=self)
+
+    async def _apply_manual_spatial_moves(self) -> None:
+        if not self._manual_spatial_moves:
+            return
+        from src.ui.spatial_debug_control import spatial_idx_from_grid
+
+        agent = self.agent_system.unit_agents.get(self.agent_id)
+        if agent is None:
+            self._manual_spatial_moves.clear()
+            return
+        if self.game_info is not None:
+            agent.last_game_info = self.game_info
+
+        active_unit, _ = resolve_tactical_active_unit_for_debug(self)
+        if active_unit is None:
+            self._manual_spatial_moves.clear()
+            return
+
+        convert = getattr(agent, "convert_spatial_action_to_world", None)
+        if convert is None:
+            self._manual_spatial_moves.clear()
+            return
+
+        moves = list(self._manual_spatial_moves)
+        self._manual_spatial_moves.clear()
+        for command_name, gx, gy in moves:
+            spatial_idx = spatial_idx_from_grid(gx, gy)
+            wx, wy = convert(command_name, spatial_idx, active_unit=active_unit)
+            self.do(active_unit.move(Point2((float(wx), float(wy)))))
+            if hasattr(agent, "record_debug_click"):
+                agent.record_debug_click(Point2((float(wx), float(wy))), active_unit)
+
     async def on_step(self, iteration: int):
         # 1. Capture Raw Observation components
         beacon = None
-        potential_beacons = self.all_units.filter(lambda u: u.type_id in {
+        potential_beacons = self.units.filter(lambda u: u.type_id in {
             UnitTypeId.BEACON_TERRANSMALL, UnitTypeId.PYLON,
             UnitTypeId.BEACON_TERRAN, UnitTypeId.BEACON_PROTOSS, UnitTypeId.BEACON_ZERG
         })
@@ -666,9 +812,13 @@ class UnitControlBot(BotAI):
             else:
                 beacon = potential_beacons.first
 
-        # Ensure beacon is in enemy_units list for rendering on enemy_unit_density
+        # Ensure non-structure beacons are in enemy_units for enemy_unit_density rendering.
         enemy_units = list(self.enemy_units)
-        if beacon and beacon not in self.enemy_units:
+        if (
+            beacon
+            and beacon not in self.enemy_units
+            and not getattr(beacon, "is_structure", False)
+        ):
             enemy_units.append(beacon)
 
         raw_obs = {
@@ -676,11 +826,13 @@ class UnitControlBot(BotAI):
             'enemy_units': enemy_units,
             'structures': self.structures,
             'enemy_structures': self.enemy_structures,
+            'mineral_field': list(getattr(self, "mineral_field", []) or []),
+            'vespene_geyser': list(getattr(self, "vespene_geyser", []) or []),
             'effects': self.state.effects,
             'game_info': self.game_info,
             'game_data': self.game_data,
             'creep': self.state.creep,
-            'command_target': beacon # Set to beacon so it shows on COMMAND_OBJECTIVE
+            'command_target': beacon.position if beacon else None,
         }
 
         # 2. Tactical fovea + COMMAND_ASSIGNMENT follow client selection when possible
@@ -699,6 +851,15 @@ class UnitControlBot(BotAI):
         raw_obs['selected_units'] = selected_units
 
         results = self.agent_system.process_observation(raw_obs, player_id=1, active_unit=active_unit)
-        
-        # 3. (Optional) Here you would get action from model
-        # For now, this bot just allows the UI to visualize what the agent sees
+
+        agent = self.agent_system.unit_agents.get(self.agent_id)
+        if agent is not None:
+            agent.debug_active_unit = active_unit
+            processed = results.get(self.agent_id)
+            if isinstance(processed, dict):
+                agent.ui_observation = processed.get("map")
+                if processed.get("tactical") is not None:
+                    agent.tactical_observation = processed.get("tactical")
+            self._track_debug_click(agent, active_unit)
+
+        await self._apply_manual_spatial_moves()

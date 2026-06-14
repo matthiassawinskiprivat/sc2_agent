@@ -62,8 +62,8 @@ def test_unified_observation_guidance():
     def mock_units_call(type_id):
         return _mock_units_result([])
 
-    bot.units = MagicMock(side_effect=mock_units_call)
-    bot.units.filter = MagicMock(return_value=_mock_units_result([]))
+    bot.units = _mock_units_result([])
+    bot.units.filter = MagicMock(return_value=_mock_units_result([beacon]))
     bot.all_units = _mock_units_result([beacon])
     bot.enemy_units = _mock_units_result([])
     bot.structures = _mock_units_result([])

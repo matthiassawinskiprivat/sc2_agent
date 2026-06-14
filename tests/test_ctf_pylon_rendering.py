@@ -3,6 +3,7 @@ import numpy as np
 from unittest.mock import MagicMock
 from src.transformers.observation_transformer import ObservationTransformer
 from src.utils.layer_constants import LayerConstants
+from tests.obs_transformer_test_utils import get_layer, layer_val, layer_sum, transform_map
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 
@@ -33,7 +34,9 @@ def test_pylon_rendering_on_multiple_layers():
     pylon.health_max = 200.0
     pylon.shield = 10.0
     pylon.shield_max = 200.0
+    pylon.energy = 0
     pylon.energy_max = 0
+    pylon.weapon_cooldown = 0
     pylon.is_biological = False
     pylon.is_mechanical = True
     pylon.is_armored = True
@@ -44,7 +47,11 @@ def test_pylon_rendering_on_multiple_layers():
     pylon.is_blip = False
     pylon.detect_range = 0
     pylon.build_progress = 1.0
-    
+    pylon.is_ready = True
+    pylon.is_detected = True
+    pylon.is_hallucination = False
+    pylon.is_snapshot = False
+
     # 4. Mock Raw Obs
     raw_obs = {
         'units': [],
@@ -57,25 +64,12 @@ def test_pylon_rendering_on_multiple_layers():
     }
     
     # 5. Transform
-    obs = transformer.transform(raw_obs)
-    
-    # 6. Verify Layers
-    
-    # Layer 0: allied_unit_density
-    idx_den = LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_DENSITY]
-    assert obs[idx_den, 63, 64] > 0 # (50, 50) maps to center of 128x128
-    
-    # Layer 2: allied_unit_mechanical
-    idx_mech = LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_MECHANICAL]
-    assert obs[idx_mech, 63, 64] > 0
-    
-    # Layer 14: allied_health
-    idx_hp = LayerConstants.LAYERS[LayerConstants.ALLIED_HEALTH]
-    assert obs[idx_hp, 63, 64] > 0
-    
-    # Layer 41: command_objective
-    idx_obj = LayerConstants.LAYERS[LayerConstants.COMMAND_OBJECTIVE]
-    assert obs[idx_obj, 63, 64] > 0
+    obs = transform_map(transformer, raw_obs)
+
+    assert layer_sum(obs, LayerConstants.ALLIED_UNIT_DENSITY) > 0
+    assert layer_sum(obs, LayerConstants.ALLIED_UNIT_MECHANICAL) > 0
+    assert layer_sum(obs, LayerConstants.ALLIED_HEALTH) > 0  # damaged pylon (50% HP)
+    assert layer_sum(obs, LayerConstants.COMMAND_OBJECTIVE) > 0
 
 def test_enemy_pylon_rendering():
     transformer = ObservationTransformer(map_size=(128, 128))
@@ -95,11 +89,13 @@ def test_enemy_pylon_rendering():
     pylon.type_id = UnitTypeId.PYLON
     pylon.position = Point2((25, 25))
     pylon.radius = 1.125
-    pylon.health = 200.0
+    pylon.health = 100.0
     pylon.health_max = 200.0
-    pylon.shield = 200.0
+    pylon.shield = 100.0
     pylon.shield_max = 200.0
+    pylon.energy = 0
     pylon.energy_max = 0
+    pylon.weapon_cooldown = 0
     pylon.is_biological = False
     pylon.is_mechanical = True
     pylon.is_armored = True
@@ -110,7 +106,11 @@ def test_enemy_pylon_rendering():
     pylon.is_blip = False
     pylon.detect_range = 0
     pylon.build_progress = 1.0
-    
+    pylon.is_ready = True
+    pylon.is_detected = True
+    pylon.is_hallucination = False
+    pylon.is_snapshot = False
+
     raw_obs = {
         'units': [],
         'enemy_units': [],
@@ -121,16 +121,8 @@ def test_enemy_pylon_rendering():
         'command_target': Point2((25, 25))
     }
     
-    obs = transformer.transform(raw_obs)
-    
-    # Verify Enemy Layers
-    idx_den = LayerConstants.LAYERS[LayerConstants.ENEMY_UNIT_DENSITY]
-    # (25, 25) on 100x100 -> (32, 95) roughly in pixel coords? 
-    # Let's check where it is non-zero
-    assert np.any(obs[idx_den] > 0)
-    
-    idx_hp = LayerConstants.LAYERS[LayerConstants.ENEMY_HEALTH]
-    assert np.any(obs[idx_hp] > 0)
-    
-    idx_obj = LayerConstants.LAYERS[LayerConstants.COMMAND_OBJECTIVE]
-    assert np.any(obs[idx_obj] > 0)
+    obs = transform_map(transformer, raw_obs)
+
+    assert layer_sum(obs, LayerConstants.ENEMY_UNIT_DENSITY) > 0
+    assert layer_sum(obs, LayerConstants.ENEMY_HEALTH) > 0
+    assert layer_sum(obs, LayerConstants.COMMAND_OBJECTIVE) > 0

@@ -1,5 +1,5 @@
 from train.envs.level_0_env import Level0Env, ProtoWrapper
-from train.envs.sc2_session_config import use_computer_player
+from train.envs.sc2_session_config import session_realtime, use_computer_player
 from src.level_3_bot import Level3Bot
 from sc2.player import Bot, Computer
 from sc2.data import Race, Difficulty
@@ -46,6 +46,23 @@ class Level3Env(Level0Env):
         if not tags or idx >= len(tags):
             return -1
         return int(tags[idx])
+
+    async def _async_preview_tick(self):
+        stepped = await self._async_apply_preview_spatial_moves()
+        if not stepped:
+            await self._client.step()
+        response = await self._client.observation()
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
+        state = game_state_from_response_observation(response.observation)
+        self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
+        if not getattr(self, "active_unit_tags", None):
+            self.active_unit_tags = [u.tag for u in self._bot.get_active_zerglings()]
+        if self.active_unit_tags:
+            tag = self.active_unit_tags[self.current_unit_index % len(self.active_unit_tags)]
+            obs, _ = self._bot.get_observation_for_unit(tag)
+            return obs
+        obs, _, _, _, _ = self._bot._get_step_results()
+        return obs
 
     def action_masks(self):
         if self._bot:
@@ -121,10 +138,11 @@ class Level3Env(Level0Env):
         else:
             self._log("Starting game WITHOUT Computer (Movement Level)")
 
+        sim_realtime = session_realtime(self.training_conf)
         await self._controller.create_game(
             game_map,
             players,
-            realtime=self.visualize,
+            realtime=sim_realtime,
         )
         await self._client.join_game(race=Race.Zerg)
         
@@ -133,17 +151,23 @@ class Level3Env(Level0Env):
         game_data = await self._client.get_game_data()
 
         self._log("Preparing bot start...")
+        self._bot.client = self._client
         try:
             from sc2.unit import UnitGameData
             UnitGameData._game_data = game_data
             UnitGameData._bot_object = self._bot
-            self._bot.client = self._client
             self._bot._game_info = game_info
             self._bot._game_data = game_data
-        except ImportError:
+        except (ImportError, AttributeError):
             pass
-        
-        self._bot._prepare_start(client=self._client, player_id=1, game_info=game_info, game_data=game_data)
+
+        self._bot._prepare_start(
+            client=self._client,
+            player_id=1,
+            game_info=game_info,
+            game_data=game_data,
+            realtime=sim_realtime,
+        )
         initial_observation = await self._client.observation()
 
         from src.utils.sc2_observation_compat import game_state_from_response_observation

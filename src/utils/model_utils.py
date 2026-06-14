@@ -279,6 +279,22 @@ def checkpoint_policy_weights_finite(zip_path: str) -> bool:
     return ok
 
 
+def read_checkpoint_timesteps(zip_path: str) -> Optional[int]:
+    """Return ``num_timesteps`` from an SB3 ``.zip`` data blob, or None if unavailable."""
+    import json
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            if "data" not in archive.namelist():
+                return None
+            payload = json.loads(archive.read("data").decode("utf-8"))
+            ts = payload.get("num_timesteps")
+            return int(ts) if ts is not None else None
+    except Exception:
+        return None
+
+
 def load_policy_weights_from_zip(
     policy: torch.nn.Module,
     zip_path: str,
@@ -300,6 +316,64 @@ def load_policy_weights_from_zip(
         return False, [], []
     missing, unexpected = policy.load_state_dict(p_sd, strict=strict)
     return True, list(missing), list(unexpected)
+
+
+def load_curriculum_checkpoint(
+    algo_class: Any,
+    model_path: str,
+    algo_kwargs: Dict[str, Any],
+    load_kwargs: Dict[str, Any],
+    observation_space: Any,
+    action_space: Any,
+    *,
+    grid_size: int = 32,
+) -> Any:
+    """
+    Load a checkpoint for curriculum continuation.
+
+    Tries a direct SB3 load first. On observation/action shape mismatch, grafts
+    compatible policy weights onto a freshly constructed model (same path as sync
+    ``train_pipeline``).
+    """
+    try:
+        return algo_class.load(model_path, **load_kwargs)
+    except Exception as direct_exc:
+        logger.warning(
+            f"Direct checkpoint load failed for {model_path!r} ({direct_exc}); "
+            "attempting graft onto the new level architecture."
+        )
+
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    model = algo_class(**algo_kwargs)
+    _, params, _ = load_from_zip_file(model_path, device="cpu", load_data=False)
+    saved_sd = params.get("policy")
+    if saved_sd is None:
+        logger.error(f"Checkpoint {model_path!r} has no policy weights; using fresh model.")
+        return model
+
+    if hasattr(observation_space, "spaces") and "map" in observation_space.spaces:
+        new_in_channels = observation_space.spaces["map"].shape[0]
+    else:
+        new_in_channels = observation_space.shape[0]
+
+    new_action_dim = getattr(action_space, "n", None)
+    if new_action_dim is None and hasattr(action_space, "nvec"):
+        # Universal MultiDiscrete([64, 1024]) — graft spatial/command heads separately.
+        new_action_dim = int(np.sum(action_space.nvec))
+    grafted = graft_model_weights(
+        saved_sd,
+        new_in_channels=new_in_channels,
+        new_action_dim=new_action_dim,
+        new_grid_size=grid_size,
+        target_state_dict=model.policy.state_dict(),
+    )
+    missing, unexpected = model.policy.load_state_dict(grafted, strict=False)
+    logger.info(
+        f"Grafted curriculum weights from {model_path!r}: "
+        f"missing={len(missing)}, unexpected={len(unexpected)}"
+    )
+    return model
 
 
 def calculate_distance_matrix(points_a: np.ndarray, points_b: np.ndarray) -> np.ndarray:

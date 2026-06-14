@@ -13,6 +13,7 @@ training:
 env:
   headless: True
   max_steps: 100
+  every_k_episodes: 250
   maps_dir: "train/maps/32x32"
   high_level_command: "scout"
   guidance_curriculum: False

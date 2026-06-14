@@ -409,13 +409,86 @@ class RolloutBufferRow:
 
 
 @dataclass
+class VecRolloutBufferRow:
+    """One vec-env timestep: all ``env_indices`` acted in a single batched forward."""
+
+    env_indices: List[int]
+    actions: np.ndarray
+    values: torch.Tensor
+    log_probs: torch.Tensor
+    masks: np.ndarray
+    lstm_starts: np.ndarray
+    pre_lstm_by_env: Dict[int, Optional[RNNStates]]
+
+
+@dataclass
 class RolloutResolution:
     """One vec-env step plus all learner rows produced by that step."""
 
     step_actions: np.ndarray
     squad_batch_actions: Dict[int, np.ndarray]
     buffer_rows: List[RolloutBufferRow]
+    vec_rows: List[VecRolloutBufferRow]
     updated_lstm: Optional[RNNStates]
+
+
+def write_vec_rollout_row_to_buffer(
+    *,
+    buffer,
+    pre_step_obs: Dict[str, np.ndarray],
+    vec_row: VecRolloutBufferRow,
+    rewards: np.ndarray,
+    num_envs: int,
+    is_recurrent: bool,
+    fallback_lstm: Optional[RNNStates],
+) -> int:
+    """Append one buffer row for a batched multi-env forward (standard vec-env layout)."""
+    env_indices = vec_row.env_indices
+    policy_active = np.zeros((num_envs,), dtype=np.float32)
+    policy_active[env_indices] = 1.0
+
+    action_dim = int(vec_row.actions.shape[-1]) if vec_row.actions.ndim > 1 else 1
+    if action_dim > 1:
+        row_actions = np.zeros((num_envs, action_dim), dtype=np.int64)
+    else:
+        row_actions = np.zeros((num_envs,), dtype=np.int64)
+
+    values = torch.zeros((num_envs, 1))
+    log_probs = torch.zeros((num_envs,))
+    mask_len = int(vec_row.masks.shape[-1])
+    masks = np.zeros((num_envs, mask_len), dtype=bool)
+    lstm_starts = np.zeros((num_envs,), dtype=np.float32)
+
+    for j, env_i in enumerate(env_indices):
+        row_actions[env_i] = vec_row.actions[j]
+        values[env_i] = vec_row.values[j].reshape(1)
+        log_probs[env_i] = vec_row.log_probs[j].reshape(())
+        masks[env_i] = vec_row.masks[j]
+        lstm_starts[env_i] = float(vec_row.lstm_starts[j])
+
+    lstm_starts = np.maximum(lstm_starts, 1.0 - policy_active)
+
+    lstm_before: List[Optional[RNNStates]] = [None] * num_envs
+    for env_i in env_indices:
+        lstm_before[env_i] = vec_row.pre_lstm_by_env.get(env_i)
+    buffer_lstm = (
+        build_buffer_lstm_states(fallback_lstm, lstm_before)
+        if is_recurrent and fallback_lstm is not None
+        else None
+    )
+
+    buffer.add(
+        pre_step_obs,
+        row_actions,
+        np.asarray(rewards, dtype=np.float32).reshape(num_envs),
+        lstm_starts,
+        values,
+        log_probs,
+        buffer_lstm,
+        masks,
+        policy_active=policy_active,
+    )
+    return 1
 
 
 def write_rollout_rows_to_buffer(
@@ -433,6 +506,21 @@ def write_rollout_rows_to_buffer(
     """Append transition rows for one env step. Returns number of rows written."""
     written = 0
     buffer_size = getattr(buffer, "buffer_size", None)
+    for vec_row in resolution.vec_rows:
+        if max_rows is not None and written >= max_rows:
+            break
+        if buffer_size is not None and buffer.pos >= buffer_size:
+            break
+        written += write_vec_rollout_row_to_buffer(
+            buffer=buffer,
+            pre_step_obs=pre_step_obs,
+            vec_row=vec_row,
+            rewards=rewards,
+            num_envs=num_envs,
+            is_recurrent=is_recurrent,
+            fallback_lstm=fallback_lstm,
+        )
+
     for row in resolution.buffer_rows:
         if max_rows is not None and written >= max_rows:
             break
@@ -531,6 +619,7 @@ class SquadBatchRolloutHelper:
             step_actions = np.zeros((num_envs,), dtype=np.int64)
 
         buffer_rows: List[RolloutBufferRow] = []
+        vec_rows: List[VecRolloutBufferRow] = []
         squad_batch_actions: Dict[int, np.ndarray] = {}
         updated_lstm = lstm_states
         if is_recurrent and updated_lstm is not None:
@@ -628,6 +717,7 @@ class SquadBatchRolloutHelper:
                     last_dones[env_idx] or focus != prev_focus_tags[env_idx]
                 )
 
+            pre_lstm_by_env: Dict[int, Optional[RNNStates]] = {}
             if is_recurrent:
                 sub_starts = torch.as_tensor(lstm_starts, dtype=torch.float32, device=device)
                 sub_lstm = (
@@ -654,30 +744,23 @@ class SquadBatchRolloutHelper:
             act_np = act_t.cpu().numpy()
             for j, env_idx in enumerate(need_forward):
                 step_actions[env_idx] = act_np[j]
-                buffer_rows.append(
-                    RolloutBufferRow(
-                        env_idx=env_idx,
-                        cached=CachedSquadStep(
-                            obs={k: arr[env_idx] for k, arr in obs.items()},
-                            action=act_np[j],
-                            value=val_t[j].detach(),
-                            log_prob=logp_t[j].detach(),
-                            mask=sub_masks[j],
-                            lstm_start=float(lstm_starts[j]),
-                            lstm_states_before=(
-                                pre_lstm_by_env.get(env_idx)
-                                if is_recurrent
-                                else None
-                            ),
-                        ),
-                        apply_reward=True,
-                    )
+            vec_rows.append(
+                VecRolloutBufferRow(
+                    env_indices=list(need_forward),
+                    actions=act_np,
+                    values=val_t.detach(),
+                    log_probs=logp_t.detach(),
+                    masks=sub_masks,
+                    lstm_starts=lstm_starts,
+                    pre_lstm_by_env=pre_lstm_by_env,
                 )
+            )
 
         return RolloutResolution(
             step_actions=step_actions,
             squad_batch_actions=squad_batch_actions,
             buffer_rows=buffer_rows,
+            vec_rows=vec_rows,
             updated_lstm=updated_lstm,
         )
 

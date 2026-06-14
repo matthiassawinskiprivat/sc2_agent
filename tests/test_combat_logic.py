@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.transformers.observation_transformer import ObservationTransformer
 from src.utils.layer_constants import LayerConstants
+from tests.obs_transformer_test_utils import get_layer, transform_map
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.ids.effect_id import EffectId
 
@@ -70,7 +71,7 @@ class TestCombatLogic(unittest.TestCase):
         self.game_info.terrain_height.data_numpy = np.zeros((128, 128))
 
     def get_layer(self, layers, name):
-        return layers[LayerConstants.LAYERS[name]]
+        return get_layer(layers, name)
 
     def transform(self, units=[], enemy_units=[], effects=[]):
         raw = {
@@ -80,7 +81,7 @@ class TestCombatLogic(unittest.TestCase):
             'game_info': self.game_info,
             'game_data': MagicMock()
         }
-        return self.transformer.transform(raw)
+        return transform_map(self.transformer, raw)
 
     def test_dps_hallucination_exclusion(self):
         u = MockUnit(UnitTypeId.COLOSSUS, 50, 50, alliance=2)
@@ -89,15 +90,21 @@ class TestCombatLogic(unittest.TestCase):
         self.assertEqual(np.sum(self.get_layer(layers, "enemy_g_dps_base")), 0)
 
     def test_oracle_energy_dps(self):
+        """Catalog weapons stamp typed bonuses; pulsar (energy >= 25) does not."""
         u_low = MockUnit(UnitTypeId.ORACLE, 50, 50, alliance=2)
-        u_low.energy = 10
+        u_low.energy = 24
         layers_low = self.transform([], [u_low])
-        self.assertEqual(np.sum(self.get_layer(layers_low, "enemy_g_dps_light")), 0)
+        low_light = np.sum(self.get_layer(layers_low, "enemy_g_dps_light"))
 
         u_high = MockUnit(UnitTypeId.ORACLE, 50, 50, alliance=2)
         u_high.energy = 50
         layers_high = self.transform([], [u_high])
-        self.assertGreater(np.sum(self.get_layer(layers_high, "enemy_g_dps_light")), 0)
+        high_light = np.sum(self.get_layer(layers_high, "enemy_g_dps_light"))
+        high_base = np.sum(self.get_layer(layers_high, "enemy_g_dps_base"))
+
+        self.assertGreater(low_light, 0.0)
+        self.assertEqual(high_light, 0.0)
+        self.assertGreater(high_base, 0.0)
 
     def test_widow_mine_burrowed(self):
         u_up = MockUnit(UnitTypeId.WIDOWMINE, 50, 50, alliance=2)

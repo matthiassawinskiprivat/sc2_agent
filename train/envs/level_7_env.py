@@ -1,4 +1,5 @@
 from train.envs.level_3_env import Level3Env
+from train.envs.sc2_session_config import session_realtime
 from src.level_7_bot import Level7Bot
 from sc2.player import Bot, Computer
 from sc2.data import Race, Difficulty
@@ -78,10 +79,11 @@ class Level7Env(Level3Env):
         enemy_race = self.get_race_from_unit_type(self.enemy_type)
 
         self._log(f"Creating game ({allied_race.name} vs {enemy_race.name})...")
+        sim_realtime = session_realtime(self.training_conf)
         await self._controller.create_game(
             game_map,
             [Bot(allied_race, self._bot), Computer(enemy_race, Difficulty.Easy)],
-            realtime=self.visualize,
+            realtime=sim_realtime,
         )
         await self._client.join_game(race=allied_race)
         # Enable full vision for unit cleanup and observation.
@@ -93,17 +95,23 @@ class Level7Env(Level3Env):
         game_info = await self._client.get_game_info()
         game_data = await self._client.get_game_data()
 
+        self._bot.client = self._client
         try:
             from sc2.unit import UnitGameData
             UnitGameData._game_data = game_data
             UnitGameData._bot_object = self._bot
-            self._bot.client = self._client
             self._bot._game_info = game_info
             self._bot._game_data = game_data
-        except ImportError:
+        except (ImportError, AttributeError):
             pass
-        
-        self._bot._prepare_start(client=self._client, player_id=1, game_info=game_info, game_data=game_data)
+
+        self._bot._prepare_start(
+            client=self._client,
+            player_id=1,
+            game_info=game_info,
+            game_data=game_data,
+            realtime=sim_realtime,
+        )
         initial_observation = await self._client.observation()
 
         from src.utils.sc2_observation_compat import game_state_from_response_observation
@@ -127,6 +135,24 @@ class Level7Env(Level3Env):
                  obs, _ = self._bot.get_observation_for_unit(self.active_unit_tags[0])
         
         return obs, info
+
+    async def _async_preview_tick(self):
+        stepped = await self._async_apply_preview_spatial_moves()
+        if not stepped:
+            await self._client.step()
+        response = await self._client.observation()
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
+        from train.envs.level_0_env import ProtoWrapper
+        state = game_state_from_response_observation(response.observation)
+        self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
+        if not getattr(self, "active_unit_tags", None):
+            self.active_unit_tags = [u.tag for u in self._bot.get_active_units()]
+        if self.active_unit_tags:
+            tag = self.active_unit_tags[self.current_unit_index % len(self.active_unit_tags)]
+            obs, _ = self._bot.get_observation_for_unit(tag)
+            return obs
+        obs, _, _, _, _ = self._bot._get_step_results()
+        return obs
 
     def _has_living_combat_enemies(self) -> bool:
         """True when a combat timeout still left enemies alive."""

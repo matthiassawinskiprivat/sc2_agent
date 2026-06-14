@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch as th
 import json
-from typing import Dict, Generator, Optional, Union, Any, Tuple
+from typing import Dict, Generator, Optional, Union, Any, Tuple, NamedTuple
 from gymnasium import spaces
 from stable_baselines3.common.buffers import DictRolloutBuffer
 from stable_baselines3.common.vec_env import VecNormalize
@@ -51,6 +51,18 @@ def build_recurrent_sequence_spans(
     return spans
 
 
+class FlatMaskableRolloutBufferSamples(NamedTuple):
+    """Minibatch for feed-forward MaskablePPO (no RNN state)."""
+
+    observations: Dict[str, th.Tensor]
+    actions: th.Tensor
+    old_values: th.Tensor
+    old_log_prob: th.Tensor
+    advantages: th.Tensor
+    returns: th.Tensor
+    action_masks: th.Tensor
+
+
 class DiskDictRolloutBuffer(DictRolloutBuffer):
     """
     Recurrent DictRolloutBuffer with optional memmap offload for map/tactical tensors.
@@ -71,8 +83,11 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
         rnn_type: str = "gru",
         hidden_size: int = 512,
         storage_backend: str = "disk",
+        enable_rnn_sampling: bool = True,
     ):
         super(DiskDictRolloutBuffer, self).__init__(buffer_size, observation_space, action_space, device, gae_lambda, gamma, n_envs)
+
+        self.enable_rnn_sampling = bool(enable_rnn_sampling)
 
         self.storage_backend = str(storage_backend).strip().lower()
         if self.storage_backend not in ("disk", "ram"):
@@ -188,6 +203,60 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
 
         super().add(obs, action, reward, episode_start, value, log_prob)
 
+    def compute_returns_and_advantage(
+        self, last_values: th.Tensor, dones: np.ndarray
+    ) -> None:
+        """
+        GAE that skips timesteps where ``policy_active[step, env] == 0``.
+
+        Async squad collection writes one buffer row per env per game step for
+        multi-unit squads, and may leave inactive env slots zeroed when another
+        env owns the row. Standard SB3 GAE would bootstrap through those zeros and
+        corrupt advantages / returns (low explained variance, stalled learning).
+        """
+        last_values = last_values.clone().cpu().numpy().flatten()
+        filled = int(self.pos) if self.pos > 0 else self.buffer_size
+        pa = getattr(self, "policy_active", None)
+
+        self.advantages[:filled] = 0.0
+        self.returns[:filled] = 0.0
+
+        for env_idx in range(self.n_envs):
+            active_ts = [
+                t
+                for t in range(filled)
+                if pa is None or float(pa[t, env_idx]) > 1e-8
+            ]
+            if not active_ts:
+                continue
+
+            last_gae_lam = 0.0
+            for i in reversed(range(len(active_ts))):
+                t = active_ts[i]
+                if i == len(active_ts) - 1:
+                    next_non_terminal = 1.0 - float(dones[env_idx])
+                    next_value = float(last_values[env_idx])
+                else:
+                    t_next = active_ts[i + 1]
+                    next_non_terminal = 1.0 - float(self.episode_starts[t_next, env_idx])
+                    next_value = float(self.values[t_next, env_idx])
+
+                delta = (
+                    float(self.rewards[t, env_idx])
+                    + self.gamma * next_value * next_non_terminal
+                    - float(self.values[t, env_idx])
+                )
+                last_gae_lam = (
+                    delta
+                    + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
+                )
+                self.advantages[t, env_idx] = last_gae_lam
+
+            for t in active_ts:
+                self.returns[t, env_idx] = (
+                    self.advantages[t, env_idx] + self.values[t, env_idx]
+                )
+
     def _normalize_rnn_state(self, state_tensor: torch.Tensor, name: str) -> np.ndarray:
         """
         Normalize an RNN state tensor to shape (1, n_envs, hidden_size).
@@ -235,9 +304,13 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
 
     def get(self, batch_size: Optional[int] = None) -> Generator[MaskableRecurrentRolloutBufferSamples, None, None]:
         """
-        Yield RNN sequence minibatches. Splits on ``episode_starts`` (focal-unit /
-        squad resets) and caps each span at 32 steps for BPTT memory.
+        Yield minibatches. Recurrent policies use padded RNN sequences; feed-forward
+        MaskablePPO uses flat shuffled indices (lower GPU memory, no BPTT padding).
         """
+        if not self.enable_rnn_sampling:
+            yield from self._get_flat(batch_size)
+            return
+
         assert self.full, "Buffer must be full"
 
         max_seq_len = 32
@@ -273,6 +346,52 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
 
         for batch_spans in batches:
             yield self._get_samples_by_sequences(batch_spans)
+
+    def _active_flat_indices(self, filled: int) -> np.ndarray:
+        pa = getattr(self, "policy_active", None)
+        if pa is None:
+            return np.arange(filled * self.n_envs, dtype=np.int64)
+        active = pa[:filled] > 1e-8
+        steps, envs = np.nonzero(active)
+        return (steps.astype(np.int64) * self.n_envs + envs.astype(np.int64))
+
+    def _get_flat(self, batch_size: Optional[int] = None) -> Generator[FlatMaskableRolloutBufferSamples, None, None]:
+        assert self.full, "Buffer must be full"
+        filled = int(self.pos) if self.pos > 0 else self.buffer_size
+        indices = self._active_flat_indices(filled)
+        np.random.shuffle(indices)
+        if batch_size is None:
+            batch_size = max(len(indices), 1)
+        step_idx = indices // self.n_envs
+        env_idx = indices % self.n_envs
+
+        for start in range(0, len(indices), batch_size):
+            sl = slice(start, start + batch_size)
+            b_steps = step_idx[sl]
+            b_envs = env_idx[sl]
+            obs = {
+                key: th.as_tensor(arr[b_steps, b_envs], device=self.device)
+                for key, arr in self.observations.items()
+            }
+            yield FlatMaskableRolloutBufferSamples(
+                observations=obs,
+                actions=th.as_tensor(self.actions[b_steps, b_envs], device=self.device),
+                old_values=th.as_tensor(
+                    self.values[b_steps, b_envs].flatten(), device=self.device
+                ),
+                old_log_prob=th.as_tensor(
+                    self.log_probs[b_steps, b_envs].flatten(), device=self.device
+                ),
+                advantages=th.as_tensor(
+                    self.advantages[b_steps, b_envs].flatten(), device=self.device
+                ),
+                returns=th.as_tensor(
+                    self.returns[b_steps, b_envs].flatten(), device=self.device
+                ),
+                action_masks=th.as_tensor(
+                    self.action_masks[b_steps, b_envs], device=self.device
+                ),
+            )
 
     def _get_samples_by_sequences(
         self, batch_spans: list[tuple[int, int, int]]

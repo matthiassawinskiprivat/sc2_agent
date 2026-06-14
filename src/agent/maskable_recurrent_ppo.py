@@ -1130,7 +1130,15 @@ class MaskableRecurrentPPO(RecurrentPPO):
         # Calculate explained variance (only for valid steps)
         v_true = self.rollout_buffer.returns.flatten()
         v_pred = self.rollout_buffer.values.flatten()
-        expl_var = explained_variance(v_pred, v_true)
+        pa = getattr(self.rollout_buffer, "policy_active", None)
+        if pa is not None:
+            valid = pa.flatten() > 1e-8
+            if valid.any():
+                expl_var = explained_variance(v_pred[valid], v_true[valid])
+            else:
+                expl_var = float("nan")
+        else:
+            expl_var = explained_variance(v_pred, v_true)
 
         # LOG ALL METRICS
         self.logger.record("train/entropy_loss", np.mean(entropy_losses))

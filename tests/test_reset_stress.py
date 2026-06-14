@@ -53,9 +53,9 @@ class TestResetStress:
                 # or rely on the environment's internal counter if it's small enough.
                 
                 # Let's check the internal counter in Level0Env. 
-                # It hard resets every HARD_RESET_COUNT (default 10).
-                # We can manually set the counter to force hard resets more often if needed,
-                # or just run enough iterations. 50 iterations with count 10 = 5 hard resets.
+                # To force stress, set every_k_episodes=1 in training_conf or patch
+                # train.envs.sc2_session_config.DEFAULT_EVERY_K_EPISODES.
+                # Default is 100 episodes between scheduled hard resets per worker.
                 
         except Exception as e:
             logger.exception(f"Stress test failed at reset #{i+1}")

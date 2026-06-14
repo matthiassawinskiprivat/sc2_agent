@@ -8,6 +8,14 @@ import cv2
 from typing import List, Tuple
 from src.utils.layer_constants import LayerConstants
 
+# Command protocol layers render on top of unit density/attribute layers so they
+# stay visible when np.maximum would let white density wash out green assignment.
+_PROTOCOL_OVERLAY_LAYERS = frozenset({
+    LayerConstants.COMMAND_ASSIGNMENT,
+    LayerConstants.COMMAND_OBJECTIVE,
+})
+
+
 class RealTimeUITransformer:
     def __init__(self, display_size: Tuple[int, int] = (600, 600)):
         self.display_size = display_size
@@ -69,7 +77,7 @@ class RealTimeUITransformer:
             LayerConstants.TERRAIN_PATHABLE:        [0.3, 0.3, 0.3],
             LayerConstants.TERRAIN_CREEP:           [0.4, 0.0, 0.4],
 
-            LayerConstants.COMMAND_ASSIGNMENT:      [0.0, 1.0, 0.0],
+            LayerConstants.COMMAND_ASSIGNMENT:      [1.0, 0.0, 1.0],  # Magenta (distinct from allied bio green)
             LayerConstants.COMMAND_OBJECTIVE:       [1.0, 1.0, 0.0],
         }
 
@@ -81,42 +89,41 @@ class RealTimeUITransformer:
         num_layers, obs_height, obs_width = observation.shape
         frame = np.zeros((obs_height, obs_width, 3), dtype=np.float32)
 
-        # Map layer names to observation indices. 
-        # If active_layers is provided, the observation is pruned.
+        # Map layer names to observation indices.
         if active_layers:
             layer_map = {name: i for i, name in enumerate(active_layers)}
         else:
             layer_map = LayerConstants.LAYERS
 
-        for layer_name in enabled_layers:
-            if layer_name not in layer_map: continue
+        base_layers = [n for n in enabled_layers if n not in _PROTOCOL_OVERLAY_LAYERS]
+        overlay_layers = [n for n in enabled_layers if n in _PROTOCOL_OVERLAY_LAYERS]
+
+        for layer_name in base_layers + overlay_layers:
+            if layer_name not in layer_map:
+                continue
             layer_idx = layer_map[layer_name]
-            
-            # Bound check: ensure the mapped index exists in the observation array
-            if layer_idx >= num_layers: continue
+
+            if layer_idx >= num_layers:
+                continue
 
             layer_data = observation[layer_idx]
 
-            # Optimization: Skip empty layers
-            if layer_data.max() == 0: continue
-
-            # --- FIX: STABLE VISUALIZATION ---
-            # Remove dynamic scaling based on frame max.
-            # Just clip at 1.0 (or slightly higher if you want to see density gradients).
-            # log1p(1) = 0.69 (Visible)
-            # log1p(2) = 1.10 (Saturated)
-            # This ensures 1 unit always looks the same brightness, regardless of clumps elsewhere.
+            if layer_data.max() == 0:
+                continue
 
             visual_data = np.clip(layer_data, 0.0, 1.0)
 
             color = self.layer_colors.get(layer_name, [1, 1, 1])
 
-            # Vectorized Blending
             color_arr = np.array(color).reshape(1, 1, 3)
             data_expanded = visual_data[:, :, np.newaxis]
             colored_layer = data_expanded * color_arr
 
-            frame = np.maximum(frame, colored_layer)
+            if layer_name in _PROTOCOL_OVERLAY_LAYERS:
+                mask = visual_data > 0
+                frame[mask] = colored_layer[mask]
+            else:
+                frame = np.maximum(frame, colored_layer)
 
         frame = np.clip(frame, 0, 1)
         frame = (frame * 255).astype(np.uint8)

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.transformers.observation_transformer import ObservationTransformer
 from src.utils.layer_constants import LayerConstants
+from tests.obs_transformer_test_utils import get_layer, transform_map
 
 
 class MockPoint2:
@@ -82,13 +83,16 @@ class TestStructuresAndNeutrals(unittest.TestCase):
             'game_info': self.game_info
         }
 
-        layers = self.transformer.transform(raw_obs)
+        map_data = transform_map(self.transformer, raw_obs)
 
-        # Check Allied Density (Marine)
-        self.assertGreater(np.sum(layers[0]), 0, "Marine should appear")
-
-        # Check Enemy Density (Mineral)
-        self.assertEqual(np.sum(layers[7]), 0, "Mineral should NOT appear as enemy")
+        self.assertGreater(
+            np.sum(get_layer(map_data, LayerConstants.ALLIED_UNIT_DENSITY)), 0,
+            "Marine should appear",
+        )
+        self.assertEqual(
+            np.sum(get_layer(map_data, LayerConstants.ENEMY_UNIT_DENSITY)), 0,
+            "Mineral should NOT appear as enemy",
+        )
 
     def test_structure_radius_scaling(self):
         """
@@ -106,8 +110,8 @@ class TestStructuresAndNeutrals(unittest.TestCase):
             'game_info': self.game_info
         }
 
-        layers = self.transformer.transform(raw_obs)
-        density_layer = layers[0]  # Allied Density
+        map_data = transform_map(self.transformer, raw_obs)
+        density_layer = get_layer(map_data, LayerConstants.ALLIED_UNIT_DENSITY)
 
         # Count non-zero pixels around Marine
         # (Naive slice around 40,40)

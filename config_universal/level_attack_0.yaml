@@ -2,7 +2,7 @@
 # Combat: 2 Colossuses vs 2 Zealots (1 per slot). Kiting intro: large range advantage, melee enemy.
 
 training:
-  training_steps: 1_500_000
+  training_steps: 2_000_000
   num_envs: 8
   n_steps: 2048
   batch_size: 1024
@@ -20,6 +20,7 @@ env:
   enemies_per_target: 1
   headless: True
   max_steps: 350
+  every_k_episodes: 250
   maps_dir: "train/maps/ladder/no_trigger"
   high_level_command: "attack"
   guidance_curriculum: False

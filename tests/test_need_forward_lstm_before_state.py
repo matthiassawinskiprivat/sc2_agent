@@ -88,12 +88,12 @@ def test_need_forward_stores_pre_forward_lstm_for_replay(tmp_path):
             device=torch.device("cpu"),
         )
 
-    assert len(resolution.buffer_rows) == 1
-    row = resolution.buffer_rows[0]
-    assert row.cached.lstm_start == 0.0
-    assert row.cached.lstm_states_before is not None
+    assert len(resolution.vec_rows) == 1
+    vec_row = resolution.vec_rows[0]
+    assert vec_row.lstm_starts[0] == 0.0
+    assert vec_row.pre_lstm_by_env[0] is not None
     torch.testing.assert_close(
-        row.cached.lstm_states_before.pi[0], h, atol=1e-6, rtol=0
+        vec_row.pre_lstm_by_env[0].pi[0], h, atol=1e-6, rtol=0
     )
 
     buf = DiskDictRolloutBuffer(

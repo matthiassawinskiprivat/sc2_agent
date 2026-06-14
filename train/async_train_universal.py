@@ -292,8 +292,14 @@ def copy_file_retry(src: str, dst: str, *, retries: int = 50, delay_sec: float =
 
 
 def push_opponent_checkpoint_to_envs(vec_env, checkpoint_path: Optional[str] = None) -> None:
-    """Load opponent weights inside each vec-env worker (Subproc-safe path string)."""
+    """Load opponent weights inside each vec-env worker (Subproc-safe path string).
+
+    Only CTF envs implement ``sync_opponent_model``; move/attack levels skip silently.
+    """
     try:
+        if not vec_env.has_attr("sync_opponent_model"):
+            logger.debug("Collector: skipping opponent sync (env has no sync_opponent_model)")
+            return
         if checkpoint_path:
             vec_env.env_method("sync_opponent_model", checkpoint_path)
         else:
@@ -313,6 +319,12 @@ def stage_learner_zip_for_collector(src_zip: str, staging_zip: str) -> None:
 
 
 COLLECTOR_WEIGHT_RELOAD_POLL_SEC = 0.1
+
+
+def _emit_collector_status(message: str) -> None:
+    """Stdout + loguru — collector runs in a child process; print matches worker visibility."""
+    print(f"[Collector] {message}", flush=True)
+    logger.info(message)
 
 
 def maybe_poll_collector_weights(
@@ -351,7 +363,7 @@ class CollectorWeightSync:
         model,
         vec_env,
         *,
-        sync_opponent: bool = True,
+        sync_opponent: bool = False,
         log_success: bool = True,
     ) -> bool:
         updated_model_path = os.path.join(TEMP_DIR, "latest_learner_model.zip")
@@ -361,8 +373,7 @@ class CollectorWeightSync:
             mtime = os.path.getmtime(updated_model_path)
             if self.last_model_load_time is not None and mtime <= self.last_model_load_time:
                 return False
-            if log_success:
-                logger.info(f"Collector found new weights (mtime={mtime}). Staging copy...")
+            logger.debug(f"Collector staging learner checkpoint (mtime={mtime})...")
             from src.utils.model_utils import inspect_checkpoint_policy_weights
 
             src_ok, src_reason, src_bad = inspect_checkpoint_policy_weights(
@@ -409,7 +420,16 @@ class CollectorWeightSync:
             set_parameters_with_retry(model, COLLECTOR_WEIGHTS_STAGING_ZIP, model.device)
             self.last_model_load_time = mtime
             if log_success:
-                logger.info("Collector: Successfully loaded fresh weights from Learner.")
+                from src.utils.model_utils import read_checkpoint_timesteps
+
+                timesteps = read_checkpoint_timesteps(updated_model_path)
+                ts_suffix = (
+                    f", timesteps={timesteps:,}" if timesteps is not None else ""
+                )
+                _emit_collector_status(
+                    "loaded updated trainee checkpoint from learner "
+                    f"({os.path.basename(updated_model_path)}{ts_suffix})"
+                )
             if sync_opponent:
                 push_opponent_checkpoint_to_envs(vec_env, COLLECTOR_WEIGHTS_STAGING_ZIP)
             return True
@@ -527,15 +547,16 @@ class AsyncCollector(mp.Process):
         algo_name = model_params.get("algorithm", "MaskablePPO")
         rnn_type = model_params.get("rnn_type", "gru")
         hidden_size = model_params.get("policy_kwargs", {}).get("lstm_hidden_size", 512)
+        is_recurrent_algo = algo_name == "MaskableRecurrentPPO"
         
-        AlgoClass = MaskableRecurrentPPO if algo_name == "MaskableRecurrentPPO" else MaskablePPO
-        PolicyClass = UniversalRecurrentPolicy if AlgoClass == MaskableRecurrentPPO else UniversalActorCriticPolicy
+        AlgoClass = MaskableRecurrentPPO if is_recurrent_algo else MaskablePPO
+        PolicyClass = UniversalRecurrentPolicy if is_recurrent_algo else UniversalActorCriticPolicy
         
         policy_kwargs = {**model_params.get("policy_kwargs", {}), "normalize_images": False}
         policy_kwargs["spatial_resolution"] = 32
         # Only recurrent policies accept/need `rnn_type`. For plain PPO we must not
         # inject it into sb3_contrib's MaskableActorCriticPolicy (non-recurrent).
-        if AlgoClass == MaskableRecurrentPPO:
+        if is_recurrent_algo:
             policy_kwargs["rnn_type"] = rnn_type # CRITICAL: SB3 compares this with stored kwargs
         if "features_extractor_class" in policy_kwargs and policy_kwargs["features_extractor_class"] == "src.agent.models.unit_control_network.UnitControlNetwork":
             policy_kwargs["features_extractor_class"] = UnitControlNetwork
@@ -549,7 +570,7 @@ class AsyncCollector(mp.Process):
             "gamma": model_params["gamma"],
             "device": train_device,
         }
-        if AlgoClass == MaskableRecurrentPPO:
+        if is_recurrent_algo:
             algo_kwargs["rnn_type"] = rnn_type
 
         if self.model_path:
@@ -559,16 +580,26 @@ class AsyncCollector(mp.Process):
                 "policy_kwargs": policy_kwargs,
                 "device": train_device,
             }
-            if AlgoClass == MaskableRecurrentPPO:
+            if is_recurrent_algo:
                 load_kwargs["rnn_type"] = rnn_type
-            try:
-                model = AlgoClass.load(self.model_path, **load_kwargs)
-            except Exception as e:
-                logger.warning(
-                    f"Could not load weights from '{self.model_path}' "
-                    f"(likely architecture change between levels): {e}. Starting fresh."
-                )
-                model = AlgoClass(**algo_kwargs)
+            from src.utils.model_utils import load_curriculum_checkpoint
+
+            model = load_curriculum_checkpoint(
+                AlgoClass,
+                self.model_path,
+                algo_kwargs,
+                load_kwargs,
+                vec_env.observation_space,
+                vec_env.action_space,
+                grid_size=_grid,
+            )
+            from src.utils.model_utils import read_checkpoint_timesteps
+
+            init_ts = read_checkpoint_timesteps(self.model_path)
+            ts_suffix = f", timesteps={init_ts:,}" if init_ts is not None else ""
+            _emit_collector_status(
+                f"loaded initial checkpoint {self.model_path!r}{ts_suffix}"
+            )
         else:
             model = AlgoClass(**algo_kwargs)
 
@@ -608,6 +639,7 @@ class AsyncCollector(mp.Process):
                 temp_dir=TEMP_DIR,
                 rnn_type=rnn_type,
                 hidden_size=hidden_size,
+                enable_rnn_sampling=is_recurrent_algo,
             )
             buf.instance_id = f"buffer_{i}"
             configure_collector_static_buffer(
@@ -638,7 +670,9 @@ class AsyncCollector(mp.Process):
                 time.sleep(5)
                 continue
 
-            weight_sync.try_reload(model, vec_env)
+            # Trainee/collector policy only — opponent sync is env-driven (every_k hard reset).
+            # Runs here (rollout boundary), not immediately when the learner publishes weights.
+            weight_sync.try_reload(model, vec_env, sync_opponent=False)
 
             # Snapshot policy weights *before* filling — learner must evaluate the same
             # weights that produced old_log_prob. A post-fill reload here would publish a
@@ -854,9 +888,10 @@ class AsyncLearner:
         algo_name = model_params.get("algorithm", "MaskablePPO")
         rnn_type = model_params.get("rnn_type", "gru")
         hidden_size = model_params.get("policy_kwargs", {}).get("lstm_hidden_size", 512)
+        is_recurrent_algo = algo_name == "MaskableRecurrentPPO"
         
-        AlgoClass = MaskableRecurrentPPO if algo_name == "MaskableRecurrentPPO" else MaskablePPO
-        PolicyClass = UniversalRecurrentPolicy if AlgoClass == MaskableRecurrentPPO else UniversalActorCriticPolicy
+        AlgoClass = MaskableRecurrentPPO if is_recurrent_algo else MaskablePPO
+        PolicyClass = UniversalRecurrentPolicy if is_recurrent_algo else UniversalActorCriticPolicy
         
         policy_kwargs = {**model_params.get("policy_kwargs", {}), "normalize_images": False}
         policy_kwargs["spatial_resolution"] = 32
@@ -973,6 +1008,7 @@ class AsyncLearner:
                 temp_dir=TEMP_DIR,
                 rnn_type=rnn_type,
                 hidden_size=hidden_size,
+                enable_rnn_sampling=is_recurrent_algo,
             )
             try:
                 os.rmdir(buf.instance_dir)
@@ -1236,7 +1272,25 @@ class AsyncLearner:
                             logger.warning(f"Could not remove hot-swap file {self.latest_model_path}: {e}")
                         return
 
-                    logger.info("Learner: Update complete. Weights broadcasted.")
+                    if weights_ok:
+                        from src.utils.model_utils import read_checkpoint_timesteps
+
+                        published_ts = read_checkpoint_timesteps(self.latest_model_path)
+                        ts_suffix = (
+                            f", timesteps={published_ts:,}"
+                            if published_ts is not None
+                            else ""
+                        )
+                        logger.info(
+                            "Learner: Update complete. Trainee checkpoint published "
+                            f"({os.path.basename(self.latest_model_path)}{ts_suffix}). "
+                            "Collector hot-reload runs after the in-flight rollout finishes."
+                        )
+                    else:
+                        logger.warning(
+                            "Learner: Update complete but trainee hot-swap was skipped "
+                            "(non-finite weights); collector keeps the previous checkpoint."
+                        )
                     found_buffer = True
                     break
             

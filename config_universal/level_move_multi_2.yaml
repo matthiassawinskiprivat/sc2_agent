@@ -2,7 +2,7 @@
 # Multi-unit movement level for Universal Architecture (4 targets)
 
 training:
-  training_steps: 1_000_000
+  training_steps: 500_000
   num_envs: 8
   n_steps: 2048
   batch_size: 1024
@@ -17,7 +17,8 @@ env:
   targets: 8
   headless: True
   max_steps: 250
-  maps_dir: "train/maps/128x128"
+  every_k_episodes: 250
+  maps_dir: "train/maps/ladder/no_trigger"
   high_level_command: "scout"
   guidance_curriculum: False
   rewards:

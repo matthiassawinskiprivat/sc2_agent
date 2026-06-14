@@ -10,9 +10,10 @@ from loguru import logger
 import logging
 
 from train.envs.single_client_env import SingleClientEnv
+from train.envs.sc2_session_config import every_k_episodes
 from src.agent.ctf_bot import CaptureTheFlagBot
 from src.utils.config_manager import ConfigManager
-from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM, universal_fallback_action
 from src.utils.layer_constants import LayerConstants
 from sc2.ids.unit_typeid import UnitTypeId
 from src.utils.spawning_utils import SpawningUtils
@@ -85,6 +86,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         self.agent_architecture = self.config_manager.get_agent_architecture()
         self.training_conf.setdefault("agent_architecture", self.agent_architecture)
+        if self.agent_architecture == "universal":
+            self.grid_size = 32
+        self.training_conf["grid_size"] = self.grid_size
 
         # Dynamic Observation Layers from Curriculum
         self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
@@ -142,7 +146,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.label_to_defender_pos: Dict[str, Any] = {}
         self._promoted_pool_index: Optional[int] = None
 
-        # Self-play opponent model — frozen snapshot, synced every every_k_episodes.
+        # Self-play opponent model — frozen snapshot, synced on hard reset (every_k_episodes).
         # None until the first hard reset; also None when using symmetric self-play.
         self.model: Optional[Any] = None           # latest model ref, set by training loop
         self.opponent_model: Optional[Any] = None  # frozen snapshot used for player 2
@@ -175,18 +179,50 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return self.model, "live"
         return None, None
 
+    def _preview_computer_opponent(self) -> bool:
+        """Debug UI preview: SC2 Computer controls P2 instead of a policy snapshot."""
+        return bool(self.training_conf.get("preview_computer_opponent"))
+
+    def _ensure_opponent_model_loaded(self) -> bool:
+        """
+        Load the frozen opponent snapshot when missing.
+
+        The collector pushes ``initial_model.zip`` at startup, but workers can miss
+        that window or fail graft on the first try. Without a retry here, player 2
+        falls back to action [0, 0] (map corner) until the next hard reset.
+        """
+        if self._preview_computer_opponent() or self.opponent_model is not None:
+            return self.opponent_model is not None
+        return self._sync_opponent_model()
+
+    def _opponent_graft_grid_size(self) -> int:
+        """32×32 universal spatial head — not env.grid_size (often 128 for legacy masks)."""
+        if isinstance(self.action_space, spaces.MultiDiscrete) and len(self.action_space.nvec) >= 2:
+            spatial_cells = int(self.action_space.nvec[1])
+            side = int(round(spatial_cells ** 0.5))
+            if side * side == spatial_cells:
+                return side
+        return 32
+
     async def _setup_game_session(self):
         from sc2.player import Bot, Computer
         from sc2.data import Race, Difficulty
         from s2clientprotocol import sc2api_pb2 as sc_pb
-        
+        from train.envs.sc2_session_config import session_realtime
+
         self.bot = CaptureTheFlagBot(player_id=1, training_conf=self.training_conf)
-        # Use Computer for P2 to ensure single-client setup works reliably
-        players = [Bot(Race.Zerg, self.bot), Computer(Race.Zerg, Difficulty.VeryEasy)]
+        sim_realtime = session_realtime(self.training_conf)
+        env_conf = self.training_conf.get("env", {})
+        difficulty_name = self.training_conf.get("difficulty") or env_conf.get("difficulty", "Easy")
+        try:
+            difficulty = getattr(Difficulty, difficulty_name)
+        except AttributeError:
+            difficulty = Difficulty.Easy
+        players = [Bot(Race.Zerg, self.bot), Computer(Race.Zerg, difficulty)]
         resolved_map = self._resolve_map(self.map_name)
         
         self._log("Starting single-process God-Mode game session...")
-        await self._manager.create_join_game(resolved_map, players, realtime=self.realtime)
+        await self._manager.create_join_game(resolved_map, players, realtime=sim_realtime)
 
         # Prepare bot
         client = self._manager.clients[0]
@@ -195,13 +231,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         game_info = GameInfo(raw_game_info.game_info)
         game_data = await client.get_game_data()
         
-        self.bot._prepare_start(client, 1, game_info, game_data, self.realtime)
+        self.bot._prepare_start(client, 1, game_info, game_data, sim_realtime)
         self.bot._proto_game_info = raw_game_info
         await self.bot.on_start()
         
-        # God-Mode: Enable full visibility and enemy control
         await client.debug_show_map()
-        await client.debug_control_enemy()
+        if not self._preview_computer_opponent():
+            await client.debug_control_enemy()
         
         # Initial step and spawn
         await client.step()
@@ -791,6 +827,39 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self.bot.active_unit_tag = tags[self.current_unit_index]
         return self.bot.get_observation(perspective_player_id=player_id)
 
+    def preview_tick(self):
+        """Advance SC2 one frame without policy actions (debug UI training-level preview)."""
+        return self._loop.run_until_complete(self._async_preview_tick())
+
+    def _ensure_preview_focal_unit(self) -> None:
+        """Pick a focal unit so the tactical fovea is populated in debug preview."""
+        if self.bot is None:
+            return
+        if self.bot.active_unit_tag and self.bot.all_units.find_by_tag(self.bot.active_unit_tag):
+            return
+        _, tags = self._current_squad()
+        if tags:
+            self.bot.active_unit_tag = tags[0]
+            return
+        for tag in self.player_units.get(1, []):
+            pool_idx = self.unit_pool_index.get(tag)
+            if (
+                pool_idx is not None
+                and self.unit_pools_config
+                and self.unit_pools_config[pool_idx].get("agent")
+            ):
+                self.bot.active_unit_tag = tag
+                return
+        if self.player_units.get(1):
+            self.bot.active_unit_tag = self.player_units[1][0]
+
+    async def _async_preview_tick(self):
+        await self.bot.client.step()
+        await self._refresh_bot_state()
+        await self._refresh_unit_lists()
+        self._ensure_preview_focal_unit()
+        return await self._get_joint_observation()
+
     def _opponent_checkpoint_dir(self) -> str:
         return os.path.normpath(
             os.environ.get("SC2_ASYNC_BUFFER_DIR", os.path.join("temp", "async_train"))
@@ -802,18 +871,22 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if explicit_path:
             return [explicit_path]
         temp_dir = self._opponent_checkpoint_dir()
+        # Prefer level-entry ``initial_model`` so self-play uses a lagging snapshot,
+        # not the collector's latest hot-reload zip (near-current trainee weights).
         return [
-            os.path.join(temp_dir, "latest_learner_model_collector_staging.zip"),
             os.path.join(temp_dir, "initial_model.zip"),
+            os.path.join(temp_dir, "latest_learner_model_collector_staging.zip"),
             os.path.join(temp_dir, "latest_learner_model.zip"),
             os.path.join(temp_dir, "collector_weights_staging.zip"),
         ]
 
-    def _build_opponent_model_load_kwargs(self) -> Dict[str, Any]:
-        """Match collector/learner load kwargs so checkpoint shapes align (512-dim LSTM, UCN)."""
+    def _resolve_opponent_algo_bundle(self) -> Tuple[Any, Any, Dict[str, Any], str]:
+        """Return (AlgoClass, PolicyClass, policy_kwargs, rnn_type) for opponent load."""
+        from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
+        from src.agent.maskable_ppo import MaskablePPO
         from src.agent.models.unit_control_network import UnitControlNetwork
         from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
-        from src.utils.training_device import resolve_opponent_device
+        from src.agent.models.universal_policy import UniversalActorCriticPolicy
 
         model_conf = self.training_conf.get("model", {})
         algo_name = model_conf.get("algorithm", "MaskablePPO")
@@ -829,6 +902,39 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             policy_kwargs["features_extractor_class"] = UnitControlNetwork
         if "Recurrent" in algo_name:
             policy_kwargs["rnn_type"] = rnn_type
+
+        if "Recurrent" in algo_name:
+            return MaskableRecurrentPPO, UniversalRecurrentPolicy, policy_kwargs, rnn_type
+        return MaskablePPO, UniversalActorCriticPolicy, policy_kwargs, rnn_type
+
+    def _build_opponent_algo_kwargs(self) -> Dict[str, Any]:
+        """Fresh-model kwargs for curriculum graft when direct SB3 load fails."""
+        from src.utils.training_device import resolve_opponent_device
+
+        AlgoClass, PolicyClass, policy_kwargs, rnn_type = self._resolve_opponent_algo_bundle()
+        training_params = self.training_conf.get("training", self.training_conf)
+        model_conf = self.training_conf.get("model", {})
+        algo_kwargs: Dict[str, Any] = {
+            "policy": PolicyClass,
+            "env": self,
+            "policy_kwargs": policy_kwargs,
+            "n_steps": int(training_params.get("n_steps", 2048)),
+            "batch_size": int(training_params.get("batch_size", 512)),
+            "gamma": float(model_conf.get("gamma", 0.99)),
+            "device": resolve_opponent_device(training_params),
+        }
+        if AlgoClass.__name__ == "MaskableRecurrentPPO":
+            algo_kwargs["rnn_type"] = rnn_type
+        return algo_kwargs
+
+    def _build_opponent_model_load_kwargs(self) -> Dict[str, Any]:
+        """Match collector/learner load kwargs so checkpoint shapes align (512-dim LSTM, UCN)."""
+        from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
+        from src.utils.training_device import resolve_opponent_device
+
+        _algo, _policy, policy_kwargs, rnn_type = self._resolve_opponent_algo_bundle()
+        model_conf = self.training_conf.get("model", {})
+        algo_name = model_conf.get("algorithm", "MaskablePPO")
 
         custom_objects = {
             "lr_schedule": lambda _: 0.0,
@@ -863,42 +969,55 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         Load the latest learner checkpoint from disk as the frozen opponent snapshot.
         """
         candidates = self._opponent_checkpoint_candidates(checkpoint_path)
-        model_path = next((p for p in candidates if os.path.exists(p)), None)
-        if model_path is None:
+        existing = [p for p in candidates if os.path.exists(p)]
+        if not existing:
             self._log(
                 "Opponent sync: no checkpoint found yet "
                 f"(searched {candidates}) — skipping."
             )
             return False
 
-        try:
-            from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
-            from src.agent.maskable_ppo import MaskablePPO
+        from src.utils.model_utils import load_curriculum_checkpoint
 
-            model_conf = self.training_conf.get("model", {})
-            algo_name = model_conf.get("algorithm", "MaskablePPO")
-            AlgoClass = MaskableRecurrentPPO if "Recurrent" in algo_name else MaskablePPO
+        AlgoClass, _, _policy_kwargs, _rnn = self._resolve_opponent_algo_bundle()
+        algo_kwargs = self._build_opponent_algo_kwargs()
+        load_kwargs = self._build_opponent_model_load_kwargs()
+        grid_size = self._opponent_graft_grid_size()
 
-            load_kwargs = self._build_opponent_model_load_kwargs()
-            new_model = AlgoClass.load(model_path, **load_kwargs)
-            new_model.policy.set_training_mode(False)
-            self.opponent_model = new_model
-            self._opponent_lstm_state = None
-            self._opponent_last_focus_tag = None
-            self._opponent_infer_source = "frozen"
-            self._logged_no_opponent_model = False
-            self._log(
-                f"Opponent synced from '{os.path.basename(model_path)}' "
-                f"(episode {self.episode_counter})."
-            )
-            return True
-        except Exception as e:
-            import traceback
-            self._log(
-                f"Opponent sync failed (will retry next hard reset): {e}\n"
-                + traceback.format_exc()
-            )
-            return False
+        errors: List[str] = []
+        for model_path in existing:
+            try:
+                new_model = load_curriculum_checkpoint(
+                    AlgoClass,
+                    model_path,
+                    algo_kwargs,
+                    load_kwargs,
+                    self.observation_space,
+                    self.action_space,
+                    grid_size=grid_size,
+                )
+                new_model.policy.set_training_mode(False)
+                self.opponent_model = new_model
+                self._opponent_lstm_state = None
+                self._opponent_last_focus_tag = None
+                self._opponent_infer_source = "frozen"
+                self._logged_no_opponent_model = False
+                self._log(
+                    f"Opponent synced from '{os.path.basename(model_path)}' "
+                    f"(episode {self.episode_counter})."
+                )
+                return True
+            except Exception as e:
+                import traceback
+                errors.append(
+                    f"{os.path.basename(model_path)}: {e}\n{traceback.format_exc()}"
+                )
+
+        self._log(
+            "Opponent sync failed for all checkpoint candidates "
+            f"(will retry next hard reset):\n" + "\n---\n".join(errors)
+        )
+        return False
 
     async def _predict_opponent_squad_batch(self, tags: List[int]) -> List[np.ndarray]:
         """Batched opponent inference for every unit in the acting squad."""
@@ -909,14 +1028,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         player_id = self.active_player_id
         obs_list, mask_list = self._build_squad_obs_and_masks(tags, player_id)
-        default = np.zeros(self.action_space.nvec.shape[0], dtype=np.int64)
+        default = universal_fallback_action()
+
+        if self.opponent_model is None:
+            self._ensure_opponent_model_loaded()
 
         opp_model, source = self._resolve_opponent_model()
         if opp_model is None:
             if not getattr(self, "_logged_no_opponent_model", False):
                 self._log(
                     "Opponent predict: no opponent_model or collector model — "
-                    "using default action [0, 0] (units drift to map corner)."
+                    "using fallback move_global + center spatial (not map corner)."
                 )
                 self._logged_no_opponent_model = True
             return [default.copy() for _ in tags]
@@ -948,12 +1070,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         Partial chunks only refresh a subset during apply; re-issuing stale move
         orders for the rest made opponents drift to spatial cell 0 (map corner).
         """
+        if self._preview_computer_opponent():
+            return
+        if self.opponent_model is None:
+            self._ensure_opponent_model_loaded()
         tags = list(self.player_units.get(2, []))
         if not tags:
             return
-
-        if self.opponent_model is None:
-            self.sync_opponent_model()
 
         prev_player = self.active_player_id
         self.active_player_id = 2
@@ -983,7 +1106,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             )
             mask_list.append(self.bot.action_masks())
 
-        default = np.zeros(self.action_space.nvec.shape[0], dtype=np.int64)
+        default = universal_fallback_action()
+        if self.opponent_model is None:
+            self._ensure_opponent_model_loaded()
         opp_model, source = self._resolve_opponent_model()
         if opp_model is None:
             return [default.copy() for _ in entries]
@@ -1084,7 +1209,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     async def _predict_opponent_action(self):
         """Run frozen opponent model for the current active_unit_tag."""
         obs_p2 = await self._get_joint_observation()
-        default = np.zeros(self.action_space.nvec.shape[0], dtype=np.int64)
+        default = universal_fallback_action()
         opp_model, source = self._resolve_opponent_model()
         if opp_model is None:
             return default
@@ -1167,6 +1292,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             await self._advance_squad_index()
             obs = await self._get_joint_observation()
             return obs, 0.0, False, False, {"squad_physics_step": True}
+
+        if self._preview_computer_opponent():
+            return await self._finalize_squad_physics_step(tags, acting_player_id)
 
         for tag in tags:
             self.bot.active_unit_tag = tag
@@ -1379,11 +1507,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._squad_batch_actions = None
         self._prepared_chunk = None
 
-        env_conf = self.training_conf.get("env", {})
-        every_k = (
-            self.training_conf.get("every_k_episodes")
-            or env_conf.get("every_k_episodes", 50)
-        )
+        every_k = every_k_episodes(self.training_conf)
 
         session_alive = bool(self._manager.clients)
         is_hard_reset_due = (self.episode_counter % every_k == 0)
@@ -1399,7 +1523,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     self.game_ended = False
                     self._log(f"Soft reset complete (episode {self.episode_counter}).")
                     if self.opponent_model is None:
-                        self._sync_opponent_model()
+                        self._ensure_opponent_model_loaded()
                     return obs, {}
                 except Exception as e:
                     import traceback

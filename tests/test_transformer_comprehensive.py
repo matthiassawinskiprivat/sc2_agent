@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.transformers.observation_transformer import ObservationTransformer
 from src.utils.layer_constants import LayerConstants
+from tests.obs_transformer_test_utils import get_layer, transform_map
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.ids.effect_id import EffectId
 
@@ -108,7 +109,7 @@ class TestTransformerComprehensive(unittest.TestCase):
         }
 
     def get_layer(self, layers, name):
-        return layers[LayerConstants.LAYERS[name]]
+        return get_layer(layers, name)
 
     def run_obs(self, units=[], enemy_units=[], effects=[]):
         raw = {
@@ -118,7 +119,7 @@ class TestTransformerComprehensive(unittest.TestCase):
             'game_info': self.game_info,
             'game_data': MagicMock()
         }
-        return self.transformer.transform(raw)
+        return transform_map(self.transformer, raw)
 
     # ==============================================================================
     # 1. UNIT ATTRIBUTE TESTS
@@ -155,10 +156,8 @@ class TestTransformerComprehensive(unittest.TestCase):
         hp_layer = self.get_layer(layers, "allied_health")
         en_layer = self.get_layer(layers, "allied_energy")
 
-        # Expected: np.log1p(ratio)
-        # log1p(0.5) = 0.405...
-        # log1p(0.25) = 0.223...
-        expected_hp = np.log1p(0.5)
+        # Expected: health = damage fraction; energy still log1p(ratio)
+        expected_hp = 0.5
         expected_en = np.log1p(0.25)
 
         self.assertAlmostEqual(np.max(hp_layer), expected_hp, delta=0.01)

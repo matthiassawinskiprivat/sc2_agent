@@ -309,6 +309,7 @@ def test_write_rollout_rows_applies_squad_reward_to_every_unit_row():
         step_actions=np.zeros((1, 2), dtype=np.int64),
         squad_batch_actions={0: np.zeros((3, 2), dtype=np.int64)},
         buffer_rows=rows,
+        vec_rows=[],
         updated_lstm=None,
     )
     pre_obs = {k: v[np.newaxis, ...] for k, v in _dict_obs(0).items()}
@@ -366,6 +367,7 @@ def test_write_rollout_rows_respects_max_rows():
         step_actions=np.zeros((1, 2), dtype=np.int64),
         squad_batch_actions={0: np.zeros((3, 2), dtype=np.int64)},
         buffer_rows=rows,
+        vec_rows=[],
         updated_lstm=None,
     )
     pre_obs = {k: v[np.newaxis, ...] for k, v in _dict_obs(0).items()}

@@ -2,7 +2,7 @@
 # Optimized starting level for Hybrid Agent (128x128 maps)
 
 training:
-  training_steps: 3_000_000
+  training_steps: 500_000
   num_envs: 8
   n_steps: 2048
   batch_size: 1024
@@ -14,6 +14,7 @@ training:
 env:
   headless: True
   max_steps: 250
+  every_k_episodes: 250
   maps_dir: "train/maps/128x128"
   high_level_command: "scout"
   guidance_curriculum: False

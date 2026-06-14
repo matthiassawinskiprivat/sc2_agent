@@ -1,5 +1,5 @@
 training:
-  training_steps: 500_000
+  training_steps: 1_000_000
   num_envs: 5
   n_steps: 2048
   batch_size: 512
@@ -11,9 +11,9 @@ training:
 
 env:
   env_class: "CaptureTheFlagEnv"
-  max_steps: 350
+  max_steps: 200
   headless: True
-  every_k_episodes: 250
+  every_k_episodes: 50
 
   # Map & layout
   maps_dir: "train/maps/ladder/with_region"

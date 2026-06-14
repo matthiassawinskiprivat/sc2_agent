@@ -9,6 +9,7 @@ from sc2.data import Race
 from loguru import logger
 
 from src.hierarchical_agent import HierarchicalAgentSystem
+from src.utils.layer_constants import LayerConstants
 from src.utils.perspective_transformer import PerspectiveTransformer
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
@@ -72,7 +73,7 @@ class CaptureTheFlagBot(BotAI):
         self.last_action_was_move_by_unit: Dict[int, bool] = {}
         
         self.frame_count = 0
-        self.cached_observation: Optional[np.ndarray] = None
+        self.cached_observation: Optional[Any] = None
 
         # enemy_race must be set to avoid AttributeError in BotAIInternal._prepare_step
         self._enemy_race = Race.Random
@@ -100,9 +101,28 @@ class CaptureTheFlagBot(BotAI):
         self.cached_observation = None
         self.frame_count = 0
 
+    def _get_zero_observation(self) -> Any:
+        """Shape-correct empty observation (dict for universal, array for original)."""
+        num_layers = len(self.training_conf.get("active_layers", [])) or LayerConstants.get_num_layers()
+        if self.training_conf.get("agent_architecture") == "universal":
+            n_tactical = len(self.training_conf.get("active_tactical_layers", [])) or num_layers
+            return {
+                "map": np.zeros((num_layers, 128, 128), dtype=np.float32),
+                "tactical": np.zeros((n_tactical, 32, 32), dtype=np.float32),
+                "command": np.zeros(10, dtype=np.float32),
+            }
+        return np.zeros((num_layers, 128, 128), dtype=np.float32)
+
     async def on_start(self):
         env_conf = self.training_conf.get("env", {})
-        self.grid_size = self.training_conf.get("grid_size", env_conf.get("grid_size", 128))
+        arch = self.training_conf.get("agent_architecture", "original")
+        if arch == "universal":
+            # Match SC2BotUniversal / MultiDiscrete 32×32 spatial head (not legacy 128).
+            self.grid_size = 32
+        else:
+            self.grid_size = self.training_conf.get(
+                "grid_size", env_conf.get("grid_size", 128)
+            )
 
         self.agent_system = HierarchicalAgentSystem(
             map_size=(128, 128),
@@ -111,7 +131,7 @@ class CaptureTheFlagBot(BotAI):
         )
         self.agent_system.create_unit_agent("active_agent")
 
-    def get_observation(self, perspective_player_id: Optional[int] = None) -> np.ndarray:
+    def get_observation(self, perspective_player_id: Optional[int] = None) -> Any:
         """Returns the processed observation from the given player's perspective."""
         # Use provided perspective or default to bot's own player_id
         p_id = perspective_player_id if perspective_player_id is not None else self.player_id
@@ -119,7 +139,7 @@ class CaptureTheFlagBot(BotAI):
         # Defensive check for game info/state
         if not hasattr(self, "game_info") or self.game_info is None:
              logger.warning(f"Bot {self.player_id}: game_info is missing. Returning zero observation.")
-             return np.zeros((23, 128, 128), dtype=np.uint8)
+             return self._get_zero_observation()
 
         # Flip units based on perspective
         if p_id == self.player_id:
@@ -149,6 +169,10 @@ class CaptureTheFlagBot(BotAI):
                     selected_units = [active_unit]
             except Exception:
                 pass
+        if active_unit is None and units.exists:
+            active_unit = units.first
+            selected_units = [active_unit]
+            self.active_unit_tag = active_unit.tag
 
         # command_target: use per-unit spawn-time objective when available.
         # For attackers this is the enemy defender's pylon in their arena;
@@ -186,6 +210,9 @@ class CaptureTheFlagBot(BotAI):
         }
 
         # Process with agent system, passing active_unit for the tactical crop
+        if self.agent_system is None:
+            logger.warning(f"Bot {self.player_id}: agent_system not ready. Returning zero observation.")
+            return self._get_zero_observation()
         try:
             processed = self.agent_system.process_observation(
                 raw_obs, player_id=p_id, active_unit=active_unit
@@ -209,9 +236,11 @@ class CaptureTheFlagBot(BotAI):
                 logger.warning(f"Bot {self.player_id} (P_ID {p_id}): Observation processing failed ({e}). Returning cached observation.")
                 return self.cached_observation
             else:
-                # Fallback to zeros
-                num_layers = len(self.training_conf.get("active_layers", [])) or 23
-                return np.zeros((num_layers, 128, 128), dtype=np.float32)
+                logger.warning(
+                    f"Bot {self.player_id} (P_ID {p_id}): Observation processing failed ({e}). "
+                    "Returning zero observation."
+                )
+                return self._get_zero_observation()
 
         return self.cached_observation
 
@@ -277,6 +306,12 @@ class CaptureTheFlagBot(BotAI):
         # it back to real-world coordinates before issuing the SC2 order.
         is_opponent_unit = unit.owner_id != self.player_id
 
+        agent = self.agent_system.unit_agents["active_agent"]
+        # Spatial decode reads last_game_info; ensure it is set even if obs processing
+        # failed earlier this step (otherwise every order targets world 0,0 → map corner).
+        if self.game_info is not None:
+            agent.last_game_info = self.game_info
+
         if arch == "universal":
             # Universal: action = [head_idx, spatial_idx] on 32×32 grid
             action = np.asarray(action, dtype=np.int64).reshape(-1)
@@ -297,7 +332,7 @@ class CaptureTheFlagBot(BotAI):
                 _row, _col = divmod(spatial_idx, _gs)
                 spatial_idx = ((_gs - 1 - _row) * _gs) + (_gs - 1 - _col)
 
-            world_x, world_y = self.agent_system.unit_agents["active_agent"].convert_spatial_action_to_world(
+            world_x, world_y = agent.convert_spatial_action_to_world(
                 head_name, spatial_idx, active_unit=unit
             )
             target = Point2((world_x, world_y))

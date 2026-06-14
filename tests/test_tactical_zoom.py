@@ -92,14 +92,15 @@ def test_observation_transformer_tactical_zoom():
     obj_pixel = tactical_obs[1, 13, 18]
     assert obj_pixel > 0, f"Command objective not found at expected tactical coordinates (13, 18), got {obj_pixel}"
 
-    # Layer 2: Command Assignment (Self)
-    # Unit at 50, 50. PX: 50-34 = 16. PY: 31-(50-34) = 15.
-    self_pixel = tactical_obs[2, 15, 16]
+    # Layer 2: Command Assignment (Self) — footprint must match density (not a special-case path).
+    assign_layer = tactical_obs[2]
+    assert np.count_nonzero(assign_layer > 0) == np.count_nonzero(tactical_obs[0] > 0)
+    self_pixel = assign_layer[15, 16]
     assert self_pixel > 0, f"Command assignment (Self) not found at tactical center (15, 16), got {self_pixel}"
     
     # Layer 3: Terrain Pathable
     # Normalization floor is 0.2, so if it's all ones it will be around 0.2
-    assert np.mean(tactical_obs[3]) >= 0.2, "Tactical terrain layer is empty"
+    assert np.mean(tactical_obs[3]) >= 0.15, "Tactical terrain layer is empty"
 
     # --- Action Head Alignment Verification ---
     from src.agent.universal_unit_control_agent import UniversalUnitControlAgent

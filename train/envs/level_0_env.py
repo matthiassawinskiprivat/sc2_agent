@@ -39,18 +39,16 @@ from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.config_manager import ConfigManager
 from src.utils.layer_constants import LayerConstants
 from src.utils.proto_utils import ProtoWrapper
-from train.envs.sc2_session_config import use_computer_player
+from train.envs.sc2_session_config import every_k_episodes, session_realtime, use_computer_player
 from src.agent.universal_constants import (
     FIXED_UNIVERSAL_COMMAND_DIM,
     build_action_head_manifest,
 )
 
-HARD_RESET_COUNT = 100
-
 class Level0Env(gym.Env):
     def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1,
                  level_name: str = "level_0", sc2_process_cls=None, client_cls=None, training_conf: Dict = None,
-                 max_steps: int = 300, initial_steps: int = 0):
+                 max_steps: int = 300, initial_steps: int = 0, realtime: bool = None):
         super(Level0Env, self).__init__()
         self.visualize = visualize
         self.grid_size = grid_size
@@ -123,6 +121,12 @@ class Level0Env(gym.Env):
             self.categorical_heads = []
             self.agent_architecture = "original"
 
+        if realtime is not None:
+            env_section = self.training_conf.setdefault("env", {})
+            if isinstance(env_section, dict):
+                env_section["realtime"] = bool(realtime)
+        self.realtime = session_realtime(self.training_conf)
+
         # Dependency Injection for testing
         self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
         
@@ -186,6 +190,7 @@ class Level0Env(gym.Env):
         # Initialize total steps from the provided initial_steps (adjusted for per-worker count)
         self.total_steps_in_level = initial_steps // max(1, self.num_workers)
         self.training_steps_limit = self.training_conf.get("training_steps", 100_000)
+        self._preview_spatial_moves: list = []
 
     def _discover_maps(self):
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -223,12 +228,21 @@ class Level0Env(gym.Env):
         self.episode_counter += 1
         
         # --- Hard Reset / Map Rotation Logic ---
-        if self.episode_counter > 1 and (self.episode_counter + self.worker_index) % HARD_RESET_COUNT == 0:
-            self._log(f"Episode {self.episode_counter}: Triggering hard reset.")
+        every_k = every_k_episodes(self.training_conf)
+        if (
+            self.episode_counter > 1
+            and (self.episode_counter + self.worker_index) % every_k == 0
+        ):
+            self._log(
+                f"Episode {self.episode_counter}: Triggering hard reset "
+                f"(every_k_episodes={every_k})."
+            )
             self.close()
-            
-            resets_done = (self.episode_counter + self.worker_index) // HARD_RESET_COUNT
-            map_idx = (self.worker_index + resets_done * self.num_workers) % len(self.map_list)
+
+            resets_done = (self.episode_counter + self.worker_index) // every_k
+            map_idx = (self.worker_index + resets_done * self.num_workers) % len(
+                self.map_list
+            )
             self.map_name = self.map_list[map_idx]
             self._log(f"New map: {self.map_name}")
         
@@ -366,10 +380,11 @@ class Level0Env(gym.Env):
         else:
             self._log("Starting game WITHOUT Computer (Movement Level)")
 
+        sim_realtime = session_realtime(self.training_conf)
         await self._controller.create_game(
             game_map,
             players,
-            realtime=self.visualize,
+            realtime=sim_realtime,
         )
         await self._client.join_game(race=Race.Zerg)
         
@@ -378,17 +393,23 @@ class Level0Env(gym.Env):
         game_data = await self._client.get_game_data()
 
         self._log("Preparing bot start...")
+        self._bot.client = self._client
         try:
             from sc2.unit import UnitGameData
             UnitGameData._game_data = game_data
             UnitGameData._bot_object = self._bot
-            self._bot.client = self._client
             self._bot._game_info = game_info
             self._bot._game_data = game_data
-        except ImportError:
+        except (ImportError, AttributeError):
             pass
-        
-        self._bot._prepare_start(client=self._client, player_id=1, game_info=game_info, game_data=game_data)
+
+        self._bot._prepare_start(
+            client=self._client,
+            player_id=1,
+            game_info=game_info,
+            game_data=game_data,
+            realtime=sim_realtime,
+        )
         initial_observation = await self._client.observation()
 
         from src.utils.sc2_observation_compat import game_state_from_response_observation
@@ -533,6 +554,73 @@ class Level0Env(gym.Env):
             return int(self._bot.zergling.tag)
         return -1
 
+    def queue_preview_spatial_move(self, command_name: str, gx: int, gy: int) -> None:
+        """Queue a manual spatial command for the next debug UI preview tick."""
+        self._preview_spatial_moves.append((str(command_name), int(gx), int(gy)))
+
+    def _preview_active_unit_tag(self):
+        """Unit tag that receives manual debug spatial orders (matches preview focal unit)."""
+        if self._bot is None:
+            return None
+        tags = getattr(self, "active_unit_tags", None)
+        if tags:
+            idx = getattr(self, "current_unit_index", 0) % len(tags)
+            return int(tags[idx])
+        if getattr(self._bot, "zergling", None):
+            return int(self._bot.zergling.tag)
+        from src.sc2_bot import resolve_tactical_active_unit_for_debug
+
+        _unit, tag = resolve_tactical_active_unit_for_debug(self._bot)
+        return int(tag) if tag is not None else None
+
+    async def _async_apply_preview_spatial_moves(self) -> bool:
+        """Apply queued debug spatial moves via the same bot path as training."""
+        if not self._preview_spatial_moves or self._bot is None:
+            return False
+
+        from src.ui.spatial_debug_control import build_universal_spatial_action
+
+        moves = list(self._preview_spatial_moves)
+        self._preview_spatial_moves.clear()
+        applied = False
+        for command_name, gx, gy in moves:
+            unit_tag = self._preview_active_unit_tag()
+            if unit_tag is None:
+                continue
+            action = build_universal_spatial_action(
+                command_name, gx, gy, self.training_conf
+            )
+            agent_system = getattr(self._bot, "agent_system", None)
+            if agent_system is not None:
+                agent = agent_system.unit_agents.get("agent_0")
+                if agent is not None and getattr(self._bot, "game_info", None) is not None:
+                    agent.last_game_info = self._bot.game_info
+            await self._bot.apply_action(unit_tag, action)
+            actions = getattr(self._bot, "_actions", None)
+            if actions is None:
+                actions = getattr(self._bot, "actions", None)
+            if actions:
+                await self._client.actions(actions[:])
+                actions.clear()
+            await self._client.step()
+            applied = True
+        return applied
+
+    def preview_tick(self):
+        """Advance SC2 one frame without policy actions (debug UI training-level preview)."""
+        return self._loop.run_until_complete(self._async_preview_tick())
+
+    async def _async_preview_tick(self):
+        stepped = await self._async_apply_preview_spatial_moves()
+        if not stepped:
+            await self._client.step()
+        response = await self._client.observation()
+        from src.utils.sc2_observation_compat import game_state_from_response_observation
+        state = game_state_from_response_observation(response.observation)
+        self._bot._prepare_step(state, ProtoWrapper(self._bot.game_info._proto))
+        obs, _, _, _, _ = self._bot._get_step_results()
+        return obs
+
     def requires_policy_action(self) -> bool:
         """Non-CTF envs always need a policy forward each step."""
         return True
@@ -544,6 +632,10 @@ class Level0Env(gym.Env):
     def prepare_policy_batch(self):
         """Unified batching hook; non-CTF envs always return None."""
         return self.prepare_squad_policy_batch()
+
+    def sync_opponent_model(self, checkpoint_path=None) -> bool:
+        """No-op for non-CTF levels (CaptureTheFlagSingleEnv overrides with self-play sync)."""
+        return False
 
     def action_masks(self):
         mask = None
