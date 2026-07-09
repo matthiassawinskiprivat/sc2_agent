@@ -1,6 +1,7 @@
+# CTF 03 — Marauder vs Roach. Trainee race alternates (T/Z).
 training:
   training_steps: 1_000_000
-  num_envs: 5
+  num_envs: 4
   n_steps: 2048
   batch_size: 512
   learning_rate: 0.0003
@@ -14,78 +15,67 @@ env:
   max_steps: 200
   headless: True
   every_k_episodes: 50
+  alternate_trainee_race: true
 
-  # Map & layout
   maps_dir: "train/maps/ladder/with_region"
   unit_pools:
     - high_level_command: "attack"
-      agent: True
-      mineral_budget: 1200   
-      vespene_budget: 400
+      race: terran
+      mineral_budget: 200
+      vespene_budget: 50
       unit_pool:
-        - "ZEALOT"
-        - "STALKER"
-        - "ADEPT"
-        - "IMMORTAL"
-        - "ARCHON"
-        - "COLOSSUS"
+        - "MARAUDER"
       region: "A"
     - high_level_command: "defend"
-      mineral_budget: 850       
-      vespene_budget: 400
+      race: zerg
+      mineral_budget: 150
+      vespene_budget: 50
       unit_pool:
-        - "MARINE"
-        - "MARAUDER"
-        - "HELLIONTANK"
-        - "HELLION"
-        - "CYCLONE"
-        - "THOR"
-        - "SIEGETANK"
+        - "ROACH"
       region: "A"
     - high_level_command: "defend"
-      agent: True
-      mineral_budget: 850       
-      vespene_budget: 400
+      race: terran
+      mineral_budget: 200
+      vespene_budget: 50
       unit_pool:
-        - "MARINE"
         - "MARAUDER"
-        - "HELLIONTANK"
-        - "HELLION"
-        - "CYCLONE"
-        - "THOR"
-        - "SIEGETANK"
       region: "B"
     - high_level_command: "attack"
-      mineral_budget: 1200   
-      vespene_budget: 400
+      race: zerg
+      mineral_budget: 150
+      vespene_budget: 50
       unit_pool:
-        - "ZEALOT"
-        - "STALKER"
-        - "ADEPT"
-        - "IMMORTAL"
-        - "ARCHON"
-        - "COLOSSUS"
+        - "ROACH"
       region: "B"
 
+  active_layers:
+    - "allied_unit_armored"
+    - "enemy_unit_armored"
+    - "allied_g_dps_armor"
+    - "enemy_g_dps_armor"
+
+  active_tactical_layers:
+    - "allied_unit_armored"
+    - "enemy_unit_armored"
+    - "allied_g_dps_armor"
+    - "enemy_g_dps_armor"
+
   rewards:
-    pylon_damage_reward: 1.0 
+    pylon_damage_reward: 1.0
     pylon_damage_penalty: 1.0
     damage_reward: 0.2
     damage_penalty: 0.2
+    melee_multiplier: 0.5
     kill_reward: 0.5
     kill_penalty: -0.5
     distance_multiplier: 1.0
     defender_zone_radius: 10.0
     cooldown_retreat_scale: 1.1
-
-    # Episode outcome
     win_reward: 15.0
     loss_penalty: -5.0
     draw_penalty: -2.0
-
-    # Per-step role signals
-    step_penalty: -0.05          # applied to attacker units each step (discourages passivity)
-    defender_step_reward: 0.001  # applied to defender units each step (rewards survival)
+    step_penalty: -0.05
+    defender_step_reward: 0.001
 
 model:
   algorithm: "MaskableRecurrentPPO"
@@ -98,6 +88,6 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.996
-  ent_coef: 0.001
-  n_epochs: 2
+  gamma: 0.995
+  ent_coef: 0.05
+  n_epochs: 4

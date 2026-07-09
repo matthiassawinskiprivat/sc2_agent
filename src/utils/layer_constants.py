@@ -113,6 +113,7 @@ class LayerConstants:
     ENEMY_DETECTION  = "enemy_detection"
     TERRAIN_PATHABLE = "terrain_pathable"
     TERRAIN_CREEP    = "terrain_creep"
+    TERRAIN_BUILDABLE = "terrain_buildable"
 
 
     # ==============================================================================
@@ -158,6 +159,7 @@ class LayerConstants:
 
         ALLIED_DETECTION: 36, ENEMY_DETECTION: 37,
         TERRAIN_PATHABLE: 38, TERRAIN_CREEP: 39,
+        TERRAIN_BUILDABLE: 46,
 
         COMMAND_ASSIGNMENT: 40, COMMAND_OBJECTIVE: 41,
         
@@ -180,6 +182,7 @@ class LayerConstants:
         TERRAIN_CREEP: 9,
         ALLIED_WEAPON_COOLDOWN: 10,
         ENEMY_WEAPON_COOLDOWN: 11,
+        TERRAIN_BUILDABLE: 26,
         # Unit attribute flags (mirrors LAYERS group 1/2)
         ALLIED_UNIT_BIOLOGICAL: 12,
         ENEMY_UNIT_BIOLOGICAL: 13,
@@ -196,12 +199,23 @@ class LayerConstants:
         ENEMY_G_DPS_ARMOR: 23,
         ALLIED_G_DPS_MASSIVE: 24,
         ENEMY_G_DPS_MASSIVE: 25,
+        # Flying unit flags + air DPS channels (CTF air curriculum)
+        ALLIED_UNIT_FLYING: 27,
+        ENEMY_UNIT_FLYING: 28,
+        ALLIED_A_DPS_BASE: 29,
+        ALLIED_A_DPS_LIGHT: 30,
+        ALLIED_A_DPS_ARMOR: 31,
+        ALLIED_A_DPS_MASSIVE: 32,
+        ENEMY_A_DPS_BASE: 33,
+        ENEMY_A_DPS_LIGHT: 34,
+        ENEMY_A_DPS_ARMOR: 35,
+        ENEMY_A_DPS_MASSIVE: 36,
     }
 
     @classmethod
     def get_num_layers(cls) -> int:
-        return 46
+        return 47
 
     @classmethod
     def get_num_tactical_layers(cls) -> int:
-        return 26
+        return 37

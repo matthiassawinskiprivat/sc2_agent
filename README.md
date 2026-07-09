@@ -77,7 +77,7 @@ Training progresses through a sequence of levels defined in `pipeline.yaml`. Eac
 | Single-unit movement | `level_move_single_0` – `level_move_single_2` | Navigate one unit to a beacon on progressively harder maps |
 | Multi-unit movement | `level_move_multi_0` – `level_move_multi_4` | Coordinate multiple units to their assigned beacons |
 | Combat | `level_attack_0` – `level_attack_5` | Attack micro — kiting, focus fire, multi-unit fights |
-| Capture the Flag | `ctf_level_01` – `ctf_level_03` | Multi-squad objectives, self-play snapshots, role-based rewards |
+| Capture the Flag | `ctf_level_01` – `ctf_level_18` | Multi-race CTF; trainee race alternates each episode; gradual unit/layer curriculum |
 
 Capabilities are **additive** across the curriculum. Observation layers, action heads, and tactical layers accumulate: each level can add new ones, but never removes what earlier levels defined. This lets the network retain learned features as new capabilities are introduced.
 
@@ -199,6 +199,10 @@ flowchart TB
 ```
 
 **Command protocol:** manager emits a command object `{type, target_pos, unit_type, priority}` plus unit tags → updates global assignment → build path dispatches one worker to `BuildNetwork`; combat path groups units by squad/command and runs batched unit-control inference on **active** groups only.
+
+**Worker routing:** `WorkerRegistry` assigns each worker to `mining`, `build`, or `micro`. Manager owns assignments; workers can be reassigned to `micro` for defense (e.g. all-in). `MiningController` (scripted first, learned later) handles `mining` workers every game step.
+
+**Build training stack:** separate tree `config_build_zerg/`, `models_build_zerg/`, `train/train_build.py` (and `train/async_train_build.py` entry). MaskablePPO + `BuildNetwork`; action masks default to all-`True`.
 
 **Scaling many squads:** training **multiplexes** squads over time (CTF round-robin); Arena **deploy** batches all hot squads each game step. Cold squads keep last orders. Workers route to the build agent, not unit micro.
 

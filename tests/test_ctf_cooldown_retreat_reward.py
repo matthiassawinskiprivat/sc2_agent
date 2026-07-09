@@ -5,6 +5,7 @@ import math
 import pytest
 from unittest.mock import MagicMock
 from sc2.position import Point2
+from sc2.ids.unit_typeid import UnitTypeId
 
 from src.agent.ctf_bot import CaptureTheFlagBot
 
@@ -16,6 +17,7 @@ def _make_unit(
     owner_id: int = 1,
     weapon_cd: float = 0.0,
     ground_range: float = 5.0,
+    type_id=None,
 ):
     u = MagicMock()
     u.tag = tag
@@ -28,6 +30,8 @@ def _make_unit(
     u.ground_range = ground_range
     u.air_range = 0.0
     u.is_flying = False
+    if type_id is not None:
+        u.type_id = type_id
     return u
 
 
@@ -76,6 +80,29 @@ def test_no_reward_for_melee_unit():
     bot = _make_bot(scale=0.8)
     ally = _make_unit(101, 6.0, 0.0, ground_range=0.1)
     enemy = _make_unit(201, 0.0, 0.0, owner_id=2, ground_range=0.1)
+    bot.all_units.find_by_tag = MagicMock(return_value=ally)
+
+    bot._pre_action_weapon_cd_by_unit[101] = 5.0
+    bot._pre_action_dist_to_enemy_com[101] = 4.0
+    bot.last_action_was_move_by_unit[101] = True
+
+    assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
+
+
+def test_no_reward_for_helliontank_even_if_ground_range_is_large():
+    bot = _make_bot(scale=0.8)
+    # Our unit_data gives HellionTank (Hellbat) a weapon range > melee threshold,
+    # but it should still be treated as melee for cooldown-kite shaping.
+    ally = _make_unit(
+        101,
+        6.0,
+        0.0,
+        owner_id=1,
+        weapon_cd=5.0,
+        ground_range=2.0,
+        type_id=UnitTypeId.HELLIONTANK,
+    )
+    enemy = _make_unit(201, 0.0, 0.0, owner_id=2, ground_range=2.0)
     bot.all_units.find_by_tag = MagicMock(return_value=ally)
 
     bot._pre_action_weapon_cd_by_unit[101] = 5.0

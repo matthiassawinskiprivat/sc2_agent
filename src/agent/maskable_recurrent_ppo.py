@@ -1342,7 +1342,9 @@ class MaskableRecurrentPPO(RecurrentPPO):
                 custom_objects["policy_kwargs"] = {}
             custom_objects["policy_kwargs"]["rnn_type"] = rnn_override
 
-        custom_objects["optimizer"] = None
+        restore_optimizer = kwargs.pop("restore_optimizer", False)
+        if not restore_optimizer:
+            custom_objects["optimizer"] = None
         tb_log = kwargs.pop("tensorboard_log", None)
 
         force_surgical = env is not None and checkpoint_obs_action_mismatch_env(path, env)

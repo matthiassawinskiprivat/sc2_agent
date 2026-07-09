@@ -100,6 +100,17 @@ class TestCumulativeActiveLayers:
         assert cm.get_cumulative_active_layers("lvl1") == ["a"]
 
 
+class TestConfigManagerYamlCache:
+    def test_load_yaml_is_cached_per_instance(self, tmp_path):
+        _make_pipeline(tmp_path, {"lvl0": {"env": {"active_layers": ["A"]}}})
+        cm = ConfigManager(str(tmp_path))
+        first = cm._load_yaml("lvl0.yaml")
+        first["env"]["active_layers"].append("mutated")
+        second = cm._load_yaml("lvl0.yaml")
+        assert second is first
+        assert "mutated" in second["env"]["active_layers"]
+
+
 # ===========================================================================
 # get_cumulative_active_tactical_layers
 # ===========================================================================

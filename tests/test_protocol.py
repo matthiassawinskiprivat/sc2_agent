@@ -25,4 +25,4 @@ def test_layer_constants_transport_layers():
     
 def test_layer_count():
     """Verify total layer count includes new layers."""
-    assert LayerConstants.get_num_layers() == 46
+    assert LayerConstants.get_num_layers() == 47

@@ -295,6 +295,38 @@ def read_checkpoint_timesteps(zip_path: str) -> Optional[int]:
         return None
 
 
+def load_optimizer_state_from_zip(
+    model: Any,
+    zip_path: str,
+    device: Union[str, torch.device] = "auto",
+) -> Tuple[bool, str]:
+    """
+    Restore Adam state from an SB3 ``.zip`` into ``model.policy.optimizer``.
+
+    Call after policy weights are on the model (same parameter count/order as the
+    checkpoint). Returns ``(ok, reason)``; on failure the caller keeps a fresh optimizer.
+    """
+    if not hasattr(model, "policy") or getattr(model.policy, "optimizer", None) is None:
+        return False, "no_policy_optimizer"
+
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    try:
+        _, params, _ = load_from_zip_file(zip_path, device=device, load_data=False)
+    except Exception as exc:
+        return False, f"zip_read_failed:{exc}"
+
+    opt_sd = params.get("policy.optimizer")
+    if not opt_sd:
+        return False, "no_optimizer_in_checkpoint"
+
+    try:
+        model.policy.optimizer.load_state_dict(opt_sd)
+        return True, "ok"
+    except Exception as exc:
+        return False, f"load_state_dict_failed:{exc}"
+
+
 def load_policy_weights_from_zip(
     policy: torch.nn.Module,
     zip_path: str,
@@ -327,6 +359,7 @@ def load_curriculum_checkpoint(
     action_space: Any,
     *,
     grid_size: int = 32,
+    restore_optimizer: bool = False,
 ) -> Any:
     """
     Load a checkpoint for curriculum continuation.
@@ -334,9 +367,25 @@ def load_curriculum_checkpoint(
     Tries a direct SB3 load first. On observation/action shape mismatch, grafts
     compatible policy weights onto a freshly constructed model (same path as sync
     ``train_pipeline``).
+
+    When ``restore_optimizer`` is True and parameter shapes match the checkpoint,
+    Adam moments are restored for same-level interrupted resume. On curriculum
+    level change, pass ``restore_optimizer=False`` so the new MDP starts with fresh Adam.
     """
+    load_kwargs = {**load_kwargs, "restore_optimizer": restore_optimizer}
     try:
-        return algo_class.load(model_path, **load_kwargs)
+        model = algo_class.load(model_path, **load_kwargs)
+        if restore_optimizer:
+            ok, reason = load_optimizer_state_from_zip(
+                model, model_path, load_kwargs.get("device", "auto")
+            )
+            if ok:
+                logger.info(f"Restored optimizer state from {model_path!r}")
+            elif reason != "no_optimizer_in_checkpoint":
+                logger.warning(
+                    f"Optimizer restore skipped for {model_path!r} ({reason})"
+                )
+        return model
     except Exception as direct_exc:
         logger.warning(
             f"Direct checkpoint load failed for {model_path!r} ({direct_exc}); "
@@ -373,6 +422,114 @@ def load_curriculum_checkpoint(
         f"Grafted curriculum weights from {model_path!r}: "
         f"missing={len(missing)}, unexpected={len(unexpected)}"
     )
+    if restore_optimizer:
+        ok, reason = load_optimizer_state_from_zip(model, model_path, "cpu")
+        if ok:
+            logger.info(f"Restored optimizer state after graft from {model_path!r}")
+        else:
+            logger.warning(
+                f"Optimizer restore skipped after graft from {model_path!r} ({reason})"
+            )
+    return model
+
+
+def graft_build_model_weights(
+    checkpoint_path: str,
+    model: Any,
+    *,
+    strict: bool = False,
+) -> bool:
+    """
+    Load compatible build-agent policy weights across curriculum levels.
+    Grafts CNN input channels when build_map_layers grow.
+    """
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    try:
+        _, params, _ = load_from_zip_file(checkpoint_path, device="cpu", load_data=False)
+    except Exception as exc:
+        logger.warning(f"graft_build_model_weights: could not load {checkpoint_path}: {exc}")
+        return False
+
+    old_sd = params.get("policy")
+    if old_sd is None:
+        return False
+
+    new_sd = model.policy.state_dict()
+    grafted = graft_model_weights(
+        old_sd,
+        new_in_channels=None,
+        target_state_dict=new_sd,
+    )
+    missing, unexpected = model.policy.load_state_dict(grafted, strict=strict)
+    if missing:
+        logger.info(f"graft_build_model_weights missing keys: {missing[:8]}...")
+    if unexpected:
+        logger.info(f"graft_build_model_weights unexpected keys: {unexpected[:8]}...")
+    opt_ok, opt_reason = load_optimizer_state_from_zip(model, checkpoint_path, "cpu")
+    if opt_ok:
+        logger.info(f"graft_build_model_weights: restored optimizer from {checkpoint_path!r}")
+    elif opt_reason != "no_optimizer_in_checkpoint":
+        logger.warning(
+            f"graft_build_model_weights: optimizer restore skipped ({opt_reason})"
+        )
+    return True
+
+
+def load_build_checkpoint(
+    model_path: str,
+    model_kwargs: Dict[str, Any],
+    *,
+    load_kwargs: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """
+    Load a build-agent checkpoint with policy and Adam state.
+
+    Build curriculum keeps a fixed action space and stable map channel count, so
+    weights should load directly without channel grafting. On metadata mismatch we
+    copy policy weights and restore the optimizer explicitly.
+    """
+    from src.agent.maskable_ppo import MaskablePPO
+
+    load_kwargs = dict(load_kwargs or {})
+    load_kwargs["restore_optimizer"] = True
+    device = load_kwargs.get("device", "auto")
+
+    try:
+        model = MaskablePPO.load(model_path, **load_kwargs)
+        opt_ok, opt_reason = load_optimizer_state_from_zip(model, model_path, device)
+        if opt_ok:
+            logger.info(f"Build checkpoint: optimizer restored from {model_path!r}")
+        elif opt_reason != "no_optimizer_in_checkpoint":
+            logger.warning(
+                f"Build checkpoint: optimizer restore skipped ({opt_reason})"
+            )
+        return model
+    except Exception as direct_exc:
+        logger.warning(
+            f"Build direct load failed for {model_path!r} ({direct_exc}); "
+            "loading policy and optimizer without grafting."
+        )
+
+    model = MaskablePPO(**model_kwargs)
+    ok, missing, unexpected = load_policy_weights_from_zip(
+        model.policy, model_path, device, strict=False
+    )
+    if not ok:
+        raise RuntimeError(f"Build checkpoint {model_path!r} has no policy weights")
+    if missing:
+        logger.warning(
+            "Build policy partial load "
+            f"missing={missing[:8]} unexpected={unexpected[:8]}"
+        )
+
+    opt_ok, opt_reason = load_optimizer_state_from_zip(model, model_path, device)
+    if opt_ok:
+        logger.info(
+            f"Build checkpoint: optimizer restored after policy load from {model_path!r}"
+        )
+    else:
+        logger.warning(f"Build checkpoint: optimizer restore skipped ({opt_reason})")
     return model
 
 

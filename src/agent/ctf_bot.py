@@ -309,8 +309,9 @@ class CaptureTheFlagBot(BotAI):
         agent = self.agent_system.unit_agents["active_agent"]
         # Spatial decode reads last_game_info; ensure it is set even if obs processing
         # failed earlier this step (otherwise every order targets world 0,0 → map corner).
-        if self.game_info is not None:
-            agent.last_game_info = self.game_info
+        game_info = getattr(self, "game_info", None)
+        if game_info is not None:
+            agent.last_game_info = game_info
 
         if arch == "universal":
             # Universal: action = [head_idx, spatial_idx] on 32×32 grid
@@ -418,6 +419,11 @@ class CaptureTheFlagBot(BotAI):
 
     def _is_ranged_combat_unit(self, unit: Unit, enemies: Iterable[Unit]) -> bool:
         """Cooldown-retreat shaping applies only to units that outrange melee contact."""
+        # HellionTank (Hellbat) is effectively melee for the purpose of cooldown-kite shaping,
+        # even though its weapon range can exceed the generic melee-vs-ranged threshold
+        # in our simplified unit_data.
+        if getattr(unit, "type_id", None) == UnitTypeId.HELLIONTANK:
+            return False
         enemy_list = [e for e in enemies if e is not None]
         if enemy_list:
             max_range = max(
@@ -428,6 +434,33 @@ class CaptureTheFlagBot(BotAI):
             ar = float(getattr(unit, "air_range", 0.0) or 0.0)
             max_range = max(gr, ar)
         return max_range > self._RANGED_WEAPON_RANGE_MIN
+
+    def _is_melee_combat_unit(self, unit: Unit, enemies: Iterable[Unit]) -> bool:
+        """Melee contact units (inverse of ranged gate used for cooldown retreat)."""
+        return not self._is_ranged_combat_unit(unit, enemies)
+
+    def _squad_has_melee_unit(self, squad_tags: List[int], enemies: Iterable[Unit]) -> bool:
+        for tag in squad_tags:
+            unit = self.all_units.find_by_tag(tag)
+            if unit is not None and self._is_melee_combat_unit(unit, enemies):
+                return True
+        return False
+
+    @staticmethod
+    def _scaled_damage_reward_coeff(r_conf: Dict, *, squad_is_melee: bool) -> float:
+        base = float(r_conf.get("damage_reward", 0.1))
+        if not squad_is_melee:
+            return base
+        melee_mult = float(r_conf.get("melee_multiplier", 0.5))
+        return base * (melee_mult + 1.0)
+
+    @staticmethod
+    def _scaled_damage_penalty_coeff(r_conf: Dict, *, squad_is_melee: bool) -> float:
+        base = float(r_conf.get("damage_penalty", 0.1))
+        if not squad_is_melee:
+            return base
+        melee_mult = float(r_conf.get("melee_multiplier", 0.5))
+        return base * melee_mult
 
     def _defend_pylon_pos_for_unit(
         self, unit: Unit, fallback_pylon_pos: Optional[Point2] = None
@@ -668,14 +701,23 @@ class CaptureTheFlagBot(BotAI):
         self.prev_pylon_health[2] = p2_pylon_hp
         
         # 2. Combat Rewards (Mobile Units)
+        mobile_enemies_for_melee = [u for u in enemy_units if not u.is_structure]
+        squad_is_melee = self._squad_has_melee_unit(squad_tags, mobile_enemies_for_melee)
+        damage_reward_coeff = self._scaled_damage_reward_coeff(
+            r_conf, squad_is_melee=squad_is_melee
+        )
+        damage_penalty_coeff = self._scaled_damage_penalty_coeff(
+            r_conf, squad_is_melee=squad_is_melee
+        )
+
         curr_enemy_hp = sum(u.health + u.shield for u in enemy_units if not u.is_structure)
         if curr_enemy_hp < self.prev_enemy_units_health[p_id]:
-            reward += (self.prev_enemy_units_health[p_id] - curr_enemy_hp) * r_conf.get("damage_reward", 0.1)
+            reward += (self.prev_enemy_units_health[p_id] - curr_enemy_hp) * damage_reward_coeff
         self.prev_enemy_units_health[p_id] = curr_enemy_hp
         
         curr_own_hp = sum(u.health + u.shield for u in own_units if not u.is_structure)
         if curr_own_hp < self.prev_own_units_health[p_id]:
-            reward -= (self.prev_own_units_health[p_id] - curr_own_hp) * r_conf.get("damage_penalty", 0.1)
+            reward -= (self.prev_own_units_health[p_id] - curr_own_hp) * damage_penalty_coeff
         self.prev_own_units_health[p_id] = curr_own_hp
 
         # 3. Progress Rewards — attacker squad Center-of-Mass distance shaping
@@ -710,7 +752,7 @@ class CaptureTheFlagBot(BotAI):
 
         # 3b–4. Per-unit shaping summed over the acting squad
         own_pylon_pos = own_pylon.position if own_pylon is not None else None
-        mobile_enemies = [u for u in enemy_units if not u.is_structure]
+        mobile_enemies = mobile_enemies_for_melee
         saved_active = self.active_unit_tag
         for tag in squad_tags:
             self.active_unit_tag = tag

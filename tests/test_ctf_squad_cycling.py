@@ -38,6 +38,7 @@ def _make_env():
     env.player_units = {1: [], 2: []}
     env.active_player_id = 1
     env.current_unit_index = 0
+    env.training_conf = {}  # needed by _units_per_physics_step / _uses_chunk_physics
     return env
 
 

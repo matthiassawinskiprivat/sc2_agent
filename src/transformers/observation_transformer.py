@@ -781,6 +781,7 @@ class ObservationTransformer:
             )
             self._apply_map_blocker_terrain(layers, raw_obs)
             self._draw_terrain_creep(raw_obs, layers)
+            self._draw_terrain_buildable(raw_obs, layers)
 
             # Allied / enemy bodies (and in-fovea DPS) — skip units outside the fovea.
             for unit in list(allied_units) + list(allied_structures):
@@ -925,6 +926,7 @@ class ObservationTransformer:
         self._draw_terrain_pathing(game_info, layers, cliff_walker=cliff_walker)
         self._apply_map_blocker_terrain(layers, raw_obs)
         self._draw_terrain_creep(raw_obs, layers)
+        self._draw_terrain_buildable(raw_obs, layers)
 
         self._collect_liberator_positions(
             allied_units, allied_structures, enemy_units, enemy_structures
@@ -2348,6 +2350,55 @@ class ObservationTransformer:
         valid_mask = (X_map >= 0) & (Y_map >= 0)
         if np.any(valid_mask):
             layers[idx][valid_mask] = data[Y_map[valid_mask], X_map[valid_mask]]
+
+    def _draw_terrain_buildable(self, raw_obs, layers):
+        idx = self.current_layer_map.get(LayerConstants.TERRAIN_BUILDABLE)
+        if idx is None:
+            return
+        game_info = raw_obs.get("game_info")
+        if game_info is None or not hasattr(game_info, "pathing_grid"):
+            return
+
+        from sc2.data import Race
+        from src.transformers.buildability import compute_buildable_mask
+
+        path_data = self._get_numpy_data(game_info.pathing_grid)
+        creep_map = raw_obs.get("creep")
+        creep_data = self._get_numpy_data(creep_map) if creep_map else None
+        placement_data = None
+        if hasattr(game_info, "placement_grid"):
+            placement_data = self._get_numpy_data(game_info.placement_grid)
+
+        race_name = (raw_obs.get("race") or "zerg").lower()
+        race = Race.Zerg
+        if race_name == "terran":
+            race = Race.Terran
+        elif race_name == "protoss":
+            race = Race.Protoss
+
+        pending = raw_obs.get("pending_build_type")
+        geyser_mask = raw_obs.get("geyser_mask")
+        if geyser_mask is not None:
+            geyser_mask = np.asarray(geyser_mask, dtype=np.float32)
+        power_mask = raw_obs.get("power_mask")
+
+        buildable_sc2 = compute_buildable_mask(
+            race,
+            pending,
+            path_data,
+            creep_data=creep_data,
+            placement_data=placement_data,
+            geyser_mask=geyser_mask,
+            power_mask=power_mask,
+        )
+
+        X_map, Y_map = self._obs_to_sc2_meshgrid()
+        creep_h, creep_w = buildable_sc2.shape
+        X_map = np.clip(X_map, 0, creep_w - 1)
+        Y_map = np.clip(Y_map, 0, creep_h - 1)
+        valid_mask = self._obs_content_valid_mask()
+        if np.any(valid_mask):
+            layers[idx][valid_mask] = buildable_sc2[Y_map[valid_mask], X_map[valid_mask]]
 
     def _effective_dps_min_range_game(self, unit: Optional[Unit], min_radius_game: float) -> float:
         """Weapon min_range dead zone in game units (independent of hull footprint)."""

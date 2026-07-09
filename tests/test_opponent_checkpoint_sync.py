@@ -41,6 +41,16 @@ def _make_env():
     return env
 
 
+def test_opponent_checkpoint_dir_default_matches_async_pipeline(monkeypatch):
+    """CTF workers must search the same buffer root as the async collector/learner."""
+    from src.utils.async_buffer_paths import DEFAULT_ASYNC_BUFFER_DIR, resolve_async_buffer_dir
+
+    monkeypatch.delenv("SC2_ASYNC_BUFFER_DIR", raising=False)
+    env = _make_env()
+    assert env._opponent_checkpoint_dir() == resolve_async_buffer_dir()
+    assert DEFAULT_ASYNC_BUFFER_DIR.replace("/", os.sep) in env._opponent_checkpoint_dir()
+
+
 def test_opponent_checkpoint_candidates_include_collector_staging_name(tmp_path, monkeypatch):
     env = _make_env()
     monkeypatch.setenv("SC2_ASYNC_BUFFER_DIR", str(tmp_path))
@@ -48,7 +58,28 @@ def test_opponent_checkpoint_candidates_include_collector_staging_name(tmp_path,
     candidates = env._opponent_checkpoint_candidates()
     assert os.path.join(tmp_path, "latest_learner_model_collector_staging.zip") in candidates
     assert os.path.join(tmp_path, "initial_model.zip") in candidates
-    assert candidates[0] == os.path.join(tmp_path, "initial_model.zip")
+    assert candidates[0] == os.path.join(tmp_path, "latest_learner_model.zip")
+
+
+def test_sync_opponent_model_prefers_latest_learner_over_initial(tmp_path, monkeypatch):
+    """Hard-reset opponent sync must not reload stale level-entry initial_model."""
+    env = _make_env()
+    monkeypatch.setenv("SC2_ASYNC_BUFFER_DIR", str(tmp_path))
+    (tmp_path / "initial_model.zip").write_bytes(b"stale")
+    (tmp_path / "latest_learner_model.zip").write_bytes(b"fresh")
+
+    mock_model = MagicMock()
+    mock_model.policy.set_training_mode = MagicMock()
+
+    with patch(
+        "src.utils.model_utils.load_curriculum_checkpoint",
+        return_value=mock_model,
+    ) as mock_load:
+        ok = env.sync_opponent_model()
+
+    assert ok is True
+    assert mock_load.call_args[0][1] == str(tmp_path / "latest_learner_model.zip")
+    assert env.opponent_model is mock_model
 
 
 def test_build_opponent_model_load_kwargs_matches_learner_architecture():
@@ -67,6 +98,79 @@ def test_build_opponent_model_load_kwargs_matches_learner_architecture():
 
     assert kwargs["policy_kwargs"]["features_extractor_class"] is UnitControlNetwork
     assert kwargs["custom_objects"]["policy_kwargs"]["lstm_hidden_size"] == 512
+
+
+def test_opponent_algo_bundle_falls_back_to_level_yaml_when_model_missing():
+    """Subproc workers receive flattened training_conf without a model section."""
+    from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
+    from src.agent.models.unit_control_network import UnitControlNetwork
+    from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
+
+    env = _make_env()
+    env.training_conf.pop("model", None)
+    env.level_name = "ctf_level_04"
+    mock_cm = MagicMock()
+    mock_cm.get_level_config.return_value = {
+        "model": {
+            "algorithm": "MaskableRecurrentPPO",
+            "rnn_type": "gru",
+            "policy_kwargs": {
+                "features_extractor_class": "src.agent.models.unit_control_network.UnitControlNetwork",
+                "features_extractor_kwargs": {"features_dim": 512, "thinking_steps": 3},
+                "lstm_hidden_size": 512,
+                "net_arch": [],
+            },
+            "gamma": 0.995,
+        }
+    }
+    env.config_manager = mock_cm
+
+    AlgoClass, PolicyClass, policy_kwargs, rnn_type = env._resolve_opponent_algo_bundle()
+    assert AlgoClass is MaskableRecurrentPPO
+    assert PolicyClass is UniversalRecurrentPolicy
+    assert rnn_type == "gru"
+    assert policy_kwargs["features_extractor_class"] is UnitControlNetwork
+    assert policy_kwargs["lstm_hidden_size"] == 512
+
+    algo_kwargs = env._build_opponent_algo_kwargs()
+    assert algo_kwargs["policy"] is UniversalRecurrentPolicy
+    assert algo_kwargs["rnn_type"] == "gru"
+    assert algo_kwargs["gamma"] == 0.995
+
+
+def test_async_collector_combined_conf_includes_model_section():
+    """CTF opponent sync needs model metadata in worker training_conf."""
+    config = {
+        "training": {"num_envs": 2, "n_steps": 2048, "batch_size": 512},
+        "env": {"env_class": "CaptureTheFlagEnv", "max_steps": 200},
+        "model": {
+            "algorithm": "MaskableRecurrentPPO",
+            "policy_kwargs": {"lstm_hidden_size": 512},
+        },
+        "active_layers": ["allied_unit_density"],
+    }
+    training_params = config["training"]
+    env_params = config["env"]
+    combined_conf = training_params.copy()
+    combined_conf.update(env_params)
+    combined_conf["is_training"] = True
+    combined_conf["agent_architecture"] = "universal"
+    combined_conf["config_dir"] = "config_universal"
+    combined_conf["spatial_resolution"] = 32
+    for key in (
+        "active_layers",
+        "active_tactical_layers",
+        "action_heads",
+        "categorical_heads",
+    ):
+        if key in config:
+            combined_conf[key] = config[key]
+    if "model" in config:
+        combined_conf["model"] = config["model"]
+    combined_conf["level_name"] = "ctf_level_04"
+
+    assert combined_conf["model"]["algorithm"] == "MaskableRecurrentPPO"
+    assert combined_conf["level_name"] == "ctf_level_04"
 
 
 def test_sync_opponent_model_uses_explicit_path(tmp_path, monkeypatch):

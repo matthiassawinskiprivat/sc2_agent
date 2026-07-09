@@ -5,9 +5,10 @@ import torch as th
 import json
 from typing import Dict, Generator, Optional, Union, Any, Tuple, NamedTuple
 from gymnasium import spaces
-from stable_baselines3.common.buffers import DictRolloutBuffer
 from stable_baselines3.common.vec_env import VecNormalize
 from loguru import logger
+
+from sb3_contrib.common.maskable.buffers import MaskableDictRolloutBuffer
 
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentRolloutBufferSamples, RNNStates
 
@@ -63,9 +64,9 @@ class FlatMaskableRolloutBufferSamples(NamedTuple):
     action_masks: th.Tensor
 
 
-class DiskDictRolloutBuffer(DictRolloutBuffer):
+class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
     """
-    Recurrent DictRolloutBuffer with optional memmap offload for map/tactical tensors.
+    Maskable DictRolloutBuffer with optional memmap offload for spatial tensors.
 
     ``storage_backend="disk"`` (default): large observation channels use memmap files.
     ``storage_backend="ram"``: all observations stay in RAM (same add/get API).
@@ -115,21 +116,13 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
             self.cell_states_pi = np.zeros((self.buffer_size, 1, self.n_envs, self.hidden_size), dtype=np.float32)
             self.cell_states_vf = np.zeros((self.buffer_size, 1, self.n_envs, self.hidden_size), dtype=np.float32)
 
-        # Action masks
-        if isinstance(self.action_space, spaces.MultiDiscrete):
-            m_dim = sum(self.action_space.nvec)
-        elif isinstance(self.action_space, spaces.Discrete):
-            m_dim = self.action_space.n
-        else:
-            m_dim = 1
-        self.action_masks = np.ones((self.buffer_size, self.n_envs, m_dim), dtype=bool)
         self.policy_active = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
 
         # Offload large observations to memmap files (disk backend only).
         self.disk_files = {}
         if self.storage_backend == "disk":
             for key, subspace in observation_space.spaces.items():
-                if "map" in key or "tactical" in key:
+                if "map" in key or "tactical" in key or key == "local_map":
                     filename = os.path.join(self.instance_dir, f"obs_{key}.bin")
                     shape = (self.buffer_size, self.n_envs, *subspace.shape)
                     self.observations[key] = np.memmap(
@@ -184,8 +177,6 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
         action_masks: Optional[np.ndarray] = None,
         policy_active: Optional[np.ndarray] = None,
     ) -> None:
-        if action_masks is not None:
-            self.action_masks[self.pos] = action_masks.copy()
         if policy_active is not None:
             self.policy_active[self.pos] = np.asarray(policy_active, dtype=np.float32).reshape(self.n_envs)
         else:
@@ -201,7 +192,15 @@ class DiskDictRolloutBuffer(DictRolloutBuffer):
                 self.cell_states_pi[self.pos] = self._normalize_rnn_state(lstm_states.pi[1], "pi_c")
                 self.cell_states_vf[self.pos] = self._normalize_rnn_state(lstm_states.vf[1], "vf_c")
 
-        super().add(obs, action, reward, episode_start, value, log_prob)
+        super(DiskDictRolloutBuffer, self).add(
+            obs,
+            action,
+            reward,
+            episode_start,
+            value,
+            log_prob,
+            action_masks=action_masks,
+        )
 
     def compute_returns_and_advantage(
         self, last_values: th.Tensor, dones: np.ndarray

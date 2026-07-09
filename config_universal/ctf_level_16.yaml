@@ -1,0 +1,93 @@
+# CTF 16 — Viking+Marine vs Mutalisk+Hydralisk. Terran anti-air; trainee alternates (T/Z).
+training:
+  training_steps: 1_000_000
+  num_envs: 4
+  n_steps: 2048
+  batch_size: 512
+  learning_rate: 0.0003
+  render_beacon: False
+  watchdog_timeout: 3600
+  target_kl: null
+  rollout_buffer: disk
+
+env:
+  env_class: "CaptureTheFlagEnv"
+  max_steps: 200
+  headless: True
+  every_k_episodes: 50
+  alternate_trainee_race: true
+
+  maps_dir: "train/maps/ladder/with_region"
+  unit_pools:
+    - high_level_command: "attack"
+      race: terran
+      mineral_budget: 400
+      vespene_budget: 150
+      unit_pool:
+        - "VIKINGFIGHTER"
+        - "MARINE"
+      region: "A"
+    - high_level_command: "defend"
+      race: zerg
+      mineral_budget: 300
+      vespene_budget: 200
+      unit_pool:
+        - "MUTALISK"
+        - "HYDRALISK"
+      region: "A"
+    - high_level_command: "defend"
+      race: terran
+      mineral_budget: 400
+      vespene_budget: 150
+      unit_pool:
+        - "VIKINGFIGHTER"
+        - "MARINE"
+      region: "B"
+    - high_level_command: "attack"
+      race: zerg
+      mineral_budget: 300
+      vespene_budget: 200
+      unit_pool:
+        - "MUTALISK"
+        - "HYDRALISK"
+      region: "B"
+
+  active_layers:
+    - "allied_a_dps_armor"
+    - "enemy_a_dps_armor"
+
+  active_tactical_layers:
+    - "allied_a_dps_armor"
+    - "enemy_a_dps_armor"
+
+  rewards:
+    pylon_damage_reward: 1.0
+    pylon_damage_penalty: 1.0
+    damage_reward: 0.2
+    damage_penalty: 0.2
+    melee_multiplier: 0.5
+    kill_reward: 0.5
+    kill_penalty: -0.5
+    distance_multiplier: 1.0
+    defender_zone_radius: 10.0
+    cooldown_retreat_scale: 1.1
+    win_reward: 15.0
+    loss_penalty: -5.0
+    draw_penalty: -2.0
+    step_penalty: -0.05
+    defender_step_reward: 0.001
+
+model:
+  algorithm: "MaskableRecurrentPPO"
+  policy: "CnnLstmPolicy"
+  rnn_type: "gru"
+  policy_kwargs:
+    features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
+    features_extractor_kwargs:
+      features_dim: 512
+      thinking_steps: 3
+    lstm_hidden_size: 512
+    net_arch: []
+  gamma: 0.995
+  ent_coef: 0.05
+  n_epochs: 4

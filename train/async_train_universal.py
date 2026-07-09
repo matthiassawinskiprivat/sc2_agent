@@ -31,6 +31,7 @@ from src.utils.async_buffer_setup import (
     configure_collector_static_buffer,
     prepare_learner_placeholder_buffer,
 )
+from src.utils.async_buffer_paths import ensure_async_buffer_dir_env, resolve_async_buffer_dir
 from src.agent.utils.async_shared_ram_buffer import AsyncSharedRamBuffer
 from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
 
@@ -40,12 +41,13 @@ import psutil
 # Async buffer: memmaps + payload.npz + hot-swap model zip every rollout — heavy disk I/O.
 # Default to C:/temp (typically the OS SSD) for lowest latency.
 # Override with env var SC2_ASYNC_BUFFER_DIR if you want a different location.
-# Example: $env:SC2_ASYNC_BUFFER_DIR = "D:/sc2_buffer"
-_DEFAULT_ASYNC_DIR = "C:/temp/sc2_async_buffer"
-TEMP_DIR = os.path.normpath(os.environ.get("SC2_ASYNC_BUFFER_DIR", _DEFAULT_ASYNC_DIR))
+TEMP_DIR = resolve_async_buffer_dir()
 # Collector loads from this path. Never read `latest_learner_model.zip` directly — the learner
 # replaces that file; simultaneous open on Windows causes Errno 13 / sharing violations.
 COLLECTOR_WEIGHTS_STAGING_ZIP = os.path.join(TEMP_DIR, "latest_learner_model_collector_staging.zip")
+COLLECTOR_READY_MARKER = os.path.join(TEMP_DIR, "collector_ready.marker")
+_COLLECTOR_STARTUP_TIMEOUT_SEC = 180.0
+_NATIVE_ACCESS_VIOLATION_EXIT_CODES = frozenset({3221225477, -1073741819})
 
 
 def _tensorboard_preflight() -> None:
@@ -71,6 +73,32 @@ def resolve_async_log_dir(level_name: str, training_params: dict) -> str:
     if tb_subdir:
         return os.path.join("logs_universal", level_name, tb_subdir)
     return os.path.join("logs_universal", level_name)
+
+
+def detect_active_log_level(log_dir_base: str = "logs_universal") -> str | None:
+    """Most recently touched curriculum folder under logs_universal (for TensorBoard pinning)."""
+    log_dir = os.path.abspath(log_dir_base)
+    if not os.path.isdir(log_dir):
+        return None
+    candidates = []
+    for name in os.listdir(log_dir):
+        path = os.path.join(log_dir, name)
+        if os.path.isdir(path):
+            candidates.append((os.path.getmtime(path), name))
+    if not candidates:
+        return None
+    return max(candidates)[1]
+
+
+def build_tensorboard_logdir_spec(
+    log_dir_base: str = "logs_universal",
+    active_level: str | None = None,
+) -> str:
+    log_dir = os.path.abspath(log_dir_base)
+    if active_level:
+        active_path = os.path.join(log_dir, active_level)
+        return f"active:{active_path},all:{log_dir}"
+    return log_dir
 
 
 def _tensorboard_port_open(port: int) -> bool:
@@ -107,7 +135,12 @@ def free_port(port: int) -> int:
     return stopped
 
 
-def _start_tensorboard(log_dir_base: str = "logs_universal", port: int = 6006) -> None:
+def _start_tensorboard(
+    log_dir_base: str = "logs_universal",
+    port: int = 6006,
+    *,
+    active_level: str | None = None,
+) -> None:
     """Launch TensorBoard in the background if nothing is listening on *port*."""
     try:
         _tensorboard_preflight()
@@ -118,7 +151,10 @@ def _start_tensorboard(log_dir_base: str = "logs_universal", port: int = 6006) -
     log_dir = os.path.abspath(log_dir_base)
     os.makedirs(log_dir, exist_ok=True)
 
-    run_hint = "In TensorBoard, select runs named level_attack_0, level_move_single_0, etc."
+    run_hint = (
+        "In TensorBoard, enable the 'active' run in the left sidebar "
+        "(or filter for your level, e.g. ctf_level_04)."
+    )
 
     if _tensorboard_port_open(port):
         logger.info(
@@ -131,17 +167,22 @@ def _start_tensorboard(log_dir_base: str = "logs_universal", port: int = 6006) -
         free_port(port)
 
     tb_log = os.path.join(log_dir, "tensorboard_startup.log")
+    # When a curriculum level is active, pin it as a named run so CTF curves are easy to find.
+    logdir_arg = build_tensorboard_logdir_spec(log_dir_base, active_level)
     cmd = [
         sys.executable,
         "-m",
         "tensorboard.main",
-        "--logdir",
-        log_dir,
+        "--logdir_spec",
+        logdir_arg,
         "--port",
         str(port),
         "--bind_all",
         "--reload_interval",
         "15",
+        # Avoid Windows read errors while the learner appends to events.out.tfevents.
+        "--load_fast",
+        "false",
     ]
     creationflags = 0
     if sys.platform == "win32":
@@ -169,7 +210,7 @@ def _start_tensorboard(log_dir_base: str = "logs_universal", port: int = 6006) -
             )
             return
         logger.info(
-            f"TensorBoard at http://localhost:{port} (logdir={log_dir}). {run_hint}"
+            f"TensorBoard at http://localhost:{port} (logdir_spec={logdir_arg}). {run_hint}"
         )
     except Exception as e:
         logger.error(f"Failed to start TensorBoard: {e}")
@@ -197,7 +238,7 @@ def refresh_tensorboard(
         return
 
     free_port(port)
-    _start_tensorboard(log_dir_base, port)
+    _start_tensorboard(log_dir_base, port, active_level=active_level)
     if active_level:
         logger.info(
             f"TensorBoard refreshed for level '{active_level}': "
@@ -218,6 +259,45 @@ def force_kill_sc2():
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
+
+def recover_collector_vec_env(vec_env, model, env_fns, num_envs, is_recurrent):
+    """
+    Rebuild SubprocVecEnv after a worker dies (SC2 crash, reset failure, pipe EOF).
+    Keeps the collector alive so the learner does not abort the training session.
+    """
+    from train.train_pipeline import MaskableSubprocVecEnv, MaskableSyncVecEnv
+    from train.env_utils import vec_env_obs_focus_tags
+    from train.squad_batch_inference import (
+        SquadBatchRolloutHelper,
+        ensure_collector_lstm_states,
+    )
+
+    logger.warning(
+        "Collector: SubprocVecEnv worker died — rebuilding all SC2 environments "
+        "and continuing rollout collection."
+    )
+    try:
+        vec_env.close()
+    except Exception as exc:
+        logger.warning(f"Collector: vec_env.close() during recovery: {exc}")
+    force_kill_sc2()
+    time.sleep(5)
+    new_vec = (
+        MaskableSubprocVecEnv(env_fns, start_method="spawn")
+        if num_envs > 1
+        else MaskableSyncVecEnv(env_fns)
+    )
+    model.set_env(new_vec)
+    if is_recurrent:
+        ensure_collector_lstm_states(model, num_envs)
+    reset_out = new_vec.reset()
+    obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+    squad_helper = SquadBatchRolloutHelper(num_envs)
+    last_dones = np.ones(num_envs, dtype=bool)
+    prev_focus_tags = vec_env_obs_focus_tags(new_vec, num_envs)
+    return new_vec, obs, squad_helper, last_dones, prev_focus_tags
+
+
 def clear_temp_dir():
     """Wipes the async buffer directory entirely."""
     if os.path.exists(TEMP_DIR):
@@ -231,6 +311,62 @@ def clear_temp_dir():
         except Exception as e:
             logger.warning(f"Startup cleanup failed: {e}")
     os.makedirs(TEMP_DIR, exist_ok=True)
+
+
+def _clear_collector_ready_marker() -> None:
+    try:
+        os.remove(COLLECTOR_READY_MARKER)
+    except OSError:
+        pass
+
+
+def _write_collector_ready_marker() -> None:
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    with open(COLLECTOR_READY_MARKER, "w", encoding="utf-8") as marker:
+        marker.write(str(time.time()))
+
+
+def _wait_for_collector_ready(collector: mp.Process, timeout_sec: float) -> tuple[bool, int | None]:
+    """Return (ready, exit_code). ready=True when marker exists or collector still running past timeout."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if not collector.is_alive():
+            return False, collector.exitcode
+        if os.path.isfile(COLLECTOR_READY_MARKER):
+            return True, None
+        time.sleep(0.25)
+    if collector.is_alive():
+        logger.warning(
+            f"Collector still running after {timeout_sec:.0f}s without ready marker; proceeding anyway."
+        )
+        return True, None
+    return False, collector.exitcode
+
+
+def _cleanup_after_collector_spawn_failure(backoff_sec: float) -> None:
+    """Release GPU handles before retrying collector spawn on Windows."""
+    _clear_collector_ready_marker()
+    gc.collect()
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except Exception as exc:
+        logger.debug(f"CUDA cache cleanup after collector spawn failure: {exc}")
+    time.sleep(backoff_sec)
+
+
+def _describe_collector_exit_code(exit_code: int | None) -> str:
+    if exit_code in _NATIVE_ACCESS_VIOLATION_EXIT_CODES:
+        return (
+            "Windows access violation (0xC0000005) during collector startup — usually a CUDA "
+            "driver/DLL race when multiple processes init the GPU. Retrying after cleanup."
+        )
+    if exit_code == 1:
+        return (
+            "Python exception in collector (see 'Collector subprocess CRASHED' traceback above)."
+        )
+    return f"Unexpected exit code {exit_code}."
 
 
 def _is_transient_file_lock(err: OSError) -> bool:
@@ -500,6 +636,17 @@ class AsyncCollector(mp.Process):
         self.resume_timesteps_from_save = resume_timesteps_from_save
 
     def run(self):
+        try:
+            self._run_inner()
+        except Exception:
+            import traceback
+            logger.error(
+                f"Collector subprocess CRASHED with unhandled exception:\n"
+                + traceback.format_exc()
+            )
+            raise
+
+    def _run_inner(self):
         logger.info(f"Collector started for level: {self.level_name}")
         # Initialize env and model using UniversalPipelineManager logic
         manager = UniversalPipelineManager(config_dir=self.config['config_dir'])
@@ -529,18 +676,41 @@ class AsyncCollector(mp.Process):
         EnvClass = ENV_REGISTRY.get(env_params.get("env_class", "Level0Env"))
         # Default 32 matches universal MultiDiscrete spatial resolution; key optional in YAML.
         _grid = env_params.get("grid_size", 32)
+        combined_conf = training_params.copy()
+        combined_conf.update(env_params)
+        combined_conf["is_training"] = True
+        combined_conf["agent_architecture"] = "universal"
+        combined_conf["config_dir"] = self.config.get("config_dir", "config_universal")
+        combined_conf["spatial_resolution"] = 32
+        for key in (
+            "active_layers",
+            "active_tactical_layers",
+            "action_heads",
+            "categorical_heads",
+        ):
+            if key in self.config:
+                combined_conf[key] = self.config[key]
+        if "model" in self.config:
+            combined_conf["model"] = self.config["model"]
+        combined_conf["level_name"] = self.level_name
         env_fns = [
             EnvFactory(
                 EnvClass, self.level_name, False, _grid, i, num_envs,
-                None, None, self.config, env_params.get("max_steps", 300)
+                None, None, combined_conf, env_params.get("max_steps", 300)
             )
             for i in range(num_envs)
         ]
-        vec_env = (
-            MaskableSubprocVecEnv(env_fns, start_method="spawn")
-            if num_envs > 1
-            else MaskableSyncVecEnv(env_fns)
-        )
+
+        def _make_vec_env():
+            return (
+                MaskableSubprocVecEnv(env_fns, start_method="spawn")
+                if num_envs > 1
+                else MaskableSyncVecEnv(env_fns)
+            )
+
+        vec_env_ref = _make_vec_env()
+        vec_env = vec_env_ref
+        _emit_collector_status("vectorized environment ready")
 
         # 2. Setup Policy
         model_params = self.config.get("model", {})
@@ -575,6 +745,7 @@ class AsyncCollector(mp.Process):
 
         if self.model_path:
             logger.info(f"Loading weights from: {self.model_path}")
+            _emit_collector_status(f"loading checkpoint {self.model_path!r}")
             load_kwargs = {
                 "env": vec_env,
                 "policy_kwargs": policy_kwargs,
@@ -592,6 +763,7 @@ class AsyncCollector(mp.Process):
                 vec_env.observation_space,
                 vec_env.action_space,
                 grid_size=_grid,
+                restore_optimizer=self.resume_timesteps_from_save,
             )
             from src.utils.model_utils import read_checkpoint_timesteps
 
@@ -601,6 +773,7 @@ class AsyncCollector(mp.Process):
                 f"loaded initial checkpoint {self.model_path!r}{ts_suffix}"
             )
         else:
+            _emit_collector_status("creating fresh policy on GPU")
             model = AlgoClass(**algo_kwargs)
 
         if isinstance(model, MaskableRecurrentPPO):
@@ -623,6 +796,8 @@ class AsyncCollector(mp.Process):
         model.save(initial_path)
         logger.info("Collector: Saved initial weights for Learner synchronization.")
         push_opponent_checkpoint_to_envs(vec_env, initial_path)
+        _write_collector_ready_marker()
+        _emit_collector_status("ready for learner")
         
         # 3. Static Double-Buffer Initialization
         # We manually create fixed directories buffer_0 and buffer_1
@@ -647,11 +822,31 @@ class AsyncCollector(mp.Process):
             )
             buffers.append(buf)
 
-        logger.info("Collector entering main loop...")
-        _reset_out = vec_env.reset()
+        logger.info("Collector: Starting SC2 environments (vec_env.reset)...")
+        try:
+            _reset_out = vec_env.reset()
+        except Exception as _reset_exc:
+            logger.error(
+                f"Collector: vec_env.reset() failed — SC2 likely crashed on startup. "
+                f"Error: {_reset_exc}. "
+                "Kill all SC2_x64.exe processes in Task Manager, then restart training."
+            )
+            vec_env.close()
+            raise
+        logger.info("Collector: SC2 environments ready. Entering main loop...")
         obs = _reset_out[0] if isinstance(_reset_out, tuple) else _reset_out
         self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
         squad_batch_helper = SquadBatchRolloutHelper(num_envs)
+
+        def _recover_vec_env(vec_env, model):
+            nonlocal vec_env_ref
+            new_vec, new_obs, new_helper, new_dones, new_focus = recover_collector_vec_env(
+                vec_env, model, env_fns, num_envs, is_recurrent_algo
+            )
+            vec_env_ref = new_vec
+            self.last_dones = new_dones
+            self._prev_obs_focus_tags = new_focus
+            return new_vec, new_obs, new_helper
         
         # Track metrics manually to avoid wrapper attribute errors
         episode_rewards = np.zeros(num_envs)
@@ -702,48 +897,59 @@ class AsyncCollector(mp.Process):
             while filled < n_rollout_steps:
                 requires_policy = vec_env_requires_policy_action(vec_env, num_envs)
 
-                if not requires_policy.any():
-                    new_obs, rewards, dones, infos = vec_env.step(dummy_actions)
-                    episode_rewards += rewards
-                    episode_lengths += 1
-                    for i, done in enumerate(dones):
-                        if done:
-                            squad_batch_helper.clear_env(i)
-                            recent_ep_rewards.append(episode_rewards[i])
-                            recent_ep_lengths.append(episode_lengths[i])
-                            episode_rewards[i] = 0
-                            episode_lengths[i] = 0
-                            if len(recent_ep_rewards) > 100:
-                                recent_ep_rewards.pop(0)
-                                recent_ep_lengths.pop(0)
-                    obs = new_obs
-                    self.last_dones = dones
+                try:
+                    if not requires_policy.any():
+                        new_obs, rewards, dones, infos = vec_env.step(dummy_actions)
+                        # Opponent-squad steps are skipped for the training buffer
+                        # (requires_policy=False).  Their rewards are P2-perspective
+                        # values that would contaminate the P1-only rew_mean metric.
+                        # Do NOT add them to episode_rewards — only count the length.
+                        episode_lengths += 1
+                        for i, done in enumerate(dones):
+                            if done:
+                                squad_batch_helper.clear_env(i)
+                                recent_ep_rewards.append(episode_rewards[i])
+                                recent_ep_lengths.append(episode_lengths[i])
+                                episode_rewards[i] = 0
+                                episode_lengths[i] = 0
+                                if len(recent_ep_rewards) > 100:
+                                    recent_ep_rewards.pop(0)
+                                    recent_ep_lengths.pop(0)
+                        obs = new_obs
+                        self.last_dones = dones
+                        continue
+
+                    if not hasattr(self, "last_dones"):
+                        self.last_dones = np.ones(num_envs, dtype=bool)
+
+                    pre_step_obs = obs
+                    with torch.no_grad():
+                        resolution = squad_batch_helper.resolve_rollout(
+                            vec_env=vec_env,
+                            num_envs=num_envs,
+                            obs=obs,
+                            requires_policy=requires_policy,
+                            model=model,
+                            is_recurrent=is_recurrent,
+                            last_dones=self.last_dones,
+                            prev_focus_tags=self._prev_obs_focus_tags,
+                            lstm_states=model._last_lstm_states if is_recurrent else None,
+                            device=model.device,
+                        )
+
+                    for env_idx, batch in resolution.squad_batch_actions.items():
+                        vec_env.env_method(
+                            "set_squad_batch_actions", batch, indices=[env_idx]
+                        )
+
+                    new_obs, rewards, dones, infos = vec_env.step(resolution.step_actions)
+                except (EOFError, BrokenPipeError) as pipe_exc:
+                    logger.error(
+                        f"Collector: vec_env worker pipe error during rollout "
+                        f"({type(pipe_exc).__name__}: {pipe_exc}). Recovering..."
+                    )
+                    vec_env, obs, squad_batch_helper = _recover_vec_env(vec_env, model)
                     continue
-
-                if not hasattr(self, "last_dones"):
-                    self.last_dones = np.ones(num_envs, dtype=bool)
-
-                pre_step_obs = obs
-                with torch.no_grad():
-                    resolution = squad_batch_helper.resolve_rollout(
-                        vec_env=vec_env,
-                        num_envs=num_envs,
-                        obs=obs,
-                        requires_policy=requires_policy,
-                        model=model,
-                        is_recurrent=is_recurrent,
-                        last_dones=self.last_dones,
-                        prev_focus_tags=self._prev_obs_focus_tags,
-                        lstm_states=model._last_lstm_states if is_recurrent else None,
-                        device=model.device,
-                    )
-
-                for env_idx, batch in resolution.squad_batch_actions.items():
-                    vec_env.env_method(
-                        "set_squad_batch_actions", batch, indices=[env_idx]
-                    )
-
-                new_obs, rewards, dones, infos = vec_env.step(resolution.step_actions)
 
                 episode_rewards += rewards
                 episode_lengths += 1
@@ -790,8 +996,16 @@ class AsyncCollector(mp.Process):
             # CRITICAL: Compute GAE (Advantages & Returns) before sending to Learner
             # We need the value of the LAST observation to bootstrap
             with torch.no_grad():
+                try:
+                    masks = np.array(vec_env.env_method("action_masks"))
+                except (EOFError, BrokenPipeError) as pipe_exc:
+                    logger.error(
+                        f"Collector: vec_env worker pipe error before GAE "
+                        f"({type(pipe_exc).__name__}: {pipe_exc}). Recovering..."
+                    )
+                    vec_env, obs, squad_batch_helper = _recover_vec_env(vec_env, model)
+                    masks = np.array(vec_env.env_method("action_masks"))
                 obs_tensor = model.policy.obs_to_tensor(obs)[0]
-                masks = np.array(vec_env.env_method("action_masks"))
                 masks_tensor = torch.as_tensor(masks).to(model.device)
                 
                 # We only need the value
@@ -843,10 +1057,14 @@ class AsyncLearner:
     """
     CONSUMER: Watches for ready buffers and performs GPU updates.
     """
-    def __init__(self, level_name, config, resume_timesteps_from_save=False):
+    def __init__(self, level_name, config, resume_timesteps_from_save=False, model_path=None, collector_proc=None):
         self.level_name = level_name
         self.config = config
         self.resume_timesteps_from_save = resume_timesteps_from_save
+        self.model_path = model_path
+        self.collector_proc = collector_proc  # mp.Process — used to detect collector death
+        # Same-level interrupted resume only; curriculum transfer uses fresh Adam.
+        self.restore_optimizer = resume_timesteps_from_save and bool(model_path)
         self.latest_model_path = os.path.join(TEMP_DIR, "latest_learner_model.zip")
         training_params = config.get("training", {})
         self.log_dir = resolve_async_log_dir(level_name, training_params)
@@ -855,6 +1073,29 @@ class AsyncLearner:
         self.model_dir = os.path.join("models_universal", level_name)
         os.makedirs(self.model_dir, exist_ok=True)
         self.save_freq = config["training"].get("save_freq", 50000)
+
+    def _check_collector_alive(self):
+        """Raise RuntimeError if the collector subprocess has died unexpectedly."""
+        if self.collector_proc is not None and not self.collector_proc.is_alive():
+            exit_code = self.collector_proc.exitcode
+            # exit code 1 = Python exception (check logs for full traceback)
+            # 0xC0000005 / -1073741819 = SC2 access violation (kill SC2 processes)
+            # 0xC0000409 / -1073740791 = Windows stack overrun (reboot)
+            # 3221225477 = 0xC0000005 as unsigned
+            native_crashes = {-1073741819, 3221225477, -1073740791, 3221226505}
+            if exit_code in native_crashes:
+                hint = "SC2 crashed (access violation). Kill all SC2_x64.exe in Task Manager, then restart."
+            elif exit_code == 1:
+                hint = (
+                    "Python exception in collector (see 'Collector subprocess CRASHED' traceback above). "
+                    "Common causes: WinError 1114 shm.dll = GPU DLL race (restart training); "
+                    "ClientConnectionResetError = SC2 dropped WebSocket (restart training)."
+                )
+            else:
+                hint = f"Unexpected exit code {exit_code}. Check console for collector traceback."
+            raise RuntimeError(
+                f"Collector subprocess died unexpectedly (exit code {exit_code}). {hint}"
+            )
 
     def close(self):
         """Clean up handles to prevent WinError 32 leaks across curriculum levels"""
@@ -940,10 +1181,14 @@ class AsyncLearner:
         initial_path = os.path.join(TEMP_DIR, "initial_model.zip")
         logger.info("Learner: Waiting for initial weights from Collector...")
         total_steps_trained = 0
-        for _ in range(60): # Wait up to 60 seconds
+        for _ in range(120): # Wait up to 120 seconds (SC2 startup can be slow)
+            self._check_collector_alive()
             if os.path.exists(initial_path):
                 try:
-                    from src.utils.model_utils import load_policy_weights_from_zip
+                    from src.utils.model_utils import (
+                        load_optimizer_state_from_zip,
+                        load_policy_weights_from_zip,
+                    )
 
                     try:
                         model.set_parameters(initial_path, device=train_device)
@@ -957,6 +1202,18 @@ class AsyncLearner:
                             "Learner: set_parameters(initial) failed; loaded policy weights only "
                             f"(missing={len(missing)})"
                         )
+
+                    if self.restore_optimizer:
+                        opt_ok, opt_reason = load_optimizer_state_from_zip(
+                            model, initial_path, train_device
+                        )
+                        if opt_ok:
+                            logger.info("Learner: restored optimizer state from initial checkpoint.")
+                        else:
+                            logger.warning(
+                                "Learner: optimizer restore skipped "
+                                f"({opt_reason}); updates use a fresh Adam."
+                            )
 
                     import zipfile
                     with zipfile.ZipFile(initial_path, 'r') as archive:
@@ -984,6 +1241,10 @@ class AsyncLearner:
         new_logger = configure(self.log_dir, ["stdout", "tensorboard", "csv"])
         model.set_logger(new_logger)
         self.logger = new_logger
+        # Create the TensorBoard run immediately so the level appears in the UI while the
+        # collector is still gathering the first rollout (can take many minutes on CTF).
+        new_logger.record("async/learner_ready", 1.0)
+        new_logger.dump(step=0)
         logger.info(f"Learner logging configured to: {self.log_dir}")
 
         # PRE-INITIALIZE LEARNER BUFFERS
@@ -1295,6 +1556,7 @@ class AsyncLearner:
                     break
             
             if not found_buffer:
+                self._check_collector_alive()
                 time.sleep(1)
 
 
@@ -1313,10 +1575,28 @@ def run_single_async_training_session(
     if model_to_load:
         logger.info(f"--- [ASYNC] Loading weights from: {model_to_load} ---")
 
+    buffer_dir = ensure_async_buffer_dir_env()
+    logger.info(f"Async buffer directory: {buffer_dir}")
+
     tb_port = int(os.environ.get("SC2_TENSORBOARD_PORT", "6006"))
     refresh_tensorboard("logs_universal", tb_port, active_level=level_name)
 
     force_kill_sc2()
+    # Give Windows time to fully release resources/ports after SC2 is killed.
+    # Skipping this pause causes the next SC2 launch to fail with access violations
+    # when the previous process's network sockets and GPU resources are still in limbo.
+    logger.info("Waiting 5 s for Windows to release SC2 resources before starting new processes...")
+    time.sleep(5)
+
+    # Verify no lingering SC2 processes remain (log a warning so the user knows to reboot).
+    lingering = [p.info['pid'] for p in psutil.process_iter(['pid', 'name'])
+                 if p.info.get('name', '').upper() in ('SC2_X64.EXE', 'SC2.EXE')]
+    if lingering:
+        logger.warning(
+            f"SC2 processes still alive after kill attempt (PIDs: {lingering}). "
+            "If training crashes immediately, reboot Windows to clear residual resources."
+        )
+
     clear_temp_dir()
 
     stale_model = os.path.join(TEMP_DIR, "latest_learner_model.zip")
@@ -1326,23 +1606,68 @@ def run_single_async_training_session(
         except OSError:
             logger.warning(f"Could not remove stale model: {stale_model}")
 
+    # Spawn the collector subprocess and wait until it publishes a ready marker
+    # (model on GPU + initial_model.zip written). On Windows, CUDA DLL init can
+    # race when the learner and collector start concurrently (0xC0000005).
+    _COLLECTOR_SPAWN_RETRIES = 3
     stop_event = mp.Event()
-    collector = AsyncCollector(
-        level_name,
-        config,
-        stop_event,
-        model_path=model_to_load,
-        resume_timesteps_from_save=resume_timesteps_from_save,
-    )
-    collector.start()
+    collector = None
+    _clear_collector_ready_marker()
+    for _spawn_attempt in range(_COLLECTOR_SPAWN_RETRIES):
+        stop_event.clear()
+        collector = AsyncCollector(
+            level_name,
+            config,
+            stop_event,
+            model_path=model_to_load,
+            resume_timesteps_from_save=resume_timesteps_from_save,
+        )
+        collector.start()
+        logger.info(
+            f"Collector spawned (attempt {_spawn_attempt + 1}/{_COLLECTOR_SPAWN_RETRIES}). "
+            f"Waiting up to {_COLLECTOR_STARTUP_TIMEOUT_SEC:.0f}s for ready marker..."
+        )
+        ready, exit_code = _wait_for_collector_ready(
+            collector, _COLLECTOR_STARTUP_TIMEOUT_SEC
+        )
+        if ready and collector.is_alive():
+            logger.info("Collector ready — starting learner.")
+            break
+        hint = _describe_collector_exit_code(exit_code)
+        logger.error(
+            f"Collector subprocess not ready (exit code {exit_code}). {hint} "
+            + (
+                f"Retrying after cleanup..."
+                if _spawn_attempt < _COLLECTOR_SPAWN_RETRIES - 1
+                else f"Collector startup failed after {_COLLECTOR_SPAWN_RETRIES} attempts."
+            )
+        )
+        collector.join(timeout=5)
+        if _spawn_attempt < _COLLECTOR_SPAWN_RETRIES - 1:
+            _cleanup_after_collector_spawn_failure(5.0 * (_spawn_attempt + 1))
+    else:
+        raise RuntimeError(
+            f"Collector subprocess failed to start after {_COLLECTOR_SPAWN_RETRIES} attempts. "
+            "Check GPU drivers and CUDA installation. If exit code is 3221225477 "
+            "(0xC0000005), reboot Windows to clear a stuck CUDA driver state."
+        )
 
     learner = AsyncLearner(
-        level_name, config, resume_timesteps_from_save=resume_timesteps_from_save
+        level_name,
+        config,
+        resume_timesteps_from_save=resume_timesteps_from_save,
+        model_path=model_to_load,
+        collector_proc=collector,
     )
     try:
         learner.run()
     except KeyboardInterrupt:
         logger.info("Shutdown signaled...")
+        raise
+    except RuntimeError as e:
+        if "Collector subprocess died" in str(e):
+            logger.error(str(e))
+            raise
         raise
     finally:
         if 'learner' in locals() and hasattr(learner, 'close'):

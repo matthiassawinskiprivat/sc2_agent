@@ -9,6 +9,8 @@ import pytest
 import torch
 
 from src.utils.training_device import (
+    cuda_init_file_lock,
+    cuda_init_lock_path,
     resolve_opponent_device,
     resolve_training_device,
     warmup_cuda_if_needed,
@@ -65,3 +67,20 @@ def test_warmup_rejects_cpu():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_warmup_cuda_runs():
     warmup_cuda_if_needed(torch.device("cuda:0"))
+
+
+def test_cuda_init_lock_path_override(tmp_path, monkeypatch):
+    lock_file = tmp_path / "custom_cuda.lock"
+    monkeypatch.setenv("SC2_CUDA_INIT_LOCK", str(lock_file))
+    assert cuda_init_lock_path() == str(lock_file)
+
+
+def test_cuda_init_file_lock_serializes(tmp_path, monkeypatch):
+    lock_file = tmp_path / "cuda.lock"
+    monkeypatch.setenv("SC2_CUDA_INIT_LOCK", str(lock_file))
+    with cuda_init_file_lock():
+        assert lock_file.is_file()
+    assert not lock_file.exists()
+    with cuda_init_file_lock():
+        pass
+    assert not lock_file.exists()

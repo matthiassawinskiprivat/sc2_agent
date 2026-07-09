@@ -60,13 +60,13 @@ class BuildNetwork(nn.Module):
         )
         
     def forward(self, 
-                worker_features: torch.Tensor,     # [B, N, 5]
-                command_type: torch.Tensor,        # [B, 1] (UnitTypeId)
+                worker_features: torch.Tensor,     # [B, N, F]
+                command_type: torch.Tensor,        # [B, 1] (UnitTypeId index)
                 command_target: torch.Tensor,      # [B, 2] (Global x,y)
                 local_map: torch.Tensor,           # [B, C, H, W]
                 hidden_state: torch.Tensor,        # [B, Hidden]
                 worker_mask: torch.Tensor = None   # [B, N]
-                ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
         batch_size = worker_features.size(0)
         
@@ -92,9 +92,26 @@ class BuildNetwork(nn.Module):
         # Encode workers first
         worker_embs = self.worker_encoder(worker_features, worker_mask) # [B, N, 64]
         # Query workers with the reasoned state
-        selection_probs = self.pointer_attention(query=new_hidden, keys=worker_embs, mask=worker_mask)
+        worker_logits = self._worker_logits(new_hidden, worker_embs, worker_mask)
+        selection_probs = F.softmax(worker_logits, dim=-1)
         
         # 2. Placement
         placement_logits = self.placement_head(new_hidden) # [B, 256]
         
-        return selection_probs, placement_logits, new_hidden
+        return selection_probs, placement_logits, new_hidden, worker_logits
+
+    def _worker_logits(
+        self,
+        query: torch.Tensor,
+        keys: torch.Tensor,
+        mask: torch.Tensor = None,
+    ) -> torch.Tensor:
+        B, N, _ = keys.size()
+        query_expanded = query.unsqueeze(1).expand(B, N, -1)
+        energy = torch.tanh(
+            self.pointer_attention.W_q(query_expanded) + self.pointer_attention.W_k(keys)
+        )
+        logits = self.pointer_attention.V(energy).squeeze(-1)
+        if mask is not None:
+            logits = logits.masked_fill(mask == 0, -1e9)
+        return logits

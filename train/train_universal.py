@@ -184,6 +184,8 @@ class UniversalPipelineManager(PipelineManager):
                     }
                     if AlgoClass == MaskableRecurrentPPO:
                         load_kwargs["rnn_type"] = model_kwargs.get("rnn_type", "lstm")
+                    # Same-level resume (CONTINUE_TRAINING) only; curriculum uses fresh Adam.
+                    load_kwargs["restore_optimizer"] = not reset_timesteps
                     model = AlgoClass.load(model_path_to_load, **load_kwargs)
                 except Exception as e:
                     logger.warning(

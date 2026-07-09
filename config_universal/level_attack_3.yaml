@@ -1,11 +1,9 @@
-# config_universal/level_attack_3.yaml
-# Combat: 2 Stalkers vs 2 Zealots (1 per slot). Stalker faster than Zealot, easy kiting window.
 training:
-  training_steps: 1_500_000
+  training_steps: 3_000_000
   num_envs: 8
   n_steps: 2048
   batch_size: 1024
-  learning_rate: 0.0002
+  learning_rate: 0.0003
   render_beacon: False
   watchdog_timeout: 3600
   target_kl: null
@@ -13,10 +11,10 @@ training:
 # Environment parameters
 env:
   env_class: "Level7Env"
-  unit_type: "STALKER"
-  enemy_type: "ZEALOT"
+  unit_type: "HELLION"
+  enemy_type: "ZERGLING"
   targets: 2
-  enemies_per_target: 1
+  enemies_per_target: 3
   headless: True
   max_steps: 340
   every_k_episodes: 250
@@ -28,21 +26,21 @@ env:
     step_penalty: -0.1
     distance_multiplier: 1.0
     retreat_shaping_scale: 1.0
-    cooldown_retreat_scale: 0.8
+    cooldown_retreat_scale: 1.0
     attack_on_cooldown_penalty: 0.3
-    kiting_close_in_penalty: 1.5
+    kiting_close_in_penalty: 0.2
     weapon_ready_attack_bonus: 0.3
     sweet_spot_bonus: 0.2
-    in_danger_penalty: 1.3
-    damage_reward: 1.0
-    damage_penalty: -0.5
+    in_danger_penalty: 0.8
+    damage_reward: 1.1
+    damage_penalty: -0.3
     kill_reward: 10.0
-    kill_penalty: -1.0
+    kill_penalty: -5.0
     win_reward: 20.0
-    loss_penalty: -15.0
-    timeout_penalty: -15.0
-    use_global: 0.5
-    
+    loss_penalty: -12.5
+    timeout_penalty: -17.5
+    use_global: 0.05
+
 # Model parameters
 model:
   algorithm: "MaskableRecurrentPPO"

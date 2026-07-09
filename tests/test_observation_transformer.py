@@ -3432,3 +3432,78 @@ def test_mineral_fields_stamped_unpathable_on_terrain():
     px, py = transformer._game_to_obs_pixel(32.0, 32.0)
     assert terrain[py, px] <= 0.0
     assert np.count_nonzero(terrain <= 0.0) >= 1
+
+
+def test_tactical_flying_layer_renders_when_configured():
+    """Flying attribute layers must be available and drawn in the tactical fovea."""
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_tactical_layers": [
+                LayerConstants.ALLIED_UNIT_FLYING,
+                LayerConstants.ENEMY_UNIT_FLYING,
+            ],
+        },
+    )
+    focal = create_mock_unit(UnitTypeId.ZERGLING, Point2((64.0, 64.0)))
+    banshee = create_mock_unit(
+        UnitTypeId.BANSHEE,
+        Point2((66.0, 64.0)),
+        is_flying=True,
+        is_mechanical=True,
+        is_light=True,
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+    gi.placement_grid = MagicMock()
+    gi.placement_grid.data_numpy = gi.pathing_grid.data_numpy.copy()
+    raw_obs = {
+        "units": [focal],
+        "enemy_units": [banshee],
+        "structures": [],
+        "enemy_structures": [],
+        "effects": [],
+        "game_info": gi,
+        "game_data": MagicMock(),
+        "selected_units": [focal],
+    }
+    tactical = transformer.transform_tactical(raw_obs, focal)
+    assert tactical.shape[0] == 2
+    assert float(tactical[1].max()) > 0.0
+
+
+def test_tactical_air_dps_layer_renders_when_configured():
+    """Air-only weapons must paint a_dps channels when listed in active_tactical_layers."""
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_tactical_layers": [LayerConstants.ENEMY_A_DPS_MASSIVE],
+        },
+    )
+    focal = create_mock_unit(UnitTypeId.ZERGLING, Point2((64.0, 64.0)))
+    tempest = create_mock_unit(
+        UnitTypeId.TEMPEST,
+        Point2((70.0, 70.0)),
+        is_flying=True,
+        is_massive=True,
+        is_armored=True,
+        is_mechanical=True,
+        air_range=15.0,
+        ground_range=0.0,
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+    gi.placement_grid = MagicMock()
+    gi.placement_grid.data_numpy = gi.pathing_grid.data_numpy.copy()
+    raw_obs = {
+        "units": [focal],
+        "enemy_units": [tempest],
+        "structures": [],
+        "enemy_structures": [],
+        "effects": [],
+        "game_info": gi,
+        "game_data": MagicMock(),
+        "selected_units": [focal],
+    }
+    tactical = transformer.transform_tactical(raw_obs, focal)
+    assert float(tactical[0].max()) > 0.0
+    assert int(np.count_nonzero(tactical[0] > 0.01)) > 0
+

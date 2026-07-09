@@ -1,0 +1,42 @@
+training:
+  training_steps: 750_000
+  num_envs: 2
+  n_steps: 2048
+  batch_size: 512
+  learning_rate: 0.0003
+  device: auto
+
+env:
+  env_class: ZergBuildEnv
+  maps_dir: train/maps/ladder/no_trigger
+  use_computer: false
+  max_steps: 500
+  headless: true
+  macro_tick_interval: 8
+  mining_controller: noop
+  build_commands:
+    - spawningpool
+  spawn:
+    drones: 4
+    minerals: 250
+  manager_script:
+    - command_type: BUILD
+      unit_type: SPAWNINGPOOL
+      target_pos: [0, 0]
+      urgent: true
+  rewards:
+    success: 50.0
+    step_penalty: -0.08
+    invalid_build_penalty: -1.5
+    distance_multiplier: 0.0
+
+model:
+  algorithm: MaskablePPO
+  gamma: 0.995
+  ent_coef: 0.01
+  n_epochs: 4
+  policy_kwargs:
+    features_extractor_class: src.agent.models.build_policy.BuildFeaturesExtractor
+    features_extractor_kwargs:
+      features_dim: 128
+      thinking_steps: 3

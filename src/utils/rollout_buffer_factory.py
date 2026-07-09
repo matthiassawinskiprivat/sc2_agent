@@ -55,24 +55,44 @@ def resolve_rollout_buffer_backend(
     )
 
 
+def resolve_sync_buffer_temp_dir(
+    training_params: Dict[str, Any],
+    namespace: str = "universal",
+) -> str:
+    """Per-pipeline memmap root so parallel trainers do not share the same folder."""
+    explicit = training_params.get("rollout_buffer_temp_dir")
+    if explicit is not None:
+        return os.path.normpath(str(explicit))
+
+    env_vars = {
+        "universal": "SC2_SYNC_BUFFER_DIR",
+        "build": "SC2_BUILD_BUFFER_DIR",
+    }
+    defaults = {
+        "universal": "C:/temp/sc2_buffer_cache",
+        "build": "C:/temp/sc2_buffer_cache_build",
+    }
+    env_key = env_vars.get(namespace, env_vars["universal"])
+    default = defaults.get(namespace, defaults["universal"])
+    return os.path.normpath(os.environ.get(env_key, default))
+
+
 def sync_rollout_buffer_config(
     training_params: Dict[str, Any],
     env_params: Dict[str, Any] | None = None,
+    namespace: str = "universal",
 ) -> Tuple[Type[DiskDictRolloutBuffer], Dict[str, Any]]:
-    """Buffer class + kwargs for MaskableRecurrentPPO (sync universal training)."""
+    """Buffer class + kwargs for MaskablePPO / MaskableRecurrentPPO sync training."""
     backend = resolve_rollout_buffer_backend(training_params, env_params)
     if backend == "ram":
         logger.info("Rollout buffer: RAM (in-memory observations, no memmap).")
         return DiskDictRolloutBuffer, {"storage_backend": "ram"}
 
-    temp_dir = training_params.get(
-        "rollout_buffer_temp_dir",
-        os.environ.get("SC2_SYNC_BUFFER_DIR", "C:/temp/sc2_buffer_cache"),
-    )
+    temp_dir = resolve_sync_buffer_temp_dir(training_params, namespace)
     logger.info(f"Rollout buffer: disk (memmap) at {temp_dir}")
     return DiskDictRolloutBuffer, {
         "storage_backend": "disk",
-        "temp_dir": os.path.normpath(str(temp_dir)),
+        "temp_dir": temp_dir,
     }
 
 

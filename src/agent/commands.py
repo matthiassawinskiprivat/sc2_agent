@@ -21,11 +21,14 @@ class CommandType(Enum):
 class Command:
     """
     The Protocol Object passed from Manager Agent to Sub-Agents.
+
+    Worker role assignment (mining / build / micro) is owned by WorkerRegistry,
+    not embedded in Command. Manager updates the registry when emitting commands.
     """
     command_type: CommandType
     
     # -- Payload --
-    # For BUILD/TRAIN: What to build?
+    # For BUILD/TRAIN/EXPAND: structure or unit to produce (UnitTypeId).
     unit_type_id: Optional[UnitTypeId] = None
     
     # For ATTACK/DEFEND/BUILD/EXPAND: Where?

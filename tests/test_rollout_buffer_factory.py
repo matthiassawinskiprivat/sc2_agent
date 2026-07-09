@@ -48,6 +48,19 @@ def test_sync_rollout_buffer_config_disk():
     assert "temp_dir" in kwargs
 
 
+def test_sync_rollout_buffer_config_build_namespace():
+    cls, kwargs = sync_rollout_buffer_config({}, namespace="build")
+    assert cls is DiskDictRolloutBuffer
+    assert kwargs["storage_backend"] == "disk"
+    assert kwargs["temp_dir"].endswith("sc2_buffer_cache_build")
+
+
+def test_disk_dict_rollout_buffer_is_maskable():
+    from sb3_contrib.common.maskable.buffers import MaskableDictRolloutBuffer
+
+    assert issubclass(DiskDictRolloutBuffer, MaskableDictRolloutBuffer)
+
+
 def test_sync_rollout_buffer_config_ram():
     cls, kwargs = sync_rollout_buffer_config({"rollout_buffer": "ram"})
     assert cls is DiskDictRolloutBuffer

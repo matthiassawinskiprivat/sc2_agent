@@ -23,11 +23,21 @@ set "PYTHONPATH=%REPO_ROOT%"
 echo Freeing port 6006 if needed...
 "%PYTHON_EXE%" -c "from train.async_train_universal import free_port; free_port(6006)"
 
-echo TensorBoard logdir: %REPO_ROOT%\logs_universal
+for /f "delims=" %%i in ('"%PYTHON_EXE%" -c "from train.async_train_universal import detect_active_log_level, build_tensorboard_logdir_spec; import os; b=os.path.join(r'%REPO_ROOT%','logs_universal'); a=detect_active_log_level(b); print(a or '')"') do set "ACTIVE_LEVEL=%%i"
+
+if defined ACTIVE_LEVEL (
+  for /f "delims=" %%i in ('"%PYTHON_EXE%" -c "from train.async_train_universal import build_tensorboard_logdir_spec; import os; print(build_tensorboard_logdir_spec(os.path.join(r'%REPO_ROOT%','logs_universal'), r'%ACTIVE_LEVEL%'))"') do set "LOGDIR_SPEC=%%i"
+  echo Active level ^(latest logs_universal folder^): %ACTIVE_LEVEL%
+) else (
+  set "LOGDIR_SPEC=all:%REPO_ROOT%\logs_universal"
+  echo No level folders found under logs_universal yet.
+)
+
+echo TensorBoard logdir_spec: %LOGDIR_SPEC%
 echo Open: http://localhost:6006
-echo Runs: level_attack_0, level_attack_1, level_move_single_0, ...
-echo Tip: enable ONE run in the left sidebar; refresh the page after a new level starts.
+echo In the left sidebar enable run "active" for %ACTIVE_LEVEL%, or browse "all" for every level.
+echo Training curves appear after the first learner update; async/learner_ready shows immediately.
 echo.
 
-"%PYTHON_EXE%" -m tensorboard.main --logdir "%REPO_ROOT%\logs_universal" --port 6006 --reload_interval 5 --bind_all
+"%PYTHON_EXE%" -m tensorboard.main --logdir_spec "%LOGDIR_SPEC%" --port 6006 --reload_interval 15 --load_fast false --bind_all
 if /i not "%~1"=="--no-pause" pause

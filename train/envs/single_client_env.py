@@ -55,7 +55,8 @@ class SingleClientEnv(gym.Env):
         self._manager = SingleClientSC2Manager(
             sc2_process_cls=self._sc2_process_cls, 
             client_cls=self._client_cls,
-            worker_index=self.worker_index
+            worker_index=self.worker_index,
+            num_workers=self.num_workers,
         )
         self._loop = asyncio.new_event_loop()
 
@@ -145,12 +146,18 @@ class SingleClientEnv(gym.Env):
             or env_conf.get("startup_max_retries", 3)
         )
 
+    def _startup_stagger_sec(self) -> float:
+        return self._manager._startup_stagger_sec()
+
     def _startup_timeout_sec(self) -> float:
         env_conf = self.training_conf.get("env", {})
-        return float(
+        base = float(
             self.training_conf.get("startup_timeout_sec")
             or env_conf.get("startup_timeout_sec", 60.0)
         )
+        # launch_process sleeps worker_index × stagger before SC2 starts; budget must include that
+        # plus join_game and the post-join in_game poll (up to ~30s in CTF).
+        return base + self.worker_index * self._startup_stagger_sec()
 
     async def _startup_session(self):
         """Launch SC2, join the game, and fetch the first observation."""
@@ -203,7 +210,8 @@ class SingleClientEnv(gym.Env):
                 self._log(traceback.format_exc())
                 self.close()
                 if attempt < max_retries - 1:
-                    time.sleep(2.0)
+                    # Desync retries across parallel workers; longer backoff reduces GPU/port races.
+                    time.sleep(8.0 + self.worker_index * 2.0)
 
         assert last_error is not None
         self._log(
@@ -212,8 +220,25 @@ class SingleClientEnv(gym.Env):
         )
         raise last_error
 
+    @staticmethod
+    def _is_sc2_connection_error(exc: BaseException) -> bool:
+        """True when SC2's WebSocket closed unexpectedly mid-game (not a Python bug)."""
+        type_name = type(exc).__name__
+        module = type(exc).__module__ or ""
+        # aiohttp: ClientConnectionResetError, ClientConnectionError, ServerDisconnectedError
+        if "aiohttp" in module or "ClientConnection" in type_name or "ServerDisconnected" in type_name:
+            return True
+        # Websockets / asyncio transport errors
+        msg = str(exc).lower()
+        if "closing transport" in msg or "connection reset" in msg or "connection closed" in msg:
+            return True
+        # Raw OS-level connection drops
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, EOFError)):
+            return True
+        return False
+
     def step(self, action: Any):
-        from sc2.protocol import ProtocolError
+        from sc2.protocol import ProtocolError, ConnectionAlreadyClosed
         
         if self.game_ended:
              return self._last_obs, 0.0, True, False, {"game_ended": True, "already_ended": True}
@@ -226,6 +251,14 @@ class SingleClientEnv(gym.Env):
             if terminated or truncated:
                 self.game_ended = True
             return results
+        except ConnectionAlreadyClosed as e:
+            self._log(
+                f"SC2 connection closed during step ({e}). "
+                "Marking episode as done — SC2 will relaunch on next reset()."
+            )
+            self.close()
+            self.game_ended = True
+            return self._last_obs, 0.0, True, False, {"sc2_connection_lost": True}
         except ProtocolError as e:
             if "Game has already ended" in str(e):
                 self._log("ProtocolError: Game ended during step. Transitioning to terminal state.")
@@ -236,6 +269,17 @@ class SingleClientEnv(gym.Env):
                 return self._last_obs, reward, True, False, info
             raise e
         except Exception as e:
+            if self._is_sc2_connection_error(e):
+                # SC2 process exited or dropped its WebSocket mid-game.
+                # Treat as a terminal episode so the env worker survives and
+                # the next reset() relaunches SC2 instead of crashing the collector.
+                self._log(
+                    f"SC2 connection lost during step ({type(e).__name__}: {e}). "
+                    "Marking episode as done — SC2 will relaunch on next reset()."
+                )
+                self.close()
+                self.game_ended = True
+                return self._last_obs, 0.0, True, False, {"sc2_connection_lost": True}
             self._log(f"CRITICAL: Error during step: {e}")
             self.close()
             raise e

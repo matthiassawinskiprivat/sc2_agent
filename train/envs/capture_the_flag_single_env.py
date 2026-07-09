@@ -18,6 +18,11 @@ from src.utils.layer_constants import LayerConstants
 from sc2.ids.unit_typeid import UnitTypeId
 from src.utils.spawning_utils import SpawningUtils
 from train.envs.ctf.region_loader import RegionLoader
+from train.envs.ctf.pool_assignment import (
+    alternate_trainee_race_enabled,
+    is_pool_trainee,
+    pool_player_id,
+)
 import json
 import os
 
@@ -90,17 +95,19 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self.grid_size = 32
         self.training_conf["grid_size"] = self.grid_size
 
-        # Dynamic Observation Layers from Curriculum
-        self.active_layers = self.config_manager.get_cumulative_active_layers(self.level_name)
-        if not self.active_layers:
-            self.active_layers = env_conf.get("active_layers", [])
+        # Prefer cumulative lists pre-computed in the parent process (async/sync pipeline).
+        # Subproc workers re-walking every pipeline YAML can race on Windows file reads.
+        self.active_layers = self._resolve_cumulative_list(
+            "active_layers", self.config_manager.get_cumulative_active_layers
+        ) or env_conf.get("active_layers", [])
         self.training_conf["active_layers"] = self.active_layers
 
-        # Dynamic Action Heads from Curriculum
-        self.action_heads = self.config_manager.get_cumulative_action_heads(self.level_name)
-        if not self.action_heads:
-            self.action_heads = env_conf.get("action_heads", ["move", "attack"])
-        self.categorical_heads = self.config_manager.get_cumulative_categorical_heads(self.level_name)
+        self.action_heads = self._resolve_cumulative_list(
+            "action_heads", self.config_manager.get_cumulative_action_heads
+        ) or env_conf.get("action_heads", ["move", "attack"])
+        self.categorical_heads = self._resolve_cumulative_list(
+            "categorical_heads", self.config_manager.get_cumulative_categorical_heads
+        )
         self.training_conf["action_heads"] = self.action_heads
         self.training_conf["categorical_heads"] = self.categorical_heads
 
@@ -111,9 +118,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         }
 
         if self.agent_architecture == "universal":
-            self.active_tactical_layers = self.config_manager.get_cumulative_active_tactical_layers(self.level_name)
-            if not self.active_tactical_layers:
-                self.active_tactical_layers = self.active_layers
+            self.active_tactical_layers = self._resolve_cumulative_list(
+                "active_tactical_layers",
+                self.config_manager.get_cumulative_active_tactical_layers,
+            ) or self.active_layers
             self.training_conf["active_tactical_layers"] = self.active_tactical_layers
             self.training_conf["fixed_universal_command_dim"] = FIXED_UNIVERSAL_COMMAND_DIM
             n_tactical = len(self.active_tactical_layers)
@@ -146,6 +154,15 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.label_to_defender_pos: Dict[str, Any] = {}
         self._promoted_pool_index: Optional[int] = None
 
+        # Deferred terminal step — when the game ends during an opponent's physics step
+        # (requires_policy_action=False), the terminal reward from P1's perspective is
+        # buffered here and returned on the NEXT phantom agent step so the training buffer
+        # always captures the terminal reward.
+        self._deferred_done: bool = False
+        self._deferred_truncated: bool = False
+        self._deferred_p1_terminal_reward: float = 0.0
+        self._deferred_terminal_obs: Optional[Any] = None
+
         # Self-play opponent model — frozen snapshot, synced on hard reset (every_k_episodes).
         # None until the first hard reset; also None when using symmetric self-play.
         self.model: Optional[Any] = None           # latest model ref, set by training loop
@@ -153,6 +170,30 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._opponent_lstm_state: Optional[Any] = None  # stateful LSTM between steps
         self._opponent_last_focus_tag: Optional[int] = None
         self._prepared_chunk: Optional[List[_ChunkEntry]] = None
+        self._alternate_trainee_race = alternate_trainee_race_enabled(self.training_conf)
+
+    def _pool_player_id(self, pool: Dict) -> int:
+        return pool_player_id(
+            pool,
+            self.unit_pools_config,
+            getattr(self, "episode_counter", 1),
+            alternate=getattr(self, "_alternate_trainee_race", False),
+        )
+
+    def _is_pool_trainee(self, pool: Dict) -> bool:
+        return is_pool_trainee(
+            pool,
+            self.unit_pools_config,
+            getattr(self, "episode_counter", 1),
+            alternate=getattr(self, "_alternate_trainee_race", False),
+        )
+
+    def _resolve_cumulative_list(self, key: str, getter):
+        """Use flattened training_conf list when the pipeline already computed it."""
+        precomputed = self.training_conf.get(key)
+        if precomputed:
+            return list(precomputed)
+        return getter(self.level_name)
 
     def _load_unit_data(self):
         path = os.path.join(os.getcwd(), "data", "unit_data.json")
@@ -189,7 +230,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         The collector pushes ``initial_model.zip`` at startup, but workers can miss
         that window or fail graft on the first try. Without a retry here, player 2
-        falls back to action [0, 0] (map corner) until the next hard reset.
+        falls back to a safe center-cell move until the next hard reset.
         """
         if self._preview_computer_opponent() or self.opponent_model is not None:
             return self.opponent_model is not None
@@ -224,8 +265,35 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._log("Starting single-process God-Mode game session...")
         await self._manager.create_join_game(resolved_map, players, realtime=sim_realtime)
 
-        # Prepare bot
+        # SC2 5.0.16 requires polling until the game transitions from init_game → in_game
+        # before sending any further requests. Sending RequestGameInfo while SC2 is still
+        # in init_game causes it to close the WebSocket (WSMsgType.CLOSE / message 257).
         client = self._manager.clients[0]
+        self._log("Waiting for SC2 to transition from init_game → in_game...")
+        _in_game_wait_secs = 30.0
+        _poll_interval = 0.3
+        _waited = 0.0
+        while _waited < _in_game_wait_secs:
+            try:
+                ping_resp = await asyncio.wait_for(
+                    client._execute(ping=sc_pb.RequestPing()), timeout=5.0
+                )
+                sc2_status = ping_resp.status  # 3 = in_game in SC2 API proto
+                if sc2_status == 3:  # Status.in_game
+                    self._log(f"SC2 status = in_game after {_waited:.1f}s.")
+                    break
+                self._log(f"SC2 status = {sc2_status} (init_game), waiting...")
+            except Exception as _ping_exc:
+                self._log(f"Ping failed while waiting for in_game: {_ping_exc}")
+                raise
+            await asyncio.sleep(_poll_interval)
+            _waited += _poll_interval
+        else:
+            raise RuntimeError(
+                f"SC2 did not reach in_game status within {_in_game_wait_secs}s after join_game."
+            )
+
+        # Prepare bot
         raw_game_info = await client._execute(game_info=sc_pb.RequestGameInfo())
         from sc2.game_info import GameInfo
         game_info = GameInfo(raw_game_info.game_info)
@@ -470,8 +538,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         for pool in self.unit_pools_config:
             label = pool["region"]
-            # agent:True → player 1 (trainee), absent/False → player 2 (opponent)
-            player_id = 1 if pool.get("agent", False) else 2
+            player_id = self._pool_player_id(pool)
             pair_idx = label_to_pair[label]
             command = pool.get("high_level_command", "attack")
             side_char = "a" if command == "attack" else "d"
@@ -577,7 +644,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return sum(
                 self._pool_alive_count(i)
                 for i, pool in enumerate(self.unit_pools_config)
-                if pool.get("agent", False)
+                if self._is_pool_trainee(pool)
                 and pool.get("high_level_command", "attack") == "attack"
             )
 
@@ -591,12 +658,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return None
 
         promoted = self.unit_pools_config[promoted_pool_idx]
-        promoted_player = 1 if promoted.get("agent", False) else 2
+        promoted_player = self._pool_player_id(promoted)
 
         for pool in self.unit_pools_config:
             if pool.get("high_level_command", "attack") != "defend":
                 continue
-            pool_player = 1 if pool.get("agent", False) else 2
+            pool_player = self._pool_player_id(pool)
             if pool_player == promoted_player:
                 continue
             label = pool.get("region")
@@ -626,7 +693,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self.bot.unit_target_map[tag] = target
 
         pool = self.unit_pools_config[pool_idx]
-        player_id = 1 if pool.get("agent", False) else 2
+        player_id = self._pool_player_id(pool)
         self.bot.prev_dist_per_squad.pop((player_id, "attack"), None)
         self.bot.prev_dist_per_squad.pop((player_id, "defend"), None)
 
@@ -683,7 +750,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         alive = set(self.player_units[1] + self.player_units[2])
         self.squad_unit_tags = [
             (
-                1 if pool.get("agent", False) else 2,
+                self._pool_player_id(pool),
                 [t for t, pi in self.unit_pool_index.items() if pi == pool_idx and t in alive],
             )
             for pool_idx, pool in enumerate(self.unit_pools_config)
@@ -702,7 +769,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
     def _is_agent_squad(self) -> bool:
         if self.unit_pools_config and self.squad_unit_tags:
-            return bool(self._current_pool_config().get("agent", False))
+            return self._is_pool_trainee(self._current_pool_config())
         return self.active_player_id == 1
 
     def _squad_tags(self) -> List[int]:
@@ -763,7 +830,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 if sq_idx < len(self.unit_pools_config)
                 else {}
             )
-            is_agent = bool(pool_conf.get("agent", player_id == 1))
+            is_agent = (
+                self._is_pool_trainee(pool_conf)
+                if pool_conf
+                else player_id == 1
+            )
             entries.append(
                 _ChunkEntry(sq_idx, player_id, int(tags[unit_idx]), is_agent)
             )
@@ -813,7 +884,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self.active_player_id = self.squad_unit_tags[self.current_squad_index][0]
 
     def requires_policy_action(self) -> bool:
-        """True when the collector must run a policy forward for this env step."""
+        """True when the collector must run a policy forward for this env step.
+
+        Also returns True for the phantom terminal step that flushes a deferred
+        terminal reward (from an episode that ended during an opponent's physics
+        step) into the training buffer.
+        """
+        if getattr(self, "_deferred_done", False) or getattr(self, "_deferred_truncated", False):
+            return True
         if self._uses_chunk_physics():
             chunk = self._prepared_chunk or self._peek_acting_chunk()
             return any(entry.is_agent for entry in chunk)
@@ -846,7 +924,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             if (
                 pool_idx is not None
                 and self.unit_pools_config
-                and self.unit_pools_config[pool_idx].get("agent")
+                and self._is_pool_trainee(self.unit_pools_config[pool_idx])
             ):
                 self.bot.active_unit_tag = tag
                 return
@@ -861,9 +939,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return await self._get_joint_observation()
 
     def _opponent_checkpoint_dir(self) -> str:
-        return os.path.normpath(
-            os.environ.get("SC2_ASYNC_BUFFER_DIR", os.path.join("temp", "async_train"))
-        )
+        from src.utils.async_buffer_paths import resolve_async_buffer_dir
+
+        return resolve_async_buffer_dir()
 
     def _opponent_checkpoint_candidates(
         self, explicit_path: Optional[str] = None
@@ -871,14 +949,25 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if explicit_path:
             return [explicit_path]
         temp_dir = self._opponent_checkpoint_dir()
-        # Prefer level-entry ``initial_model`` so self-play uses a lagging snapshot,
-        # not the collector's latest hot-reload zip (near-current trainee weights).
+        # Prefer the learner's published checkpoint (refreshed on hard reset via
+        # every_k_episodes). ``initial_model`` is only a bootstrap before the first
+        # learner publish. Staging zips are fallbacks when the primary zip is locked.
         return [
-            os.path.join(temp_dir, "initial_model.zip"),
-            os.path.join(temp_dir, "latest_learner_model_collector_staging.zip"),
             os.path.join(temp_dir, "latest_learner_model.zip"),
+            os.path.join(temp_dir, "latest_learner_model_collector_staging.zip"),
+            os.path.join(temp_dir, "initial_model.zip"),
             os.path.join(temp_dir, "collector_weights_staging.zip"),
         ]
+
+    def _resolve_opponent_model_conf(self) -> Dict[str, Any]:
+        """Model section for opponent load — workers may only have training+env flattened."""
+        model_conf = self.training_conf.get("model")
+        if model_conf:
+            return model_conf
+        level_name = self.training_conf.get("level_name", getattr(self, "level_name", None))
+        if level_name and hasattr(self, "config_manager"):
+            return self.config_manager.get_level_config(level_name).get("model", {})
+        return {}
 
     def _resolve_opponent_algo_bundle(self) -> Tuple[Any, Any, Dict[str, Any], str]:
         """Return (AlgoClass, PolicyClass, policy_kwargs, rnn_type) for opponent load."""
@@ -888,9 +977,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
         from src.agent.models.universal_policy import UniversalActorCriticPolicy
 
-        model_conf = self.training_conf.get("model", {})
+        model_conf = self._resolve_opponent_model_conf()
         algo_name = model_conf.get("algorithm", "MaskablePPO")
         rnn_type = model_conf.get("rnn_type", "gru")
+        is_recurrent_algo = algo_name == "MaskableRecurrentPPO"
 
         policy_kwargs = {**model_conf.get("policy_kwargs", {}), "normalize_images": False}
         policy_kwargs["spatial_resolution"] = 32
@@ -900,10 +990,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             UnitControlNetwork,
         ):
             policy_kwargs["features_extractor_class"] = UnitControlNetwork
-        if "Recurrent" in algo_name:
+        if is_recurrent_algo:
             policy_kwargs["rnn_type"] = rnn_type
 
-        if "Recurrent" in algo_name:
+        if is_recurrent_algo:
             return MaskableRecurrentPPO, UniversalRecurrentPolicy, policy_kwargs, rnn_type
         return MaskablePPO, UniversalActorCriticPolicy, policy_kwargs, rnn_type
 
@@ -913,7 +1003,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         AlgoClass, PolicyClass, policy_kwargs, rnn_type = self._resolve_opponent_algo_bundle()
         training_params = self.training_conf.get("training", self.training_conf)
-        model_conf = self.training_conf.get("model", {})
+        model_conf = self._resolve_opponent_model_conf()
         algo_kwargs: Dict[str, Any] = {
             "policy": PolicyClass,
             "env": self,
@@ -933,7 +1023,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         from src.utils.training_device import resolve_opponent_device
 
         _algo, _policy, policy_kwargs, rnn_type = self._resolve_opponent_algo_bundle()
-        model_conf = self.training_conf.get("model", {})
+        model_conf = self._resolve_opponent_model_conf()
         algo_name = model_conf.get("algorithm", "MaskablePPO")
 
         custom_objects = {
@@ -1383,10 +1473,56 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         obs = await self._get_joint_observation()
         return obs, reward, done, truncated, {"squad_physics_step": True}
 
+    def _compute_p1_terminal_reward(
+        self,
+        p1_lost: bool,
+        p2_lost: bool,
+        p1_army_lost: bool,
+        p2_army_lost: bool,
+        all_units_gone: bool,
+        timeout: bool,
+        r_conf: dict,
+    ) -> float:
+        """P1 (agent) perspective terminal reward for any termination condition."""
+        win_reward = r_conf.get("win_reward", 100.0)
+        loss_penalty = r_conf.get("loss_penalty", -100.0)
+        draw_penalty = r_conf.get("draw_penalty", -10.0)
+
+        if p1_lost:
+            return loss_penalty
+        if p2_lost:
+            return win_reward
+        if p1_army_lost and p2_army_lost:
+            return draw_penalty
+        if all_units_gone:
+            return draw_penalty
+        if p1_army_lost:
+            return loss_penalty
+        if p2_army_lost:
+            return win_reward
+        if timeout:
+            if self._agent_attack_units_alive() > 0:
+                return loss_penalty
+            return draw_penalty
+        return 0.0
+
     async def _finalize_squad_physics_step(
         self, squad_tags: List[int], acting_player_id: int
     ):
-        """Flush squad orders, advance SC2 once, compute reward/termination, advance squad."""
+        """Flush squad orders, advance SC2 once, compute reward/termination, advance squad.
+
+        Terminal reward correctness guarantee
+        ────────────────────────────────────
+        When the game ends during the *opponent's* physics step
+        (``acting_player_id != 1``) the training buffer has no open slot for
+        that step (``requires_policy_action`` returns ``False``).  To ensure the
+        terminal reward is captured from P1's perspective we defer it: we store
+        the P1-perspective terminal reward and the terminal observation, clear
+        the done/truncated flags in the returned tuple, and let
+        ``requires_policy_action`` return ``True`` on the next call so the
+        collector runs a phantom agent step whose *only* purpose is to flush the
+        stored reward into the training buffer.
+        """
         self.steps_count += 1
         squad_tag_set = set(squad_tags)
 
@@ -1435,21 +1571,47 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         p1_units_count = len(self.player_units[1])
         p2_units_count = len(self.player_units[2])
 
-        if not done and p1_units_count == 0 and p2_units_count == 0:
+        all_units_gone = not done and p1_units_count == 0 and p2_units_count == 0
+        if all_units_gone:
             done = True
             reward += draw_penalty
 
-        if not done and self.steps_count >= self.max_steps:
+        timeout = not done and self.steps_count >= self.max_steps
+        if timeout:
             truncated = True
             if self._agent_attack_units_alive() > 0:
                 reward += loss_penalty
             else:
                 reward += draw_penalty
 
+        # Advance the squad index BEFORE generating the observation.
+        # The observation returned from this step is what the collector uses as
+        # input to compute the NEXT policy action.  If the next actor is P1
+        # squad B but we return P2 squad A's spatially-flipped view, the policy
+        # will navigate in completely the wrong direction.  By advancing first,
+        # _get_joint_observation always reflects the next acting squad's
+        # perspective.
+        # Guard: do NOT advance when the episode is ending — terminal obs stays
+        # on the current (terminating) squad; reset() will supply a fresh start.
         if not done and not truncated:
             await self._advance_squad_index()
 
         obs = await self._get_joint_observation()
+
+        # When the episode ends during the opponent's physics step, the
+        # training buffer has no slot for this step.  Defer the terminal state
+        # so the next phantom agent step carries the P1 reward into the buffer.
+        if (done or truncated) and acting_player_id != 1:
+            p1_terminal = self._compute_p1_terminal_reward(
+                p1_lost, p2_lost, p1_army_lost, p2_army_lost,
+                all_units_gone, timeout, r_conf,
+            )
+            self._deferred_done = done
+            self._deferred_truncated = truncated
+            self._deferred_p1_terminal_reward = p1_terminal
+            self._deferred_terminal_obs = obs
+            return obs, 0.0, False, False, {"squad_physics_step": True, "deferred_terminal": True}
+
         return obs, reward, done, truncated, {"squad_physics_step": True}
 
     async def _async_step_chunk(self, action_p_active):
@@ -1506,6 +1668,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._opponent_last_focus_tag = None
         self._squad_batch_actions = None
         self._prepared_chunk = None
+        # Clear any deferred terminal state from the previous episode.
+        self._deferred_done = False
+        self._deferred_truncated = False
+        self._deferred_p1_terminal_reward = 0.0
+        self._deferred_terminal_obs = None
 
         every_k = every_k_episodes(self.training_conf)
 
@@ -1581,6 +1748,22 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return combat_units.amount > 0
 
     async def _async_step(self, action_p_active):
+        # Phantom terminal step: flush deferred reward into the training buffer.
+        # This fires when the episode ended during the opponent's previous physics
+        # step.  No SC2 advance is needed — just return the cached terminal state
+        # with the P1-perspective reward so the collector can write it to the
+        # rollout buffer with policy_active=True.
+        if getattr(self, "_deferred_done", False) or getattr(self, "_deferred_truncated", False):
+            obs = self._deferred_terminal_obs
+            reward = self._deferred_p1_terminal_reward
+            done = self._deferred_done
+            truncated = self._deferred_truncated
+            self._deferred_done = False
+            self._deferred_truncated = False
+            self._deferred_p1_terminal_reward = 0.0
+            self._deferred_terminal_obs = None
+            return obs, reward, done, truncated, {"squad_physics_step": True, "phantom_terminal": True}
+
         if self._uses_chunk_physics():
             return await self._async_step_chunk(action_p_active)
 

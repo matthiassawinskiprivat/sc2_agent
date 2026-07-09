@@ -45,6 +45,46 @@ from src.agent.universal_constants import (
     build_action_head_manifest,
 )
 
+def _build_agent_observation_space(training_conf: Dict, n_map_ch: int):
+    """Placeholder build-agent Dict space; BuildEnv may refine after init."""
+    from src.agent.build_constants import (
+        BUILD_MAP_RESOLUTION,
+        BUILD_PLACEMENT_CELLS,
+        COMMAND_VECTOR_DIM,
+        MACRO_VECTOR_DIM,
+        MAX_BUILD_WORKERS,
+        WORKER_FEAT_DIM,
+    )
+
+    return spaces.Dict(
+        {
+            "local_map": spaces.Box(
+                0.0,
+                1.0,
+                shape=(n_map_ch, BUILD_MAP_RESOLUTION, BUILD_MAP_RESOLUTION),
+                dtype=np.float32,
+            ),
+            "worker_features": spaces.Box(
+                0.0,
+                1.0,
+                shape=(MAX_BUILD_WORKERS, WORKER_FEAT_DIM),
+                dtype=np.float32,
+            ),
+            "macro_vector": spaces.Box(
+                0.0,
+                1.0,
+                shape=(MACRO_VECTOR_DIM,),
+                dtype=np.float32,
+            ),
+            "command": spaces.Box(
+                0.0,
+                1.0,
+                shape=(COMMAND_VECTOR_DIM,),
+                dtype=np.float32,
+            ),
+        }
+    ), spaces.MultiDiscrete([MAX_BUILD_WORKERS, BUILD_PLACEMENT_CELLS])
+
 class Level0Env(gym.Env):
     def __init__(self, visualize=False, grid_size: int = 16, worker_index: int = 0, num_workers: int = 1,
                  level_name: str = "level_0", sc2_process_cls=None, client_cls=None, training_conf: Dict = None,
@@ -167,7 +207,12 @@ class Level0Env(gym.Env):
 
         self.observation_space = spaces.Dict(obs_dict)
         
-        if self.agent_architecture == "universal":
+        if self.agent_architecture == "build":
+            n_map_ch = len(self.training_conf.get("build_map_layers", [])) or 3
+            self.observation_space, self.action_space = _build_agent_observation_space(
+                self.training_conf, n_map_ch
+            )
+        elif self.agent_architecture == "universal":
             # Universal: fixed command axis; unused slots masked via action_head_manifest.
             spatial_res = 32
             self.action_space = spaces.MultiDiscrete(
