@@ -75,6 +75,69 @@ class Level3Bot(SC2Bot):
         self.pending_success_rewards = {} # unit_tag -> float (buffered rewards)
         self.completed_tags = set() # tags (units/beacons) that should be removed
 
+    def _spawn_geometry_key(self) -> tuple:
+        """Identity for pathing/playable geometry; invalidates spawn cache on map rotation."""
+        area = self.game_info.playable_area
+        grid = self.game_info.pathing_grid
+        ms = self.game_info.map_size
+        if hasattr(ms, "width"):
+            mw, mh = int(ms.width), int(ms.height)
+        else:
+            mw, mh = int(ms[0]), int(ms[1])
+        return (
+            mw,
+            mh,
+            int(area.x),
+            int(area.y),
+            int(area.width),
+            int(area.height),
+            int(getattr(grid, "width", 0)),
+            int(getattr(grid, "height", 0)),
+        )
+
+    def _rebuild_spawn_point_cache(self) -> List[Point2]:
+        grid = self.game_info.pathing_grid
+        area = self.game_info.playable_area
+        margin = 5.0
+        # Intersect pathing grid scan with playable margin (128 edge safety) without
+        # shrinking below the legacy full-grid scan when playable covers the map.
+        min_x = max(4, int(area.x + margin))
+        max_x = min(int(getattr(grid, "width", 0)) - 4, int(area.x + area.width - margin))
+        min_y = max(4, int(area.y + margin))
+        max_y = min(int(getattr(grid, "height", 0)) - 4, int(area.y + area.height - margin))
+        return [
+            Point2((x, y))
+            for x in range(min_x, max_x, 4)
+            for y in range(min_y, max_y, 4)
+            if grid[(x, y)] != 0
+        ]
+
+    def _random_pathable_in_playable(self, max_tries: int = 50) -> Point2:
+        grid = self.game_info.pathing_grid
+        area = self.game_info.playable_area
+        margin = 5.0
+        for _ in range(max_tries):
+            x = random.uniform(float(area.x + margin), float(area.x + area.width - margin))
+            y = random.uniform(float(area.y + margin), float(area.y + area.height - margin))
+            try:
+                if grid[(int(x), int(y))] != 0:
+                    return Point2((x, y))
+            except Exception:
+                pass
+        return Point2((float(area.x + area.width / 2), float(area.y + area.height / 2)))
+
+    def unit_is_level3_scenario_cleanup(self, u) -> bool:
+        """
+        Only remove units this level spawns.
+
+        1v1 ladder maps pre-place a full enemy base (Alliance.Enemy). The default
+        SC2Bot cleanup treats every non-neutral unit as killable (~150 on typical
+        AIE maps) even when no Computer opponent is in the game.
+        """
+        if getattr(u, "owner_id", None) != getattr(self, "player_id", 1):
+            return False
+        return u.type_id in (self.allied_unit_type, self.beacon_type)
+
     async def reset_game_state(self, verify: bool = True):
         """
         Cleans up the map and spawns new units and Beacons.
@@ -82,25 +145,22 @@ class Level3Bot(SC2Bot):
         # Ladder maps often retain map-placed units that never fully clear via
         # debug_kill within a few steps; we still run cleanup but must not abort
         # the worker when debris remains (see SC2Bot.reset_game_state).
-        await super().reset_game_state(verify=verify, strict_empty_map=False)
+        await super().reset_game_state(
+            verify=verify,
+            strict_empty_map=False,
+            cleanup_predicate=self.unit_is_level3_scenario_cleanup,
+        )
         self.previous_distances = {}
         self.current_assignments = {}
         self.pending_success_rewards = {}
         self.completed_tags = set()
         
-        # Spawn new units at valid pathable locations.
-        # Cache the spawn point list — pathing grid never changes during a training run.
-        # Without the cache this nested loop (~900 iterations on 128x128 with step 4)
-        # runs on every episode reset and becomes a major bottleneck as the agent
-        # improves (shorter episodes → more resets per second).
-        if not hasattr(self, "_cached_spawn_points") or not self._cached_spawn_points:
-            grid = self.game_info.pathing_grid
-            self._cached_spawn_points = [
-                Point2((x, y))
-                for x in range(4, grid.width - 4, 4)
-                for y in range(4, grid.height - 4, 4)
-                if grid[(x, y)] != 0
-            ]
+        # Spawn new units at valid pathable locations inside playable_area.
+        # Cache spawn points per map geometry (hard reset rotates ladder maps).
+        geom_key = self._spawn_geometry_key()
+        if getattr(self, "_spawn_cache_key", None) != geom_key or not getattr(self, "_cached_spawn_points", None):
+            self._cached_spawn_points = self._rebuild_spawn_point_cache()
+            self._spawn_cache_key = geom_key
         valid_spawn_points = self._cached_spawn_points
         
         # Build all spawn commands as one batched call instead of 2*targets_count
@@ -108,10 +168,9 @@ class Level3Bot(SC2Bot):
         # websocket round-trip overhead; batching reduces this from 8 calls to 1.
         spawn_cmds = []
         if len(valid_spawn_points) < self.targets_count * 2:
-            w, h = self.game_info.map_size
             for _ in range(self.targets_count):
-                start = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
-                end   = Point2((random.uniform(w*0.1, w*0.9), random.uniform(h*0.1, h*0.9)))
+                start = self._random_pathable_in_playable()
+                end = self._random_pathable_in_playable()
                 spawn_cmds.append([self.allied_unit_type, 1, start, self.player_id])
                 spawn_cmds.append([self.beacon_type,      1, end,   self.player_id])
         else:

@@ -366,32 +366,15 @@ def test_refresh_combat_assignments_keeps_existing_valid_pairs():
     assert assignments == {1: 101, 2: 102}
 
 
-def test_queue_idle_combat_orders_only_for_idle_assigned_units():
-    bot = object.__new__(Level7Bot)
-    bot.enemy_unit_type = UnitTypeId.ZERGLING
-    bot.current_assignments = {1: 101, 2: 102}
-
-    u1 = MagicMock(tag=1)
-    u1.orders = []  # idle => should receive keepalive order
-    u2 = MagicMock(tag=2)
-    u2.orders = [MagicMock()]  # busy => must not be overridden
-
-    e1 = MagicMock(tag=101)
-    e2 = MagicMock(tag=102)
-    enemies = MagicMock()
-    enemies.exists = True
-    enemies.find_by_tag.side_effect = lambda tag: e1 if tag == 101 else (e2 if tag == 102 else None)
-
-    bot.refresh_combat_assignments = MagicMock(return_value={1: 101, 2: 102})
-    bot.get_active_units = MagicMock(return_value=[u1, u2])
-    bot.enemy_units = MagicMock(return_value=enemies)
-    bot.do = MagicMock()
-
-    queued = bot.queue_idle_combat_orders()
-
-    assert queued == 1
-    u1.attack.assert_called_once_with(e1)
-    u2.attack.assert_not_called()
+def test_level7_bot_has_no_queue_idle_combat_orders_helper():
+    """Regression: the bot-side auto-attack helper must stay removed so the policy is the
+    sole source of unit orders (agent-faithful actuation, AGENTS.md)."""
+    assert not hasattr(Level7Bot, "queue_idle_combat_orders"), (
+        "Level7Bot.queue_idle_combat_orders was removed because it issued attack orders "
+        "the policy never chose, overriding kiting moves between policy turns. Do not "
+        "reintroduce it; if non-acting units need to engage, change the policy/observation "
+        "instead."
+    )
 
 
 def test_apply_action_attack_uses_agent_world_target_not_assignment():
@@ -425,8 +408,9 @@ def test_apply_action_attack_uses_agent_world_target_not_assignment():
     bot.refresh_combat_assignments = MagicMock(return_value={1: 101})
     bot.do = MagicMock()
     bot.last_action_was_attack_by_unit = {}
+    bot.last_action_was_move_by_unit = {}
     bot.last_attack_target_tag_by_unit = {}
-    bot._kite_damage_credit_ok = {}
+    bot._attack_order_weapon_cd_before = {}
 
     # attack_local head index = 1
     asyncio.run(bot.apply_action(1, np.array([1, 0], dtype=np.int64)))

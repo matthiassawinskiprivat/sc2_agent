@@ -109,6 +109,10 @@ class DataExtractorBot(BotAI):
                     proto = getattr(unit_data, "_proto", None)
                     if proto: radius = getattr(proto, "unit_radius", 0.0)
 
+                footprint_radius = unit_data.footprint_radius
+                if footprint_radius is not None and footprint_radius <= 0:
+                    footprint_radius = None
+
                 supply = 0.0
                 proto = getattr(unit_data, "_proto", None)
                 if proto: supply = getattr(proto, "food_required", 0.0)
@@ -123,6 +127,8 @@ class DataExtractorBot(BotAI):
                     "detect": DETECTOR_RANGES.get(name, 0.0),
                     "weapons": []
                 }
+                if footprint_radius is not None:
+                    entry["footprint_radius"] = float(footprint_radius)
 
                 raw_weapons = getattr(unit_data, "weapons", [])
                 if not raw_weapons and proto and hasattr(proto, "weapons"):

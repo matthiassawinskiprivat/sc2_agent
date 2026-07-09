@@ -1,8 +1,0 @@
-{
-    "track_id": "fix_mp_pipeline_20251220",
-    "type": "bug",
-    "status": "new",
-    "created_at": "2025-12-20T20:33:00Z",
-    "updated_at": "2025-12-20T20:33:00Z",
-    "description": "Fix and Stabilize Multi-Processing Training Pipeline"
-}

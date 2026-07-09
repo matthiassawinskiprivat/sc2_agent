@@ -354,6 +354,8 @@ class SC2BotUniversal(BotAI):
             'enemy_units': enemies,
             'structures': self.units.structure,
             'enemy_structures': enemy_structures_obj,
+            'mineral_field': list(self.mineral_field),
+            'vespene_geyser': list(self.vespene_geyser),
             'effects': getattr(self.state, "effects", []),
             'game_info': self.game_info,
             'game_data': game_data_obj,

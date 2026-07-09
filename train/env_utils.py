@@ -24,7 +24,21 @@ def vec_env_obs_focus_tags(vec_env, n_envs: int) -> np.ndarray:
     arr = np.asarray(tags, dtype=np.int64).reshape((n_envs,))
     return arr
 
-def create_dummy_env_from_config(config: dict):
+
+def vec_env_requires_policy_action(vec_env, n_envs: int) -> np.ndarray:
+    """
+    Per-env flag: True when the collector should run policy forward and buffer the transition.
+    CTF opponent squads return False (env runs internal opponent batch).
+    """
+    if not hasattr(vec_env, "env_method"):
+        return np.ones((n_envs,), dtype=bool)
+    try:
+        flags = vec_env.env_method("requires_policy_action")
+    except Exception:
+        return np.ones((n_envs,), dtype=bool)
+    return np.asarray(flags, dtype=bool).reshape((n_envs,))
+
+def create_dummy_env_from_config(config: dict, level_name: str | None = None):
     """
     Creates a mock Gymnasium environment with only spaces defined.
     Used by the Async Learner to initialize models without launching SC2.
@@ -32,11 +46,25 @@ def create_dummy_env_from_config(config: dict):
     env_params = config.get("env", {})
     grid_size = env_params.get("grid_size", 128)
     spatial_res = 32
+
+    config_dir = config.get("config_dir", "config_universal")
+    level = level_name or config.get("level_name")
+    if level:
+        from src.utils.config_manager import ConfigManager
+
+        cm = ConfigManager(config_dir)
+        active_layers = cm.get_cumulative_active_layers(level)
+        active_tactical_layers = cm.get_cumulative_active_tactical_layers(level)
+        action_heads = cm.get_cumulative_action_heads(level)
+    else:
+        active_layers = config.get("active_layers") or config.get("env", {}).get("active_layers", [])
+        active_tactical_layers = config.get("active_tactical_layers") or config.get(
+            "env", {}
+        ).get("active_tactical_layers", [])
+        action_heads = config.get("action_heads") or config.get("env", {}).get("action_heads")
     
     # Matches Universal Architecture spaces
     # Keep global and tactical channels independent (they can differ).
-    active_layers = config.get("active_layers") or config.get("env", {}).get("active_layers", [])
-    active_tactical_layers = config.get("active_tactical_layers") or config.get("env", {}).get("active_tactical_layers", [])
     num_layers = len(active_layers) if active_layers else 30
     num_tactical_layers = len(active_tactical_layers) if active_tactical_layers else num_layers
     print(
@@ -56,9 +84,7 @@ def create_dummy_env_from_config(config: dict):
             super().__init__()
             self.observation_space = spaces.Dict(obs_dict)
             
-            # Use accumulated action_heads from top-level config first,
-            # then nested env config as fallback.
-            self.action_heads = config.get("action_heads") or config.get("env", {}).get("action_heads")
+            self.action_heads = action_heads
             if not self.action_heads:
                 self.action_heads = ["move_global", "move_local"]
 

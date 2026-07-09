@@ -1,0 +1,48 @@
+training:
+  training_steps: 100
+  num_envs: 1
+  n_steps: 2048
+  batch_size: 512
+  learning_rate: 0.0003
+  device: auto
+
+env:
+  env_class: ZergBuildEnv
+  maps_dir: train/maps/ladder/no_trigger
+  use_computer: false
+  max_steps: 300
+  headless: true
+  macro_tick_interval: 8
+  mining_controller: scripted
+  build_map_layers:
+    - terrain_pathable
+    - terrain_creep
+    - terrain_buildable
+  build_commands:
+    - extractor
+  spawn:
+    drones: 3
+    mining_drones: 2
+    minerals: 500
+  manager_script:
+    - command_type: BUILD
+      unit_type: EXTRACTOR
+      target_pos: [0, 0]
+      urgent: true
+  rewards:
+    success: 40.0
+    step_penalty: -0.05
+    invalid_build_penalty: -1.0
+    distance_multiplier: 0.5
+
+model:
+  algorithm: MaskablePPO
+  gamma: 0.99
+  ent_coef: 0.01
+  n_epochs: 4
+  policy_kwargs:
+    features_extractor_class: src.agent.models.build_policy.BuildFeaturesExtractor
+    features_extractor_kwargs:
+      features_dim: 128
+      thinking_steps: 3
+      map_resolution: 16

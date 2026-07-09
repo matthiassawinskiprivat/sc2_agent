@@ -1,8 +1,9 @@
 
 import pytest
 import asyncio
+import numpy as np
 from train.envs.single_client_env import SingleClientEnv
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
 
 @pytest.fixture
 def mock_sc2_process():
@@ -48,3 +49,77 @@ def test_single_client_env_reset(mock_sc2_process, mock_client):
     assert obs == {"obs": "data"}
     env._setup_game_session.assert_called_once()
     env._manager.launch_process.assert_called_once()
+
+
+def test_single_client_env_reset_retries_after_startup_failure(mock_sc2_process, mock_client):
+    env = SingleClientEnv(
+        sc2_process_cls=lambda **kwargs: mock_sc2_process,
+        client_cls=lambda **kwargs: mock_client,
+        training_conf={"env": {"startup_max_retries": 3}},
+    )
+    env._get_joint_observation = AsyncMock(return_value={"obs": "data"})
+
+    call_count = {"n": 0}
+
+    async def flaky_setup():
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise RuntimeError("create_game failed")
+
+    env._setup_game_session = flaky_setup
+    env._manager.launch_process = AsyncMock()
+    env.close = MagicMock()
+
+    with patch("train.envs.single_client_env.time.sleep"):
+        obs, info = env.reset()
+
+    assert obs == {"obs": "data"}
+    assert call_count["n"] == 2
+    assert env._manager.launch_process.call_count == 2
+    assert env.close.call_count == 1
+
+
+def test_single_client_env_startup_timeout_scales_with_worker_index():
+    env0 = SingleClientEnv(worker_index=0, num_workers=5, training_conf={"env": {}})
+    env4 = SingleClientEnv(worker_index=4, num_workers=5, training_conf={"env": {}})
+    assert env4._startup_timeout_sec() > env0._startup_timeout_sec()
+    assert env4._startup_timeout_sec() - env0._startup_timeout_sec() == pytest.approx(32.0)
+
+
+def test_single_client_env_reset_raises_after_max_startup_retries(mock_sc2_process, mock_client):
+    env = SingleClientEnv(
+        sc2_process_cls=lambda **kwargs: mock_sc2_process,
+        client_cls=lambda **kwargs: mock_client,
+        training_conf={"env": {"startup_max_retries": 2}},
+    )
+    env._setup_game_session = AsyncMock(side_effect=RuntimeError("SC2 won't start"))
+    env._manager.launch_process = AsyncMock()
+    env.close = MagicMock()
+
+    with patch("train.envs.single_client_env.time.sleep"):
+        with pytest.raises(RuntimeError, match="SC2 won't start"):
+            env.reset()
+
+    assert env._manager.launch_process.call_count == 2
+    assert env.close.call_count == 2
+
+
+def test_single_client_env_step_survives_connection_already_closed():
+    from sc2.protocol import ConnectionAlreadyClosed
+
+    env = SingleClientEnv(training_conf={})
+    env.game_ended = False
+    env._last_obs = {"map": np.zeros((1, 2, 2), dtype=np.float32)}
+    env._loop = MagicMock()
+    env._loop.run_until_complete = MagicMock(
+        side_effect=ConnectionAlreadyClosed("Connection already closed.")
+    )
+    env.close = MagicMock()
+    env._log = MagicMock()
+
+    obs, reward, terminated, truncated, info = env.step(0)
+
+    assert terminated is True
+    assert reward == 0.0
+    assert info.get("sc2_connection_lost") is True
+    env.close.assert_called_once()

@@ -10,6 +10,14 @@ import numpy as np
 import cv2
 from typing import Any, Tuple, Dict, Optional, List, Union
 
+from src.utils.obs_geometry import (
+    compute_global_obs_geometry,
+    global_world_to_spatial_idx,
+    spatial_idx_to_global_world,
+    obs_pixel_center_to_display,
+    world_to_tactical_obs_pixel,
+)
+
 class UnitControlAgent:
     def __init__(self, cnn_input_size: Tuple[int, int] = (128, 128), grid_size: int = 128, dilation_size: int = 3):
         self.cnn_width, self.cnn_height = cnn_input_size
@@ -17,10 +25,13 @@ class UnitControlAgent:
         self.dilation_size = dilation_size
         self.transformed_observation = None
         self.tactical_observation = None
+        self.obs_geometry = None
         self.active_layers = None
         self.active_tactical_layers = None
         self.last_game_info = None
         self.last_action = None
+        self.last_debug_click: Optional[Dict[str, Any]] = None
+        self.debug_active_unit: Any = None
         self.frame_count = 0
         self.avg_processing_time = 0.0
 
@@ -32,6 +43,44 @@ class UnitControlAgent:
         self._cached_eroded_terrain = None
         self._cached_grid_id = None
         self._cached_structure_count = 0
+
+    def _global_obs_geometry(
+        self,
+    ) -> Tuple[float, float, float, float, float, float, float, float]:
+        path_data = None
+        if self.last_game_info is not None and hasattr(self.last_game_info, "pathing_grid"):
+            grid = self.last_game_info.pathing_grid
+            if hasattr(grid, "data_numpy"):
+                path_data = grid.data_numpy
+        return compute_global_obs_geometry(
+            self.last_game_info,
+            self.cnn_width,
+            self.cnn_height,
+            path_data=path_data,
+        )
+
+    def world_to_cnn_pixel(self, world_x: float, world_y: float) -> Tuple[int, int]:
+        """Map a game-world point to global observation pixel indices (128×128)."""
+        crop_x, crop_y, _mw, _mh, scale_x, scale_y, offset_x, offset_y = (
+            self._global_obs_geometry()
+        )
+        content_x = (world_x - crop_x) * scale_x + offset_x
+        content_y = (world_y - crop_y) * scale_y + offset_y
+        px = int(round(content_x))
+        py = int(round(self.cnn_height - 1 - content_y))
+        px = max(0, min(px, self.cnn_width - 1))
+        py = max(0, min(py, self.cnn_height - 1))
+        return px, py
+
+    def cnn_pixel_to_display(
+        self,
+        px: int,
+        py: int,
+        display_size: Tuple[int, int],
+        obs_size: Optional[Tuple[int, int]] = None,
+    ) -> Tuple[int, int]:
+        obs_w, obs_h = obs_size or (self.cnn_width, self.cnn_height)
+        return obs_pixel_center_to_display(px, py, display_size, (obs_w, obs_h))
 
     def process_transformed_observation(self, transformed_observation: Union[np.ndarray, Dict[str, np.ndarray]],
                                       game_info: Any = None) -> Union[np.ndarray, Dict[str, np.ndarray]]:
@@ -72,31 +121,21 @@ class UnitControlAgent:
         # Update Tracking
         self._cached_structure_count = struct_count
 
-        crop_x, crop_y = 0, 0
-        mw, mh = grid.width, grid.height
+        crop_x, crop_y, mw, mh, scale_x, scale_y, offset_x, offset_y = (
+            self._global_obs_geometry()
+        )
 
-        if hasattr(self.last_game_info, 'playable_area'):
-            area = self.last_game_info.playable_area
-            crop_x, crop_y = int(area.x), int(area.y)
-            mw, mh = int(area.width), int(area.height)
-
-        # 2. Scale & Offset
-        scale = min(self.cnn_width / max(mw, 1), self.cnn_height / max(mh, 1))
-        offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
-        offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
-
-        # 3. Get Raw Data
-        raw_data = grid.data_numpy if hasattr(grid, "data_numpy") else np.ones((mw, mh), dtype=np.uint8)
+        raw_data = grid.data_numpy if hasattr(grid, "data_numpy") else np.ones((int(mh), int(mw)), dtype=np.uint8)
         dim0, dim1 = raw_data.shape
         total_w = self.last_game_info.map_size.width
         total_h = self.last_game_info.map_size.height
 
-        # 4. Inverse Map (Pixel -> Grid)
-        sc2_x_1d = ((self._range_x - offset_x) / scale) + crop_x
+        # 2. Inverse Map (Pixel -> Grid) using the same inclusive edge mapping as observations
+        sc2_x_1d = ((self._range_x - offset_x) / scale_x) + crop_x
         y_term = (self.cnn_height - 1) - self._range_y
-        sc2_y_1d = ((y_term - offset_y) / scale) + crop_y
+        sc2_y_1d = ((y_term - offset_y) / scale_y) + crop_y
 
-        sc2_x_grid, sc2_y_grid = np.meshgrid(sc2_x_1d.astype(int), sc2_y_1d.astype(int))
+        sc2_x_grid, sc2_y_grid = np.meshgrid(np.round(sc2_x_1d).astype(int), np.round(sc2_y_1d).astype(int))
 
         # 5. Sample
         valid_coords = (sc2_x_grid >= 0) & (sc2_x_grid < total_w) & \
@@ -200,20 +239,10 @@ class UnitControlAgent:
             return np.ones(self.grid_size * self.grid_size, dtype=bool)
 
         # 1. Geometry Setup (Same as get_action_mask)
-        grid = game_info.pathing_grid
-        crop_x, crop_y = 0, 0
-        mw, mh = grid.width, grid.height
-
-        if hasattr(game_info, 'playable_area'):
-            area = game_info.playable_area
-            crop_x, crop_y = int(area.x), int(area.y)
-            mw, mh = int(area.width), int(area.height)
-
-        scale = min(self.cnn_width / max(mw, 1), self.cnn_height / max(mh, 1))
-        offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
-        offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
-
-        # 2. Create Blank Mask
+        crop_x, crop_y, mw, mh, scale_x, scale_y, offset_x, offset_y = (
+            self._global_obs_geometry()
+        )
+        scale_r = min(scale_x, scale_y)
         mask_2d = np.zeros((self.cnn_height, self.cnn_width), dtype=np.uint8)
 
         # 3. Mark Targets
@@ -223,13 +252,13 @@ class UnitControlAgent:
                 rel_x = unit.position.x - crop_x
                 rel_y = unit.position.y - crop_y
                 
-                x_cnn = int((rel_x * scale) + offset_x)
-                y_cnn = int((self.cnn_height - 1) - ((rel_y * scale) + offset_y))
+                x_cnn = int((rel_x * scale_x) + offset_x)
+                y_cnn = int((self.cnn_height - 1) - ((rel_y * scale_y) + offset_y))
                 
                 if 0 <= x_cnn < self.cnn_width and 0 <= y_cnn < self.cnn_height:
                     # Draw Circle based on radius (Task 4)
                     radius = getattr(unit, "radius", 1.0)
-                    r_px = int(radius * scale)
+                    r_px = int(radius * scale_r)
                     if r_px < 1: r_px = 1
                     cv2.circle(mask_2d, (x_cnn, y_cnn), r_px, 255, -1)
 
@@ -253,19 +282,10 @@ class UnitControlAgent:
         grid_id = id(grid)
         
         # We need geometry (scale/offset) for the dynamic entity_mask part
-        crop_x, crop_y = 0, 0
-        mw, mh = grid.width, grid.height
-
-        if hasattr(game_info, 'playable_area'):
-            area = game_info.playable_area
-            crop_x, crop_y = int(area.x), int(area.y)
-            mw, mh = int(area.width), int(area.height)
-
-        scale = min(self.cnn_width / max(mw, 1), self.cnn_height / max(mh, 1))
-        offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
-        offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
-
-        # --- CACHED TERRAIN PART ---
+        crop_x, crop_y, mw, mh, scale_x, scale_y, offset_x, offset_y = (
+            self._global_obs_geometry()
+        )
+        scale_r = min(scale_x, scale_y)
         if self._cached_grid_id == grid_id and self._cached_eroded_terrain is not None:
             eroded_terrain = self._cached_eroded_terrain
         else:
@@ -276,11 +296,11 @@ class UnitControlAgent:
 
             # 3. Create Terrain-Only Mask (Walkable = 255)
             # Use Inverse Mapping to get pathing into CNN space
-            sc2_x_1d = ((self._range_x - offset_x) / scale) + crop_x
+            sc2_x_1d = ((self._range_x - offset_x) / scale_x) + crop_x
             y_term = (self.cnn_height - 1) - self._range_y
-            sc2_y_1d = ((y_term - offset_y) / scale) + crop_y
+            sc2_y_1d = ((y_term - offset_y) / scale_y) + crop_y
 
-            sc2_x_grid, sc2_y_grid = np.meshgrid(sc2_x_1d.astype(int), sc2_y_1d.astype(int))
+            sc2_x_grid, sc2_y_grid = np.meshgrid(np.round(sc2_x_1d).astype(int), np.round(sc2_y_1d).astype(int))
             valid_coords = (sc2_x_grid >= 0) & (sc2_x_grid < total_w) & \
                            (sc2_y_grid >= 0) & (sc2_y_grid < total_h)
 
@@ -318,8 +338,8 @@ class UnitControlAgent:
                 rel_x = unit.position.x - crop_x
                 rel_y = unit.position.y - crop_y
                 
-                x_cnn = int((rel_x * scale) + offset_x)
-                y_cnn = int((self.cnn_height - 1) - ((rel_y * scale) + offset_y))
+                x_cnn = int((rel_x * scale_x) + offset_x)
+                y_cnn = int((self.cnn_height - 1) - ((rel_y * scale_y) + offset_y))
                 
                 if 0 <= x_cnn < self.cnn_width and 0 <= y_cnn < self.cnn_height:
                     # Use footprint_radius if available, else radius. Fallback to 0.0 if both None.
@@ -328,7 +348,7 @@ class UnitControlAgent:
                         radius = getattr(unit, "radius", 0.5) # Default small radius if missing
                     
                     if radius is not None:
-                        r_px = int(radius * scale)
+                        r_px = int(radius * scale_r)
                         if r_px < 1: r_px = 1
                         cv2.circle(entity_mask, (x_cnn, y_cnn), r_px, 255, -1)
 
@@ -348,63 +368,22 @@ class UnitControlAgent:
         It takes a 1D index (from 0 to grid_size^2 - 1) and maps it to SC2 coordinates.
         """
         self.last_action = action_idx
-        if self.last_game_info is None: return (0.0, 0.0)
+        if self.last_game_info is None:
+            return (0.0, 0.0)
 
-        # 1. Convert 1D action index (e.g., 822) to 2D grid coordinates (row, col)
-        # For Level 0, grid_size is 32.
-        grid_y, grid_x = divmod(action_idx, self.grid_size)
+        path_data = None
+        grid = getattr(self.last_game_info, "pathing_grid", None)
+        if grid is not None and hasattr(grid, "data_numpy"):
+            path_data = grid.data_numpy
 
-        # 2. Scale grid coordinates (32x32) to CNN coordinates (128x128)
-        # We target the CENTER of the grid cell by adding (scale_factor / 2)
-        scale_factor = self.cnn_width / self.grid_size
-        y_cnn = (grid_y * scale_factor) + (scale_factor / 2)
-        x_cnn = (grid_x * scale_factor) + (scale_factor / 2)
-
-        # 3. Handle Playable Area (Cropping and Scaling)
-        # SC2 maps have 'void' areas outside the playable bounds.
-        crop_x, crop_y = 0, 0
-        mw, mh = self.last_game_info.map_size.width, self.last_game_info.map_size.height
-
-        if hasattr(self.last_game_info, 'playable_area'):
-            area = self.last_game_info.playable_area
-            crop_x, crop_y = area.x, area.y
-            mw, mh = area.width, area.height
-
-        # 4. Calculate the scaling used in the ObservationTransformer
-        # This ensures the inverse math perfectly aligns with the 'pixels' the agent saw.
-        scale = min(self.cnn_width / max(mw, 1), self.cnn_height / max(mh, 1))
-        offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
-        offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
-
-        # 5. Inverse Linear Transformation
-        # Formula: World = (CNN_Pixel - Offset) / Scale + Crop
-        rel_x = (x_cnn - offset_x) / scale
-        # Note: SC2 Y-axis is inverted relative to standard image coordinates (top-down)
-        y_term = (self.cnn_height - 1) - y_cnn
-        rel_y = (y_term - offset_y) / scale
-
-        world_x = rel_x + crop_x
-        world_y = rel_y + crop_y
-
-        # 6. Clamp to playable bounds (preferred) to avoid targeting void.
-        # Using map_size here can allow coordinates outside playable_area on many ladder maps.
-        eps = 1e-3
-        if hasattr(self.last_game_info, "playable_area") and self.last_game_info.playable_area is not None:
-            area = self.last_game_info.playable_area
-            min_x = float(area.x)
-            min_y = float(area.y)
-            max_x = float(area.x + area.width) - eps
-            max_y = float(area.y + area.height) - eps
-        else:
-            min_x = 0.0
-            min_y = 0.0
-            max_x = float(self.last_game_info.map_size.width) - eps
-            max_y = float(self.last_game_info.map_size.height) - eps
-
-        world_x = max(min_x, min(float(world_x), max_x))
-        world_y = max(min_y, min(float(world_y), max_y))
-
-        return world_x, world_y
+        return spatial_idx_to_global_world(
+            action_idx,
+            self.grid_size,
+            self.last_game_info,
+            self.cnn_width,
+            self.cnn_height,
+            path_data=path_data,
+        )
 
     def get_grid_index_at_world_pos(self, pos) -> int:
         """
@@ -415,40 +394,27 @@ class UnitControlAgent:
         if self.last_game_info is None:
             return 0
 
-        # 1. Get same geometry constants as the forward mapping
-        crop_x, crop_y = 0, 0
-        mw, mh = self.last_game_info.map_size.width, self.last_game_info.map_size.height
+        path_data = None
+        grid = getattr(self.last_game_info, "pathing_grid", None)
+        if grid is not None and hasattr(grid, "data_numpy"):
+            path_data = grid.data_numpy
 
-        if hasattr(self.last_game_info, 'playable_area'):
-            area = self.last_game_info.playable_area
-            crop_x, crop_y = area.x, area.y
-            mw, mh = area.width, area.height
-
-        scale = min(self.cnn_width / max(mw, 1), self.cnn_height / max(mh, 1))
-        offset_x = max(0, (self.cnn_width - int(mw * scale)) // 2)
-        offset_y = max(0, (self.cnn_height - int(mh * scale)) // 2)
-
-        # 2. Forward Linear Transformation (World -> CNN Pixel)
-        rel_x = pos.x - crop_x
-        rel_y = pos.y - crop_y
-
-        x_cnn = (rel_x * scale) + offset_x
-        y_cnn = (self.cnn_height - 1) - ((rel_y * scale) + offset_y)
-
-        # 3. Scale CNN Pixel (128x128) down to Grid Index (e.g., 32x32)
-        grid_x = int(x_cnn * self.grid_size / self.cnn_width)
-        grid_y = int(y_cnn * self.grid_size / self.cnn_height)
-
-        # 4. Clamp and flatten to 1D index for the CrossEntropy loss
-        grid_x = max(0, min(grid_x, self.grid_size - 1))
-        grid_y = max(0, min(grid_y, self.grid_size - 1))
-
-        return grid_y * self.grid_size + grid_x
+        return global_world_to_spatial_idx(
+            pos.x,
+            pos.y,
+            self.grid_size,
+            self.last_game_info,
+            self.cnn_width,
+            self.cnn_height,
+            path_data=path_data,
+        )
 
     def reset(self):
         self.transformed_observation = None
         self.last_game_info = None
         self.last_action = None
+        self.last_debug_click = None
+        self.debug_active_unit = None
         self._cached_action_mask = None
         self._cached_eroded_terrain = None
         self._cached_grid_id = None

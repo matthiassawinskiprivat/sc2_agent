@@ -13,6 +13,7 @@ def env():
     
     # Mock the bot
     env.bot = MagicMock()
+    env.bot.actions = []
     env.bot.client = MagicMock()
     env.bot.client.step = AsyncMock()
     env.bot.client.actions = AsyncMock()
@@ -20,15 +21,19 @@ def env():
     
     # Mock bot async methods properly
     env.bot.apply_action = AsyncMock()
+    env.bot.record_pre_action_retreat_state = MagicMock()
+    env.bot.do = MagicMock()
+    env.bot._unit_last_order = {}
     
     # Mock bot methods
-    env.bot.calculate_reward = MagicMock(return_value=0.0)
+    env.bot.calculate_squad_step_reward = MagicMock(return_value=0.0)
     env.bot.get_observation = MagicMock(return_value=MagicMock())
     
     # Mock bot unit accessors
     env.bot.structures = MagicMock()
     env.bot.enemy_structures = MagicMock()
-    env.bot.all_units = [] # Default empty
+    env.bot.all_units = MagicMock()
+    env.bot.all_units.find_by_tag = MagicMock(return_value=None)
     
     # Mock Manager
     env._manager = MagicMock()
@@ -37,14 +42,31 @@ def env():
     env._refresh_bot_state = AsyncMock()
     env._refresh_unit_lists = AsyncMock()
     env._get_joint_observation = AsyncMock(return_value=np.zeros((23, 128, 128)))
+    env._maybe_promote_defender_to_attack = MagicMock()
+
+    env.unit_pools_config = [{"agent": True, "high_level_command": "attack"}]
+    env.squad_unit_tags = [(1, [100])]
+    env.current_squad_index = 0
+    env.current_unit_index = 0
+    env.player_units = {1: [100], 2: [200]}
     
     return env
+
+
+def _configure_opponent_squad(env):
+    env.unit_pools_config = [{"agent": False, "high_level_command": "defend"}]
+    env.squad_unit_tags = [(2, [200])]
+    env.current_squad_index = 0
+    env.active_player_id = 2
+    env.current_unit_index = 0
+    env.opponent_model = MagicMock()
+    env.opponent_model.predict = MagicMock(return_value=(np.array([0, 0]), None))
 
 @pytest.mark.asyncio
 async def test_win_loss_condition_p1_lost(env):
     """Test termination when Player 1's Pylon is destroyed."""
+    _configure_opponent_squad(env)
     env.training_conf = {"rewards": {"win_reward": 100.0, "loss_penalty": -50.0}}
-    env.active_player_id = 2 # Player 2's turn
     
     # P1 Pylon missing (amount == 0)
     env.bot.structures(UnitTypeId.PYLON).amount = 0
@@ -72,43 +94,56 @@ async def test_win_loss_condition_p1_lost(env):
     assert reward == 100.0 # P2 wins on P2's turn
 
 @pytest.mark.asyncio
-async def test_continuation_on_p1_army_loss(env):
-    """Test that if P1 loses army, the game continues."""
+async def test_termination_on_p1_army_loss(env):
+    """When the agent (P1) has no combat units left, the episode ends with loss."""
     env.training_conf = {"rewards": {"win_reward": 100.0, "loss_penalty": -50.0}}
-    env.active_player_id = 1 # Player 1's turn
-    
-    # P1 Pylon ALIVE (ensure continuation)
+    env.active_player_id = 1  # agent's turn
+
     env.bot.structures(UnitTypeId.PYLON).amount = 1
     env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
-    
-    # P1 army lost
     env.player_units = {1: [], 2: [456]}
-    
-    # Mock units alive (P2 only)
-    def mock_units_alive():
-        m = MagicMock()
-        # Assume filter is used to check army count
-        # Logic is: filter(owner_id=1) -> amount 0
-        m.filter.return_value.amount = 0 
-        return m
-    env.bot.all_units = mock_units_alive()
-    
-    # We need to ensure _has_combat_units returns False for P1
-    # CaptureTheFlagSingleEnv uses self.bot.all_units.filter(...)
-    # If we mock it properly:
-    
-    # Actually, let's just mock _has_combat_units to be sure, or rely on proper mocking of all_units
-    # If we look at the implementation:
-    # combat_units = self.bot.all_units.filter(...)
-    # If we want to simulate P1 army loss, filter(owner_id=1) should return empty.
-    
-    # Let's override _has_combat_units on the instance for simplicity in this logic test
     env._has_combat_units = MagicMock(side_effect=lambda owner_id: False if owner_id == 1 else True)
 
     obs, reward, done, truncated, info = await env._async_step(0)
-    
-    assert done is False, "Should continue even if P1 army is lost"
-    assert reward == 0.0 # No penalty
+
+    assert done is True
+    assert reward == -50.0
+
+
+@pytest.mark.asyncio
+async def test_win_on_p2_army_loss_when_agent_acts(env):
+    """When the enemy (P2) is eliminated, the agent receives win_reward."""
+    env.training_conf = {"rewards": {"win_reward": 100.0, "loss_penalty": -50.0}}
+    env.active_player_id = 1
+
+    env.bot.structures(UnitTypeId.PYLON).amount = 1
+    env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
+    env.player_units = {1: [123], 2: []}
+    env._has_combat_units = MagicMock(side_effect=lambda owner_id: True if owner_id == 1 else False)
+
+    obs, reward, done, truncated, info = await env._async_step(0)
+
+    assert done is True
+    assert reward == 100.0
+
+
+@pytest.mark.asyncio
+async def test_win_on_p1_army_loss_when_enemy_acts(env):
+    """When P1 is eliminated on P2's turn, the acting opponent gets win_reward."""
+    _configure_opponent_squad(env)
+    env.training_conf = {"rewards": {"win_reward": 100.0, "loss_penalty": -50.0}}
+
+    env.bot.structures(UnitTypeId.PYLON).amount = 1
+    env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
+    env.player_units = {1: [], 2: [456]}
+    env._has_combat_units = MagicMock(side_effect=lambda owner_id: False if owner_id == 1 else True)
+
+    obs, reward, done, truncated, info = await env._async_step(0)
+
+    assert done is True
+    assert reward == 100.0
+
+
 @pytest.mark.asyncio
 async def test_mutual_destruction_draw(env):
     """Test termination when both sides have no units (Mutual Destruction)."""

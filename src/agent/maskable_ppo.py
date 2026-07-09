@@ -340,16 +340,33 @@ class MaskablePPO(SB3MaskablePPO):
         This makes the class a drop-in replacement that fixes loading errors without pipeline changes.
         """
         tb_log = kwargs.pop("tensorboard_log", None)
-        
-        try:
-            # Try standard load first
-            model = super().load(path, env=env, device=device, custom_objects=custom_objects, **kwargs)
+        restore_optimizer = kwargs.pop("restore_optimizer", False)
+
+        def _maybe_restore_optimizer(model):
+            if not restore_optimizer:
+                return model
+            from src.utils.model_utils import load_optimizer_state_from_zip
+
+            opt_ok, opt_reason = load_optimizer_state_from_zip(model, path, device)
+            if opt_ok:
+                logger.info(f"Restored optimizer state from {path!r}")
+            elif opt_reason != "no_optimizer_in_checkpoint":
+                logger.warning(f"Optimizer restore skipped for {path!r} ({opt_reason})")
+            return model
+
+        def _apply_tb_log(model):
             if tb_log is not None:
                 model.tensorboard_log = tb_log
                 from stable_baselines3.common.logger import configure
                 new_logger = configure(tb_log, ["stdout", "tensorboard"])
                 model.set_logger(new_logger)
             return model
+        
+        try:
+            # Try standard load first
+            model = super().load(path, env=env, device=device, custom_objects=custom_objects, **kwargs)
+            _apply_tb_log(model)
+            return _maybe_restore_optimizer(model)
         except (RuntimeError, ValueError, TypeError) as e:
             # If it fails, retry with non-strict parameter loading and no optimizer
             logger.warning(f"Standard load failed, attempting architecture-agnostic recovery: {e}")
@@ -368,11 +385,7 @@ class MaskablePPO(SB3MaskablePPO):
             try:
                 cls.set_parameters = non_strict_set_params
                 model = super().load(path, env=env, device=device, custom_objects=custom_objects, **kwargs)
-                if tb_log is not None:
-                    model.tensorboard_log = tb_log
-                    from stable_baselines3.common.logger import configure
-                    new_logger = configure(tb_log, ["stdout", "tensorboard"])
-                    model.set_logger(new_logger)
-                return model
+                _apply_tb_log(model)
+                return _maybe_restore_optimizer(model)
             finally:
                 cls.set_parameters = original_set_params

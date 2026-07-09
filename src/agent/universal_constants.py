@@ -27,3 +27,14 @@ def build_action_head_manifest(
             f"FIXED_UNIVERSAL_COMMAND_DIM={FIXED_UNIVERSAL_COMMAND_DIM}"
         )
     return merged + [UNUSED_COMMAND_HEAD] * (FIXED_UNIVERSAL_COMMAND_DIM - len(merged))
+
+
+# Tactical center cell (gx=16, gy=15) — matches SpatialDecoder bias / ObservationTransformer.
+UNIVERSAL_DEFAULT_SPATIAL_IDX = 15 * 32 + 16
+
+
+def universal_fallback_action() -> "np.ndarray":
+    """Safe move_global + center cell when opponent/policy inference is unavailable."""
+    import numpy as np
+
+    return np.array([0, UNIVERSAL_DEFAULT_SPATIAL_IDX], dtype=np.int64)

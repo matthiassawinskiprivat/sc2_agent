@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_watchdog_timeout_20260118",
-  "type": "bugfix",
-  "status": "new",
-  "created_at": "2026-01-18T00:47:00Z",
-  "updated_at": "2026-01-18T00:47:00Z",
-  "description": "Increase Watchdog timeout to prevent false positives during slow CPU training optimization phases."
-}

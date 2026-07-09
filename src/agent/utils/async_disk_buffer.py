@@ -25,6 +25,10 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
         """
         Actor calls this to tell the Learner: 'I've finished filling this buffer!'
         """
+        for obs in self.observations.values():
+            if isinstance(obs, np.memmap):
+                obs.flush()
+
         # Save RAM-based payload to disk for the Learner
         payload_path = os.path.join(self.instance_dir, "payload.npz")
         
@@ -56,6 +60,7 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
             cell_states_pi=getattr(self, 'cell_states_pi', np.array([])),
             cell_states_vf=getattr(self, 'cell_states_vf', np.array([])),
             action_masks=getattr(self, 'action_masks', np.array([])),
+            policy_active=getattr(self, 'policy_active', np.array([])),
             **ram_observations
         )
         os.replace(tmp_payload, payload_path)
@@ -64,6 +69,7 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
         metadata["buffer_size"] = self.buffer_size
         metadata["n_envs"] = self.n_envs
         metadata["observation_space"] = {k: v.shape for k, v in self.observation_space.spaces.items()}
+        metadata["ipc_backend"] = "disk"
 
         tmp_signal = self.signal_file + ".tmp"
         with open(tmp_signal, "w") as f:
@@ -97,6 +103,43 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
         if os.path.exists(self.signal_file):
             os.remove(self.signal_file)
         logger.debug(f"Buffer signal cleared: {self.instance_id}")
+
+    @staticmethod
+    def attach_disk_observations(
+        buffer: "AsyncDiskBuffer",
+        instance_dir: str,
+        meta: Dict[str, Any],
+    ) -> None:
+        """
+        Learner: (re)open collector memmap files for map/tactical.
+
+        Must run on **every** consume. Reusing a prior ``np.memmap`` handle across
+        async buffer cycles can serve stale pages (Windows cross-process), desyncing
+        observations from ``old_log_prob`` (approx_kl spikes, NaN loss).
+        """
+        buffer_size = int(meta["buffer_size"])
+        n_envs = int(meta["n_envs"])
+        if not hasattr(buffer, "disk_files"):
+            buffer.disk_files = {}
+
+        for key, subspace in buffer.observation_space.spaces.items():
+            if key not in ("map", "tactical"):
+                continue
+            filename = os.path.join(instance_dir, f"obs_{key}.bin")
+            if not os.path.exists(filename):
+                logger.warning(f"Disk buffer IPC: missing {filename}")
+                continue
+            existing = buffer.observations.get(key)
+            if isinstance(existing, np.memmap):
+                try:
+                    existing._mmap.close()
+                except Exception:
+                    pass
+            shape = (buffer_size, n_envs, *subspace.shape)
+            buffer.observations[key] = np.memmap(
+                filename, dtype=np.float32, mode="r+", shape=shape
+            )
+            buffer.disk_files[key] = filename
 
     def wait_for_consumer(self, timeout=60):
         """

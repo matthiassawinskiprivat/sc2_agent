@@ -6,24 +6,28 @@ Cliff face detection strategy (exact SC2MapAnalysis C-extension port):
     block around them shows EXACTLY LEVEL_DIFFERENCE = 16 height units
     between the walkable areas on both sides.
   - A connectivity filter removes isolated single-cell artefacts: a cell
-    must have at least one adjacent climbable neighbour to be included.
+    must have at least one climbable neighbour (8-connected, so diagonal
+    cliff runs are preserved) to be included.
   - Walls, minerals, and building footprints at flat height (height diff = 0,
     not 16) are naturally excluded.
+  - Walkable terrain brightness uses a fixed step per cliff tier (16 gu) from the
+    map's lowest walkable height; tier count does not rescale the step. Walkable
+    height outliers are capped at the 95th percentile when computing map metadata;
+    the baseline uses the 5th percentile of playable-area walkable heights so rare
+    low ramps do not wash out dominant cliff tiers.
   - Walkable terrain heights are NEVER modified — the cliff-walker view
-    differs only in that the cliff-face cells (normally 0/dark) are shown at
-    the local maximum walkable height (= the high-ground side brightness),
-    creating a gradient: dark (low ground) → bright (cliff face) → bright
-    (high ground).
+    differs only in that cliff-face cells (normally 0/dark) are shown at the
+    mean of neighbouring walkable heights, creating a gradient:
+    dark (low ground) → bright (cliff face) → bright (high ground).
 """
+
+import math
 
 import numpy as np
 import pytest
 from unittest.mock import MagicMock
 
-from src.transformers.observation_transformer import (
-    ObservationTransformer,
-    _CLIFF_FACE_DISPLAY_VALUE,
-)
+from src.transformers.observation_transformer import ObservationTransformer
 from src.utils.layer_constants import LayerConstants
 
 
@@ -77,28 +81,30 @@ def _make_transformer(feature_map_size=16):
     transformer.active_layers = conf["active_layers"]
     transformer.active_tactical_layers = conf["active_tactical_layers"]
     transformer.scale = 1.0
+    transformer.scale_x = 1.0
+    transformer.scale_y = 1.0
     transformer.offset_x = 0
     transformer.offset_y = 0
     transformer.crop_x = 0
     transformer.crop_y = 0
+    transformer._obs_span_w = float(feature_map_size)
+    transformer._obs_span_h = float(feature_map_size)
     transformer.is_tactical_mode = False
     transformer.current_layer_map = LayerConstants.LAYERS
     transformer._terrain_caches = {}
     transformer._last_map_name = None
-    transformer._last_structure_count = 0
-    transformer._h_min = None
-    transformer._h_max = None
     transformer._cliff_face_cache = None
     transformer._cliff_face_cache_map = None
     transformer._cliff_display_heights = None
     transformer._grid_x = np.arange(feature_map_size).reshape(1, -1)
     transformer._grid_y = np.arange(feature_map_size).reshape(-1, 1)
     transformer.unit_db = {}
+    transformer.fallback_db = {}
+    transformer._current_game_data = None
     return transformer
 
 
-def _call_draw(transformer, path_grid, height_grid, cliff_walker=False,
-               structure_count=0):
+def _call_draw(transformer, path_grid, height_grid, cliff_walker=False):
     """Call _draw_terrain_pathing and return the rendered TERRAIN_PATHABLE layer."""
     game_info = _make_game_info(path_grid, height_grid)
     n_layers = LayerConstants.get_num_layers()
@@ -107,7 +113,7 @@ def _call_draw(transformer, path_grid, height_grid, cliff_walker=False,
         dtype=np.float32,
     )
     transformer._draw_terrain_pathing(
-        game_info, layers, structure_count, cliff_walker=cliff_walker
+        game_info, layers, cliff_walker=cliff_walker
     )
     layer_idx = LayerConstants.LAYERS[LayerConstants.TERRAIN_PATHABLE]
     return layers[layer_idx]
@@ -194,6 +200,29 @@ class TestComputeClimberGrid:
         assert not np.any(result[7, :]), \
             "Height diff of 100 must not be flagged (only diff == 16 is a SC2 cliff)"
 
+    def test_detects_diagonal_cliff_line(self):
+        """Diagonal cliff runs must survive the connectivity filter (8-neighbour)."""
+        path = np.ones((MAP_SIZE, MAP_SIZE), dtype=np.uint8)
+        height = np.full((MAP_SIZE, MAP_SIZE), LOW_H, dtype=np.float32)
+
+        for i in range(MAP_SIZE):
+            path[i, i] = 0
+            height[i, i] = CLIFF_FACE_H
+            for y in range(MAP_SIZE):
+                for x in range(MAP_SIZE):
+                    if x > y:
+                        height[y, x] = HIGH_H
+                    elif x < y:
+                        height[y, x] = LOW_H
+
+        result = ObservationTransformer._compute_climber_grid(path, height)
+        interior = [i for i in range(4, MAP_SIZE - 4)]
+        detected = [i for i in interior if result[i, i]]
+        assert len(detected) >= len(interior) - 2, (
+            f"Diagonal cliff line mostly missing: only {len(detected)}/{len(interior)} "
+            f"interior cells flagged"
+        )
+
     def test_connectivity_filter_removes_isolated_cell(self):
         """A single isolated CLIMBABLE cell with no adjacent CLIMBABLE neighbour
         must be removed by the connectivity filter."""
@@ -246,6 +275,30 @@ class TestCliffWalkerTerrain:
             assert np.all(result[_feat_row(data_row), :] > 0.0), \
                 f"Walkable data row {data_row} must be > 0 for standard unit"
 
+    def test_cliff_walker_diagonal_cliff_interior_marked(self):
+        """Cliff walker: diagonal jump cliffs must render along the full interior run."""
+        path = np.ones((MAP_SIZE, MAP_SIZE), dtype=np.uint8)
+        height = np.full((MAP_SIZE, MAP_SIZE), LOW_H, dtype=np.float32)
+        for i in range(MAP_SIZE):
+            path[i, i] = 0
+            height[i, i] = CLIFF_FACE_H
+            for y in range(MAP_SIZE):
+                for x in range(MAP_SIZE):
+                    if x > y:
+                        height[y, x] = HIGH_H
+                    elif x < y:
+                        height[y, x] = LOW_H
+
+        t = _make_transformer(feature_map_size=MAP_SIZE)
+        result = _call_draw(t, path, height, cliff_walker=True)
+        low_ref = result[_feat_row(MAP_SIZE - 5), 4]
+        for i in range(4, MAP_SIZE - 4):
+            feat_y, feat_x = _feat_row(i), i
+            assert result[feat_y, feat_x] > 0.0, f"Diagonal cliff ({i},{i}) must be visible"
+            assert result[feat_y, feat_x] > low_ref, (
+                f"Diagonal cliff ({i},{i}) must be brighter than adjacent low ground"
+            )
+
     def test_cliff_walker_cliff_gap_interior_cols_marked(self, synthetic_map):
         """Cliff walker: interior cliff gap cells must be above 0 and above low ground."""
         path, height = synthetic_map
@@ -275,6 +328,162 @@ class TestCliffWalkerTerrain:
                 cw[_feat_row(data_row), :],
                 err_msg=f"Walkable data row {data_row} must be identical in both views",
             )
+
+    def test_terrain_ramp_preserves_height_gradient(self):
+        """Ramp cells must interpolate smoothly between low and high ground."""
+        path = np.ones((MAP_SIZE, MAP_SIZE), dtype=np.uint8)
+        height = np.full((MAP_SIZE, MAP_SIZE), LOW_H, dtype=np.float32)
+        height[0:4, :] = HIGH_H
+        for x in range(MAP_SIZE):
+            height[8, x] = LOW_H + (HIGH_H - LOW_H) * (x / float(MAP_SIZE - 1))
+
+        t = _make_transformer(feature_map_size=MAP_SIZE)
+        result = _call_draw(t, path, height, cliff_walker=False)
+        ramp_vals = result[_feat_row(8), 4 : MAP_SIZE - 4]
+        unique_steps = len(np.unique(np.round(ramp_vals, 2)))
+        assert unique_steps >= 4, (
+            f"Ramp should show gradual brightness, got {unique_steps} distinct values"
+        )
+        assert float(ramp_vals[0]) < float(ramp_vals[-1]), (
+            "Ramp brightness must increase toward high ground"
+        )
+
+    def test_terrain_height_contrast_uses_map_cliff_tiers(self, synthetic_map):
+        """Low and high ground must span most of the obs brightness range."""
+        path, height = synthetic_map
+        t = _make_transformer(feature_map_size=MAP_SIZE)
+        result = _call_draw(t, path, height, cliff_walker=False)
+
+        low_val = float(result[_feat_row(12), 8])
+        high_val = float(result[_feat_row(1), 8])
+        assert high_val - low_val >= 0.39, (
+            f"Expected strong visible contrast, got low={low_val:.3f} high={high_val:.3f}"
+        )
+
+    def _tier_brightness(self, height_val: float, min_h: float) -> float:
+        return float(
+            ObservationTransformer._normalize_terrain_heights(
+                np.array([height_val], dtype=np.float32),
+                min_h,
+                1.0,
+            )[0]
+        )
+
+    def test_adjacent_cliff_tier_brightness_step_uniform_two_and_three_tiers(self):
+        """One cliff tier (16 gu) must advance brightness by the same amount on every map."""
+        from src.transformers.observation_transformer import (
+            _TERRAIN_BRIGHTNESS_PER_CLIFF_TIER,
+        )
+
+        min_h = LOW_H
+        two_tier_delta = self._tier_brightness(HIGH_H, min_h) - self._tier_brightness(
+            LOW_H, min_h
+        )
+        mid_h = LOW_H + 16.0
+        top_h = LOW_H + 32.0
+        three_low = self._tier_brightness(LOW_H, min_h)
+        three_mid = self._tier_brightness(mid_h, min_h)
+        three_high = self._tier_brightness(top_h, min_h)
+        step_3a = three_mid - three_low
+        step_3b = three_high - three_mid
+
+        assert two_tier_delta == pytest.approx(_TERRAIN_BRIGHTNESS_PER_CLIFF_TIER)
+        assert step_3a == pytest.approx(_TERRAIN_BRIGHTNESS_PER_CLIFF_TIER)
+        assert 0.0 < step_3b <= _TERRAIN_BRIGHTNESS_PER_CLIFF_TIER + 1e-6
+
+    def test_two_tier_map_contrast_not_compressed_by_height_span_outliers(self):
+        """Maps with two play heights must not look washed out when tier span is wider."""
+        path = np.ones((MAP_SIZE, MAP_SIZE), dtype=np.uint8)
+        height = np.full((MAP_SIZE, MAP_SIZE), LOW_H, dtype=np.float32)
+        height[0 : MAP_SIZE // 2, :] = HIGH_H
+        height[2, 2] = HIGH_H + 48.0  # rare walkable outlier tier
+
+        t = _make_transformer(feature_map_size=MAP_SIZE)
+        result = _call_draw(t, path, height, cliff_walker=False)
+        low_val = float(result[_feat_row(12), 8])
+        high_val = float(result[_feat_row(2), 8])
+        assert high_val - low_val >= 0.39, (
+            f"Two-tier map should keep strong low/high contrast, got "
+            f"low={low_val:.3f} high={high_val:.3f}"
+        )
+
+    def test_terrain_height_ignores_offscreen_outliers_on_large_map(self):
+        """Map-wide height outliers must not flatten contrast in the zoomed obs view."""
+        size = 256
+        path = np.zeros((size, size), dtype=np.uint8)
+        path[64:192, 64:192] = 1
+        height = np.full((size, size), LOW_H, dtype=np.float32)
+        height[64:128, 64:192] = HIGH_H
+        height[8, 8] = 200.0
+
+        gi = _make_game_info(path, height)
+        gi.playable_area = MagicMock()
+        gi.playable_area.x = 64
+        gi.playable_area.y = 64
+        gi.playable_area.width = 128
+        gi.playable_area.height = 128
+
+        t = ObservationTransformer(
+            map_size=(128, 128),
+            training_conf=_make_training_conf(),
+        )
+        raw_obs = {
+            "units": [],
+            "structures": [],
+            "enemy_units": [],
+            "enemy_structures": [],
+            "effects": [],
+            "game_info": gi,
+            "game_data": MagicMock(),
+        }
+        terrain = t.transform(raw_obs)["map"][0]
+
+        high_px, high_py = t._game_to_obs_pixel(96.0, 96.0)
+        low_px, low_py = t._game_to_obs_pixel(96.0, 160.0)
+        high_val = float(terrain[high_py, high_px])
+        low_val = float(terrain[low_py, low_px])
+        assert high_val - low_val >= 0.39, (
+            f"Zoomed obs should contrast local tiers, got low={low_val:.3f} high={high_val:.3f}"
+        )
+
+    def test_terrain_height_ignores_rare_playable_low_outlier(self):
+        """Rare low walkable cells must not flatten dominant playable cliff tiers."""
+        size = 176
+        path = np.zeros((size, size), dtype=np.uint8)
+        path[16:148, 16:148] = 1
+        height = np.full((size, size), 175.0, dtype=np.float32)
+        height[16:148, 16:80] = 191.0
+        height[16:148, 80:148] = 207.0
+        path[16, 16] = 1
+        height[16, 16] = 112.0
+
+        gi = _make_game_info(path, height)
+        gi.playable_area = MagicMock()
+        gi.playable_area.x = 16
+        gi.playable_area.y = 16
+        gi.playable_area.width = 132
+        gi.playable_area.height = 132
+
+        t = ObservationTransformer(
+            map_size=(128, 128),
+            training_conf=_make_training_conf(),
+        )
+        raw_obs = {
+            "units": [],
+            "structures": [],
+            "enemy_units": [],
+            "enemy_structures": [],
+            "effects": [],
+            "game_info": gi,
+            "game_data": MagicMock(),
+        }
+        terrain = t.transform(raw_obs)["map"][0]
+        visible = terrain[terrain > 0.05]
+        assert float(np.mean(visible >= 0.99)) < 0.95, (
+            "Dominant cliff tiers must not all clip to max brightness"
+        )
+        assert visible.max() - visible.min() >= 0.39
+        assert len(np.unique(np.round(visible, 2))) >= 2
 
     def test_cliff_walker_creates_gradient(self, synthetic_map):
         """The cliff gap is brighter than low ground, creating a visible gradient.
@@ -324,14 +533,14 @@ class TestCliffWalkerTerrain:
         t = _make_transformer(feature_map_size=MAP_SIZE)
 
         _call_draw(t, path, height, cliff_walker=False)
-        assert "standard" in t._terrain_caches
-        assert "cliff_walker" not in t._terrain_caches
+        assert any(k[0] == "standard" for k in t._terrain_caches)
+        assert not any(k[0] == "cliff_walker" for k in t._terrain_caches)
 
         _call_draw(t, path, height, cliff_walker=True)
-        assert "cliff_walker" in t._terrain_caches
+        assert any(k[0] == "cliff_walker" for k in t._terrain_caches)
 
-        std = t._terrain_caches["standard"]
-        cw = t._terrain_caches["cliff_walker"]
+        std = next(v for k, v in t._terrain_caches.items() if k[0] == "standard")
+        cw = next(v for k, v in t._terrain_caches.items() if k[0] == "cliff_walker")
         assert not np.array_equal(std, cw), \
             "Standard and cliff_walker caches must differ"
 
@@ -343,16 +552,137 @@ class TestCliffWalkerTerrain:
         second = _call_draw(t, path, height, cliff_walker=False).copy()
         np.testing.assert_array_equal(first, second)
 
-    def test_cache_invalidated_on_structure_count_change(self, synthetic_map):
-        """Cache is bypassed when structure count changes."""
+    def test_cache_hit_ignores_structure_count(self, synthetic_map):
+        """Global terrain cache is static map pathing only — structure count does not bust it."""
         path, height = synthetic_map
         t = _make_transformer(feature_map_size=MAP_SIZE)
-        _call_draw(t, path, height, cliff_walker=False, structure_count=0)
-        assert t._terrain_caches.get("standard") is not None
-        path_modified = path.copy()
-        path_modified[0, 0] = 0
-        _call_draw(t, path_modified, height, cliff_walker=False, structure_count=1)
-        assert t._last_structure_count == 1
+        first = _call_draw(t, path, height, cliff_walker=False).copy()
+        second = _call_draw(t, path, height, cliff_walker=False).copy()
+        np.testing.assert_array_equal(first, second)
+        assert any(k[0] == "standard" for k in t._terrain_caches)
+
+    def test_structure_overlay_preserves_cliff_faces_in_obs_rect(self, synthetic_map):
+        """Building terrain stamps must not erase reaper-jump cliffs inside the obs bounding box."""
+        from sc2.ids.unit_typeid import UnitTypeId
+        from sc2.position import Point2
+
+        path, height = synthetic_map
+        t = _make_transformer(feature_map_size=MAP_SIZE)
+        t._cached_path_data = path.astype(np.uint8)
+        t._current_game_data = None
+        game_info = _make_game_info(path, height)
+        n_layers = LayerConstants.get_num_layers()
+        layers = np.zeros(
+            (n_layers, MAP_SIZE, MAP_SIZE), dtype=np.float32
+        )
+        t._draw_terrain_pathing(game_info, layers, cliff_walker=True)
+        terrain_idx = LayerConstants.LAYERS[LayerConstants.TERRAIN_PATHABLE]
+        terrain = layers[terrain_idx]
+        cliff_feat_row = _feat_row(5)
+        cliff_val_before = float(terrain[cliff_feat_row, 8])
+        assert cliff_val_before > 0.0
+
+        barracks = MagicMock()
+        barracks.position = Point2((8.0, 10.0))
+        barracks.type_id = UnitTypeId.BARRACKS
+        barracks.is_structure = True
+        barracks.is_flying = False
+        barracks.radius = 0.0
+        barracks.tag = 1
+
+        t._overlay_map_blocker_terrain(terrain, [barracks])
+        assert float(terrain[cliff_feat_row, 8]) == cliff_val_before, (
+            "Cliff-face brightness must survive structure terrain overlay outside building footprint"
+        )
+
+    def test_tactical_terrain_brightness_stable_when_focal_moves(self):
+        """Tactical terrain at a fixed world point must not change as the fovea pans."""
+        from sc2.position import Point2
+        from sc2.ids.unit_typeid import UnitTypeId
+        from src.utils.obs_geometry import world_to_tactical_obs_pixel
+        from tests.test_observation_transformer import create_mock_unit
+
+        size = 64
+        path = np.ones((size, size), dtype=np.uint8)
+        height = np.full((size, size), LOW_H, dtype=np.float32)
+        height[0:24, :] = HIGH_H
+        gi = _make_game_info(path, height)
+        world_pt = (40.0, 32.0)
+        conf = _make_training_conf()
+
+        def brightness_at(focal_xy):
+            transformer = ObservationTransformer(
+                map_size=(128, 128), training_conf=conf
+            )
+            focal = create_mock_unit(UnitTypeId.MARINE, Point2(focal_xy))
+            raw_obs = {
+                "units": [focal],
+                "structures": [],
+                "enemy_units": [],
+                "enemy_structures": [],
+                "effects": [],
+                "game_info": gi,
+                "game_data": MagicMock(),
+                "selected_units": [focal],
+            }
+            tactical = transformer.transform_tactical(raw_obs, focal)[0]
+            px, py = world_to_tactical_obs_pixel(
+                world_pt[0], world_pt[1], focal_xy[0], focal_xy[1]
+            )
+            return float(tactical[py, px])
+
+        a = brightness_at((32.0, 32.0))
+        b = brightness_at((36.0, 32.0))
+        c = brightness_at((32.0, 36.0))
+        assert a == pytest.approx(b)
+        assert a == pytest.approx(c)
+
+    def test_tactical_reaper_sees_cliff_gap(self):
+        """Tactical view must render jumpable cliff faces for the focal Reaper."""
+        from sc2.position import Point2
+
+        size = 64
+        cliff_row = 30
+        path = np.zeros((size, size), dtype=np.uint8)
+        height = np.zeros((size, size), dtype=np.float32)
+        path[0:cliff_row, :] = 1
+        height[0:cliff_row, :] = HIGH_H
+        path[cliff_row, :] = 0
+        height[cliff_row, :] = CLIFF_FACE_H
+        path[cliff_row + 1 :, :] = 1
+        height[cliff_row + 1 :, :] = LOW_H
+
+        gi = _make_game_info(path, height)
+        reaper = MagicMock()
+        reaper.position = Point2((32.0, 40.0))
+        reaper.type_id.name = "REAPER"
+        reaper.radius = 0.5
+        reaper.is_structure = False
+        reaper.is_flying = False
+        reaper.tag = 42
+
+        conf = _make_training_conf()
+        transformer = ObservationTransformer(map_size=(128, 128), training_conf=conf)
+        raw_obs = {
+            "units": [reaper],
+            "structures": [],
+            "enemy_units": [],
+            "enemy_structures": [],
+            "effects": [],
+            "game_info": gi,
+            "game_data": MagicMock(),
+            "high_level_command": 0,
+        }
+        tactical = transformer.transform_tactical(raw_obs, reaper)
+        assert tactical.shape[0] == 1
+        terrain = tactical[0]
+        low_py = 31 - int(40 - math.floor(40.0 - 16.0))
+        cliff_py = 31 - int(cliff_row - math.floor(40.0 - 16.0))
+        col = 32 - math.floor(40.0 - 16.0)
+        assert terrain[low_py, col] > 0.0
+        assert terrain[cliff_py, col] > terrain[low_py, col], (
+            "Cliff gap must be brighter than adjacent low ground for Reaper tactical view"
+        )
 
 
 # ---------------------------------------------------------------------------

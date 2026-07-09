@@ -1,8 +1,0 @@
-{
-  "track_id": "unify_level_drop_config_20260115",
-  "type": "chore",
-  "status": "new",
-  "created_at": "2026-01-15T18:37:00Z",
-  "updated_at": "2026-01-15T18:37:00Z",
-  "description": "Unify LevelDrop configuration by moving rewards, active_layers, and action_heads to the env section and refactoring code to use them dynamically."
-}

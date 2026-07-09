@@ -8,6 +8,22 @@ For a human-oriented overview, see [README.md](README.md).
 
 ---
 
+## Training device — GPU only (mandatory)
+
+All policy **training and inference** must run on **CUDA**. This applies to the async **collector**, **learner**, CTF **opponent** models, and sync universal training.
+
+| Rule | Detail |
+|------|--------|
+| **Default** | `training.device: auto` → `cuda:0` via `src/utils/training_device.resolve_training_device` |
+| **Never CPU for models** | Do not set `training.device: cpu`, `SC2_TRAINING_DEVICE=cpu`, `collector_device: cpu`, or `SC2_COLLECTOR_DEVICE=cpu`. Do not add CPU fallbacks when CUDA is missing — **fail loudly** instead. |
+| **Single device** | Collector and learner use the **same** GPU device. Do not split collector onto CPU “to save VRAM”. |
+| **Opponent** | `resolve_opponent_device` also requires CUDA. |
+| **Allowed host copies** | `.cpu().numpy()` when writing rollout buffers, IPC payloads, or loading checkpoint bytes is fine — that is storage marshalling, not running the policy on CPU. |
+
+If VRAM is tight, tune `num_envs`, `n_steps`, `batch_size`, or model size — do not move the policy to CPU.
+
+---
+
 ## Source of truth files
 
 When making changes to observations, actions, or config wiring, always consult these files first:

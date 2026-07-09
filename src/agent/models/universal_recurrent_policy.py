@@ -9,6 +9,12 @@ from sb3_contrib.common.recurrent.type_aliases import RNNStates
 from src.agent.models.unit_control_network import UnitControlNetwork
 from src.agent.models.spatial_decoder import SpatialDecoder, tactical_center_spatial_bias
 
+
+def _stabilize_action_logits(logits: torch.Tensor) -> torch.Tensor:
+    """Finite logits before softmax — NaN/inf probs break CUDA multinomial sampling."""
+    return torch.nan_to_num(logits, nan=0.0, posinf=50.0, neginf=-50.0)
+
+
 class UniversalRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
     """
     A custom Maskable Recurrent policy for the Universal architecture.
@@ -65,7 +71,25 @@ class UniversalRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
         spatial_logits = spatial_logits + bump.unsqueeze(0)
         cmd_logits = self.command_head(latent_pi)
         action_logits = torch.cat([cmd_logits, spatial_logits], dim=-1)
+        action_logits = _stabilize_action_logits(action_logits)
         return self.action_dist.proba_distribution(action_logits=action_logits)
+
+    @staticmethod
+    def _sample_multidiscrete_safe(dist, *, deterministic: bool) -> torch.Tensor:
+        """Sample actions; fall back to mode() when CUDA multinomial would see invalid probs."""
+        if deterministic:
+            return dist.get_actions(deterministic=True)
+        parts = []
+        for sub_dist in dist.distributions:
+            probs = sub_dist.probs
+            invalid = (~torch.isfinite(probs).all(dim=-1)) | (probs.sum(dim=-1) <= 1e-12)
+            if not invalid.any():
+                parts.append(sub_dist.sample())
+                continue
+            mode = sub_dist.mode()
+            sampled = sub_dist.sample()
+            parts.append(torch.where(invalid, mode, sampled))
+        return torch.stack(parts, dim=1)
 
     def _disable_spatial_mask(self, action_masks: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         """
@@ -83,7 +107,21 @@ class UniversalRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
 
     def forward(self, obs, lstm_states, episode_starts, action_masks=None, deterministic=False):
         action_masks = self._disable_spatial_mask(action_masks)
-        return super().forward(obs, lstm_states, episode_starts, action_masks, deterministic)
+        features = self.extract_features(obs)
+        pi_f, vf_f = (features, features) if self.share_features_extractor else features
+        l_pi, s_pi = self._process_sequence(pi_f, lstm_states.pi, episode_starts, self.lstm_actor)
+        if self.lstm_critic:
+            l_vf, s_vf = self._process_sequence(vf_f, lstm_states.vf, episode_starts, self.lstm_critic)
+        elif self.shared_lstm:
+            l_vf, s_vf = l_pi.detach(), tuple(s.detach() for s in s_pi)
+        else:
+            l_vf, s_vf = self.critic(vf_f), s_pi
+        l_pi, l_vf = self.mlp_extractor.forward_actor(l_pi), self.mlp_extractor.forward_critic(l_vf)
+        values, dist = self.value_net(l_vf), self._get_action_dist_from_latent(l_pi)
+        if action_masks is not None:
+            dist.apply_masking(action_masks)
+        actions = self._sample_multidiscrete_safe(dist, deterministic=deterministic)
+        return actions, values, dist.log_prob(actions), RNNStates(s_pi, s_vf)
 
     def get_distribution(self, obs, lstm_states, episode_starts, action_masks=None):
         action_masks = self._disable_spatial_mask(action_masks)

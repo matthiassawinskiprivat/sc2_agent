@@ -27,6 +27,7 @@ class ConfigManager:
     """
     def __init__(self, config_dir: str = "config"):
         self.config_dir = _normalize_config_dir(config_dir)
+        self._yaml_cache: Dict[str, Dict[str, Any]] = {}
         self.pipeline_config = self._load_yaml("pipeline.yaml")
         self.levels = self.pipeline_config.get("levels", [])
 
@@ -35,11 +36,17 @@ class ConfigManager:
         return self.pipeline_config.get("agent_architecture", "original")
 
     def _load_yaml(self, filename: str) -> Dict[str, Any]:
+        if filename in self._yaml_cache:
+            return self._yaml_cache[filename]
         path = os.path.join(self.config_dir, filename)
         if not os.path.exists(path):
+            self._yaml_cache[filename] = {}
             return {}
-        with open(path, 'r') as f:
-            return yaml.safe_load(f)
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        parsed = data if isinstance(data, dict) else {}
+        self._yaml_cache[filename] = parsed
+        return parsed
 
     def get_cumulative_active_layers(self, target_level: str) -> List[str]:
         """
@@ -200,6 +207,64 @@ class ConfigManager:
                         accumulated_heads.append(hn)
 
         return accumulated_heads
+
+    def get_cumulative_build_map_layers(self, target_level: str) -> List[str]:
+        """Cumulative build-agent local map layers (separate from micro active_layers)."""
+        accumulated: List[str] = []
+        root_layers = self.pipeline_config.get("build_map_layers", [])
+        for layer in root_layers:
+            ln = layer.lower()
+            if ln not in accumulated:
+                accumulated.append(ln)
+
+        found_target = False
+        for level in self.levels:
+            level_conf = self._load_yaml(f"{level}.yaml")
+            new_layers = level_conf.get("env", {}).get("build_map_layers", [])
+            for layer in new_layers:
+                ln = layer.lower()
+                if ln not in accumulated:
+                    accumulated.append(ln)
+            if level == target_level:
+                found_target = True
+                break
+
+        if not found_target:
+            level_conf = self._load_yaml(f"{target_level}.yaml")
+            for layer in level_conf.get("env", {}).get("build_map_layers", []):
+                ln = layer.lower()
+                if ln not in accumulated:
+                    accumulated.append(ln)
+        return accumulated
+
+    def get_cumulative_build_commands(self, target_level: str) -> List[str]:
+        """Allowed structure/unit types for scripted manager per curriculum level."""
+        accumulated: List[str] = []
+        root_cmds = self.pipeline_config.get("build_commands", [])
+        for cmd in root_cmds:
+            cn = cmd.lower()
+            if cn not in accumulated:
+                accumulated.append(cn)
+
+        found_target = False
+        for level in self.levels:
+            level_conf = self._load_yaml(f"{level}.yaml")
+            new_cmds = level_conf.get("env", {}).get("build_commands", [])
+            for cmd in new_cmds:
+                cn = cmd.lower()
+                if cn not in accumulated:
+                    accumulated.append(cn)
+            if level == target_level:
+                found_target = True
+                break
+
+        if not found_target:
+            level_conf = self._load_yaml(f"{target_level}.yaml")
+            for cmd in level_conf.get("env", {}).get("build_commands", []):
+                cn = cmd.lower()
+                if cn not in accumulated:
+                    accumulated.append(cn)
+        return accumulated
 
     def get_level_config(self, level_name: str) -> Dict[str, Any]:
         """Loads and returns the configuration for a specific level."""

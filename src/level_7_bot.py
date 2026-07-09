@@ -28,6 +28,7 @@ class Level7Bot(Level3Bot):
     # Must match ``ObservationTransformer.transform_tactical`` allied/enemy draw culling
     # (|dx| > HALF or |dy| > HALF → outside the 32×32 fovea centered on the active unit).
     _TACTICAL_FOVEA_MAX_DELTA: float = 17.0
+    _USE_GLOBAL_NO_ENEMY_RADIUS: float = 20.0
 
     @staticmethod
     def _resolve_enemies_per_target(training_conf: dict, enemy_unit_type: UnitTypeId) -> int:
@@ -61,6 +62,7 @@ class Level7Bot(Level3Bot):
             # Default: no attributed target unless we issue unit.attack(enemy_unit).
             self.last_action_was_attack_by_unit[unit_tag] = False
             self.last_action_was_move_by_unit[unit_tag] = False
+            self.last_move_head_by_unit[unit_tag] = None
             self.last_attack_target_tag_by_unit.pop(unit_tag, None)
 
             head_idx = int(action[0])
@@ -82,15 +84,17 @@ class Level7Bot(Level3Bot):
             self.last_target_pos = target_pos
 
             if "move" in head_name:
-                self._kite_damage_credit_ok[unit_tag] = True
                 self.last_action_was_move_by_unit[unit_tag] = True
+                self.last_move_head_by_unit[unit_tag] = head_name
+                self._attack_order_weapon_cd_before.pop(unit_tag, None)
                 self.do(unit.move(target_pos))
                 return
 
             if "attack" in head_name:
-                if self._kite_damage_credit_ok.get(unit_tag, True):
-                    self._kite_damage_credit_ok[unit_tag] = False
                 self.last_action_was_attack_by_unit[unit_tag] = True
+                self._attack_order_weapon_cd_before[unit_tag] = float(
+                    getattr(unit, "weapon_cooldown", 0.0) or 0.0
+                )
                 # Track nearest enemy to the policy-chosen point for reward attribution bookkeeping.
                 enemies = self.enemy_units(self.enemy_unit_type)
                 if enemies is not None and getattr(enemies, "exists", False):
@@ -115,6 +119,8 @@ class Level7Bot(Level3Bot):
         self.last_attack_target_tag_by_unit = {} # ally_tag -> enemy_tag (only when attacking a unit)
         self.last_action_was_attack_by_unit = {} # ally_tag -> bool
         self.last_action_was_move_by_unit: Dict[int, bool] = {}  # universal: last policy step was move
+        self.last_move_head_by_unit: Dict[int, Optional[str]] = {}  # universal: move head name used
+        self._pre_action_enemy_within_use_global_radius: Dict[int, bool] = {}
         
         # Resolve unit types from configuration
         # Look in training_conf root first, then in 'env' section
@@ -138,14 +144,29 @@ class Level7Bot(Level3Bot):
             self.training_conf, self.enemy_unit_type
         )
 
-        self._kite_damage_credit_ok: Dict[int, bool] = {}
-        # Micro bonus state machine per ally:
-        # 0 = idle, 1 = clean first attack registered, 2 = disengaged after first attack.
-        self._micro_chain_stage: Dict[int, int] = {}
-        self._micro_chain_attack_danger: Dict[int, int] = {}
-        # End of prior step: min distance to enemies in tactical fovea that can shoot this ally.
-        self._micro_under_fire_min_dist_prev: Dict[int, Optional[float]] = {}
         self._allied_took_damage_this_step: Dict[int, bool] = {}
+        # Kiting shaping state — all three dicts are populated by
+        # record_pre_action_kiting_state() BEFORE the action is applied each step.
+        # Storing the step-start (pre-action) baseline makes the retreat-reward
+        # comparison single-step accurate even in multi-unit cycling, where the
+        # previous active-turn baseline would span N game steps and be polluted by
+        # enemy approach between turns.
+        self._kiting_simple_prev_dist: Dict[int, float] = {}          # dist at step start
+        self._prev_enemy_in_attack_range: Dict[int, bool] = {}         # enemy in contact range at step start
+        self._micro_under_fire_min_dist_prev: Dict[int, Optional[float]] = {}  # min shooting-enemy dist at step start
+        self._attack_order_weapon_cd_before: Dict[int, float] = {}
+        self._pre_action_weapon_cd_by_unit: Dict[int, float] = {}
+        # Per-unit combat reward buffer: damage/kill credit accumulates here and is flushed
+        # the next time that unit becomes the acting unit. Even without a bot-side auto-attack
+        # helper, SC2's default stance lets a unit auto-fire at enemies in range while its
+        # previous order is winding down (e.g. attack-move completing on a dead target), so
+        # damage can still land between this unit's consecutive policy turns.
+        self._pending_rewards: Dict[int, float] = {}
+        # Last observed position per enemy tag — used to attribute kills to closest ally.
+        self._enemy_last_known_pos: Dict[int, Any] = {}
+        # Last assigned enemy tag seen during kiting shaping — used to detect assignment
+        # changes so stale per-enemy kiting state can be invalidated promptly.
+        self._prev_kiting_enemy_tag: Dict[int, Optional[int]] = {}
 
         # Filled after a successful combat reset: per-target spawn anchors, enemy tags per
         # spawn cluster, and each ally's primary target index (nearest spawn start).
@@ -257,14 +278,28 @@ class Level7Bot(Level3Bot):
 
     def _clear_kiting_state_for_tag(self, unit_tag: int) -> None:
         for d in (
-            self._kite_damage_credit_ok,
-            self._micro_chain_stage,
-            self._micro_chain_attack_danger,
             self._micro_under_fire_min_dist_prev,
             self._allied_took_damage_this_step,
+            self._kiting_simple_prev_dist,
+            self._prev_enemy_in_attack_range,
+            self._attack_order_weapon_cd_before,
+            self._pre_action_weapon_cd_by_unit,
+            self._prev_kiting_enemy_tag,
         ):
             d.pop(unit_tag, None)
         self.last_action_was_move_by_unit.pop(unit_tag, None)
+        self.last_move_head_by_unit.pop(unit_tag, None)
+        self._pre_action_enemy_within_use_global_radius.pop(unit_tag, None)
+
+    def _any_enemy_within_radius(self, unit: Unit, radius: float) -> bool:
+        enemies = self.enemy_units(self.enemy_unit_type)
+        if enemies is None or not getattr(enemies, "exists", False):
+            return False
+        eps = 1e-3
+        for enemy in enemies:
+            if float(unit.distance_to(enemy)) <= radius + eps:
+                return True
+        return False
 
     async def _debug_unlock_colossus_extended_thermal_lance(self):
         """
@@ -291,11 +326,17 @@ class Level7Bot(Level3Bot):
         self.last_attack_target_tag_by_unit = {}
         self.last_action_was_attack_by_unit = {}
         self.last_action_was_move_by_unit.clear()
-        self._kite_damage_credit_ok.clear()
-        self._micro_chain_stage.clear()
-        self._micro_chain_attack_danger.clear()
+        self.last_move_head_by_unit.clear()
+        self._pre_action_enemy_within_use_global_radius.clear()
         self._micro_under_fire_min_dist_prev.clear()
         self._allied_took_damage_this_step.clear()
+        self._kiting_simple_prev_dist.clear()
+        self._prev_enemy_in_attack_range.clear()
+        self._attack_order_weapon_cd_before.clear()
+        self._pre_action_weapon_cd_by_unit.clear()
+        self._pending_rewards.clear()
+        self._enemy_last_known_pos.clear()
+        self._prev_kiting_enemy_tag.clear()
         self._group_anchors = []
         self._enemy_tags_by_group = []
         self._ally_primary_group = {}
@@ -448,77 +489,93 @@ class Level7Bot(Level3Bot):
              
         return total_reward
 
+    def _closest_active_ally_tag(self, reference_pos, allies: list) -> Optional[int]:
+        """Tag of the active ally geometrically closest to reference_pos. None if allies is empty."""
+        if not allies:
+            return None
+        return min(allies, key=lambda a: float(a.distance_to(reference_pos))).tag
+
     def calculate_unit_centric_combat_delta(self, acting_unit_tag: int) -> Tuple[float, float]:
         """
-        Returns (attributed_reward_for_acting_unit, pooled_reward_delta).
+        Attributes damage and kills to the most plausible attacker, buffers pending rewards per
+        allied unit, and flushes the acting unit's accumulated buffer.
 
-        Attribution rules:
-        - When the acting unit issued an attack and `last_attack_target_tag_by_unit` holds a
-          valid tag (nearest enemy to the chosen position), damage/kill for that enemy is
-          attributed to the actor; all other deltas in the same step are pooled.
-        - When no valid target tag is present, all combat deltas are pooled.
+        Attribution rules
+        -----------------
+        - Damage on the enemy the acting unit **directly targeted** (nearest enemy to the
+          policy-chosen attack point, stored in ``last_attack_target_tag_by_unit``) is
+          attributed to the acting unit — the causal link is unambiguous.
+        - Damage on **any other enemy** is attributed to the closest active ally to that
+          enemy, mirroring SC2's auto-attack resolution.
+        - Kills follow the same split: direct-target kill → acting unit; other kills →
+          closest active ally to the enemy's last known position.
+
+        Cross-step buffering
+        --------------------
+        Rewards accumulate in ``_pending_rewards[ally_tag]`` and are not consumed until
+        that ally becomes the acting unit. This correctly attributes rewards earned by
+        SC2's default-stance auto-fire (a unit shooting an in-range enemy while its prior
+        order is still resolving) that lands during a different unit's policy step.
+
+        Return value: ``(acting_unit_attributed_reward, 0.0)`` — the second element is
+        always zero and is kept only for call-site compatibility.
         """
         rewards_conf = self.training_conf.get("rewards", {})
         damage_reward = float(rewards_conf.get("damage_reward", 0.1))
         kill_reward = float(rewards_conf.get("kill_reward", 10.0))
 
+        allies = self.get_active_units()
         enemies = self.enemy_units(self.enemy_unit_type)
         enemy_list = list(enemies) if enemies.exists else []
         current_enemy_tags = {u.tag for u in enemy_list}
 
-        # Compute per-enemy damage deltas.
-        damage_events: Dict[int, float] = {}
+        # The enemy the acting unit explicitly targeted this step (None if move action).
+        direct_target = None
+        if self.last_action_was_attack_by_unit.get(acting_unit_tag, False):
+            direct_target = self.last_attack_target_tag_by_unit.get(acting_unit_tag)
+
         for u in enemy_list:
             curr = float(u.health + u.shield)
+            # Track position for kill attribution even if no damage this step.
+            self._enemy_last_known_pos[u.tag] = u.position
             if u.tag not in self.previous_health:
-                # Initialize baseline on first sight; don't award/penalize.
                 self.previous_health[u.tag] = curr
                 continue
-            prev = float(self.previous_health.get(u.tag, curr))
+            prev = float(self.previous_health[u.tag])
             dmg = max(0.0, prev - curr)
             if dmg > 0.0:
-                damage_events[u.tag] = dmg
+                if u.tag == direct_target:
+                    attacker_tag = acting_unit_tag
+                else:
+                    attacker_tag = (
+                        self._closest_active_ally_tag(u.position, allies)
+                        or acting_unit_tag
+                    )
+                self._pending_rewards[attacker_tag] = (
+                    self._pending_rewards.get(attacker_tag, 0.0) + dmg * damage_reward
+                )
             self.previous_health[u.tag] = curr
 
-        # Determine deaths since last step (based on tracked tags).
         prev_tags = set(self.previous_health.keys())
         died_tags = prev_tags - current_enemy_tags
-
-        # Convert to scalar rewards (damage, kill) by tag.
-        damage_rewards_by_tag = {t: d * damage_reward for t, d in damage_events.items()}
-        kill_rewards_by_tag = {t: kill_reward for t in died_tags}
-
-        # Clean up previous_health for dead enemies.
         for t in died_tags:
+            if t == direct_target:
+                attacker_tag = acting_unit_tag
+            else:
+                last_pos = self._enemy_last_known_pos.get(t)
+                attacker_tag = (
+                    (self._closest_active_ally_tag(last_pos, allies) if last_pos is not None else None)
+                    or acting_unit_tag
+                )
+            self._pending_rewards[attacker_tag] = (
+                self._pending_rewards.get(attacker_tag, 0.0) + kill_reward
+            )
             self.previous_health.pop(t, None)
+            self._enemy_last_known_pos.pop(t, None)
 
-        # Attribution decision.
-        target_tag = None
-        if acting_unit_tag is not None and self.last_action_was_attack_by_unit.get(acting_unit_tag, False):
-            target_tag = self.last_attack_target_tag_by_unit.get(acting_unit_tag)
-
-        attributed = 0.0
-        pooled = 0.0
-
-        # Damage: attribute matching target when available; pool the rest.
-        if target_tag is not None and target_tag in damage_rewards_by_tag:
-            attributed += damage_rewards_by_tag[target_tag]
-            pooled += sum(
-                reward for tag, reward in damage_rewards_by_tag.items() if tag != target_tag
-            )
-        else:
-            pooled += sum(damage_rewards_by_tag.values())
-
-        # Kills: attribute matching target when available; pool the rest.
-        if target_tag is not None and target_tag in kill_rewards_by_tag:
-            attributed += kill_rewards_by_tag[target_tag]
-            pooled += sum(
-                reward for tag, reward in kill_rewards_by_tag.items() if tag != target_tag
-            )
-        else:
-            pooled += sum(kill_rewards_by_tag.values())
-
-        return attributed, pooled
+        # Flush this unit's accumulated buffer into the step reward.
+        attributed = self._pending_rewards.pop(acting_unit_tag, 0.0)
+        return attributed, 0.0
 
     def calculate_allied_attrition_penalty(self) -> float:
         """
@@ -554,13 +611,6 @@ class Level7Bot(Level3Bot):
             del self.previous_allied_health[tag]
             
         return total_penalty
-
-    def calculate_unattributed_allied_attrition_delta(self) -> float:
-        """
-        Unattributed allied attrition delta (damage taken, deaths). This is treated as pooled
-        reward in unit-centric env mode because it cannot be reliably assigned to one acting unit.
-        """
-        return self.calculate_allied_attrition_penalty()
 
     def get_closest_targets_combat(self) -> Dict[int, int]:
         """
@@ -774,6 +824,14 @@ class Level7Bot(Level3Bot):
         return distances
 
     @staticmethod
+    def _get_unit_radius(unit) -> float:
+        """Collision radius of ``unit``; defaults to 0.5 when not available."""
+        try:
+            return float(unit.radius)
+        except (TypeError, AttributeError, ValueError):
+            return 0.5
+
+    @staticmethod
     def _weapon_range_attacker_vs_defender(attacker, defender) -> float:
         """Weapon range from attacker to a specific defender (ground vs air-aware)."""
         if attacker is None or defender is None:
@@ -829,7 +887,12 @@ class Level7Bot(Level3Bot):
                 continue
             dist = float(ally.distance_to(enemy))
             enemy_range = self._weapon_range_attacker_vs_defender(enemy, ally)
-            if dist <= enemy_range + eps:
+            # SC2 weapon data gives the nominal range; the engine adds unit collision
+            # radii before triggering attacks.  For melee units (e.g. Zergling range 0.1)
+            # the raw value is smaller than the physical minimum contact distance, so we
+            # use max(nominal_range, sum-of-radii) to correctly detect "enemy is shooting".
+            effective_range = max(enemy_range, self._get_unit_radius(enemy) + self._get_unit_radius(ally))
+            if dist <= effective_range + eps:
                 best = dist if best is None else min(best, dist)
         return best
 
@@ -872,73 +935,229 @@ class Level7Bot(Level3Bot):
                 count += 1
         return count
 
-    def calculate_micro_bonus(self, unit_tag: int) -> float:
+    def record_pre_action_kiting_state(self, unit_tag: int) -> None:
         """
-        Micro shaping (scalar ``micro_bonus`` from config):
-        - Positive chain: attack → disengage (lower tactical-fovea danger count) → attack again,
-          with no damage during the chain.
-        - Negative: on a **move** while at least one tactical-fovea enemy could already shoot the
-          ally, if the move **decreases** the minimum distance to such enemies vs the prior step,
-          add ``-micro_bonus``.
+        Snapshot kiting-relevant state BEFORE the action is applied and the game steps.
+
+        Must be called from _async_step immediately before apply_action so that
+        calculate_kiting_simple_shaping can compare the post-step state against the
+        state the agent actually observed — a single-frame baseline.  Without this,
+        the retreat-reward comparison spans N game steps (full unit-cycling round),
+        causing the Zergling approach between turns to shrink _kiting_simple_prev_dist
+        below the post-step distance even when the agent correctly issued a move.
+        """
+        unit = self.units.find_by_tag(unit_tag)
+        if unit is None:
+            self._kiting_simple_prev_dist.pop(unit_tag, None)
+            self._prev_enemy_in_attack_range.pop(unit_tag, None)
+            self._micro_under_fire_min_dist_prev.pop(unit_tag, None)
+            self._pre_action_weapon_cd_by_unit.pop(unit_tag, None)
+            self._prev_kiting_enemy_tag.pop(unit_tag, None)
+            self._pre_action_enemy_within_use_global_radius.pop(unit_tag, None)
+            return
+
+        self._pre_action_weapon_cd_by_unit[unit_tag] = float(
+            getattr(unit, "weapon_cooldown", 0.0) or 0.0
+        )
+        self._pre_action_enemy_within_use_global_radius[unit_tag] = self._any_enemy_within_radius(
+            unit, self._USE_GLOBAL_NO_ENEMY_RADIUS
+        )
+
+        self.refresh_combat_assignments()
+        e_tag = self.current_assignments.get(unit_tag)
+        enemies = self.enemy_units(self.enemy_unit_type)
+        enemy = enemies.find_by_tag(e_tag) if e_tag is not None and enemies.exists else None
+        if enemy is None:
+            self._kiting_simple_prev_dist.pop(unit_tag, None)
+            self._prev_enemy_in_attack_range.pop(unit_tag, None)
+            self._micro_under_fire_min_dist_prev.pop(unit_tag, None)
+            self._pre_action_weapon_cd_by_unit.pop(unit_tag, None)
+            self._prev_kiting_enemy_tag.pop(unit_tag, None)
+            return
+
+        dist = float(unit.distance_to(enemy))
+        enemy_range = self._weapon_range_attacker_vs_defender(enemy, unit)
+        effective_enemy_range = max(
+            enemy_range,
+            self._get_unit_radius(enemy) + self._get_unit_radius(unit),
+        )
+        eps = 1e-3
+        self._kiting_simple_prev_dist[unit_tag] = dist
+        self._prev_enemy_in_attack_range[unit_tag] = dist <= effective_enemy_range + eps
+        self._micro_under_fire_min_dist_prev[unit_tag] = self._min_dist_to_shooting_enemies_in_fovea(unit)
+        self._prev_kiting_enemy_tag[unit_tag] = e_tag
+
+    def calculate_kiting_simple_shaping(self, unit_tag: int) -> float:
+        """
+        Shaping for kiting:
+        - Retreat reward (proportional): moving away when the assigned enemy was within its
+          own attack range of this unit last step, AND the unit is still within its own weapon
+          range. The weapon-range cap prevents the agent earning retreat reward indefinitely
+          while fleeing to the map edge — retreat is only meaningful while the unit can still
+          shoot back. Does NOT require the previous action to be an attack, so it fires in
+          multi-unit cycling where several other units' steps separate attack and retreat.
+        - Cooldown-retreat reward: moving away while this unit's weapon is on cooldown,
+          while staying close enough to keep fighting. This rewards the actual kite rhythm
+          (shoot, back up during cooldown, shoot again) before a melee enemy reaches contact.
+        - Attack-on-cooldown penalty: discourages repeatedly issuing attack commands while
+          the weapon cannot fire yet.
+        - Close-in penalty (proportional): penalises moving closer to a currently-shooting
+          enemy by `kiting_close_in_penalty * delta_distance_closer`.
+        - Sweet-spot bonus: per-step reward for each enemy the unit can shoot (within own
+          weapon range) while staying outside that enemy's attack range. Directly incentivises
+          the kiting geometry: attack from distance, stay out of danger.
+        - In-danger penalty: per-step cost for each enemy whose danger zone currently contains
+          this unit. Discourages standing still inside enemy attack range.
+        - Weapon-ready bonus (optional, set to 0 to disable): fires when the attack action
+          is issued with weapon cooldown ≈ 0.
         """
         if unit_tag is None:
             return 0.0
 
         unit = self.units.find_by_tag(unit_tag)
         if unit is None:
-            self._clear_kiting_state_for_tag(unit_tag)
+            self._kiting_simple_prev_dist.pop(unit_tag, None)
+            self._prev_enemy_in_attack_range.pop(unit_tag, None)
             return 0.0
 
         rewards_conf = self.training_conf.get("rewards", {})
-        micro_bonus = float(rewards_conf.get("micro_bonus", 2.0))
+        retreat_scale = float(rewards_conf.get("retreat_shaping_scale", 0.15))
+        close_penalty = float(rewards_conf.get("kiting_close_in_penalty", 0.0))
+        weapon_ready_bonus = float(rewards_conf.get("weapon_ready_attack_bonus", 0.0))
+        sweet_spot_bonus = float(rewards_conf.get("sweet_spot_bonus", 0.0))
+        in_danger_penalty = float(rewards_conf.get("in_danger_penalty", 0.0))
+        cooldown_retreat_scale = float(rewards_conf.get("cooldown_retreat_scale", 0.0))
+        attack_on_cooldown_penalty = float(rewards_conf.get("attack_on_cooldown_penalty", 0.0))
 
-        curr_under = self._min_dist_to_shooting_enemies_in_fovea(unit)
-        prev_under = self._micro_under_fire_min_dist_prev.get(unit_tag)
-        moved_now = bool(self.last_action_was_move_by_unit.get(unit_tag, False))
-
-        close_in_penalty = 0.0
-        if (
-            micro_bonus != 0.0
-            and moved_now
-            and prev_under is not None
-            and curr_under is not None
-            and float(curr_under) < float(prev_under) - 1e-3
-        ):
-            close_in_penalty = -micro_bonus
-
-        if micro_bonus == 0.0:
-            self._micro_chain_stage[unit_tag] = 0
-            self._micro_chain_attack_danger.pop(unit_tag, None)
-            self._micro_under_fire_min_dist_prev[unit_tag] = curr_under
+        self.refresh_combat_assignments()
+        e_tag = self.current_assignments.get(unit_tag)
+        enemies = self.enemy_units(self.enemy_unit_type)
+        enemy = enemies.find_by_tag(e_tag) if e_tag is not None and enemies.exists else None
+        if enemy is None:
+            self._kiting_simple_prev_dist.pop(unit_tag, None)
+            self._prev_enemy_in_attack_range.pop(unit_tag, None)
+            self._prev_kiting_enemy_tag.pop(unit_tag, None)
             return 0.0
 
+        # Guard: if the assignment changed since record_pre_action_kiting_state was called
+        # (e.g. an enemy died during the step), the pre-action snapshot is stale — clear it
+        # so we don't compare distances to two different enemies.
+        prev_kiting_tag = self._prev_kiting_enemy_tag.get(unit_tag)
+        if prev_kiting_tag is not None and prev_kiting_tag != e_tag:
+            self._kiting_simple_prev_dist.pop(unit_tag, None)
+            self._prev_enemy_in_attack_range.pop(unit_tag, None)
+            self._micro_under_fire_min_dist_prev.pop(unit_tag, None)
+            # _prev_kiting_enemy_tag is updated by record_pre_action_kiting_state, not here.
+
+        dist = float(unit.distance_to(enemy))
+        ally_range = self._weapon_range_attacker_vs_defender(unit, enemy)
+        eps = 1e-3
+
+        # Pre-action baseline recorded by record_pre_action_kiting_state (single-step).
+        prev_dist = self._kiting_simple_prev_dist.get(unit_tag)
+        prev_enemy_in_range = self._prev_enemy_in_attack_range.get(unit_tag, False)
+        pre_action_cd = getattr(self, "_pre_action_weapon_cd_by_unit", {}).get(unit_tag)
+
+        moved_now = bool(self.last_action_was_move_by_unit.get(unit_tag, False))
         attacked_now = bool(self.last_action_was_attack_by_unit.get(unit_tag, False))
-        took_damage_now = bool(self._allied_took_damage_this_step.get(unit_tag, False))
-        danger_now = int(self._count_enemy_danger_zones_for_unit(unit))
 
-        chain_reward = 0.0
-        if took_damage_now:
-            self._micro_chain_stage[unit_tag] = 0
-            self._micro_chain_attack_danger.pop(unit_tag, None)
-            self._micro_under_fire_min_dist_prev[unit_tag] = curr_under
-            return chain_reward + close_in_penalty
+        # Compute current min-shooting-enemy distance for close-penalty.
+        curr_under = self._min_dist_to_shooting_enemies_in_fovea(unit)
 
-        stage = int(self._micro_chain_stage.get(unit_tag, 0))
-        if attacked_now:
-            if stage == 2:
-                self._micro_chain_stage[unit_tag] = 1
-                self._micro_chain_attack_danger[unit_tag] = danger_now
-                chain_reward = micro_bonus
-            else:
-                self._micro_chain_stage[unit_tag] = 1
-                self._micro_chain_attack_danger[unit_tag] = danger_now
-        elif stage == 1:
-            start_danger = int(self._micro_chain_attack_danger.get(unit_tag, danger_now))
-            if danger_now < start_danger:
-                self._micro_chain_stage[unit_tag] = 2
+        reward = 0.0
 
-        self._micro_under_fire_min_dist_prev[unit_tag] = curr_under
-        return chain_reward + close_in_penalty
+        # Retreat reward: moving away when the enemy was in contact range at step START
+        # and the unit is still within its own weapon range. Using the pre-action baseline
+        # (prev_dist = dist before apply_action) makes this a single-step comparison,
+        # correctly measuring what the agent's move action achieved regardless of how many
+        # other units acted between this unit's consecutive turns.
+        if retreat_scale != 0.0 and moved_now and prev_enemy_in_range and prev_dist is not None:
+            if dist > prev_dist + eps and dist <= ally_range + eps:
+                reward += retreat_scale * (dist - prev_dist)
+
+        # Cooldown-retreat reward: after firing, the correct kiting move is often to
+        # back up before the enemy reaches contact range. This uses the same
+        # single-step distance baseline as retreat shaping, but gates on weapon
+        # cooldown instead of enemy contact.
+        if (
+            cooldown_retreat_scale != 0.0
+            and ally_range > 1.5
+            and moved_now
+            and pre_action_cd is not None
+            and float(pre_action_cd) > eps
+            and prev_dist is not None
+            and prev_dist <= ally_range + eps
+            and dist > prev_dist + eps
+            and dist <= ally_range + eps
+        ):
+            reward += cooldown_retreat_scale * (dist - prev_dist)
+
+        # Close-in penalty (proportional): penalise moving closer to a currently-shooting enemy.
+        if close_penalty != 0.0:
+            prev_under = self._micro_under_fire_min_dist_prev.get(unit_tag)
+            if (
+                moved_now
+                and prev_under is not None
+                and curr_under is not None
+                and float(curr_under) < float(prev_under) - eps
+            ):
+                delta_closer = float(prev_under) - float(curr_under)
+                reward -= close_penalty * delta_closer
+
+        # Weapon-ready attack bonus: fire exactly when cooldown has expired.
+        if weapon_ready_bonus != 0.0 and attacked_now:
+            cd_before = self._attack_order_weapon_cd_before.get(unit_tag)
+            if cd_before is not None and float(cd_before) <= eps:
+                reward += weapon_ready_bonus
+
+        # Attack commands during cooldown usually just make the unit stand and wait,
+        # which is the anti-kiting behavior we want the policy to avoid.
+        if attack_on_cooldown_penalty != 0.0 and attacked_now:
+            cd_before = self._attack_order_weapon_cd_before.get(unit_tag, pre_action_cd)
+            if cd_before is not None and float(cd_before) > eps:
+                reward -= attack_on_cooldown_penalty
+
+        # Sweet-spot bonus: reward attacking from the kiting geometry (in range to shoot,
+        # out of enemy range). Gated on attacked_now so it rewards the action of firing
+        # from sweet spot rather than passive positioning at that distance.
+        if sweet_spot_bonus != 0.0 and attacked_now:
+            sweet_spots = self._count_kiting_sweet_spots_for_unit(unit)
+            reward += sweet_spot_bonus * sweet_spots
+
+        # In-danger penalty: cost for each enemy that can currently shoot this unit.
+        if in_danger_penalty != 0.0:
+            danger_zones = self._count_enemy_danger_zones_for_unit(unit)
+            reward -= in_danger_penalty * danger_zones
+
+        # State dicts (_kiting_simple_prev_dist, _prev_enemy_in_attack_range,
+        # _micro_under_fire_min_dist_prev, _prev_kiting_enemy_tag) are populated by
+        # record_pre_action_kiting_state() before the NEXT step — not updated here.
+        self._attack_order_weapon_cd_before.pop(unit_tag, None)
+        if hasattr(self, "_pre_action_weapon_cd_by_unit"):
+            self._pre_action_weapon_cd_by_unit.pop(unit_tag, None)
+
+        return reward
+
+    def calculate_use_global_reward(self, unit_tag: int) -> float:
+        """
+        Bonus for choosing move_global when no enemy is within
+        ``_USE_GLOBAL_NO_ENEMY_RADIUS`` of the acting unit (pre-action snapshot).
+        """
+        if unit_tag is None:
+            return 0.0
+
+        rewards_conf = self.training_conf.get("rewards", {})
+        use_global_bonus = float(rewards_conf.get("use_global", 0.0))
+        if use_global_bonus == 0.0:
+            return 0.0
+
+        if self.last_move_head_by_unit.get(unit_tag) != "move_global":
+            return 0.0
+
+        if self._pre_action_enemy_within_use_global_radius.get(unit_tag, True):
+            return 0.0
+
+        return use_global_bonus
 
     def _compute_distance_reward_for_assigned_pair(self, unit_tag: int, dist_multiplier: float) -> float:
         """
@@ -971,38 +1190,6 @@ class Level7Bot(Level3Bot):
         self.previous_distances[unit_tag] = dist
         return shaping
 
-    def queue_idle_combat_orders(self, skip_unit_tag: int = None) -> int:
-        """
-        Keep assigned allies engaged between their policy turns.
-        Queues attack orders only for units that are currently idle.
-        """
-        assignments = self.refresh_combat_assignments()
-        if not assignments:
-            return 0
-
-        enemies = self.enemy_units(self.enemy_unit_type)
-        if not enemies.exists:
-            return 0
-
-        queued = 0
-        for ally in self.get_active_units():
-            if skip_unit_tag is not None and ally.tag == skip_unit_tag:
-                continue
-            if ally.tag not in assignments:
-                continue
-
-            # Do not override ongoing unit orders; just fill true idles.
-            if getattr(ally, "orders", None):
-                continue
-
-            enemy = enemies.find_by_tag(assignments[ally.tag])
-            if enemy is None:
-                continue
-            self.do(ally.attack(enemy))
-            queued += 1
-        return queued
-
-
     def calculate_distance_reward(self, unit_tag: int = None) -> float:
         """
         Distance shaping toward the assigned enemy with range-aware gating.
@@ -1034,12 +1221,12 @@ class Level7Bot(Level3Bot):
         original_unit = self.zergling
         self.zergling = unit
 
-        if self._combat_topology_ready():
-            g = self._active_target_group_for_ally(unit.tag)
-            target_pos = self._group_anchors[g] if g is not None else None
-        else:
-            target = self._get_enemy_target_for_unit(unit)
-            target_pos = target.position if target else None
+        # Always use the live assigned-enemy position as the command target so the
+        # COMMAND_OBJECTIVE observation layer tracks actual enemy locations.  The static
+        # spawn-anchor (_group_anchors) was stale once enemies moved, causing the
+        # observation to point to an empty area of the map during active combat.
+        target = self._get_enemy_target_for_unit(unit)
+        target_pos = target.position if target else None
 
         raw_hc = self.training_conf.get("high_level_command", 0)
         if isinstance(raw_hc, str):

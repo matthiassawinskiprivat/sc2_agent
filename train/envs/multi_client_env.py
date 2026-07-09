@@ -67,6 +67,8 @@ class MultiClientEnv(gym.Env):
         else:
             # Fallback to map_name if discovery fails
             self.map_list = [self.map_name]
+
+        self.episode_counter = 0
             
         # Placeholder spaces - should be defined by subclasses
         self.observation_space = None
@@ -81,8 +83,17 @@ class MultiClientEnv(gym.Env):
         from pathlib import Path
         import os
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        # Try to find maps in train/maps/<level_name>
-        maps_dir = Path(current_dir).parent / "maps" / self.level_name
+        # Priority: 1. training_conf['maps_dir'], 2. standard level_name path
+        config_maps_dir = (
+            self.training_conf.get("maps_dir")
+            or self.training_conf.get("env", {}).get("maps_dir")
+        )
+        if config_maps_dir:
+            maps_dir = Path(config_maps_dir)
+            if not maps_dir.is_absolute():
+                maps_dir = Path(current_dir).parent.parent / config_maps_dir
+        else:
+            maps_dir = Path(current_dir).parent / "maps" / self.level_name
         if not maps_dir.exists():
             return []
         map_files = [f.stem for f in maps_dir.glob("*.SC2Map")]
@@ -93,12 +104,26 @@ class MultiClientEnv(gym.Env):
         from pathlib import Path
         from sc2.maps import Map
         import sc2
-        
+        import os
+
+        config_maps_dir = (
+            self.training_conf.get("maps_dir")
+            or self.training_conf.get("env", {}).get("maps_dir")
+        )
+        if config_maps_dir:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            maps_dir = Path(config_maps_dir)
+            if not maps_dir.is_absolute():
+                maps_dir = Path(current_dir).parent.parent / config_maps_dir
+            map_path = maps_dir / f"{map_name}.SC2Map"
+            if not map_path.exists():
+                raise FileNotFoundError(f"Map not found: {map_path}")
+            return Map(map_path)
+
         # Try library maps first
         try:
             return sc2.maps.get(map_name)
-        except KeyError:
-            # Try project maps
+        except (KeyError, FileNotFoundError, OSError):
             current_dir = os.path.dirname(os.path.abspath(__file__))
             map_path = Path(current_dir).parent / "maps" / self.level_name / f"{map_name}.SC2Map"
             if not map_path.exists():
@@ -118,12 +143,19 @@ class MultiClientEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self._log(f"reset() called (Level: {self.level_name})")
+        self.episode_counter += 1
+        self._log(f"reset() called (Level: {self.level_name}, Episode: {self.episode_counter})")
+
+        # Rotate map each episode (round-robin across workers)
+        if len(self.map_list) > 1:
+            map_idx = (self.worker_index + (self.episode_counter - 1) * self.num_workers) % len(self.map_list)
+            self.map_name = self.map_list[map_idx]
+            self._log(f"Map rotated to: {self.map_name}")
         
         # Ensure clean state
         if self._manager.clients:
-             self._log("Cleaning up previous session...")
-             self.close()
+            self._log("Cleaning up previous session...")
+            self.close()
              
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)

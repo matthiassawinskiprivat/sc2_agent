@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.transformers.observation_transformer import ObservationTransformer
 from src.utils.layer_constants import LayerConstants
+from tests.obs_transformer_test_utils import get_layer, layer_val, transform_map
 
 
 class MockGrid:
@@ -123,12 +124,14 @@ class TestUnitLayerValues(unittest.TestCase):
         if unit:
             key = 'units' if unit.alliance == 1 else 'enemy_units'
             obs[key] = [unit]
-        return self.transformer.transform(obs)
+        return transform_map(self.transformer, obs)
 
     def get_val(self, layers, const_name, x=None, y=None):
-        if x is None: x = self.px
-        if y is None: y = self.py
-        return layers[LayerConstants.LAYERS[const_name], y, x]
+        if x is None:
+            x = self.px
+        if y is None:
+            y = self.py
+        return layer_val(layers, const_name, x, y)
 
     def check_unit(self, unit_name, alliance=1, **kwargs):
         u = MockUnit(unit_name, alliance=alliance, **kwargs)
@@ -166,8 +169,8 @@ class TestUnitLayerValues(unittest.TestCase):
         u.shield = 0
         layers = self.run_transform(u)
         
-        # Expected value is log1p(10/45)
-        expected = np.log1p(10.0 / 45.0)
+        # Expected: 1 - (current / max) damage fraction
+        expected = 1.0 - (10.0 / 45.0)
         actual = self.get_val(layers, "allied_health")
         self.assertAlmostEqual(actual, expected, places=4)
 
@@ -193,21 +196,28 @@ class TestUnitLayerValues(unittest.TestCase):
             'game_info': self.game_info, 'game_data': None,
             'creep': creep_mock
         }
-        layers = self.transformer.transform(obs)
+        layers = transform_map(self.transformer, obs)
 
         px_zone = int(60 * 0.64)
         py_zone = int(128 - 1 - (50 * 0.64))
 
-        self.assertGreater(layers[LayerConstants.LAYERS["allied_g_dps_base"], py_zone, px_zone], 0.0)
+        self.assertGreater(layer_val(layers, "allied_g_dps_base", px_zone, py_zone), 0.0)
 
     def test_ORACLE_NO_ENERGY(self):
-        u = MockUnit("ORACLE", 100, 100, alliance=4, is_light=True, is_flying=True, energy=0)
-        layers = self.run_transform(u)
-        val = self.get_val(layers, "enemy_g_dps_base")
-        self.assertEqual(val, 0.0)
+        """Pulsar (energy >= 25) stamps g_dps_base without typed light bonus."""
+        u_low = MockUnit("ORACLE", 100, 100, alliance=4, is_light=True, is_flying=True, energy=24)
+        u_high = MockUnit("ORACLE", 100, 100, alliance=4, is_light=True, is_flying=True, energy=50)
+        low_light = self.get_val(self.run_transform(u_low), "enemy_g_dps_light")
+        high_light = self.get_val(self.run_transform(u_high), "enemy_g_dps_light")
+        high_base = self.get_val(self.run_transform(u_high), "enemy_g_dps_base")
+        self.assertGreater(low_light, 0.0)
+        self.assertEqual(high_light, 0.0)
+        self.assertGreater(high_base, 0.0)
 
     def test_INCOMPLETE_DETECTOR(self):
         u = MockUnit("MISSILETURRET", 100, 100, alliance=1, build_progress=0.5)
+        u.is_structure = True
+        u.radius = 1.0
         layers = self.run_transform(u)
         self.assertGreater(self.get_val(layers, "allied_unit_density"), 0.0)
         self.assertEqual(self.get_val(layers, "allied_detection", x=self.px), 0.0)
@@ -227,7 +237,7 @@ class TestUnitLayerValues(unittest.TestCase):
         u.type_id = MockUnitType("FORCEFIELD", 135)
 
         layers = self.run_transform(u)
-        path_val = layers[LayerConstants.LAYERS["terrain_pathable"], self.py, self.px]
+        path_val = layer_val(layers, "terrain_pathable", self.px, self.py)
         self.assertEqual(path_val, 0.0)
         self.assertGreater(self.get_val(layers, "allied_unit_density"), 0.0)
 

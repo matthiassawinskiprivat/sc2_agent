@@ -29,7 +29,7 @@ from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
 from src.agent.models.unit_control_network import UnitControlNetwork
 from src.agent.models.universal_policy import UniversalActorCriticPolicy
 from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
-from src.agent.utils.disk_buffer import DiskDictRolloutBuffer
+from src.utils.rollout_buffer_factory import sync_rollout_buffer_config
 from train.callbacks import StopTrainingOnMetricThreshold, DiagnosticsCallback
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from src.utils.watchdog import Watchdog
@@ -143,6 +143,9 @@ class UniversalPipelineManager(PipelineManager):
             policy_kwargs = {**model_params.get("policy_kwargs", {}), "normalize_images": False}
             policy_kwargs["spatial_resolution"] = combined_conf["spatial_resolution"]
             
+            rollout_buffer_class, rollout_buffer_kwargs = sync_rollout_buffer_config(
+                training_params, env_params
+            )
             model_kwargs = {
                 "policy": PolicyClass,
                 "env": env,
@@ -157,21 +160,33 @@ class UniversalPipelineManager(PipelineManager):
                 "policy_kwargs": policy_kwargs,
                 "device": train_device,
                 "level_name": level_name,
-                "rollout_buffer_class": DiskDictRolloutBuffer,
-                "rollout_buffer_kwargs": {"temp_dir": "C:/temp/sc2_buffer_cache"}
+                "rollout_buffer_class": rollout_buffer_class,
+                "rollout_buffer_kwargs": rollout_buffer_kwargs,
             }
             if AlgoClass == MaskableRecurrentPPO:
                 model_kwargs["rnn_type"] = model_params.get("rnn_type", "lstm")
-            model_kwargs["target_kl"] = model_params.get("target_kl")
+            model_kwargs["target_kl"] = training_params.get(
+                "target_kl", model_params.get("target_kl")
+            )
 
             if model_path_to_load:
                 logger.info(f"Loading weights from: {model_path_to_load}")
                 try:
-                    model = AlgoClass.load(
-                        model_path_to_load, env=env, device=model_kwargs["device"],
-                        tensorboard_log=log_dir,
-                        custom_objects={"learning_rate": training_params["learning_rate"]}
-                    )
+                    load_kwargs = {
+                        "env": env,
+                        "device": model_kwargs["device"],
+                        "tensorboard_log": log_dir,
+                        "custom_objects": {
+                            "learning_rate": training_params["learning_rate"]
+                        },
+                        "rollout_buffer_class": rollout_buffer_class,
+                        "rollout_buffer_kwargs": rollout_buffer_kwargs,
+                    }
+                    if AlgoClass == MaskableRecurrentPPO:
+                        load_kwargs["rnn_type"] = model_kwargs.get("rnn_type", "lstm")
+                    # Same-level resume (CONTINUE_TRAINING) only; curriculum uses fresh Adam.
+                    load_kwargs["restore_optimizer"] = not reset_timesteps
+                    model = AlgoClass.load(model_path_to_load, **load_kwargs)
                 except Exception as e:
                     logger.warning(
                         f"Could not load weights from '{model_path_to_load}' "

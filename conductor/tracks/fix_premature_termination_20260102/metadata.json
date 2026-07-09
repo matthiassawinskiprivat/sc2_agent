@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_premature_termination_20260102",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-02T14:51:00Z",
-  "updated_at": "2026-01-02T14:51:00Z",
-  "description": "Fix premature episode termination in Level 3/7 environments caused by unit death mid-cycle or incorrect done flag logic."
-}

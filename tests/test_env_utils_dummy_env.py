@@ -1,5 +1,6 @@
 import numpy as np
 
+from src.utils.config_manager import ConfigManager
 from train.env_utils import create_dummy_env_from_config
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
@@ -37,5 +38,19 @@ def test_dummy_env_uses_nested_env_fallback_for_heads_and_tactical():
         assert obs_space["map"].shape == (3, 128, 128)
         assert obs_space["tactical"].shape == (1, 32, 32)
         assert env.action_space.nvec.tolist() == [FIXED_UNIVERSAL_COMMAND_DIM, 1024]
+    finally:
+        env.close()
+
+
+def test_dummy_env_level_name_matches_config_manager():
+    cm = ConfigManager("config_universal")
+    ng = len(cm.get_cumulative_active_layers("ctf_level_01"))
+    nt = len(cm.get_cumulative_active_tactical_layers("ctf_level_01"))
+    env = create_dummy_env_from_config(
+        {"config_dir": "config_universal"}, level_name="ctf_level_01"
+    )
+    try:
+        assert env.observation_space["map"].shape[0] == ng
+        assert env.observation_space["tactical"].shape[0] == nt
     finally:
         env.close()

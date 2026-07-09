@@ -15,27 +15,42 @@ import os
 import math
 from typing import Dict, Any, List, Optional, Union, Tuple
 import cv2
+from scipy.ndimage import binary_dilation
 
 # SC2 Dependencies
 from sc2.unit import Unit
 from sc2.game_data import GameData
 from sc2.ids.unit_typeid import UnitTypeId
+from sc2.ids.upgrade_id import UpgradeId
 from sc2.ids.effect_id import EffectId
 from sc2.ids.ability_id import AbilityId
+from sc2.constants import IS_DETECTOR, UNIT_PHOTONCANNON
 
 # Project Constants
 from src.utils.layer_constants import LayerConstants
 from src.utils.command_constants import CommandConstants
+from src.utils.obs_geometry import (
+    TACTICAL_HALF,
+    TACTICAL_OBS_SIZE,
+    compute_global_obs_geometry,
+    tactical_crop_origin,
+)
 
+# Tactical 1×1 stamps — flying support + tiny structures (not full tile footprints).
+_TACTICAL_SINGLE_PIXEL_UNITS: frozenset = frozenset({
+    "OVERLORD",
+    "OVERLORDTRANSPORT",
+    "OVERSEER",
+    "OVERSEERSIEGEMODE",
+    "OBSERVER",
+    "OBSERVERSIEGEMODE",
+    "CREEPTUMOR",
+    "CREEPTUMORBURROWED",
+})
 # Units with passive cliff traversal (Colossus: Cliff Walk, Reaper: jet-pack jumps).
 # Used by the observation transformer to automatically widen the terrain_pathable layer
 # for these unit types — no bot needs to set cliff_walker explicitly in raw_obs.
 _CLIFF_WALKER_NAMES: frozenset = frozenset({'COLOSSUS', 'REAPER'})
-
-# Fixed display value for cliff-edge walkable cells in the terrain_pathable layer.
-# Shown at the midpoint of [0.2, 1.0] so cliff edges appear as a medium-gray band
-# creating a visible gradient: low ground (≈0.2) → cliff edge (0.6) → high ground (≈1.0).
-_CLIFF_FACE_DISPLAY_VALUE: float = 0.6
 
 # 4-connected cross structuring element — used for binary erosion when finding
 # walkable cells at the walkable boundary (adjacent to any non-walkable cell).
@@ -43,6 +58,231 @@ _FOUR_CONNECTED = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
 
 # Playable size (game units) used as reference so COMMAND_ASSIGNMENT stays as visible as on 128×128 maps.
 _ASSIGNMENT_REFERENCE_PLAYABLE = 128
+# Fixed game-space radius for COMMAND_OBJECTIVE on the global 128×128 view (Point2 + beacon).
+_OBJECTIVE_REFERENCE_RADIUS_GU = 3.0
+
+# Half-extent (game units) for structure footprints when live API / unit_data omit radius.
+# Values follow SC2 editor footprint sizes: NxN tiles → N/2 from center to edge.
+_STRUCTURE_FOOTPRINT_RADIUS: Dict[str, float] = {
+    # 5x5 town halls
+    "COMMANDCENTER": 2.5,
+    "COMMANDCENTERFLYING": 2.5,
+    "ORBITALCOMMAND": 2.5,
+    "ORBITALCOMMANDFLYING": 2.5,
+    "PLANETARYFORTRESS": 2.5,
+    "HATCHERY": 2.5,
+    "LAIR": 2.5,
+    "HIVE": 2.5,
+    "NEXUS": 2.5,
+    # 3x3 production / support
+    "BARRACKS": 1.5,
+    "FACTORY": 1.5,
+    "STARPORT": 1.5,
+    "BUNKER": 1.5,
+    "ENGINEERINGBAY": 1.5,
+    "ARMORY": 1.5,
+    "FUSIONCORE": 1.5,
+    "GHOSTACADEMY": 1.5,
+    "REFINERY": 1.5,
+    "EXTRACTOR": 1.5,
+    "ASSIMILATOR": 1.5,
+    "VESPENEGEYSER": 1.5,
+    "MINERALFIELD": 1.5,
+    "GATEWAY": 1.5,
+    "WARPGATE": 1.5,
+    "ROBOTICSFACILITY": 1.5,
+    "STARGATE": 1.5,
+    "FORGE": 1.5,
+    "CYBERNETICSCORE": 1.5,
+    "TWILIGHTCOUNCIL": 1.5,
+    "ROBOTICSBAY": 1.5,
+    "FLEETBEACON": 1.5,
+    "TEMPLARARCHIVE": 1.5,
+    "DARKSHRINE": 1.5,
+    "ROACHWARREN": 1.5,
+    "HYDRALISKDEN": 1.5,
+    "BANELINGNEST": 1.5,
+    "SPIRE": 1.5,
+    "GREATERSPIRE": 1.5,
+    "ULTRALISKCAVERN": 1.5,
+    "INFESTATIONPIT": 1.5,
+    "EVOLUTIONCHAMBER": 1.5,
+    "SPINECRAWLER": 1.5,
+    "SPORECRAWLER": 1.5,
+    # 2x2 small structures
+    "SUPPLYDEPOT": 1.0,
+    "PYLON": 1.0,
+    "MISSILETURRET": 1.0,
+    "SENSORTOWER": 1.0,
+    "AUTOTURRET": 1.0,
+    "PHOTONCANNON": 1.0,
+    "SHIELDBATTERY": 1.0,
+    "REACTOR": 1.0,
+    "TECHLAB": 1.0,
+    # 1×1 zerg creep spreaders (not 2×2 buildings)
+    "CREEPTUMOR": 0.375,
+    "CREEPTUMORBURROWED": 0.375,
+}
+
+# Terran production buildings and their 2×2 add-on slot (center-to-center offset).
+_ADDON_PARENT_TYPES: frozenset = frozenset({
+    "BARRACKS",
+    "FACTORY",
+    "STARPORT",
+    "BARRACKSFLYING",
+    "FACTORYFLYING",
+    "STARPORTFLYING",
+})
+_ADDON_TYPES: frozenset = frozenset({"TECHLAB", "REACTOR"})
+_ADDON_SLOT_OFFSET: Tuple[float, float] = (2.5, -0.5)
+_ADDON_FOOTPRINT_RADIUS: float = 1.0
+
+# Fallback display radii for units missing from unit_data.json / CTF UNIT_DATA.
+_UNIT_DISPLAY_RADIUS_SUPPLEMENT: Dict[str, float] = {
+    "OBSERVER": 0.75,
+    "OBSERVERSIEGEMODE": 0.75,
+    # Protoss support
+    "WARPPRISM": 1.0,
+    "WARPPRISMPHASING": 1.0,
+    "SENTRY": 0.5,
+    # Workers / transports (also listed in CTF UNIT_DATA when import succeeds)
+    "SCV": 0.375,
+    "PROBE": 0.375,
+    "DRONE": 0.375,
+    "MULE": 0.375,
+    "MEDIVAC": 1.0,
+    "OVERLORD": 0.875,
+    "OVERLORDTRANSPORT": 0.875,
+    "OVERSEER": 0.875,
+    "OVERSEERSIEGEMODE": 0.875,
+    "ZEALOT": 0.5,
+    "STALKER": 0.625,
+    "IMMORTAL": 1.0,
+    "ZERGLING": 0.375,
+    "ROACH": 0.75,
+    "HYDRALISK": 0.625,
+    "ULTRALISK": 1.0,
+    "ARCHON": 1.0,
+    "QUEEN": 0.875,
+}
+
+# Body half-extent for mobiles whose unit_data ``radius`` is selection/collision sized
+# (e.g. SIEGETANKSIEGED radius 2.0 == weapon min_range, not the rendered hull).
+_UNIT_BODY_RADIUS_OVERRIDE: Dict[str, float] = {
+    "SIEGETANKSIEGED": 1.25,
+}
+
+# Tactical 1:1 obs uses a fixed 2×2 hull for sieged tanks (catalog 1.25 gu spans 2–3
+# pixels when sampled on the pathing grid; snapping avoids 2×3 / 3×3 wobble).
+_TACTICAL_SIEGE_FOOTPRINT_CELLS = 2
+
+# Tile-snapped N×N obs hulls — center-stamped odd sizes (1, 3, 5…) cannot hit 2×2.
+_FIXED_FOOTPRINT_CELLS: Dict[str, int] = {
+    "ULTRALISK": 2,
+    "ARCHON": 2,
+}
+
+# Minimum siege dead-zone radius on the obs grid (pixels) when downsampling would hide it.
+_MIN_WEAPON_MIN_RANGE_OBS_RADIUS_PX = 1.5
+
+# SC2 cliff tiers are 16 gu apart; map-stable normalization keeps tactical/global fixed.
+_SC2_TERRAIN_LEVEL_STEP = 16.0
+_TERRAIN_HEIGHT_PERCENTILE_FLOOR = 5.0
+_TERRAIN_HEIGHT_PERCENTILE_CAP = 95.0
+# Each cliff tier (16 gu) advances brightness by a fixed step so 2- and 3-level maps match.
+_TERRAIN_BRIGHTNESS_FLOOR = 0.2
+_TERRAIN_BRIGHTNESS_PER_CLIFF_TIER = 0.4
+
+def _build_liberator_zone_effect_ids() -> frozenset:
+    """SC2 liberation-zone effect ids (enum values 8/9; keep 82/83 for legacy snapshots)."""
+    ids: set = set()
+    for name in ("LIBERATORTARGETMORPHDELAYPERSISTENT", "LIBERATORTARGETMORPHPERSISTENT"):
+        enum_val = getattr(EffectId, name, None)
+        if enum_val is not None:
+            ids.add(int(getattr(enum_val, "value", enum_val)))
+    ids.update({82, 83})
+    return frozenset(ids)
+
+
+_LIBERATOR_ZONE_EFFECT_IDS = _build_liberator_zone_effect_ids()
+
+
+def _build_threat_effect_specs() -> Dict[int, Tuple[float, float, bool]]:
+    """Map SC2 ``EffectId`` values to (dps, radius_game, hits_air)."""
+    specs: Dict[int, Tuple[float, float, bool]] = {}
+
+    def _add(enum_name: str, dps: float, radius: float, hits_air: bool = False) -> None:
+        enum_val = getattr(EffectId, enum_name, None)
+        if enum_val is not None:
+            specs[int(getattr(enum_val, "value", enum_val))] = (dps, radius, hits_air)
+
+    _add("PSISTORMPERSISTENT", 28.0, 1.5, False)
+    _add("NUKEPERSISTENT", 300.0, 8.0, True)
+    _add("RAVAGERCORROSIVEBILECP", 200.0, 2.0, True)
+    # Legacy numeric ids from older snapshots / replays.
+    specs.setdefault(1, (28.0, 1.5, False))
+    specs.setdefault(7, (300.0, 8.0, True))
+    specs.setdefault(11, (200.0, 2.0, True))
+    return specs
+
+
+_THREAT_EFFECT_SPECS = _build_threat_effect_specs()
+_SCAN_EFFECT_IDS = frozenset(
+    eid
+    for eid in (
+        int(getattr(getattr(EffectId, "SCANNERSWEEP", None), "value", 6)),
+        6,
+    )
+)
+
+# Body cull for tactical unit stamps — matches Level7Bot._TACTICAL_FOVEA_MAX_DELTA.
+_TACTICAL_BODY_MAX_DELTA = float(TACTICAL_HALF + 1)
+
+# Unit density + orthogonal attribute counters accumulate per overlapping unit (see LayerConstants).
+_ADDITIVE_UNIT_COUNTER_LAYERS = frozenset({
+    LayerConstants.ALLIED_UNIT_DENSITY,
+    LayerConstants.ENEMY_UNIT_DENSITY,
+    LayerConstants.ALLIED_UNIT_BIOLOGICAL,
+    LayerConstants.ALLIED_UNIT_MECHANICAL,
+    LayerConstants.ALLIED_UNIT_ARMORED,
+    LayerConstants.ALLIED_UNIT_MASSIVE,
+    LayerConstants.ALLIED_UNIT_FLYING,
+    LayerConstants.ALLIED_UNIT_CLOAK,
+    LayerConstants.ENEMY_UNIT_BIOLOGICAL,
+    LayerConstants.ENEMY_UNIT_MECHANICAL,
+    LayerConstants.ENEMY_UNIT_ARMORED,
+    LayerConstants.ENEMY_UNIT_MASSIVE,
+    LayerConstants.ENEMY_UNIT_FLYING,
+    LayerConstants.ENEMY_UNIT_CLOAK,
+})
+
+
+def _load_unit_display_radius() -> Dict[str, float]:
+    """Structure defaults + CTF curriculum radii + supplements (unit_data.json merged in __init__)."""
+    out: Dict[str, float] = dict(_STRUCTURE_FOOTPRINT_RADIUS)
+    try:
+        from train.envs.ctf.game_data import UNIT_DATA, _ID_TABLE
+
+        id_to_name = {v: k for k, v in _ID_TABLE.items()}
+        for type_id, info in UNIT_DATA.items():
+            name = id_to_name.get(type_id)
+            if name is not None:
+                out[name] = float(info.footprint_radius)
+    except ImportError:
+        pass
+    for name, radius in _UNIT_DISPLAY_RADIUS_SUPPLEMENT.items():
+        out.setdefault(name, radius)
+    return out
+
+
+_UNIT_DISPLAY_RADIUS: Optional[Dict[str, float]] = None
+
+
+def _get_unit_display_radius() -> Dict[str, float]:
+    global _UNIT_DISPLAY_RADIUS
+    if _UNIT_DISPLAY_RADIUS is None:
+        _UNIT_DISPLAY_RADIUS = _load_unit_display_radius()
+    return _UNIT_DISPLAY_RADIUS
 
 
 class ObservationTransformer:
@@ -53,10 +293,14 @@ class ObservationTransformer:
 
         # Transformation State
         self.scale = 1.0
+        self.scale_x = 1.0
+        self.scale_y = 1.0
         self.offset_x = 0.0
         self.offset_y = 0.0
         self.crop_x = 0.0
         self.crop_y = 0.0
+        self._obs_span_w = float(map_size[0])
+        self._obs_span_h = float(map_size[1])
 
         # Layer Map Selection
         self.current_layer_map = LayerConstants.LAYERS
@@ -88,15 +332,15 @@ class ObservationTransformer:
         # Terrain caching — keyed by traversal type: "standard" or "cliff_walker"
         self._terrain_caches: Dict[str, Optional[np.ndarray]] = {}
         self._last_map_name = None
-        self._last_structure_count = 0
-        self._h_min = None
-        self._h_max = None
+        self._map_terrain_h_min: Optional[float] = None
+        self._map_terrain_tier_max: Optional[float] = None
+        self._map_terrain_h_scale_map: Optional[str] = None
         # Cliff face mask cache — depends only on the static pathing/height grid,
         # so it is valid for the lifetime of a map (recomputed on map change only).
         self._cliff_face_cache: Optional[np.ndarray] = None
         self._cliff_face_cache_map: Optional[str] = None
-        # Per-cell display height for cliff face cells: local maximum walkable
-        # height in a 5x5 window (= high-ground brightness for each cliff cell).
+        self._attached_addon_tags: set = set()
+        # Per-cell cliff-face brightness in obs space (midpoint of local high/low tiers).
         self._cliff_display_heights: Optional[np.ndarray] = None
 
         # Pre-allocated grids
@@ -104,6 +348,8 @@ class ObservationTransformer:
         self._grid_x = np.arange(self.feature_map_width).reshape(1, -1)
 
         self._liberator_positions = {'allied': [], 'enemy': []}
+        self._cached_path_data: Optional[np.ndarray] = None
+        self._current_game_data: Optional[GameData] = None
 
         # Load DB
         if unit_data_file is None:
@@ -111,6 +357,333 @@ class ObservationTransformer:
             unit_data_file = os.path.join(base_dir, "data", "unit_data.json")
 
         self.fallback_db = self._load_fallback_db(unit_data_file)
+        self._display_radius_db = dict(_get_unit_display_radius())
+        self._merge_json_display_radii()
+        self._display_radius_by_type_id = self._build_display_radius_by_type_id()
+
+    def _build_display_radius_by_type_id(self) -> Dict[int, float]:
+        """Map UnitTypeId values to display radii when ``type_id.name`` is missing."""
+        out: Dict[int, float] = {}
+        try:
+            from sc2.ids.unit_typeid import UnitTypeId
+
+            for ut in UnitTypeId:
+                name = getattr(ut, "name", None)
+                if not name:
+                    continue
+                radius = self._display_radius_db.get(str(name).upper())
+                if radius is not None:
+                    out[int(ut.value)] = float(radius)
+        except ImportError:
+            pass
+        return out
+
+    @staticmethod
+    def _resolve_unit_type_name(unit: Unit) -> Optional[str]:
+        type_id = getattr(unit, "type_id", None)
+        if type_id is None:
+            return None
+        name = getattr(type_id, "name", None)
+        if name:
+            return str(name).upper()
+        try:
+            from sc2.ids.unit_typeid import UnitTypeId
+
+            return str(UnitTypeId(int(type_id)).name).upper()
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return None
+
+    @staticmethod
+    def _is_addon_parent_type(name: Optional[str]) -> bool:
+        return name in _ADDON_PARENT_TYPES if name else False
+
+    @staticmethod
+    def _is_addon_type(name: Optional[str]) -> bool:
+        return name in _ADDON_TYPES if name else False
+
+    def _refresh_attached_addon_tags(self, *structure_lists: List[Unit]) -> None:
+        """Tags of TECHLAB/REACTOR units already drawn via their parent production building."""
+        tags: set = set()
+        for structures in structure_lists:
+            for unit in structures or []:
+                if not getattr(unit, "is_structure", False):
+                    continue
+                if not self._is_addon_parent_type(self._resolve_unit_type_name(unit)):
+                    continue
+                addon_tag = getattr(unit, "add_on_tag", 0)
+                if isinstance(addon_tag, (int, np.integer)) and addon_tag:
+                    tags.add(addon_tag)
+        self._attached_addon_tags = tags
+
+    def _structure_has_attached_addon(self, unit: Unit) -> bool:
+        if not self._is_addon_parent_type(self._resolve_unit_type_name(unit)):
+            return False
+        addon_tag = getattr(unit, "add_on_tag", 0)
+        return isinstance(addon_tag, (int, np.integer)) and addon_tag != 0
+
+    def _is_attached_addon_unit(self, unit: Unit) -> bool:
+        if not getattr(unit, "is_structure", False):
+            return False
+        if not self._is_addon_type(self._resolve_unit_type_name(unit)):
+            return False
+        tag = getattr(unit, "tag", None)
+        return tag in self._attached_addon_tags
+
+    @staticmethod
+    def _addon_slot_position(unit: Unit) -> Tuple[float, float]:
+        slot = getattr(unit, "add_on_position", None)
+        if slot is not None and hasattr(slot, "x") and hasattr(slot, "y"):
+            sx, sy = getattr(slot, "x", None), getattr(slot, "y", None)
+            if isinstance(sx, (int, float)) and isinstance(sy, (int, float)):
+                return float(sx), float(sy)
+        cx, cy = float(unit.position.x), float(unit.position.y)
+        ox, oy = _ADDON_SLOT_OFFSET
+        return cx + ox, cy + oy
+
+    def _merge_obs_rect_bounds(
+        self,
+        *bounds: Tuple[int, int, int, int],
+    ) -> Tuple[int, int, int, int]:
+        x0 = min(b[0] for b in bounds)
+        x1 = max(b[1] for b in bounds)
+        y0 = min(b[2] for b in bounds)
+        y1 = max(b[3] for b in bounds)
+        return x0, x1, y0, y1
+
+    def _merge_json_display_radii(self) -> None:
+        """Apply unit_data.json radii (authoritative game footprint when present)."""
+        for name, data in self.fallback_db.items():
+            for key in ("display_radius", "footprint_radius", "radius"):
+                val = data.get(key, 0)
+                if isinstance(val, (int, float)) and val > 0:
+                    self._display_radius_db[name] = float(val)
+                    break
+
+    def _collect_liberator_positions(
+        self,
+        allied_units,
+        allied_structures,
+        enemy_units,
+        enemy_structures,
+    ) -> None:
+        """Track sieged liberator positions for liberation-zone ownership (global + tactical)."""
+        self._liberator_positions = {"allied": [], "enemy": []}
+        lib_enum = getattr(UnitTypeId, "LIBERATORAG", None)
+        if lib_enum is None:
+            return
+        lib_val = lib_enum.value if hasattr(lib_enum, "value") else lib_enum
+
+        def _is_liberator(unit: Unit) -> bool:
+            tid = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
+            return tid == lib_val
+
+        for unit in list(allied_units or []) + list(allied_structures or []):
+            if _is_liberator(unit):
+                self._liberator_positions["allied"].append(unit.position)
+        for unit in list(enemy_units or []) + list(enemy_structures or []):
+            if _is_liberator(unit):
+                self._liberator_positions["enemy"].append(unit.position)
+
+    def _has_active_ground_dps_layers(self, is_enemy: bool) -> bool:
+        """True when any configured ground DPS channel is active for allied/enemy."""
+        prefix = "enemy" if is_enemy else "allied"
+        for suffix in ("base", "light", "armor", "massive"):
+            idx = self.current_layer_map.get(f"{prefix}_g_dps_{suffix}")
+            if idx is not None and idx in self.active_indices:
+                return True
+        return False
+
+    def _has_active_air_dps_layers(self, is_enemy: bool) -> bool:
+        """True when any configured air DPS channel is active for allied/enemy."""
+        prefix = "enemy" if is_enemy else "allied"
+        for suffix in ("base", "light", "armor", "massive"):
+            idx = self.current_layer_map.get(f"{prefix}_a_dps_{suffix}")
+            if idx is not None and idx in self.active_indices:
+                return True
+        return False
+
+    def _has_active_dps_layers(self, is_enemy: bool) -> bool:
+        """True when any ground or air DPS channel is active."""
+        return self._has_active_ground_dps_layers(is_enemy) or self._has_active_air_dps_layers(
+            is_enemy
+        )
+
+    def _resolve_axis_dps_layer(
+        self, prefix: str, axis: str, suffix: Optional[str] = None
+    ) -> Optional[int]:
+        """
+        Active DPS layer for one axis (``g`` or ``a``), with cross-axis fallback.
+
+        CTF and combat configs often enable only ``g_dps_*`` layers; air-only weapons
+        (Tempest, Phoenix) still need to project threat there when ``a_dps_*`` is off.
+        """
+        layer_suffix = suffix or "base"
+        primary = self.current_layer_map.get(f"{prefix}_{axis}_dps_{layer_suffix}")
+        if primary is not None and primary in self.active_indices:
+            return primary
+        other = "a" if axis == "g" else "g"
+        fallback = self.current_layer_map.get(f"{prefix}_{other}_dps_{layer_suffix}")
+        if fallback is not None and fallback in self.active_indices:
+            return fallback
+        return None
+
+    @staticmethod
+    def _unit_on_cloak_layer(unit: Unit) -> bool:
+        """True when the unit should stamp the cloak attribute layer."""
+        return getattr(unit, "is_cloaked", False) or getattr(unit, "is_burrowed", False)
+
+    @staticmethod
+    def _skip_undetected_cloaked_enemy(unit: Unit, is_enemy: bool) -> bool:
+        """True when an enemy unit should be omitted (cloaked and not detected)."""
+        if not is_enemy:
+            return False
+        if not ObservationTransformer._unit_on_cloak_layer(unit):
+            return False
+        if getattr(unit, "is_detected", True):
+            return False
+        return not getattr(unit, "is_snapshot", False)
+
+    @staticmethod
+    def _unit_is_combat_ready(unit: Unit) -> bool:
+        """False while a unit is warping or still under construction (no weapon DPS yet)."""
+        if not getattr(unit, "is_ready", True):
+            return False
+        progress = float(getattr(unit, "build_progress", 1.0))
+        return progress >= 1.0
+
+    def _tactical_fovea_game_bounds(self) -> Tuple[float, float, float, float]:
+        """Inclusive-min, exclusive-max game bounds of the 32×32 tactical window."""
+        return (
+            float(self.crop_x),
+            float(self.crop_y),
+            float(self.crop_x + TACTICAL_OBS_SIZE),
+            float(self.crop_y + TACTICAL_OBS_SIZE),
+        )
+
+    def _tactical_game_point_inside_fovea(self, gx: float, gy: float) -> bool:
+        x0, y0, x1, y1 = self._tactical_fovea_game_bounds()
+        return x0 <= float(gx) < x1 and y0 <= float(gy) < y1
+
+    def _tactical_footprint_intersects_fovea(self, unit: Unit) -> bool:
+        """True when the unit's catalog footprint overlaps the tactical fovea."""
+        game_r = self._footprint_game_radius(unit)
+        cx = float(unit.position.x)
+        cy = float(unit.position.y)
+        ux0, ux1 = cx - game_r, cx + game_r
+        uy0, uy1 = cy - game_r, cy + game_r
+        fx0, fy0, fx1, fy1 = self._tactical_fovea_game_bounds()
+        return ux0 < fx1 and ux1 > fx0 and uy0 < fy1 and uy1 > fy0
+
+    def _tactical_body_inside_fovea(self, unit: Unit, active_unit: Unit) -> bool:
+        del active_unit  # fovea is anchored on crop_x/crop_y, not focal distance
+        return self._tactical_footprint_intersects_fovea(unit)
+
+    def _unit_max_weapon_reach(self, unit: Unit) -> float:
+        """Max ground or air weapon reach in game units (for tactical off-fovea DPS culling)."""
+        if not self._unit_is_combat_ready(unit):
+            return 0.0
+        if unit.is_hallucination:
+            return 0.0
+        uid = unit.type_id
+        if uid in [
+            UnitTypeId.LIBERATORAG,
+            UnitTypeId.CARRIER,
+            UnitTypeId.LURKERMP,
+            UnitTypeId.MEDIVAC,
+            UnitTypeId.WARPPRISM,
+            UnitTypeId.OBSERVER,
+            UnitTypeId.OVERLORD,
+            UnitTypeId.OVERSEER,
+        ]:
+            return 0.0
+        if uid == UnitTypeId.WIDOWMINEBURROWED:
+            return 5.0 + self._footprint_game_radius(unit)
+        if uid == UnitTypeId.BANELING:
+            return 2.2
+        if uid == UnitTypeId.ORACLE and unit.energy >= 25:
+            return 4.0 + self._footprint_game_radius(unit)
+        u_name = getattr(unit.type_id, "name", None)
+        if not u_name:
+            return 0.0
+        db = self._get_unit_data_from_json(u_name)
+        if not db:
+            return 0.0
+        max_reach = 0.0
+        for w in db.get("weapons", []):
+            wtype = int(w.get("type", 0))
+            if wtype not in (1, 2, 3):
+                continue
+            rng_g, rng_a = self._dps_weapon_game_radius(unit, float(w["range"]))
+            if wtype in (1, 3):
+                max_reach = max(max_reach, rng_g)
+            if wtype in (2, 3):
+                max_reach = max(max_reach, rng_a)
+        return max_reach
+
+    def _unit_max_ground_weapon_reach(self, unit: Unit) -> float:
+        """Backward-compatible alias; includes air reach for off-fovea tactical culling."""
+        return self._unit_max_weapon_reach(unit)
+
+    def _tactical_weapon_ring_may_intersect_fovea(self, unit: Unit, active_unit: Unit) -> bool:
+        """True when a weapon disc (ground or air) could overlap the 32×32 tactical fovea."""
+        reach = self._unit_max_weapon_reach(unit)
+        if reach <= 0:
+            return False
+        dx = abs(unit.position.x - active_unit.position.x)
+        dy = abs(unit.position.y - active_unit.position.y)
+        return max(dx, dy) <= float(TACTICAL_HALF) + reach
+
+    def _draw_tactical_reach_in_dps(
+        self,
+        layers: np.ndarray,
+        active_unit: Unit,
+        allied_units,
+        allied_structures,
+        enemy_units,
+        enemy_structures,
+        game_data: GameData,
+    ) -> None:
+        """Draw weapon rings for units outside the body cull whose reach overlaps the fovea."""
+        for unit_list, is_enemy in (
+            (list(allied_units) + list(allied_structures), False),
+            (list(enemy_units) + list(enemy_structures), True),
+        ):
+            if not self._has_active_dps_layers(is_enemy):
+                continue
+            for unit in unit_list:
+                if self._is_attached_addon_unit(unit):
+                    continue
+                if self._skip_undetected_cloaked_enemy(unit, is_enemy):
+                    continue
+                if self._tactical_body_inside_fovea(unit, active_unit):
+                    continue
+                if not self._tactical_weapon_ring_may_intersect_fovea(unit, active_unit):
+                    continue
+                px, py = self._get_pixel_coords_unclamped(unit.position)
+                if px is not None:
+                    self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
+
+    def _effect_dps_layer_indices(self, prefix: str, hits_air: bool = False) -> List[int]:
+        """DPS layer indices for effect zones (storm, nuke, liberator AA zone)."""
+        indices: List[int] = []
+        base_idx = self.current_layer_map.get(f"{prefix}_g_dps_base")
+        if base_idx is not None and base_idx in self.active_indices:
+            indices.append(base_idx)
+        else:
+            for suffix in ("light", "armor", "massive"):
+                idx = self.current_layer_map.get(f"{prefix}_g_dps_{suffix}")
+                if idx is not None and idx in self.active_indices:
+                    indices.append(idx)
+        if hits_air:
+            air_base = self.current_layer_map.get(f"{prefix}_a_dps_base")
+            if air_base is not None and air_base in self.active_indices:
+                indices.append(air_base)
+            else:
+                for suffix in ("light", "armor", "massive"):
+                    idx = self.current_layer_map.get(f"{prefix}_a_dps_{suffix}")
+                    if idx is not None and idx in self.active_indices:
+                        indices.append(idx)
+        return indices
 
     def _update_active_indices(self):
         """Updates active indices based on current layer map and pruning config."""
@@ -160,16 +733,23 @@ class ObservationTransformer:
         old_state = (self.scale, self.offset_x, self.offset_y, self.crop_x, self.crop_y, 
                      self.feature_map_width, self.feature_map_height, 
                      self.current_layer_map, self.is_tactical_mode,
-                     self._grid_x, self._grid_y)
+                     self._grid_x, self._grid_y,
+                     self._obs_span_w, self._obs_span_h)
         
-        # Tactical setup (32x32 centered on unit)
+        # Tactical setup (32x32 centered on unit). Snap crop to integer game
+        # coordinates so entities and terrain do not wiggle with fractional focal positions.
         self.scale = 1.0
         self.feature_map_width = 32
         self.feature_map_height = 32
-        self.crop_x = active_unit.position.x - 16.0
-        self.crop_y = active_unit.position.y - 16.0
+        self.crop_x, self.crop_y = tactical_crop_origin(
+            active_unit.position.x, active_unit.position.y
+        )
         self.offset_x = 0
         self.offset_y = 0
+        # Tactical fovea is always a full 32×32 window — do not inherit global
+        # playable span / letterbox from transform().
+        self._obs_span_w = float(TACTICAL_OBS_SIZE)
+        self._obs_span_h = float(TACTICAL_OBS_SIZE)
         self.current_layer_map = LayerConstants.TACTICAL_LAYERS
         self.is_tactical_mode = True
         self._update_active_indices()
@@ -179,56 +759,91 @@ class ObservationTransformer:
 
         try:
             game_info = raw_obs.get('game_info')
+            self._current_game_data = raw_obs.get('game_data')
+            self._cache_pathing_grid(game_info)
             allied_units = raw_obs.get('units') or []
             enemy_units = raw_obs.get('enemy_units') or []
             allied_structures = raw_obs.get('structures') or []
             enemy_structures = raw_obs.get('enemy_structures') or []
             game_data = raw_obs.get('game_data')
             effects = raw_obs.get('effects') or []
+            self._refresh_attached_addon_tags(allied_structures, enemy_structures)
             
             # Draw
             cliff_walker = self._detect_cliff_walker(raw_obs, active_unit=active_unit)
-            self._draw_terrain_pathing(game_info, layers, cliff_walker=cliff_walker)
+            blocking_ground = [
+                u for u in list(allied_units) + list(enemy_units)
+                + list(allied_structures) + list(enemy_structures)
+                if not getattr(u, "is_flying", False)
+            ]
+            self._draw_terrain_pathing(
+                game_info, layers, cliff_walker=cliff_walker, ground_units=blocking_ground
+            )
+            self._apply_map_blocker_terrain(layers, raw_obs)
             self._draw_terrain_creep(raw_obs, layers)
+            self._draw_terrain_buildable(raw_obs, layers)
 
-            # Allied
+            # Allied / enemy bodies (and in-fovea DPS) — skip units outside the fovea.
             for unit in list(allied_units) + list(allied_structures):
-                if abs(unit.position.x - active_unit.position.x) > 17 or abs(unit.position.y - active_unit.position.y) > 17:
+                if not self._tactical_body_inside_fovea(unit, active_unit):
                     continue
-                self._process_single_unit(unit, layers, False, 32, 32, game_data)
+                self._process_single_unit(unit, layers, False, TACTICAL_OBS_SIZE, TACTICAL_OBS_SIZE, game_data)
 
-            # Enemy
             for unit in list(enemy_units) + list(enemy_structures):
-                if abs(unit.position.x - active_unit.position.x) > 17 or abs(unit.position.y - active_unit.position.y) > 17:
+                if not self._tactical_body_inside_fovea(unit, active_unit):
                     continue
-                self._process_single_unit(unit, layers, True, 32, 32, game_data)
+                self._process_single_unit(unit, layers, True, TACTICAL_OBS_SIZE, TACTICAL_OBS_SIZE, game_data)
 
-            # Enemy DPS from units outside view whose weapon range reaches in
-            dps_idx = LayerConstants.TACTICAL_LAYERS.get(LayerConstants.ENEMY_G_DPS_BASE)
-            if dps_idx is not None and dps_idx in self.active_indices:
-                for unit in list(enemy_units) + list(enemy_structures):
-                    dx = abs(unit.position.x - active_unit.position.x)
-                    dy = abs(unit.position.y - active_unit.position.y)
-                    if dx <= 17 and dy <= 17:
-                        continue
-                    if dx > 32 or dy > 32:
-                        continue
-                    px, py = self._get_pixel_coords_unclamped(unit.position)
-                    if px is not None:
-                        self._draw_unit_dps(unit, layers, True, px, py, game_data)
+            # Weapon rings from off-fovea units whose reach still overlaps the tactical window.
+            self._draw_tactical_reach_in_dps(
+                layers,
+                active_unit,
+                allied_units,
+                allied_structures,
+                enemy_units,
+                enemy_structures,
+                game_data,
+            )
 
-            # Draw Command Info (High-priority markers)
+            # Draw Command Info (High-priority markers). Keep client selection when
+            # present (debug UI multi-select); always include the focal unit.
             tactical_raw_obs = raw_obs.copy()
-            tactical_raw_obs['selected_units'] = [active_unit]
+            selected = list(raw_obs.get("selected_units") or [])
+            if active_unit is not None:
+                active_tag = getattr(active_unit, "tag", None)
+                if not any(getattr(u, "tag", None) == active_tag for u in selected):
+                    selected.append(active_unit)
+            if not selected and active_unit is not None:
+                selected = [active_unit]
+            tactical_raw_obs["selected_units"] = selected
             self._draw_command_info(tactical_raw_obs, layers)
 
-            if effects: self._draw_effects(effects, layers)
+            self._collect_liberator_positions(
+                allied_units, allied_structures, enemy_units, enemy_structures
+            )
+            if effects:
+                self._draw_effects(effects, layers)
 
-            # Normalize DPS layers with tanh (matches global transform)
-            for dps_layer_name in [LayerConstants.ALLIED_G_DPS_BASE, LayerConstants.ENEMY_G_DPS_BASE]:
+            # Normalize all DPS channels with tanh (matches global transform)
+            for dps_layer_name in [
+                LayerConstants.ALLIED_G_DPS_BASE, LayerConstants.ENEMY_G_DPS_BASE,
+                LayerConstants.ALLIED_G_DPS_LIGHT, LayerConstants.ENEMY_G_DPS_LIGHT,
+                LayerConstants.ALLIED_G_DPS_ARMOR, LayerConstants.ENEMY_G_DPS_ARMOR,
+                LayerConstants.ALLIED_G_DPS_MASSIVE, LayerConstants.ENEMY_G_DPS_MASSIVE,
+                LayerConstants.ALLIED_A_DPS_BASE, LayerConstants.ENEMY_A_DPS_BASE,
+                LayerConstants.ALLIED_A_DPS_LIGHT, LayerConstants.ENEMY_A_DPS_LIGHT,
+                LayerConstants.ALLIED_A_DPS_ARMOR, LayerConstants.ENEMY_A_DPS_ARMOR,
+                LayerConstants.ALLIED_A_DPS_MASSIVE, LayerConstants.ENEMY_A_DPS_MASSIVE,
+            ]:
                 dps_layer_idx = LayerConstants.TACTICAL_LAYERS.get(dps_layer_name)
                 if dps_layer_idx is not None:
                     layers[dps_layer_idx] = np.tanh(layers[dps_layer_idx] / 50.0)
+
+            # Count layers: log1p accumulation (matches global transform pre-clip).
+            for layer_name in _ADDITIVE_UNIT_COUNTER_LAYERS:
+                layer_idx = self.current_layer_map.get(layer_name)
+                if layer_idx is not None:
+                    layers[layer_idx] = np.log1p(layers[layer_idx])
 
             # Clip
             layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
@@ -246,7 +861,8 @@ class ObservationTransformer:
             (self.scale, self.offset_x, self.offset_y, self.crop_x, self.crop_y, 
              self.feature_map_width, self.feature_map_height, 
              self.current_layer_map, self.is_tactical_mode,
-             self._grid_x, self._grid_y) = old_state
+             self._grid_x, self._grid_y,
+             self._obs_span_w, self._obs_span_h) = old_state
             self._update_active_indices()
 
         return tactical_data
@@ -275,43 +891,56 @@ class ObservationTransformer:
         effects = raw_obs.get('effects') or []
         game_info = raw_obs.get('game_info')
         game_data = raw_obs.get('game_data')
+        self._current_game_data = game_data
 
-        # 1. Scaling
+        self._cache_pathing_grid(game_info)
+
+        # 1. Scaling — fit playable area into obs pixels (inclusive edge mapping)
         if game_info:
-            area = getattr(game_info, 'playable_area', None)
-            if area:
-                self.crop_x, self.crop_y, mw, mh = area.x, area.y, area.width, area.height
-            else:
-                self.crop_x, self.crop_y = 0, 0
-                mw, mh = game_info.map_size.width, game_info.map_size.height
+            (
+                self.crop_x,
+                self.crop_y,
+                mw,
+                mh,
+                self.scale_x,
+                self.scale_y,
+                self.offset_x,
+                self.offset_y,
+            ) = compute_global_obs_geometry(
+                game_info,
+                self.feature_map_width,
+                self.feature_map_height,
+                path_data=self._cached_path_data,
+            )
+            self._obs_span_w = float(mw)
+            self._obs_span_h = float(mh)
+            self.scale = min(self.scale_x, self.scale_y)
         else:
             self.crop_x, self.crop_y, mw, mh = 0, 0, 200, 200
+            self._obs_span_w, self._obs_span_h = 200.0, 200.0
+            self.scale = self.scale_x = self.scale_y = 1.0
+            self.offset_x, self.offset_y = 0.0, 0.0
 
-        self.scale = min(self.feature_map_width / max(mw, 1), self.feature_map_height / max(mh, 1))
-        self.offset_x = max(0, (self.feature_map_width - int(mw * self.scale)) // 2)
-        self.offset_y = max(0, (self.feature_map_height - int(mh * self.scale)) // 2)
-
-        # 2. Draw
-        current_struct_count = len(allied_structures) + len(enemy_structures)
+        # 2. Draw — global terrain is static map pathing only (cached; no live unit stamps).
         cliff_walker = self._detect_cliff_walker(raw_obs)
-        self._draw_terrain_pathing(game_info, layers, current_struct_count, cliff_walker=cliff_walker)
+        self._draw_terrain_pathing(game_info, layers, cliff_walker=cliff_walker)
+        self._apply_map_blocker_terrain(layers, raw_obs)
         self._draw_terrain_creep(raw_obs, layers)
+        self._draw_terrain_buildable(raw_obs, layers)
 
-        self._liberator_positions = {'allied': [], 'enemy': []}
-        lib_enum = getattr(UnitTypeId, 'LIBERATORAG', 154)
-        lib_val = lib_enum.value if hasattr(lib_enum, "value") else 154
+        self._collect_liberator_positions(
+            allied_units, allied_structures, enemy_units, enemy_structures
+        )
+
+        self._refresh_attached_addon_tags(allied_structures, enemy_structures)
 
         for unit in list(allied_units) + list(allied_structures):
             if "MINERAL" in getattr(unit.type_id, "name", "").upper(): continue
             self._process_single_unit(unit, layers, False, mw, mh, game_data)
-            if (unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id) == lib_val:
-                self._liberator_positions['allied'].append(unit.position)
 
         for unit in list(enemy_units) + list(enemy_structures):
             if "MINERAL" in getattr(unit.type_id, "name", "").upper(): continue
             self._process_single_unit(unit, layers, True, mw, mh, game_data)
-            if (unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id) == lib_val:
-                self._liberator_positions['enemy'].append(unit.position)
 
         if effects: self._draw_effects(effects, layers)
         self._draw_command_info(raw_obs, layers)
@@ -320,13 +949,15 @@ class ObservationTransformer:
         # 3. Post-processing
         dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
-        layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
-        layers[0:dps_start] = np.log1p(layers[0:dps_start])
-        # Health channels are binary damaged indicators; keep them in {0, 1}.
         allied_hp_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_HEALTH]
         enemy_hp_idx = LayerConstants.LAYERS[LayerConstants.ENEMY_HEALTH]
-        layers[allied_hp_idx] = (layers[allied_hp_idx] > 0.0).astype(np.float32)
-        layers[enemy_hp_idx] = (layers[enemy_hp_idx] > 0.0).astype(np.float32)
+        allied_hp = layers[allied_hp_idx].copy()
+        enemy_hp = layers[enemy_hp_idx].copy()
+
+        layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
+        layers[0:dps_start] = np.log1p(layers[0:dps_start])
+        layers[allied_hp_idx] = allied_hp
+        layers[enemy_hp_idx] = enemy_hp
         layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
 
         if self.active_layers:
@@ -338,25 +969,138 @@ class ObservationTransformer:
         # ALWAYS return Dict to match the gymnasium.spaces.Dict in Level0Env
         return {"map": map_data, "command": command_vector}
 
+    def _terrain_geometry_key(self) -> Tuple[Any, ...]:
+        return (
+            round(self.crop_x, 4),
+            round(self.crop_y, 4),
+            round(self._obs_span_w, 4),
+            round(self._obs_span_h, 4),
+            round(self.scale_x, 6),
+            round(self.scale_y, 6),
+            self.feature_map_width,
+            self.feature_map_height,
+        )
+
+    def _cache_pathing_grid(self, game_info) -> None:
+        if game_info is not None and hasattr(game_info, "pathing_grid"):
+            self._cached_path_data = self._get_numpy_data(game_info.pathing_grid)
+        else:
+            self._cached_path_data = None
+
+    def _obs_scales(self) -> Tuple[float, float]:
+        if self.is_tactical_mode:
+            return self.scale, self.scale
+        return self.scale_x, self.scale_y
+
+    def _game_to_obs_pixel_raw(self, gx: float, gy: float) -> Tuple[int, int]:
+        """Map a SC2 world point to observation pixel indices without clamping."""
+        scale_x, scale_y = self._obs_scales()
+        content_x = (gx - self.crop_x) * scale_x + self.offset_x
+        content_y = (gy - self.crop_y) * scale_y + self.offset_y
+        if self.is_tactical_mode:
+            px = int(math.floor(content_x))
+            # Align with terrain rows (integer pathing grid); floor(31 - y) is one row north.
+            py = int(self.feature_map_height - 1 - math.floor(content_y))
+        else:
+            px = int(round(content_x))
+            py = int(round(self.feature_map_height - 1 - content_y))
+        return px, py
+
+    def _game_to_obs_pixel(self, gx: float, gy: float) -> Tuple[int, int]:
+        """Map a SC2 world point to observation pixel indices."""
+        px, py = self._game_to_obs_pixel_raw(gx, gy)
+        px = max(0, min(px, self.feature_map_width - 1))
+        py = max(0, min(py, self.feature_map_height - 1))
+        return px, py
+
+    def _obs_content_valid_mask(self) -> np.ndarray:
+        """True where obs pixels fall inside the playable/content span (excludes letterbox)."""
+        if self.is_tactical_mode:
+            return np.ones(
+                (self.feature_map_height, self.feature_map_width), dtype=bool
+            )
+        x_idx = np.arange(self.feature_map_width, dtype=np.float64)
+        y_idx = np.arange(self.feature_map_height, dtype=np.float64)
+        scale_x, scale_y = self._obs_scales()
+        content_x = (x_idx - self.offset_x) / scale_x + self.crop_x
+        content_y = (
+            (self.feature_map_height - 1 - y_idx) - self.offset_y
+        ) / scale_y + self.crop_y
+        valid_x = (content_x >= self.crop_x) & (content_x < self.crop_x + self._obs_span_w)
+        valid_y = (content_y >= self.crop_y) & (content_y < self.crop_y + self._obs_span_h)
+        return np.logical_and.outer(valid_y, valid_x)
+
+    def _obs_to_sc2_meshgrid(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Map each observation pixel to SC2 pathing grid indices."""
+        x_idx = np.arange(self.feature_map_width, dtype=np.float64)
+        y_idx = np.arange(self.feature_map_height, dtype=np.float64)
+        if self.is_tactical_mode:
+            sc2_x = np.floor(((x_idx - self.offset_x) / self.scale) + self.crop_x).astype(int)
+            sc2_y = np.floor(
+                ((self.feature_map_height - 1 - y_idx - self.offset_y) / self.scale) + self.crop_y
+            ).astype(int)
+        else:
+            scale_x, scale_y = self._obs_scales()
+            sc2_x = np.round(((x_idx - self.offset_x) / scale_x) + self.crop_x).astype(int)
+            sc2_y = np.round(
+                ((self.feature_map_height - 1 - y_idx - self.offset_y) / scale_y) + self.crop_y
+            ).astype(int)
+        return np.meshgrid(sc2_x, sc2_y)
+
     def _get_pixel_coords(self, position) -> tuple:
-        if position is None: return None, None
-        px = int((position.x - self.crop_x) * self.scale + self.offset_x)
-        py = int(self.feature_map_height - 1 - ((position.y - self.crop_y) * self.scale + self.offset_y))
+        if position is None:
+            return None, None
+        px, py = self._game_to_obs_pixel(position.x, position.y)
         if 0 <= px < self.feature_map_width and 0 <= py < self.feature_map_height:
             return px, py
         return None, None
 
     def _get_pixel_coords_unclamped(self, position) -> tuple:
-        """Same as _get_pixel_coords but without bounds check.
-        Used for DPS circles whose center is outside the view but whose
-        radius overlaps it. _draw_circle_vectorized clips correctly."""
-        if position is None: return None, None
-        px = int((position.x - self.crop_x) * self.scale + self.offset_x)
-        py = int(self.feature_map_height - 1 - ((position.y - self.crop_y) * self.scale + self.offset_y))
-        return px, py
+        """Map world position to obs pixels without clamping to the fovea bounds."""
+        if position is None:
+            return None, None
+        return self._game_to_obs_pixel_raw(position.x, position.y)
+
+    def _obs_pixel_to_game_center(self, px: int, py: int) -> Tuple[float, float]:
+        """Game-space center of an obs pixel (inverse of _game_to_obs_pixel sampling)."""
+        scale_x, scale_y = self._obs_scales()
+        gx = (float(px) + 0.5 - self.offset_x) / scale_x + self.crop_x
+        content_y = (self.feature_map_height - 1 - float(py)) + 0.5 - self.offset_y
+        gy = content_y / scale_y + self.crop_y
+        return gx, gy
+
+    def _game_center_meshgrid_in_rect(
+        self,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Float game (x, y) at the center of each obs pixel inside an inclusive rect."""
+        scale_x, scale_y = self._obs_scales()
+        px_idx = np.arange(x0, x1 + 1, dtype=np.float64)
+        py_idx = np.arange(y0, y1 + 1, dtype=np.float64)
+        gx = (px_idx + 0.5 - self.offset_x) / scale_x + self.crop_x
+        content_y = (self.feature_map_height - 1 - py_idx) + 0.5 - self.offset_y
+        gy = content_y / scale_y + self.crop_y
+        return np.meshgrid(gx, gy)
+
+    def _circle_center_game(
+        self,
+        cx: int,
+        cy: int,
+        unit: Optional[Unit] = None,
+    ) -> Tuple[float, float]:
+        """Game-space center for weapon discs — unit position when available."""
+        if unit is not None:
+            return float(unit.position.x), float(unit.position.y)
+        return self._obs_pixel_to_game_center(cx, cy)
 
     def _process_single_unit(self, unit: Unit, layers: np.ndarray, is_enemy: bool,
                              map_w: int, map_h: int, game_data: GameData):
+        if self._is_attached_addon_unit(unit):
+            return
+
         px, py = self._get_pixel_coords(unit.position)
         if px is None: return
 
@@ -373,8 +1117,8 @@ class ObservationTransformer:
             return
 
         # Normal Units
-        if is_enemy and unit.is_cloaked and not unit.is_detected:
-            if not getattr(unit, "is_snapshot", False): return
+        if self._skip_undetected_cloaked_enemy(unit, is_enemy):
+            return
 
         if u_id == 170: # ScannerSweep
             idx = self.current_layer_map.get(LayerConstants.ENEMY_DETECTION if is_enemy else LayerConstants.ALLIED_DETECTION)
@@ -396,19 +1140,654 @@ class ObservationTransformer:
             self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
         else:
             self._draw_unit_vitals(unit, layers, is_enemy, px, py)
+            self._draw_unit_detection(unit, layers, is_enemy, px, py)
             self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
+
+    def _unit_is_detector_structure(self, unit: Unit) -> bool:
+        type_id = getattr(unit, "type_id", None)
+        if type_id in IS_DETECTOR:
+            return True
+        if type_id == UNIT_PHOTONCANNON:
+            return True
+        name = getattr(type_id, "name", "")
+        return str(name).upper() == "PHOTONCANNON"
+
+    def _unit_detection_range(self, unit: Unit) -> float:
+        """Detection radius in game units (0 when the unit does not actively detect)."""
+        if not getattr(unit, "is_ready", True):
+            return 0.0
+        if float(getattr(unit, "build_progress", 1.0)) < 1.0:
+            return 0.0
+        if getattr(unit, "is_structure", False):
+            if not self._unit_is_detector_structure(unit):
+                return 0.0
+            if not getattr(unit, "is_ready", True):
+                return 0.0
+            if float(getattr(unit, "build_progress", 1.0)) < 1.0:
+                return 0.0
+            type_id = getattr(unit, "type_id", None)
+            if type_id == UNIT_PHOTONCANNON or getattr(type_id, "name", "").upper() == "PHOTONCANNON":
+                if not getattr(unit, "is_powered", True):
+                    return 0.0
+        detect = float(getattr(unit, "detect_range", 0.0) or 0.0)
+        if detect > 0:
+            return detect
+        u_name = self._resolve_unit_type_name(unit)
+        if u_name:
+            db = self._get_unit_data_from_json(u_name)
+            if db:
+                catalog = float(db.get("detect", 0.0) or 0.0)
+                if catalog > 0:
+                    return catalog
+        return 0.0
+
+    def _catalog_footprint_radius(self, unit: Unit) -> Optional[float]:
+        """Footprint from python-sc2 GameData (creation ability), when available."""
+        game_data = self._current_game_data
+        if game_data is None:
+            return None
+        type_id = getattr(getattr(unit, "type_id", None), "value", None)
+        if type_id is None:
+            return None
+        type_data = game_data.units.get(type_id)
+        if type_data is None:
+            return None
+        footprint = type_data.footprint_radius
+        if isinstance(footprint, (int, float)) and footprint > 0:
+            return float(footprint)
+        return None
+
+    def _structure_game_radius(self, unit: Unit) -> float:
+        """Catalog footprint for structures — never live API / selection ``radius``."""
+        u_name = self._resolve_unit_type_name(unit)
+        if u_name:
+            data = self.fallback_db.get(u_name, {})
+            fp = data.get("footprint_radius")
+            if isinstance(fp, (int, float)) and fp > 0:
+                return float(fp)
+        catalog = self._catalog_footprint_radius(unit)
+        if catalog is not None:
+            return float(catalog)
+        if u_name:
+            default = _STRUCTURE_FOOTPRINT_RADIUS.get(u_name)
+            if default is not None:
+                return float(default)
+        return 1.0
+
+    def _unit_game_radius(self, unit: Unit) -> float:
+        """Game-space half-extent for density/footprint layers (not live selection radius)."""
+        if getattr(unit, "is_structure", False):
+            return self._structure_game_radius(unit)
+        u_name = self._resolve_unit_type_name(unit)
+        if u_name and u_name in _UNIT_BODY_RADIUS_OVERRIDE:
+            return float(_UNIT_BODY_RADIUS_OVERRIDE[u_name])
+        if u_name:
+            catalog = self._display_radius_db.get(u_name)
+            if catalog is not None:
+                return float(catalog)
+        type_val = getattr(getattr(unit, "type_id", None), "value", getattr(unit, "type_id", None))
+        if isinstance(type_val, int):
+            catalog = self._display_radius_by_type_id.get(type_val)
+            if catalog is not None:
+                return float(catalog)
+        return 0.375
+
+    def _footprint_game_radius(self, unit: Unit) -> float:
+        """Game radius for axis-aligned footprint bounds (structures + flagged mobile units)."""
+        if getattr(unit, "is_structure", False):
+            return self._structure_game_radius(unit)
+        return self._unit_game_radius(unit)
+
+    def _structure_half_extent_px(self, unit: Unit) -> int:
+        game_radius = self._structure_game_radius(unit)
+        ref_scale = min(self.feature_map_width, self.feature_map_height) / float(
+            _ASSIGNMENT_REFERENCE_PLAYABLE
+        )
+        r_draw = int(round(game_radius * self.scale))
+        r_ref = int(round(game_radius * ref_scale))
+        return max(1, r_draw, r_ref)
+
+    def _game_bounds_to_obs_rect(
+        self,
+        cx: float,
+        cy: float,
+        game_r: float,
+    ) -> Tuple[int, int, int, int]:
+        """Inclusive obs pixel bounds for an axis-aligned square in game space."""
+        x0_g, x1_g = cx - game_r, cx + game_r
+        y0_g, y1_g = cy - game_r, cy + game_r
+
+        scale_x, scale_y = self._obs_scales()
+        px0 = int(math.floor((x0_g - self.crop_x) * scale_x + self.offset_x))
+        px1 = int(math.ceil((x1_g - self.crop_x) * scale_x + self.offset_x)) - 1
+
+        content_y0 = (y0_g - self.crop_y) * scale_y + self.offset_y
+        content_y1 = (y1_g - self.crop_y) * scale_y + self.offset_y
+        py0 = int(self.feature_map_height - 1 - math.ceil(content_y1))
+        py1 = int(self.feature_map_height - 1 - math.floor(content_y0))
+
+        px0 = max(0, px0)
+        px1 = min(self.feature_map_width - 1, px1)
+        py0 = max(0, py0)
+        py1 = min(self.feature_map_height - 1, py1)
+        return px0, px1, py0, py1
+
+    def _structure_obs_rect_bounds(self, unit: Unit) -> Tuple[int, int, int, int]:
+        """Inclusive obs pixel bounds for a structure (parent + add-on slot when attached)."""
+        bounds = [
+            self._game_bounds_to_obs_rect(
+                float(unit.position.x),
+                float(unit.position.y),
+                self._structure_game_radius(unit),
+            )
+        ]
+        if self._structure_has_attached_addon(unit):
+            ax, ay = self._addon_slot_position(unit)
+            bounds.append(
+                self._game_bounds_to_obs_rect(ax, ay, _ADDON_FOOTPRINT_RADIUS)
+            )
+        return self._merge_obs_rect_bounds(*bounds)
+
+    def _footprint_half_extent_px(self, game_r: float) -> int:
+        """Stable obs half-width from catalog game radius at the current map scale."""
+        if game_r < 0.5:
+            return 0
+        scale_x, scale_y = self._obs_scales()
+        max_scale = max(scale_x, scale_y, 1e-9)
+        diameter = max(1, int(math.ceil(2.0 * game_r * max_scale - 1e-9)))
+        return (diameter - 1) // 2
+
+    def _center_stamp_obs_bounds(self, unit: Unit) -> Tuple[int, int, int, int]:
+        """Center-anchored obs bounds — stable while a unit moves sub-tile."""
+        u_name = self._resolve_unit_type_name(unit)
+        game_r = self._unit_game_radius(unit)
+        px, py = self._get_pixel_coords(unit.position)
+        if px is None:
+            return self._game_bounds_to_obs_rect(
+                float(unit.position.x),
+                float(unit.position.y),
+                game_r,
+            )
+        if game_r < 0.5 or (u_name and u_name in _TACTICAL_SINGLE_PIXEL_UNITS):
+            return px, px, py, py
+        half = self._footprint_half_extent_px(game_r)
+        return (
+            max(0, px - half),
+            min(self.feature_map_width - 1, px + half),
+            max(0, py - half),
+            min(self.feature_map_height - 1, py + half),
+        )
+
+    def _unit_fixed_footprint_cells(self, unit: Unit) -> Optional[int]:
+        """N when the unit uses a fixed N×N obs hull; None for center-stamped footprints."""
+        u_name = self._resolve_unit_type_name(unit)
+        if not u_name:
+            return None
+        return _FIXED_FOOTPRINT_CELLS.get(u_name)
+
+    def _tactical_siege_content_pos(self, unit: Unit) -> Tuple[float, float]:
+        """Unit position in tactical content coordinates (matches _game_to_obs_pixel_raw)."""
+        scale_x, scale_y = self._obs_scales()
+        cx = (float(unit.position.x) - self.crop_x) * scale_x + self.offset_x
+        cy = (float(unit.position.y) - self.crop_y) * scale_y + self.offset_y
+        return cx, cy
+
+    def _fixed_cell_footprint_obs_bounds(
+        self, unit: Unit, cells: int
+    ) -> Tuple[int, int, int, int]:
+        """Fixed N×N obs hull centered on the unit's fractional position."""
+        cx, cy = self._tactical_siege_content_pos(unit)
+        span = cells - 1
+        px0 = int(math.floor(cx - 0.5))
+        px1 = px0 + span
+        c_low = math.floor(cy - 0.5)
+        c_high = c_low + span
+        py_a = int(self.feature_map_height - 1 - math.floor(c_low))
+        py_b = int(self.feature_map_height - 1 - math.floor(c_high))
+        px0 = max(0, px0)
+        px1 = min(self.feature_map_width - 1, px1)
+        py0 = max(0, min(py_a, py_b))
+        py1 = min(self.feature_map_height - 1, max(py_a, py_b))
+        return px0, px1, py0, py1
+
+    def _tactical_siege_obs_bounds(self, unit: Unit) -> Tuple[int, int, int, int]:
+        """Fixed 2×2 tactical hull for sieged tanks."""
+        return self._fixed_cell_footprint_obs_bounds(unit, _TACTICAL_SIEGE_FOOTPRINT_CELLS)
+
+    def _tactical_siege_footprint_mask_in_rect(
+        self,
+        unit: Unit,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """True only on the fixed 2×2 siege hull inside an inclusive obs rect."""
+        footprint = np.zeros((y1 - y0 + 1, x1 - x0 + 1), dtype=bool)
+        sx0, sx1, sy0, sy1 = self._tactical_siege_obs_bounds(unit)
+        rx0 = max(sx0, x0)
+        rx1 = min(sx1, x1)
+        ry0 = max(sy0, y0)
+        ry1 = min(sy1, y1)
+        if rx0 <= rx1 and ry0 <= ry1:
+            footprint[
+                ry0 - y0 : ry1 - y0 + 1,
+                rx0 - x0 : rx1 - x0 + 1,
+            ] = True
+        return footprint
+
+    def _tactical_siege_block_center_obs(self, unit: Unit) -> Tuple[float, float]:
+        """Obs-pixel center for siege hull / dead zone (unit position, not block centroid)."""
+        cx, cy = self._tactical_siege_content_pos(unit)
+        return cx, float(self.feature_map_height - 1) - cy + 0.5
+
+    def _tactical_siege_min_range_obs_px(self, min_radius_game: float) -> int:
+        """Inner weapon dead-zone radius in obs pixels (tactical siege, block-centered)."""
+        if min_radius_game <= 0:
+            return 0
+        scale_x, scale_y = self._obs_scales()
+        max_scale = max(scale_x, scale_y, 1e-9)
+        return max(
+            int(math.ceil(float(min_radius_game) * max_scale - 1e-9)),
+            int(math.ceil(self._obs_min_weapon_range_px(float(min_radius_game)))),
+        )
+
+    def _obs_chebyshev_mask_in_rect(
+        self,
+        center_px: float,
+        center_py: float,
+        radius_px: float,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """True where obs pixel centers fall within Chebyshev radius of a point."""
+        px_idx = np.arange(x0, x1 + 1, dtype=np.float64) + 0.5
+        py_idx = np.arange(y0, y1 + 1, dtype=np.float64) + 0.5
+        gx, gy = np.meshgrid(px_idx, py_idx)
+        cheb = np.maximum(np.abs(gx - center_px), np.abs(gy - center_py))
+        return cheb <= float(radius_px) + 1e-9
+
+    def _tactical_siege_dead_ring_iterations(self, min_radius_game: float) -> int:
+        """Chessboard dilation steps for a uniform dead ring outside the 2×2 hull."""
+        inner_px = self._tactical_siege_min_range_obs_px(min_radius_game)
+        # 2×2 hull is ±0.5 px from unit center; min_range inner_px clears ~1 px beyond hull.
+        return max(1, inner_px - (_TACTICAL_SIEGE_FOOTPRINT_CELLS // 2))
+
+    def _tactical_siege_no_dps_mask_in_rect(
+        self,
+        unit: Unit,
+        min_radius_game: float,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """Hull plus a uniform pixel ring for tactical siege min_range (matches hull stamp)."""
+        hull = self._tactical_siege_footprint_mask_in_rect(unit, x0, x1, y0, y1)
+        if not np.any(hull):
+            return hull
+        ring_iters = self._tactical_siege_dead_ring_iterations(min_radius_game)
+        structure = np.ones((3, 3), dtype=bool)
+        return binary_dilation(hull, structure=structure, iterations=ring_iters)
+
+    def _mobile_obs_rect_bounds(self, unit: Unit) -> Tuple[int, int, int, int]:
+        """Inclusive obs bounds for a mobile unit from catalog game radius."""
+        fixed_cells = self._unit_fixed_footprint_cells(unit)
+        if fixed_cells is not None:
+            return self._fixed_cell_footprint_obs_bounds(unit, fixed_cells)
+        if self._unit_uses_circular_body(unit):
+            if self.is_tactical_mode:
+                return self._tactical_siege_obs_bounds(unit)
+            game_r = self._unit_game_radius(unit)
+            return self._game_bounds_to_obs_rect(
+                float(unit.position.x),
+                float(unit.position.y),
+                game_r,
+            )
+        return self._center_stamp_obs_bounds(unit)
+
+    def _unit_marker_obs_bounds(self, unit: Unit) -> Tuple[int, int, int, int]:
+        """Obs footprint from catalog game radius (structures vs mobiles)."""
+        if getattr(unit, "is_structure", False):
+            return self._structure_obs_rect_bounds(unit)
+        return self._mobile_obs_rect_bounds(unit)
+
+    def _mobile_unit_footprint_mask(
+        self,
+        unit: Unit,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """Hull mask inside center-anchored stamp (circle for siege tank, filled square otherwise)."""
+        shape = (y1 - y0 + 1, x1 - x0 + 1)
+        u_name = self._resolve_unit_type_name(unit)
+        game_r = self._unit_game_radius(unit)
+        if self._unit_fixed_footprint_cells(unit) is not None:
+            return np.ones(shape, dtype=bool)
+        if game_r < 0.5 or (u_name and u_name in _TACTICAL_SINGLE_PIXEL_UNITS):
+            return np.ones(shape, dtype=bool)
+        if self._unit_uses_circular_body(unit):
+            # Tactical: fixed 2×2 stamp (see _tactical_siege_obs_bounds). Global keeps circle.
+            if self.is_tactical_mode:
+                return np.ones(shape, dtype=bool)
+            return self._mobile_body_footprint_mask(unit, x0, x1, y0, y1)
+        return np.ones(shape, dtype=bool)
+
+    def _tactical_stamp_obs_bounds(self, unit: Unit) -> Tuple[int, int, int, int]:
+        """Tactical mobile bounds — game-anchored for circular hulls, pixel-centered otherwise."""
+        return self._mobile_obs_rect_bounds(unit)
+
+    def _tactical_single_pixel_obs_bounds(self, unit: Unit) -> Optional[Tuple[int, int, int, int]]:
+        """One obs pixel at the unit center (tactical fovea)."""
+        u_name = self._resolve_unit_type_name(unit)
+        if not u_name or u_name not in _TACTICAL_SINGLE_PIXEL_UNITS:
+            return None
+        px, py = self._get_pixel_coords(unit.position)
+        if px is None:
+            return None
+        return px, px, py, py
+
+    def _unit_draw_obs_bounds(self, unit: Unit) -> Tuple[int, int, int, int]:
+        if self.is_tactical_mode:
+            single = self._tactical_single_pixel_obs_bounds(unit)
+            if single is not None:
+                return single
+            if getattr(unit, "is_structure", False):
+                return self._structure_obs_rect_bounds(unit)
+            return self._tactical_stamp_obs_bounds(unit)
+        return self._unit_marker_obs_bounds(unit)
+
+    def _circular_footprint_mask_in_rect(
+        self,
+        cx: float,
+        cy: float,
+        game_r: float,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """Circular game-space footprint inside an inclusive obs-pixel rect."""
+        region_x, region_y = self._game_center_meshgrid_in_rect(x0, x1, y0, y1)
+        dx = region_x - float(cx)
+        dy = region_y - float(cy)
+        return (dx * dx + dy * dy) <= float(game_r) * float(game_r)
+
+    def _unit_uses_circular_body(self, unit: Unit) -> bool:
+        """Mobile units whose hull is a circle, not a tile-aligned square (siege mode tank)."""
+        return self._resolve_unit_type_name(unit) == "SIEGETANKSIEGED"
+
+    def _mobile_body_footprint_mask(
+        self,
+        unit: Unit,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """Circular hull stamp for mobile units (matches siege-tank DPS dead-zone center)."""
+        game_r = self._unit_game_radius(unit)
+        if game_r < 0.5:
+            shape = (y1 - y0 + 1, x1 - x0 + 1)
+            return np.zeros(shape, dtype=bool)
+        return self._circular_footprint_mask_in_rect(
+            float(unit.position.x),
+            float(unit.position.y),
+            game_r,
+            x0,
+            x1,
+            y0,
+            y1,
+        )
+
+    def _game_footprint_mask_in_rect(
+        self,
+        unit: Unit,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+        center: Optional[Tuple[float, float]] = None,
+        game_r: Optional[float] = None,
+    ) -> np.ndarray:
+        """True where obs samples fall inside a game-space square footprint."""
+        X_map, Y_map = self._obs_to_sc2_meshgrid()
+        region_x = X_map[y0:y1 + 1, x0:x1 + 1]
+        region_y = Y_map[y0:y1 + 1, x0:x1 + 1]
+        if center is None:
+            cx, cy = float(unit.position.x), float(unit.position.y)
+        else:
+            cx, cy = center
+        if game_r is None:
+            game_r = self._footprint_game_radius(unit)
+        return (
+            (region_x >= cx - game_r)
+            & (region_x <= cx + game_r)
+            & (region_y >= cy - game_r)
+            & (region_y <= cy + game_r)
+        )
+
+    def _pathing_unpathable_in_rect(
+        self,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """All unpathable pathing cells whose obs samples fall inside an inclusive rect."""
+        shape = (y1 - y0 + 1, x1 - x0 + 1)
+        path_data = self._cached_path_data
+        if path_data is None:
+            return np.zeros(shape, dtype=bool)
+
+        X_map, Y_map = self._obs_to_sc2_meshgrid()
+        region_x = X_map[y0:y1 + 1, x0:x1 + 1]
+        region_y = Y_map[y0:y1 + 1, x0:x1 + 1]
+
+        path_h, path_w = path_data.shape
+        clipped_x = np.clip(region_x, 0, path_w - 1)
+        clipped_y = np.clip(region_y, 0, path_h - 1)
+        return path_data[clipped_y, clipped_x] == 0
+
+    def _structure_game_footprint_mask(
+        self,
+        unit: Unit,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """Unpathable pathing cells inside the structure's game-space footprint."""
+        shape = (y1 - y0 + 1, x1 - x0 + 1)
+        path_data = self._cached_path_data
+        if path_data is None:
+            return np.zeros(shape, dtype=bool)
+
+        in_footprint = self._game_footprint_mask_in_rect(unit, x0, x1, y0, y1)
+        if self._structure_has_attached_addon(unit):
+            ax, ay = self._addon_slot_position(unit)
+            addon_mask = self._game_footprint_mask_in_rect(
+                unit,
+                x0,
+                x1,
+                y0,
+                y1,
+                center=(ax, ay),
+                game_r=_ADDON_FOOTPRINT_RADIUS,
+            )
+            in_footprint = in_footprint | addon_mask
+            path_in_rect = self._pathing_unpathable_in_rect(x0, x1, y0, y1)
+            if np.any(path_in_rect):
+                # Fill the full L-shaped pathing hole inside the combined bounds.
+                return path_in_rect
+        X_map, Y_map = self._obs_to_sc2_meshgrid()
+        region_x = X_map[y0:y1 + 1, x0:x1 + 1]
+        region_y = Y_map[y0:y1 + 1, x0:x1 + 1]
+        path_h, path_w = path_data.shape
+        clipped_x = np.clip(region_x, 0, path_w - 1)
+        clipped_y = np.clip(region_y, 0, path_h - 1)
+        unpathable = path_data[clipped_y, clipped_x] == 0
+        return in_footprint & unpathable
+
+    def _density_footprint_mask(
+        self,
+        unit: Unit,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """Density-layer mask — full pathing hole for minerals/geysers/gas structures."""
+        if self._unit_is_map_terrain_blocker(unit) or self._is_vespene_acquisition_structure(unit):
+            path_mask = self._pathing_unpathable_in_rect(x0, x1, y0, y1)
+            if np.any(path_mask):
+                return path_mask
+        return self._structure_game_footprint_mask(unit, x0, x1, y0, y1)
+
+    def _terrain_overlay_mask(
+        self,
+        unit: Unit,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+    ) -> np.ndarray:
+        """Terrain-layer stamp — map blockers use the full pathing hole; buildings use game footprint."""
+        if self._unit_is_map_terrain_blocker(unit):
+            path_mask = self._pathing_unpathable_in_rect(x0, x1, y0, y1)
+            if np.any(path_mask):
+                return path_mask
+            return np.ones((y1 - y0 + 1, x1 - x0 + 1), dtype=bool)
+        return self._structure_game_footprint_mask(unit, x0, x1, y0, y1)
+
+    def _unit_obs_half_extent(self, unit: Unit) -> int:
+        """Half-width in obs pixels from unit center to footprint edge (scale-aware)."""
+        px, py = self._get_pixel_coords(unit.position)
+        if px is None:
+            return 0
+        x0, x1, y0, y1 = self._unit_marker_obs_bounds(unit)
+        if x0 > x1 and y0 > y1:
+            return 0
+        half_x = max(px - x0, x1 - px, 0) if x0 <= x1 else 0
+        half_y = max(py - y0, y1 - py, 0) if y0 <= y1 else 0
+        return max(half_x, half_y)
+
+    def _uses_additive_accumulation(self, idx: int) -> bool:
+        for name, layer_idx in self.current_layer_map.items():
+            if layer_idx == idx:
+                return name in _ADDITIVE_UNIT_COUNTER_LAYERS
+        return False
+
+    def _accumulate_region(
+        self,
+        region: np.ndarray,
+        mask: np.ndarray,
+        value: float,
+        accumulate: bool,
+        additive: bool,
+    ) -> None:
+        if accumulate:
+            if additive:
+                region[mask] += value
+            else:
+                region[mask] = np.maximum(region[mask], value)
+        else:
+            region[mask] = value
+
+    def _draw_entity_footprint(
+        self,
+        layers: np.ndarray,
+        idx: int,
+        unit: Unit,
+        value: float,
+        accumulate: bool,
+        require_unpathable: bool,
+    ) -> None:
+        if idx not in self.active_indices:
+            return
+
+        x0, x1, y0, y1 = self._unit_draw_obs_bounds(unit)
+        if x0 > x1 or y0 > y1:
+            return
+
+        if require_unpathable and not self.is_tactical_mode:
+            mask = self._density_footprint_mask(unit, x0, x1, y0, y1)
+            if not np.any(mask) and getattr(unit, "is_structure", False):
+                # Pylons and other buildings on pathable tiles still need a density stamp.
+                mask = self._game_footprint_mask_in_rect(unit, x0, x1, y0, y1)
+        elif getattr(unit, "is_structure", False) and self.is_tactical_mode:
+            mask = self._density_footprint_mask(unit, x0, x1, y0, y1)
+            if not np.any(mask):
+                mask = self._game_footprint_mask_in_rect(unit, x0, x1, y0, y1)
+        else:
+            mask = self._mobile_unit_footprint_mask(unit, x0, x1, y0, y1)
+        if not np.any(mask):
+            return
+
+        region = layers[idx, y0:y1 + 1, x0:x1 + 1]
+        self._accumulate_region(
+            region,
+            mask,
+            value,
+            accumulate,
+            self._uses_additive_accumulation(idx),
+        )
+
+    def _draw_unit_marker(
+        self,
+        layers: np.ndarray,
+        idx: Optional[int],
+        unit: Unit,
+        px: int,
+        py: int,
+        value: float,
+        accumulate: bool = True,
+    ) -> None:
+        if idx is None:
+            return
+        additive = self._uses_additive_accumulation(idx)
+        if unit.is_structure:
+            self._draw_entity_footprint(
+                layers,
+                idx,
+                unit,
+                value,
+                accumulate,
+                require_unpathable=True,
+            )
+            return
+        # Sub-half-tile units: one obs pixel at the position sample.
+        if self._unit_game_radius(unit) < 0.5:
+            self._draw_circle_vectorized(
+                layers, idx, px, py, 0, 0, value, accumulate,
+                additive_accumulation=additive,
+            )
+            return
+        x0, x1, y0, y1 = self._unit_draw_obs_bounds(unit)
+        if x0 > x1 or y0 > y1:
+            self._draw_circle_vectorized(
+                layers, idx, px, py, 0, 0, value, accumulate,
+                additive_accumulation=additive,
+            )
+            return
+        self._draw_entity_footprint(
+            layers,
+            idx,
+            unit,
+            value,
+            accumulate,
+            require_unpathable=False,
+        )
 
     def _draw_unit_body(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
         prefix = "enemy" if is_enemy else "allied"
         idx_den = self.current_layer_map.get(f"{prefix}_unit_density")
-        if idx_den is None: return
-
-        # Radius Logic: Tactical/Universal uses r=0 (Single Pixel)
-        is_universal = self.training_conf.get("agent_architecture") == "universal"
-        if self.is_tactical_mode or is_universal:
-            r = 0
-        else:
-            r = int(unit.radius * self.scale) if unit.is_structure else 0
+        if idx_den is None:
+            return
 
         val = 1.0
         cd = float(getattr(unit, "weapon_cooldown", 0.0))
@@ -419,21 +1798,50 @@ class ObservationTransformer:
             else:
                 val = 1.0 - (0.7 * cd_norm)
 
-        self._draw_circle_vectorized(layers, idx_den, px, py, 0, r, val, True)
+        self._draw_unit_marker(layers, idx_den, unit, px, py, val, True)
+
+        # Sensor blips reveal position only — no unit-type attribute channels.
+        if getattr(unit, "is_blip", False):
+            return
 
         if self.is_tactical_mode:
             idx_cd = self.current_layer_map.get(
                 LayerConstants.ENEMY_WEAPON_COOLDOWN if is_enemy else LayerConstants.ALLIED_WEAPON_COOLDOWN
             )
             if idx_cd is not None:
-                self._draw_circle_vectorized(layers, idx_cd, px, py, 0, r, cd_norm, True)
+                self._draw_unit_marker(layers, idx_cd, unit, px, py, cd_norm, True)
 
-        if not self.is_tactical_mode:
-            # Attribute Layers (Not in tactical)
-            for attr in ["biological", "mechanical", "armored", "massive", "flying"]:
-                idx = self.current_layer_map.get(f"{prefix}_unit_{attr}")
-                if idx is not None and getattr(unit, f"is_{attr}", False):
-                    self._draw_circle_vectorized(layers, idx, px, py, 0, r, 1.0, True)
+        for attr in ["biological", "mechanical", "armored", "massive", "flying"]:
+            idx = self.current_layer_map.get(f"{prefix}_unit_{attr}")
+            if idx is not None and getattr(unit, f"is_{attr}", False):
+                self._draw_unit_marker(layers, idx, unit, px, py, 1.0, True)
+
+        idx_cloak = self.current_layer_map.get(f"{prefix}_unit_cloak")
+        if idx_cloak is not None and self._unit_on_cloak_layer(unit):
+            self._draw_unit_marker(layers, idx_cloak, unit, px, py, 1.0, True)
+
+    def _command_objective_obs_radius_px(self) -> int:
+        """
+        Obs-pixel radius for COMMAND_OBJECTIVE.
+
+        Global view: same reference footprint as on 128×128 curriculum maps regardless
+        of playable area size (matches COMMAND_ASSIGNMENT / debug UI scaling).
+        Tactical fovea: compact ~1 gu marker so objectives do not dominate 32×32 input.
+        """
+        if self.is_tactical_mode:
+            return max(1, int(round(0.5 * self.scale)))
+        ref_scale = min(self.feature_map_width, self.feature_map_height) / float(
+            _ASSIGNMENT_REFERENCE_PLAYABLE
+        )
+        game_r = _OBJECTIVE_REFERENCE_RADIUS_GU
+        r_draw = int(round(game_r * self.scale))
+        r_ref = int(round(game_r * ref_scale))
+        return max(1, r_draw, r_ref)
+
+    def _command_objective_marker_params(self, is_beacon: bool) -> Tuple[float, int]:
+        """Pixel radius and intensity for COMMAND_OBJECTIVE stamps."""
+        val = 20.0 if is_beacon else 1.0
+        return val, self._command_objective_obs_radius_px()
 
     def _draw_command_info(self, raw_obs, layers):
         idx_sel = self.current_layer_map.get(LayerConstants.COMMAND_ASSIGNMENT)
@@ -443,16 +1851,7 @@ class ObservationTransformer:
                 if "BEACON" in getattr(unit.type_id, "name", "").upper(): continue
                 px, py = self._get_pixel_coords(unit.position)
                 if px is not None:
-                    if self.is_tactical_mode:
-                        r = 0
-                    else:
-                        ref_scale = min(self.feature_map_width, self.feature_map_height) / float(
-                            _ASSIGNMENT_REFERENCE_PLAYABLE
-                        )
-                        r_draw = int(unit.radius * self.scale)
-                        r_ref = int(unit.radius * ref_scale)
-                        r = max(1, r_draw, r_ref)
-                    self._draw_circle_vectorized(layers, idx_sel, px, py, 0, r, 1.0, True)
+                    self._draw_unit_marker(layers, idx_sel, unit, px, py, 1.0, True)
 
         idx_obj = self.current_layer_map.get(LayerConstants.COMMAND_OBJECTIVE)
         if idx_obj is not None:
@@ -467,20 +1866,18 @@ class ObservationTransformer:
 
             for target in targets:
                 if target is None: continue
-                val, r = 1.0, 3
-                
-                # Check if it's a beacon
                 is_beacon = False
                 u_id = getattr(target, "type_id", None)
                 if u_id:
                     u_name = getattr(u_id, "name", str(u_id)).upper()
                     if "BEACON" in u_name:
                         is_beacon = True
-                
-                if is_beacon:
-                    val, r = 20.0, max(3, int(1.5 * self.scale))
+                val, r = self._command_objective_marker_params(is_beacon)
 
                 pos = getattr(target, "position", target)
+                if self.is_tactical_mode and hasattr(pos, "x") and hasattr(pos, "y"):
+                    if not self._tactical_game_point_inside_fovea(pos.x, pos.y):
+                        continue
                 px, py = self._get_pixel_coords(pos)
                 if px is not None:
                     self._draw_circle_vectorized(layers, idx_obj, px, py, 0, r, val, False)
@@ -501,6 +1898,103 @@ class ObservationTransformer:
             return getattr(focal.type_id, 'name', '').upper() in _CLIFF_WALKER_NAMES
         return bool(raw_obs.get('cliff_walker', False))
 
+
+    def _playable_walkable_heights(
+        self,
+        path_data: np.ndarray,
+        height_data: np.ndarray,
+        game_info,
+    ) -> np.ndarray:
+        """Walkable height samples inside SC2 playable_area (falls back to full map)."""
+        area = getattr(game_info, "playable_area", None)
+        if area is None:
+            walkable = path_data > 0
+            return height_data[walkable].astype(np.float64)
+
+        x0 = max(0, int(area.x))
+        y0 = max(0, int(area.y))
+        x1 = min(path_data.shape[1], x0 + int(area.width))
+        y1 = min(path_data.shape[0], y0 + int(area.height))
+        if x1 <= x0 or y1 <= y0:
+            walkable = path_data > 0
+            return height_data[walkable].astype(np.float64)
+
+        region_path = path_data[y0:y1, x0:x1]
+        region_height = height_data[y0:y1, x0:x1]
+        playable_walkable = region_path > 0
+        if not np.any(playable_walkable):
+            walkable = path_data > 0
+            return height_data[walkable].astype(np.float64)
+        return region_height[playable_walkable].astype(np.float64)
+
+    @staticmethod
+    def _walkable_height_tier_indices(
+        path_data: np.ndarray,
+        height_data: np.ndarray,
+        min_h: float,
+        cap_h: float,
+    ) -> np.ndarray:
+        """Non-negative cliff-tier indices for walkable cells (outliers capped at ``cap_h``)."""
+        walkable = path_data > 0
+        if not np.any(walkable):
+            return np.zeros(0, dtype=np.int32)
+        capped = np.clip(height_data[walkable].astype(np.float64), float(min_h), float(cap_h))
+        return np.round((capped - float(min_h)) / _SC2_TERRAIN_LEVEL_STEP).astype(np.int32)
+
+    def _ensure_map_terrain_height_scale(
+        self,
+        path_data: np.ndarray,
+        height_data: np.ndarray,
+        map_name: str,
+        game_info=None,
+    ) -> Tuple[float, float]:
+        """Per-map walkable height scale — stable for global cache and tactical panning."""
+        if (
+            self._map_terrain_h_min is not None
+            and self._map_terrain_tier_max is not None
+            and self._map_terrain_h_scale_map == map_name
+        ):
+            return float(self._map_terrain_h_min), float(self._map_terrain_tier_max)
+
+        walkable_heights = self._playable_walkable_heights(
+            path_data, height_data, game_info
+        )
+        if walkable_heights.size:
+            min_h = float(
+                np.percentile(walkable_heights, _TERRAIN_HEIGHT_PERCENTILE_FLOOR)
+            )
+            cap_h = float(
+                np.percentile(walkable_heights, _TERRAIN_HEIGHT_PERCENTILE_CAP)
+            )
+        else:
+            min_h = float(height_data.min())
+            cap_h = float(height_data.max())
+
+        tier_indices = self._walkable_height_tier_indices(
+            path_data, height_data, min_h, cap_h
+        )
+        max_tier_idx = int(tier_indices.max()) if tier_indices.size else 0
+        tier_max = float(max(max_tier_idx, 1))
+        self._map_terrain_h_min = min_h
+        self._map_terrain_tier_max = tier_max
+        self._map_terrain_h_scale_map = map_name
+        return min_h, tier_max
+
+    @staticmethod
+    def _normalize_terrain_heights(
+        heights: np.ndarray,
+        min_h: float,
+        tier_max: float,
+    ) -> np.ndarray:
+        """Map raw SC2 heights to [0.2, 1.0] with a fixed step per cliff tier (16 gu)."""
+        del tier_max  # retained for call-site compatibility; brightness step is tier-uniform
+        tier_idx = (heights.astype(np.float32) - float(min_h)) / _SC2_TERRAIN_LEVEL_STEP
+        tier_idx = np.maximum(tier_idx, 0.0)
+        return np.clip(
+            _TERRAIN_BRIGHTNESS_FLOOR + tier_idx * _TERRAIN_BRIGHTNESS_PER_CLIFF_TIER,
+            _TERRAIN_BRIGHTNESS_FLOOR,
+            1.0,
+        ).astype(np.float32)
 
     @staticmethod
     def _compute_climber_grid(path_data, height_data):
@@ -583,23 +2077,176 @@ class ObservationTransformer:
             climbable[y0s+ydir:y0e+ydir, x0s+xdir:x0e+xdir] |= (base & climb)
 
         # Connectivity filter: only keep cells adjacent to another climbable cell.
+        # Use 8-connectivity so diagonal cliff runs stay intact (4-connectivity drops
+        # corner-only neighbours along 45° cliff lines). Isolated single cells still
+        # fail because none of their eight neighbours are climbable.
         from scipy.ndimage import binary_dilation
-        nbr = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=bool)
+        nbr = np.ones((3, 3), dtype=bool)
+        nbr[1, 1] = False
         return climbable & binary_dilation(climbable, structure=nbr)
 
-    def _draw_terrain_pathing(self, game_info, layers, current_structure_count=0, cliff_walker: bool = False):
+    @staticmethod
+    def _unit_is_map_terrain_blocker(unit: Unit) -> bool:
+        if getattr(unit, "is_mineral_field", False) or getattr(unit, "is_vespene_geyser", False):
+            return True
+        name = getattr(getattr(unit, "type_id", None), "name", "").upper()
+        return "MINERAL" in name or "VESPENEGEYSER" in name or "GEYSER" in name
+
+    @staticmethod
+    def _is_vespene_acquisition_structure(unit: Unit) -> bool:
+        name = getattr(getattr(unit, "type_id", None), "name", "")
+        if not name:
+            return False
+        return str(name).upper() in {
+            "EXTRACTOR",
+            "REFINERY",
+            "ASSIMILATOR",
+            "EXTRACTORRICH",
+            "REFINERYRICH",
+            "ASSIMILATORRICH",
+        }
+
+    def _geyser_covered_by_vespene_structure(
+        self,
+        geyser: Unit,
+        structures: List[Unit],
+    ) -> bool:
+        """Built gas structures replace the neutral geyser terrain stamp."""
+        gx = float(geyser.position.x)
+        gy = float(geyser.position.y)
+        for structure in structures:
+            if not self._is_vespene_acquisition_structure(structure):
+                continue
+            if abs(float(structure.position.x) - gx) < 2.5 and abs(float(structure.position.y) - gy) < 2.5:
+                return True
+        return False
+
+    def _collect_map_terrain_blockers(self, raw_obs: Dict[str, Any]) -> List[Unit]:
+        """Minerals, geysers, and similar static map blockers for terrain stamping."""
+        blockers: List[Unit] = []
+        seen: set = set()
+        all_structures = list(raw_obs.get("structures") or []) + list(raw_obs.get("enemy_structures") or [])
+
+        def _add(unit: Unit) -> None:
+            tag = getattr(unit, "tag", None)
+            key = tag if tag is not None else id(unit)
+            if key in seen:
+                return
+            seen.add(key)
+            blockers.append(unit)
+
+        for key in ("mineral_field", "vespene_geyser"):
+            for unit in raw_obs.get(key) or []:
+                if key == "vespene_geyser" and self._geyser_covered_by_vespene_structure(unit, all_structures):
+                    continue
+                _add(unit)
+
+        for unit in list(raw_obs.get("structures") or []) + list(raw_obs.get("enemy_structures") or []):
+            if self._unit_is_map_terrain_blocker(unit):
+                _add(unit)
+
+        return blockers
+
+    def _collect_ground_structure_blockers(self, raw_obs: Dict[str, Any]) -> List[Unit]:
+        """Ground structures that block pathing but are not minerals/geysers."""
+        blockers: List[Unit] = []
+        seen: set = set()
+        for unit in list(raw_obs.get("structures") or []) + list(raw_obs.get("enemy_structures") or []):
+            if getattr(unit, "is_flying", False):
+                continue
+            if not getattr(unit, "is_structure", False):
+                continue
+            if self._unit_is_map_terrain_blocker(unit):
+                continue
+            tag = getattr(unit, "tag", None)
+            key = tag if tag is not None else id(unit)
+            if key in seen:
+                continue
+            seen.add(key)
+            blockers.append(unit)
+        return blockers
+
+    def _apply_map_blocker_terrain(self, layers: np.ndarray, raw_obs: Dict[str, Any]) -> None:
         layer_idx = self.current_layer_map.get(LayerConstants.TERRAIN_PATHABLE)
-        if layer_idx is None: return
+        if layer_idx is None:
+            return
+        blockers = (
+            self._collect_map_terrain_blockers(raw_obs)
+            + self._collect_ground_structure_blockers(raw_obs)
+        )
+        if blockers:
+            self._overlay_map_blocker_terrain(layers[layer_idx], blockers)
+
+    def _overlay_map_blocker_terrain(self, terrain: np.ndarray, blockers: List[Unit]) -> None:
+        """Stamp minerals/geysers (and similar blockers) as unpathable on the terrain layer."""
+        for unit in blockers:
+            if getattr(unit, "is_flying", False):
+                continue
+            x0, x1, y0, y1 = self._structure_obs_rect_bounds(unit)
+            if x0 > x1 or y0 > y1:
+                continue
+            mask = self._terrain_overlay_mask(unit, x0, x1, y0, y1)
+            if not np.any(mask):
+                continue
+            region = terrain[y0:y1 + 1, x0:x1 + 1]
+            region[mask] = 0.0
+
+    def _overlay_ground_unit_terrain_blocks(self, terrain: np.ndarray, ground_units: List[Unit]) -> None:
+        """Tactical only: stamp catalog footprints as unpathable (not cached global terrain)."""
+        for unit in ground_units:
+            if getattr(unit, "is_flying", False):
+                continue
+            if getattr(unit, "is_structure", False):
+                x0, x1, y0, y1 = self._unit_draw_obs_bounds(unit)
+                if x0 > x1 or y0 > y1:
+                    continue
+                mask = self._terrain_overlay_mask(unit, x0, x1, y0, y1)
+            else:
+                x0, x1, y0, y1 = self._tactical_stamp_obs_bounds(unit)
+                if x0 > x1 or y0 > y1:
+                    continue
+                u_name = self._resolve_unit_type_name(unit)
+                if (
+                    self._unit_game_radius(unit) < 0.5
+                    or (u_name and u_name in _TACTICAL_SINGLE_PIXEL_UNITS)
+                ):
+                    terrain[y0:y1 + 1, x0:x1 + 1] = 0.0
+                    continue
+                if self._unit_uses_circular_body(unit):
+                    mask = self._tactical_siege_footprint_mask_in_rect(
+                        unit, x0, x1, y0, y1
+                    )
+                else:
+                    mask = np.ones((y1 - y0 + 1, x1 - x0 + 1), dtype=bool)
+            if not np.any(mask):
+                continue
+            region = terrain[y0:y1 + 1, x0:x1 + 1]
+            region[mask] = 0.0
+
+    def _draw_terrain_pathing(
+        self,
+        game_info,
+        layers,
+        cliff_walker: bool = False,
+        ground_units=None,
+    ):
+        layer_idx = self.current_layer_map.get(LayerConstants.TERRAIN_PATHABLE)
+        if layer_idx is None:
+            return
 
         current_map_name = getattr(game_info, 'map_name', '')
         cache_key = "cliff_walker" if cliff_walker else "standard"
+        ground_units = ground_units or []
 
-        # Global View Cache (Only if not in tactical mode)
+        # Global view: static map pathing only (cached per map + geometry; no live unit overlays).
         if not self.is_tactical_mode:
-            if (cache_key in self._terrain_caches and
-                self._last_map_name == current_map_name and
-                self._last_structure_count == current_structure_count):
-                layers[layer_idx] = self._terrain_caches[cache_key]
+            terrain_cache_key = (
+                cache_key,
+                current_map_name,
+                self._terrain_geometry_key(),
+            )
+            if terrain_cache_key in self._terrain_caches:
+                layers[layer_idx] = self._terrain_caches[terrain_cache_key].copy()
                 return
 
         if not hasattr(game_info, 'pathing_grid') or not hasattr(game_info, 'terrain_height'):
@@ -607,79 +2254,87 @@ class ObservationTransformer:
 
         path_data = self._get_numpy_data(game_info.pathing_grid)
         height_data = self._get_numpy_data(game_info.terrain_height)
+        path_h, path_w = path_data.shape
 
-        # Calculate Global Walkable Range once for consistency
-        if self._h_min is None or self._h_max is None:
-            walkable_mask = path_data > 0
-            if np.any(walkable_mask):
-                walkable_heights = height_data[walkable_mask]
-                self._h_min = walkable_heights.min()
-                self._h_max = walkable_heights.max()
-            else:
-                self._h_min = height_data.min()
-                self._h_max = height_data.max()
+        if self._last_map_name != current_map_name:
+            self._terrain_caches.clear()
+            self._map_terrain_h_min = None
+            self._map_terrain_tier_max = None
+            self._map_terrain_h_scale_map = None
 
-        total_w = game_info.map_size.width
-        total_h = game_info.map_size.height
+        min_h, tier_max = self._ensure_map_terrain_height_scale(
+            path_data, height_data, current_map_name, game_info=game_info
+        )
 
-        x_indices = np.arange(self.feature_map_width)
-        y_indices = np.arange(self.feature_map_height)
-        sc2_x = ((x_indices - self.offset_x) / self.scale) + self.crop_x
-        sc2_y = ((self.feature_map_height - 1 - y_indices) - self.offset_y) / self.scale + self.crop_y
+        X_map, Y_map = self._obs_to_sc2_meshgrid()
+        X_map = np.clip(X_map, 0, path_w - 1)
+        Y_map = np.clip(Y_map, 0, path_h - 1)
+        valid_mask = self._obs_content_valid_mask()
 
-        X_map, Y_map = np.meshgrid(sc2_x.astype(int), sc2_y.astype(int))
-        valid_mask = (X_map >= 0) & (X_map < total_w) & (Y_map >= 0) & (Y_map < total_h)
-
+        res = np.zeros(
+            (self.feature_map_height, self.feature_map_width), dtype=np.float32
+        )
         if np.any(valid_mask):
             v_x, v_y = X_map[valid_mask], Y_map[valid_mask]
             sampled_path = path_data[v_y, v_x]
             sampled_height = height_data[v_y, v_x]
 
-            h_range = max(self._h_max - self._h_min, 1.0)
-            # Base value 0.2 to 1.0 for better visibility in UI and Agent
-            norm_height = 0.2 + ((sampled_height - self._h_min) / h_range) * 0.8
-
-            res = np.zeros((self.feature_map_height, self.feature_map_width), dtype=np.float32)
+            norm_height = self._normalize_terrain_heights(
+                sampled_height, min_h, tier_max
+            )
 
             if cliff_walker:
-                # Use the exact SC2MapAnalysis climber_grid algorithm (ported from C):
-                # non-walkable cells with exactly LEVEL_DIFFERENCE=16 height units between
-                # the walkable areas on both sides are marked as cliff-traversable.
-                # Results cached per map (static terrain never changes mid-game).
-                if self._cliff_face_cache is None or self._cliff_face_cache_map != current_map_name:
-                    self._cliff_face_cache = self._compute_climber_grid(path_data, height_data)
-                    # For each cliff face cell, display at the mean of the local
-                    # low-ground and high-ground heights (5x5 window on each side).
-                    # This places cliff cells visually between low and high ground,
-                    # creating a clear gradient: dark (low) → mid (cliff) → bright (high).
+                if (
+                    self._cliff_face_cache is None
+                    or self._cliff_face_cache_map != current_map_name
+                ):
+                    self._cliff_face_cache = self._compute_climber_grid(
+                        path_data, height_data
+                    )
                     from scipy.ndimage import maximum_filter, minimum_filter
+
                     h_f = height_data.astype(np.float32)
                     large = float(h_f.max()) + 1.0
                     local_high_h = maximum_filter(
-                        np.where(path_data > 0, h_f, 0.0), size=5)
+                        np.where(path_data > 0, h_f, 0.0), size=5
+                    )
                     local_low_h = minimum_filter(
-                        np.where(path_data > 0, h_f, large), size=5)
-                    cliff_mean_h = (local_high_h + local_low_h) * 0.5
-                    h_rng = max(float(self._h_max) - float(self._h_min), 1.0)
+                        np.where(path_data > 0, h_f, large), size=5
+                    )
+                    high_obs = self._normalize_terrain_heights(
+                        local_high_h, min_h, tier_max
+                    )
+                    low_obs = self._normalize_terrain_heights(
+                        local_low_h, min_h, tier_max
+                    )
                     self._cliff_display_heights = np.clip(
-                        0.2 + (cliff_mean_h - float(self._h_min)) / h_rng * 0.8,
-                        0.2, 1.0
+                        (high_obs + low_obs) * 0.5,
+                        0.2,
+                        1.0,
                     ).astype(np.float32)
                     self._cliff_face_cache_map = current_map_name
 
                 sampled_cliff = self._cliff_face_cache[v_y, v_x]
                 cliff_brightness = self._cliff_display_heights[v_y, v_x]
                 standard_terrain = norm_height * (sampled_path > 0).astype(np.float32)
-                res[valid_mask] = np.where(sampled_cliff, cliff_brightness, standard_terrain)
+                res[valid_mask] = np.where(
+                    sampled_cliff, cliff_brightness, standard_terrain
+                )
             else:
                 res[valid_mask] = norm_height * (sampled_path > 0).astype(np.float32)
 
-            layers[layer_idx] = res
+        if self.is_tactical_mode and ground_units:
+            visible_ground = [
+                u for u in ground_units
+                if self._tactical_footprint_intersects_fovea(u)
+            ]
+            self._overlay_ground_unit_terrain_blocks(res, visible_ground)
 
-            if not self.is_tactical_mode:
-                self._terrain_caches[cache_key] = res.copy()
-                self._last_map_name = current_map_name
-                self._last_structure_count = current_structure_count
+        layers[layer_idx] = res
+
+        if not self.is_tactical_mode:
+            self._terrain_caches[terrain_cache_key] = res.copy()
+            self._last_map_name = current_map_name
 
     def _draw_terrain_creep(self, raw_obs, layers):
         idx = self.current_layer_map.get(LayerConstants.TERRAIN_CREEP)
@@ -687,53 +2342,258 @@ class ObservationTransformer:
         if idx is None or not creep_map: return
         data = self._get_numpy_data(creep_map)
         game_info = raw_obs.get('game_info')
-        total_w, total_h = game_info.map_size.width, game_info.map_size.height
-        
-        x_indices = np.arange(self.feature_map_width)
-        y_indices = np.arange(self.feature_map_height)
-        sc2_x = ((x_indices - self.offset_x) / self.scale) + self.crop_x
-        sc2_y = ((self.feature_map_height - 1 - y_indices) - self.offset_y) / self.scale + self.crop_y
-        X_map, Y_map = np.meshgrid(sc2_x.astype(int), sc2_y.astype(int))
-        valid_mask = (X_map >= 0) & (X_map < total_w) & (Y_map >= 0) & (Y_map < total_h)
+        creep_h, creep_w = data.shape
+
+        X_map, Y_map = self._obs_to_sc2_meshgrid()
+        X_map = np.clip(X_map, 0, creep_w - 1)
+        Y_map = np.clip(Y_map, 0, creep_h - 1)
+        valid_mask = (X_map >= 0) & (Y_map >= 0)
         if np.any(valid_mask):
             layers[idx][valid_mask] = data[Y_map[valid_mask], X_map[valid_mask]]
 
-    def _draw_circle_vectorized(self, layers, idx, cx, cy, radius_game, radius_px_override=None, value=1.0, accumulate=False):
-        if idx not in self.active_indices: return
-        r = int(radius_px_override) if radius_px_override is not None else max(1, int(radius_game * self.scale))
-        if r == 0:
-            if accumulate: layers[idx, cy, cx] += value
-            else: layers[idx, cy, cx] = value
+    def _draw_terrain_buildable(self, raw_obs, layers):
+        idx = self.current_layer_map.get(LayerConstants.TERRAIN_BUILDABLE)
+        if idx is None:
             return
-        r_sq = r**2
-        x_min, x_max = max(0, cx-r), min(self.feature_map_width, cx+r+1)
-        y_min, y_max = max(0, cy-r), min(self.feature_map_height, cy+r+1)
-        if x_min >= x_max or y_min >= y_max: return
+        game_info = raw_obs.get("game_info")
+        if game_info is None or not hasattr(game_info, "pathing_grid"):
+            return
+
+        from sc2.data import Race
+        from src.transformers.buildability import compute_buildable_mask
+
+        path_data = self._get_numpy_data(game_info.pathing_grid)
+        creep_map = raw_obs.get("creep")
+        creep_data = self._get_numpy_data(creep_map) if creep_map else None
+        placement_data = None
+        if hasattr(game_info, "placement_grid"):
+            placement_data = self._get_numpy_data(game_info.placement_grid)
+
+        race_name = (raw_obs.get("race") or "zerg").lower()
+        race = Race.Zerg
+        if race_name == "terran":
+            race = Race.Terran
+        elif race_name == "protoss":
+            race = Race.Protoss
+
+        pending = raw_obs.get("pending_build_type")
+        geyser_mask = raw_obs.get("geyser_mask")
+        if geyser_mask is not None:
+            geyser_mask = np.asarray(geyser_mask, dtype=np.float32)
+        power_mask = raw_obs.get("power_mask")
+
+        buildable_sc2 = compute_buildable_mask(
+            race,
+            pending,
+            path_data,
+            creep_data=creep_data,
+            placement_data=placement_data,
+            geyser_mask=geyser_mask,
+            power_mask=power_mask,
+        )
+
+        X_map, Y_map = self._obs_to_sc2_meshgrid()
+        creep_h, creep_w = buildable_sc2.shape
+        X_map = np.clip(X_map, 0, creep_w - 1)
+        Y_map = np.clip(Y_map, 0, creep_h - 1)
+        valid_mask = self._obs_content_valid_mask()
+        if np.any(valid_mask):
+            layers[idx][valid_mask] = buildable_sc2[Y_map[valid_mask], X_map[valid_mask]]
+
+    def _effective_dps_min_range_game(self, unit: Optional[Unit], min_radius_game: float) -> float:
+        """Weapon min_range dead zone in game units (independent of hull footprint)."""
+        if min_radius_game <= 0:
+            return 0.0
+        scale_x, scale_y = self._obs_scales()
+        max_scale = max(scale_x, scale_y, 1e-9)
+        # On coarse downsampling no pixel center may fall inside the true min_range disc;
+        # expand inner hole so at least _obs_min_weapon_range_px around the unit is cleared.
+        min_obs_px = self._obs_min_weapon_range_px(float(min_radius_game))
+        return max(float(min_radius_game), min_obs_px / max_scale)
+
+    def _obs_min_weapon_range_px(self, min_radius_game: float) -> float:
+        """Minimum inner-hole radius in obs pixels when downsampling would hide min_range."""
+        if min_radius_game <= 0:
+            return 0.0
+        scale_x, scale_y = self._obs_scales()
+        max_scale = max(scale_x, scale_y, 1e-9)
+        return max(float(min_radius_game) * max_scale, _MIN_WEAPON_MIN_RANGE_OBS_RADIUS_PX)
+
+    def _min_observable_weapon_reach_game(self) -> float:
+        """Smallest weapon reach (gu) that can still hit an obs pixel center from the unit position."""
+        scale_x, scale_y = self._obs_scales()
+        max_scale = max(scale_x, scale_y, 1e-9)
+        half_cell = 0.5 / max_scale
+        return math.hypot(half_cell, half_cell)
+
+    def _apply_dps_footprint_exclusion(
+        self,
+        mask: np.ndarray,
+        unit: Optional[Unit],
+        x_min: int,
+        x_max: int,
+        y_min: int,
+        y_max: int,
+    ) -> np.ndarray:
+        """Remove DPS inside the unit hull (circle for mobiles, square for structures)."""
+        if unit is None or not np.any(mask):
+            return mask
+        x0, x1 = x_min, x_max - 1
+        y0, y1 = y_min, y_max - 1
+        if getattr(unit, "is_structure", False):
+            footprint = self._game_footprint_mask_in_rect(unit, x0, x1, y0, y1)
+        elif self._unit_uses_circular_body(unit):
+            if self.is_tactical_mode:
+                footprint = self._tactical_siege_footprint_mask_in_rect(
+                    unit, x0, x1, y0, y1
+                )
+            else:
+                footprint = self._mobile_body_footprint_mask(unit, x0, x1, y0, y1)
+        else:
+            footprint = self._game_footprint_mask_in_rect(unit, x0, x1, y0, y1)
+        if footprint.shape != mask.shape:
+            return mask
+        return mask & ~footprint
+
+    def _draw_circle_vectorized(
+        self,
+        layers,
+        idx,
+        cx,
+        cy,
+        radius_game,
+        radius_px_override=None,
+        value=1.0,
+        accumulate=False,
+        min_radius_game=0.0,
+        min_radius_px_override=None,
+        unit: Optional[Unit] = None,
+        additive_accumulation: bool = True,
+    ):
+        if idx not in self.active_indices:
+            return
+
+        scale_x, scale_y = self._obs_scales()
+        effective_min = self._effective_dps_min_range_game(unit, min_radius_game)
+        # Game-unit circles (solid discs and weapon annuli) when no pixel override is given.
+        if radius_px_override is None and float(radius_game) > 0:
+            outer = float(radius_game)
+            inner = float(effective_min) if effective_min > 0 else 0.0
+            if outer <= inner:
+                return
+            center_gx, center_gy = self._circle_center_game(cx, cy, unit)
+            # Off-fovea tactical DPS must not anchor draw rects to clamped edge pixels —
+            # scan the full 32×32 window in game space so rings stay world-fixed as the fovea pans.
+            if self.is_tactical_mode and unit is not None:
+                x_min, y_min = 0, 0
+                x_max = self.feature_map_width
+                y_max = self.feature_map_height
+            else:
+                max_scale = max(scale_x, scale_y, 1e-9)
+                r_px = max(1, int(math.ceil(outer * max_scale)))
+                x_min, x_max = max(0, cx - r_px), min(self.feature_map_width, cx + r_px + 1)
+                y_min, y_max = max(0, cy - r_px), min(self.feature_map_height, cy + r_px + 1)
+            if x_min >= x_max or y_min >= y_max:
+                return
+            region_x, region_y = self._game_center_meshgrid_in_rect(
+                x_min, x_max - 1, y_min, y_max - 1
+            )
+            dx = region_x - center_gx
+            dy = region_y - center_gy
+            dist_game_sq = dx * dx + dy * dy
+            outer_sq = outer * outer
+            if inner > 0:
+                if (
+                    self.is_tactical_mode
+                    and unit is not None
+                    and self._unit_uses_circular_body(unit)
+                ):
+                    dead = self._tactical_siege_no_dps_mask_in_rect(
+                        unit,
+                        min_radius_game,
+                        x_min,
+                        x_max - 1,
+                        y_min,
+                        y_max - 1,
+                    )
+                    mask = (dist_game_sq <= outer_sq) & ~dead
+                else:
+                    inner_sq = inner * inner
+                    mask = (dist_game_sq <= outer_sq) & (dist_game_sq >= inner_sq)
+                    mask = self._apply_dps_footprint_exclusion(
+                        mask, unit, x_min, x_max, y_min, y_max
+                    )
+            else:
+                mask = dist_game_sq <= outer_sq
+            if not np.any(mask):
+                return
+            region = layers[idx, y_min:y_max, x_min:x_max]
+            self._accumulate_region(region, mask, value, accumulate, additive_accumulation)
+            return
+
+        r = int(radius_px_override) if radius_px_override is not None else max(1, int(radius_game * self.scale))
+        if min_radius_px_override is not None:
+            min_r = int(min_radius_px_override)
+        elif effective_min > 0:
+            min_r = max(
+                0,
+                int(math.ceil(self._obs_min_weapon_range_px(effective_min))),
+            )
+        else:
+            min_r = 0
+        if r == 0:
+            if accumulate:
+                if additive_accumulation:
+                    layers[idx, cy, cx] += value
+                else:
+                    layers[idx, cy, cx] = max(layers[idx, cy, cx], value)
+            else:
+                layers[idx, cy, cx] = value
+            return
+        if min_r >= r:
+            return
+        r_sq = r ** 2
+        min_r_sq = min_r ** 2
+        x_min, x_max = max(0, cx - r), min(self.feature_map_width, cx + r + 1)
+        y_min, y_max = max(0, cy - r), min(self.feature_map_height, cy + r + 1)
+        if x_min >= x_max or y_min >= y_max:
+            return
         Y, X = self._grid_y[y_min:y_max, :], self._grid_x[:, x_min:x_max]
-        mask = ((X - cx)**2 + (Y - cy)**2) <= r_sq
-        if accumulate: layers[idx, y_min:y_max, x_min:x_max][mask] += value
-        else: layers[idx, y_min:y_max, x_min:x_max][mask] = value
+        dist_sq = (X - cx) ** 2 + (Y - cy) ** 2
+        if min_r > 0:
+            mask = (dist_sq <= r_sq) & (dist_sq >= min_r_sq)
+            mask = self._apply_dps_footprint_exclusion(mask, unit, x_min, x_max, y_min, y_max)
+        else:
+            mask = dist_sq <= r_sq
+        region = layers[idx, y_min:y_max, x_min:x_max]
+        self._accumulate_region(region, mask, value, accumulate, additive_accumulation)
+
+    def _health_damage_signal(self, unit: Unit) -> float:
+        """0 = undamaged, 1 = fully damaged (linear in missing HP+shields)."""
+        max_hp = (unit.health_max + unit.shield_max) or 1
+        hp_ratio = (unit.health + unit.shield) / max_hp
+        return float(np.clip(1.0 - hp_ratio, 0.0, 1.0))
 
     def _draw_unit_vitals(self, unit, layers, is_enemy, px, py):
         prefix = "enemy" if is_enemy else "allied"
         idx_hp = self.current_layer_map.get(f"{prefix}_health")
         if idx_hp is not None:
-            max_hp = (unit.health_max + unit.shield_max) or 1
-            hp_ratio = (unit.health + unit.shield) / max_hp
-            # Binary "damaged" signal:
-            # - 0.0 when unit is effectively full health (>=95%)
-            # - 1.0 when unit dropped below 95%
-            hp_signal = 1.0 if hp_ratio < 0.95 else 0.0
-            self._draw_circle_vectorized(layers, idx_hp, px, py, 0, 0, hp_signal, True)
+            hp_signal = self._health_damage_signal(unit)
+            self._draw_unit_marker(layers, idx_hp, unit, px, py, hp_signal, True)
         idx_nrg = self.current_layer_map.get(f"{prefix}_energy")
         if idx_nrg is not None and unit.energy_max > 0:
-            self._draw_circle_vectorized(layers, idx_nrg, px, py, 0, 0, unit.energy/unit.energy_max, True)
+            self._draw_unit_marker(layers, idx_nrg, unit, px, py, unit.energy / unit.energy_max, True)
 
     def _draw_unit_detection(self, unit, layers, is_enemy, px, py):
+        detect_range = self._unit_detection_range(unit)
+        if detect_range <= 0:
+            return
         prefix = "enemy" if is_enemy else "allied"
         idx = self.current_layer_map.get(f"{prefix}_detection")
-        if idx is not None and unit.detect_range > 0:
-            self._draw_circle_vectorized(layers, idx, px, py, unit.detect_range, None, 1.0, False)
+        if idx is not None:
+            self._draw_circle_vectorized(
+                layers, idx, px, py, detect_range, None, 1.0, False
+            )
 
     def _draw_unit_healing(self, unit, layers, is_enemy, px, py, game_data):
         prefix = "enemy" if is_enemy else "allied"
@@ -744,27 +2604,64 @@ class ObservationTransformer:
         elif unit.type_id == UnitTypeId.SHIELDBATTERY and unit.energy > 3: hps, rng = 50.4, 6.0
         if hps > 0: self._draw_circle_vectorized(layers, idx, px, py, rng, None, hps, True)
 
+    def _player_upgrade_ids(self, unit: Unit) -> frozenset:
+        """Researched upgrades for this unit's owner (python-sc2 ``state.upgrades`` is own-player only)."""
+        if not getattr(unit, "is_mine", False):
+            return frozenset()
+        bot = getattr(unit, "_bot_object", None)
+        state = getattr(bot, "state", None) if bot is not None else None
+        upgrades = getattr(state, "upgrades", None) if state is not None else None
+        if not isinstance(upgrades, (set, frozenset, list, tuple)):
+            return frozenset()
+        return frozenset(upgrades)
+
+    def _weapon_range_upgrade_deltas(self, unit: Unit) -> Tuple[float, float]:
+        """
+        Additive ground/air range bonuses from player upgrades.
+
+        python-sc2 ``Unit.ground_range`` / ``air_range`` read static GameData and omit these
+        (see ``Unit.calculate_damage_vs_target`` for the same upgrade table).
+        """
+        upgrades = self._player_upgrade_ids(unit)
+        if not upgrades:
+            return 0.0, 0.0
+        uid = unit.type_id
+        if uid == UnitTypeId.COLOSSUS and UpgradeId.EXTENDEDTHERMALLANCE in upgrades:
+            return 3.0, 0.0
+        if uid == UnitTypeId.HYDRALISK and UpgradeId.EVOLVEGROOVEDSPINES in upgrades:
+            return 1.0, 1.0
+        if uid == UnitTypeId.PHOENIX and UpgradeId.PHOENIXRANGEUPGRADE in upgrades:
+            return 0.0, 2.0
+        if (
+            uid in {UnitTypeId.PLANETARYFORTRESS, UnitTypeId.MISSILETURRET, UnitTypeId.AUTOTURRET}
+            and UpgradeId.HISECAUTOTRACKING in upgrades
+        ):
+            return 1.0, 1.0
+        return 0.0, 0.0
+
     def _dps_weapon_game_radius(self, unit: Unit, catalog_range: float) -> Tuple[float, float]:
         """
-        Weapon reach in game units for DPS discs: max(catalog range, live API range) + radius.
+        Weapon reach in game units for DPS annuli: max(catalog range, live API range, upgraded range)
+        + footprint.
 
-        ``catalog_range`` is the base weapon range from ``unit_data.json`` (no radius). The SC2
-        observation fills ``unit.ground_range`` / ``unit.air_range`` with **current** values, so
-        upgrades (e.g. Extended Thermal Lance, Hi-Sec Auto Tracking, Grooved Spines, Seismic
-        Spines, Advanced Ballistics, Anion Crystals) match what allies and **enemies** can do.
-
-        Returns (ground_ring_radius, air_ring_radius) in game units (same convention as before:
-        catalog range + unit.radius, but catalog is upgraded by live stats when higher).
+        Uses the same display footprint radius as density/terrain markers (not the inflated live
+        selection ``unit.radius``), so siege tanks and other large units stay concentric with their
+        rendered body. Live ``ground_range`` / ``air_range`` are still consulted when they exceed
+        catalog values; range upgrades are applied via ``_weapon_range_upgrade_deltas``.
         """
-        ur = float(getattr(unit, "radius", 0.0) or 0.0)
+        ur = self._footprint_game_radius(unit)
         base = float(catalog_range)
         g_live = float(getattr(unit, "ground_range", 0.0) or 0.0)
         a_live = float(getattr(unit, "air_range", 0.0) or 0.0)
-        rng_g = max(base, g_live) + ur
-        rng_a = max(base, a_live) + ur
+        g_up, a_up = self._weapon_range_upgrade_deltas(unit)
+        min_reach = self._min_observable_weapon_reach_game()
+        rng_g = max(max(base, g_live, base + g_up) + ur, min_reach)
+        rng_a = max(max(base, a_live, base + a_up) + ur, min_reach)
         return rng_g, rng_a
 
     def _draw_unit_dps(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int, game_data: GameData):
+        if not self._unit_is_combat_ready(unit):
+            return
         if unit.type_id in [UnitTypeId.LIBERATORAG, UnitTypeId.CARRIER, UnitTypeId.LURKERMP,
                             UnitTypeId.MEDIVAC, UnitTypeId.WARPPRISM, UnitTypeId.OBSERVER,
                             UnitTypeId.OVERLORD, UnitTypeId.OVERSEER]: return
@@ -791,38 +2688,85 @@ class ObservationTransformer:
                 db = self._get_unit_data_from_json(u_name)
                 if db:
                     for w in db.get('weapons', []):
-                        dps = (w['damage'] * w['attacks']) / (w['period'] or 1.0)
-                        weapon_stats.append({'base': dps, 'range': float(w['range']), 'typ': w['type']})
+                        period = w.get('period') or 1.0
+                        dps = (w['damage'] * w['attacks']) / period
+                        weapon_stats.append({
+                            'base': dps,
+                            'range': float(w['range']),
+                            'min_range': float(w.get('min_range', 0.0)),
+                            'typ': w['type'],
+                            'period': period,
+                            'bonuses': w.get('bonuses', []),
+                        })
+
+        # Weapon bonus type → typed-DPS layer suffix.
+        # Values confirmed from unit_data.json samples:
+        #   1=Light (Colossus, Hellion, Baneling), 2=Armored (Marauder, SiegeTank),
+        #   7=Massive (Corruptor, Tempest).  Type 3=Biological has no typed layer.
+        _BONUS_TYPE_SUFFIX = {1: "light", 2: "armor", 7: "massive"}
 
         for w in weapon_stats:
             p = "enemy" if is_enemy else "allied"
-            idx_g = self.current_layer_map.get(f"{p}_g_dps_base")
-            idx_a = self.current_layer_map.get(f"{p}_a_dps_base")
             if 'rng' in w and 'range' not in w:
                 rng_g = float(w['rng'])
                 rng_a = rng_g
             else:
                 rng_g, rng_a = self._dps_weapon_game_radius(unit, float(w['range']))
+            min_rng = float(w.get('min_range', 0.0))
             typ = int(w['typ'])
+            idx_g = self._resolve_axis_dps_layer(p, "g") if typ in (1, 3) else None
+            idx_a = self._resolve_axis_dps_layer(p, "a") if typ in (2, 3) else None
+            base_on_ground = idx_g is not None
+            base_on_air = idx_a is not None
             if typ in (1, 3) and idx_g is not None:
-                self._draw_circle_vectorized(layers, idx_g, px, py, rng_g, None, w['base'], True)
+                self._draw_circle_vectorized(
+                    layers, idx_g, px, py, rng_g, None, w['base'], True,
+                    min_radius_game=min_rng, unit=unit,
+                )
             if typ in (2, 3) and idx_a is not None:
-                self._draw_circle_vectorized(layers, idx_a, px, py, rng_a, None, w['base'], True)
+                self._draw_circle_vectorized(
+                    layers, idx_a, px, py, rng_a, None, w['base'], True,
+                    min_radius_game=min_rng, unit=unit,
+                )
+
+            # Typed DPS channels: bonus-only when _dps_base is active; otherwise base+bonus
+            # (CTF uses typed layers without _dps_base — siege threat must still show as a donut).
+            period = w.get('period', 1.0) or 1.0
+            for bonus in w.get('bonuses', []):
+                suffix = _BONUS_TYPE_SUFFIX.get(bonus.get('type'))
+                if suffix is None:
+                    continue
+                bonus_dps = bonus.get('bonus', 0.0) / period
+                if typ in (1, 3):
+                    idx_gb = self._resolve_axis_dps_layer(p, "g", suffix)
+                    if idx_gb is not None:
+                        typed_dps = bonus_dps + (0.0 if base_on_ground else w['base'])
+                        self._draw_circle_vectorized(
+                            layers, idx_gb, px, py, rng_g, None, typed_dps, True,
+                            min_radius_game=min_rng, unit=unit,
+                        )
+                if typ in (2, 3):
+                    idx_aa = self._resolve_axis_dps_layer(p, "a", suffix)
+                    if idx_aa is not None:
+                        typed_dps = bonus_dps + (0.0 if base_on_air else w['base'])
+                        self._draw_circle_vectorized(
+                            layers, idx_aa, px, py, rng_a, None, typed_dps, True,
+                            min_radius_game=min_rng, unit=unit,
+                        )
 
     def _draw_effects(self, effects, layers):
         for effect in effects:
             eid = getattr(effect.id, "value", effect.id)
             dps, radius, hits_air, is_ally = 0.0, 0.0, False, False
-            if eid in [82, 83]: # Liberator
+            if eid in _LIBERATOR_ZONE_EFFECT_IDS:
                 dps, radius = 85.0, 5.0
                 for pos in effect.positions:
                     dist_a = min([math.hypot(p.x-pos.x, p.y-pos.y) for p in self._liberator_positions['allied']] + [999])
                     dist_e = min([math.hypot(p.x-pos.x, p.y-pos.y) for p in self._liberator_positions['enemy']] + [999])
                     if dist_a < dist_e and dist_a < 16.0: is_ally = True
-            elif eid == 1: dps, radius = 28.0, 1.5 # Storm
-            elif eid == 11: dps, radius, hits_air = 300.0, 8.0, True # Nuke
-            elif eid == 12: dps, radius, hits_air = 200.0, 2.0, True # Bile
-            elif eid == 6: # Scan
+            elif eid in _THREAT_EFFECT_SPECS:
+                dps, radius, hits_air = _THREAT_EFFECT_SPECS[eid]
+            elif eid in _SCAN_EFFECT_IDS:
                 idx = self.current_layer_map.get(LayerConstants.ENEMY_DETECTION)
                 if idx is not None:
                     for pos in effect.positions:
@@ -831,15 +2775,14 @@ class ObservationTransformer:
                 continue
             if dps > 0:
                 p = "allied" if is_ally else "enemy"
-                idx = self.current_layer_map.get(f"{p}_g_dps_base")
-                if idx is not None:
+                layer_indices = self._effect_dps_layer_indices(p, hits_air=hits_air)
+                for idx in layer_indices:
                     for pos in effect.positions:
                         px, py = self._get_pixel_coords(pos)
                         if px is not None:
-                            self._draw_circle_vectorized(layers, idx, px, py, radius, None, dps, True)
-                            if hits_air:
-                                idx_a = self.current_layer_map.get(f"{p}_a_dps_base")
-                                if idx_a is not None: self._draw_circle_vectorized(layers, idx_a, px, py, radius, None, dps, True)
+                            self._draw_circle_vectorized(
+                                layers, idx, px, py, radius, None, dps, True
+                            )
 
     def _draw_transport_info(self, raw_obs, layers):
         units = raw_obs.get('units') or []
@@ -852,10 +2795,20 @@ class ObservationTransformer:
             if u_id not in t_ids: continue
             px, py = self._get_pixel_coords(unit.position)
             if px is None: continue
-            if unit.cargo_max > 0:
+            cargo_max = int(getattr(unit, "cargo_max", 0) or 0)
+            if cargo_max > 0:
                 r = int(unit.radius * self.scale) + 1
-                if idx_slots: self._draw_circle_vectorized(layers, idx_slots, px, py, 0, r, 0.5 if unit.cargo_used < unit.cargo_max else 1.0, False)
-                if idx_pass and unit.cargo_used > 0: self._draw_circle_vectorized(layers, idx_pass, px, py, 0, r, min(float(unit.cargo_used)/8.0, 1.0), True)
+                cargo_used = int(getattr(unit, "cargo_used", 0) or 0)
+                if idx_slots:
+                    self._draw_circle_vectorized(
+                        layers, idx_slots, px, py, 0, r,
+                        0.5 if cargo_used < cargo_max else 1.0, False,
+                    )
+                if idx_pass and cargo_used > 0:
+                    self._draw_circle_vectorized(
+                        layers, idx_pass, px, py, 0, r,
+                        min(float(cargo_used) / 8.0, 1.0), True,
+                    )
 
     def get_config(self):
         return {"map_size": (self.feature_map_width, self.feature_map_height), "scale": self.scale}

@@ -4,7 +4,7 @@ import copy
 import math
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Union
 from loguru import logger
 
 def interpolate_spatial_weights(weights: torch.Tensor, old_size: int, new_size: int) -> torch.Tensor:
@@ -217,6 +217,321 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                 new_state_dict[key] = target_state_dict[key]
 
     return new_state_dict
+
+def non_finite_state_dict_keys(
+    state_dict: Dict[str, Any], *, max_keys: int = 8
+) -> List[str]:
+    """Return state_dict keys whose tensor/array values contain NaN or inf."""
+    bad: List[str] = []
+    for key, value in state_dict.items():
+        if isinstance(value, torch.Tensor):
+            finite = torch.isfinite(value).all()
+        elif isinstance(value, np.ndarray):
+            finite = np.isfinite(value).all()
+        else:
+            continue
+        if not finite:
+            bad.append(key)
+        if len(bad) >= max_keys:
+            break
+    return bad
+
+
+def policy_state_dict_finite(state_dict: Dict[str, Any]) -> bool:
+    """True when every tensor/array in a policy state_dict has only finite values."""
+    return not non_finite_state_dict_keys(state_dict, max_keys=1)
+
+
+def inspect_checkpoint_policy_weights(
+    zip_path: str, *, max_keys: int = 8
+) -> Tuple[bool, str, List[str]]:
+    """
+    Validate an SB3 checkpoint's policy weights.
+
+    Returns (ok, reason, non_finite_keys). Reasons include ``ok``, ``missing_file``,
+    ``not_a_zip``, ``load_failed:...``, ``no_policy_key``, and ``non_finite``.
+    """
+    import os
+    import zipfile
+
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    if not os.path.isfile(zip_path):
+        return False, "missing_file", []
+    if not zipfile.is_zipfile(zip_path):
+        return False, "not_a_zip", []
+    try:
+        _, params, _ = load_from_zip_file(zip_path, device="cpu", load_data=False)
+    except Exception as exc:
+        return False, f"load_failed:{exc}", []
+    p_sd = params.get("policy")
+    if p_sd is None:
+        return False, "no_policy_key", []
+    bad = non_finite_state_dict_keys(p_sd, max_keys=max_keys)
+    if bad:
+        return False, "non_finite", bad
+    return True, "ok", []
+
+
+def checkpoint_policy_weights_finite(zip_path: str) -> bool:
+    """Check policy tensors inside an SB3 zip before hot-reloading into the collector."""
+    ok, _, _ = inspect_checkpoint_policy_weights(zip_path)
+    return ok
+
+
+def read_checkpoint_timesteps(zip_path: str) -> Optional[int]:
+    """Return ``num_timesteps`` from an SB3 ``.zip`` data blob, or None if unavailable."""
+    import json
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            if "data" not in archive.namelist():
+                return None
+            payload = json.loads(archive.read("data").decode("utf-8"))
+            ts = payload.get("num_timesteps")
+            return int(ts) if ts is not None else None
+    except Exception:
+        return None
+
+
+def load_optimizer_state_from_zip(
+    model: Any,
+    zip_path: str,
+    device: Union[str, torch.device] = "auto",
+) -> Tuple[bool, str]:
+    """
+    Restore Adam state from an SB3 ``.zip`` into ``model.policy.optimizer``.
+
+    Call after policy weights are on the model (same parameter count/order as the
+    checkpoint). Returns ``(ok, reason)``; on failure the caller keeps a fresh optimizer.
+    """
+    if not hasattr(model, "policy") or getattr(model.policy, "optimizer", None) is None:
+        return False, "no_policy_optimizer"
+
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    try:
+        _, params, _ = load_from_zip_file(zip_path, device=device, load_data=False)
+    except Exception as exc:
+        return False, f"zip_read_failed:{exc}"
+
+    opt_sd = params.get("policy.optimizer")
+    if not opt_sd:
+        return False, "no_optimizer_in_checkpoint"
+
+    try:
+        model.policy.optimizer.load_state_dict(opt_sd)
+        return True, "ok"
+    except Exception as exc:
+        return False, f"load_state_dict_failed:{exc}"
+
+
+def load_policy_weights_from_zip(
+    policy: torch.nn.Module,
+    zip_path: str,
+    device: Union[str, torch.device] = "auto",
+    *,
+    strict: bool = False,
+) -> Tuple[bool, List[str], List[str]]:
+    """
+    Load only the policy ``state_dict`` from an SB3 ``.zip`` checkpoint.
+
+    Safer than ``model.set_parameters`` for rollout snapshots: avoids optimizer /
+    ``exact_match`` failures leaving the learner on stale random weights.
+    """
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    _, params, _ = load_from_zip_file(zip_path, device=device, load_data=False)
+    p_sd = params.get("policy")
+    if p_sd is None:
+        return False, [], []
+    missing, unexpected = policy.load_state_dict(p_sd, strict=strict)
+    return True, list(missing), list(unexpected)
+
+
+def load_curriculum_checkpoint(
+    algo_class: Any,
+    model_path: str,
+    algo_kwargs: Dict[str, Any],
+    load_kwargs: Dict[str, Any],
+    observation_space: Any,
+    action_space: Any,
+    *,
+    grid_size: int = 32,
+    restore_optimizer: bool = False,
+) -> Any:
+    """
+    Load a checkpoint for curriculum continuation.
+
+    Tries a direct SB3 load first. On observation/action shape mismatch, grafts
+    compatible policy weights onto a freshly constructed model (same path as sync
+    ``train_pipeline``).
+
+    When ``restore_optimizer`` is True and parameter shapes match the checkpoint,
+    Adam moments are restored for same-level interrupted resume. On curriculum
+    level change, pass ``restore_optimizer=False`` so the new MDP starts with fresh Adam.
+    """
+    load_kwargs = {**load_kwargs, "restore_optimizer": restore_optimizer}
+    try:
+        model = algo_class.load(model_path, **load_kwargs)
+        if restore_optimizer:
+            ok, reason = load_optimizer_state_from_zip(
+                model, model_path, load_kwargs.get("device", "auto")
+            )
+            if ok:
+                logger.info(f"Restored optimizer state from {model_path!r}")
+            elif reason != "no_optimizer_in_checkpoint":
+                logger.warning(
+                    f"Optimizer restore skipped for {model_path!r} ({reason})"
+                )
+        return model
+    except Exception as direct_exc:
+        logger.warning(
+            f"Direct checkpoint load failed for {model_path!r} ({direct_exc}); "
+            "attempting graft onto the new level architecture."
+        )
+
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    model = algo_class(**algo_kwargs)
+    _, params, _ = load_from_zip_file(model_path, device="cpu", load_data=False)
+    saved_sd = params.get("policy")
+    if saved_sd is None:
+        logger.error(f"Checkpoint {model_path!r} has no policy weights; using fresh model.")
+        return model
+
+    if hasattr(observation_space, "spaces") and "map" in observation_space.spaces:
+        new_in_channels = observation_space.spaces["map"].shape[0]
+    else:
+        new_in_channels = observation_space.shape[0]
+
+    new_action_dim = getattr(action_space, "n", None)
+    if new_action_dim is None and hasattr(action_space, "nvec"):
+        # Universal MultiDiscrete([64, 1024]) — graft spatial/command heads separately.
+        new_action_dim = int(np.sum(action_space.nvec))
+    grafted = graft_model_weights(
+        saved_sd,
+        new_in_channels=new_in_channels,
+        new_action_dim=new_action_dim,
+        new_grid_size=grid_size,
+        target_state_dict=model.policy.state_dict(),
+    )
+    missing, unexpected = model.policy.load_state_dict(grafted, strict=False)
+    logger.info(
+        f"Grafted curriculum weights from {model_path!r}: "
+        f"missing={len(missing)}, unexpected={len(unexpected)}"
+    )
+    if restore_optimizer:
+        ok, reason = load_optimizer_state_from_zip(model, model_path, "cpu")
+        if ok:
+            logger.info(f"Restored optimizer state after graft from {model_path!r}")
+        else:
+            logger.warning(
+                f"Optimizer restore skipped after graft from {model_path!r} ({reason})"
+            )
+    return model
+
+
+def graft_build_model_weights(
+    checkpoint_path: str,
+    model: Any,
+    *,
+    strict: bool = False,
+) -> bool:
+    """
+    Load compatible build-agent policy weights across curriculum levels.
+    Grafts CNN input channels when build_map_layers grow.
+    """
+    from stable_baselines3.common.save_util import load_from_zip_file
+
+    try:
+        _, params, _ = load_from_zip_file(checkpoint_path, device="cpu", load_data=False)
+    except Exception as exc:
+        logger.warning(f"graft_build_model_weights: could not load {checkpoint_path}: {exc}")
+        return False
+
+    old_sd = params.get("policy")
+    if old_sd is None:
+        return False
+
+    new_sd = model.policy.state_dict()
+    grafted = graft_model_weights(
+        old_sd,
+        new_in_channels=None,
+        target_state_dict=new_sd,
+    )
+    missing, unexpected = model.policy.load_state_dict(grafted, strict=strict)
+    if missing:
+        logger.info(f"graft_build_model_weights missing keys: {missing[:8]}...")
+    if unexpected:
+        logger.info(f"graft_build_model_weights unexpected keys: {unexpected[:8]}...")
+    opt_ok, opt_reason = load_optimizer_state_from_zip(model, checkpoint_path, "cpu")
+    if opt_ok:
+        logger.info(f"graft_build_model_weights: restored optimizer from {checkpoint_path!r}")
+    elif opt_reason != "no_optimizer_in_checkpoint":
+        logger.warning(
+            f"graft_build_model_weights: optimizer restore skipped ({opt_reason})"
+        )
+    return True
+
+
+def load_build_checkpoint(
+    model_path: str,
+    model_kwargs: Dict[str, Any],
+    *,
+    load_kwargs: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """
+    Load a build-agent checkpoint with policy and Adam state.
+
+    Build curriculum keeps a fixed action space and stable map channel count, so
+    weights should load directly without channel grafting. On metadata mismatch we
+    copy policy weights and restore the optimizer explicitly.
+    """
+    from src.agent.maskable_ppo import MaskablePPO
+
+    load_kwargs = dict(load_kwargs or {})
+    load_kwargs["restore_optimizer"] = True
+    device = load_kwargs.get("device", "auto")
+
+    try:
+        model = MaskablePPO.load(model_path, **load_kwargs)
+        opt_ok, opt_reason = load_optimizer_state_from_zip(model, model_path, device)
+        if opt_ok:
+            logger.info(f"Build checkpoint: optimizer restored from {model_path!r}")
+        elif opt_reason != "no_optimizer_in_checkpoint":
+            logger.warning(
+                f"Build checkpoint: optimizer restore skipped ({opt_reason})"
+            )
+        return model
+    except Exception as direct_exc:
+        logger.warning(
+            f"Build direct load failed for {model_path!r} ({direct_exc}); "
+            "loading policy and optimizer without grafting."
+        )
+
+    model = MaskablePPO(**model_kwargs)
+    ok, missing, unexpected = load_policy_weights_from_zip(
+        model.policy, model_path, device, strict=False
+    )
+    if not ok:
+        raise RuntimeError(f"Build checkpoint {model_path!r} has no policy weights")
+    if missing:
+        logger.warning(
+            "Build policy partial load "
+            f"missing={missing[:8]} unexpected={unexpected[:8]}"
+        )
+
+    opt_ok, opt_reason = load_optimizer_state_from_zip(model, model_path, device)
+    if opt_ok:
+        logger.info(
+            f"Build checkpoint: optimizer restored after policy load from {model_path!r}"
+        )
+    else:
+        logger.warning(f"Build checkpoint: optimizer restore skipped ({opt_reason})")
+    return model
+
 
 def calculate_distance_matrix(points_a: np.ndarray, points_b: np.ndarray) -> np.ndarray:
     diff = points_a[:, np.newaxis, :] - points_b[np.newaxis, :, :]

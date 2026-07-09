@@ -1,8 +1,0 @@
-{
-  "track_id": "dynamic_greedy_reward_20251231",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2025-12-31T15:40:00Z",
-  "updated_at": "2025-12-31T15:40:00Z",
-  "description": "Implement Dynamic Greedy Choice reward calculation for Level 3/4 to encourage unit splitting."
-}

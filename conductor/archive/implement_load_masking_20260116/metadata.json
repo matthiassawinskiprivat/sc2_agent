@@ -1,8 +1,0 @@
-{
-  "track_id": "implement_load_masking_20260116",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2026-01-16T19:35:00Z",
-  "updated_at": "2026-01-16T19:35:00Z",
-  "description": "Implemented action masking for the load layer to improve training efficiency by restricting the load action head to areas near transport units."
-}

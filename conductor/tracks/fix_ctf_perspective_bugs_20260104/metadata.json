@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_ctf_perspective_bugs_20260104",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-04T13:52:00Z",
-  "updated_at": "2026-01-04T13:52:00Z",
-  "description": "Fix perspective-aware reward calculation and per-player command targets in CTF."
-}

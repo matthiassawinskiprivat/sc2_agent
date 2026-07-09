@@ -17,22 +17,6 @@ class LevelDropEnv(Level7Env):
         else:
             self.map_index = 0
 
-    def reset(self, seed=None, options=None):
-        """
-        Overridden reset to rotate maps on EVERY reset call.
-        """
-        # If this is NOT the very first reset, rotate the map
-        if self.episode_counter > 0:
-            if hasattr(self, 'map_list') and self.map_list:
-                self.map_index = (self.map_index + 1) % len(self.map_list)
-                self.map_name = self.map_list[self.map_index]
-                self._log(f"Rotating to next map: {self.map_name} (Index: {self.map_index})")
-                
-                # Force a hard reset to load the new map
-                self.close()
-        
-        return super().reset(seed=seed, options=options)
-
     def _parse_races_from_map_name(self, map_name: str) -> tuple[Race, Race]:
         """
         Parses agent and enemy races from map name (e.g., ...Terran_vs_Zerg).
@@ -87,10 +71,13 @@ class LevelDropEnv(Level7Env):
         game_map = self._resolve_map(self.map_name)
 
         self._log(f"Creating game on {self.map_name} ({agent_race.name} vs {enemy_race.name})...")
+        from train.envs.sc2_session_config import session_realtime
+
+        sim_realtime = session_realtime(self.training_conf)
         await self._controller.create_game(
             game_map,
             [Bot(agent_race, self._bot), Computer(enemy_race, Difficulty.Easy)],
-            realtime=self.visualize,
+            realtime=sim_realtime,
         )
 
         self._log(f"Joining game as {agent_race.name}...")
@@ -103,17 +90,23 @@ class LevelDropEnv(Level7Env):
         game_info = await self._client.get_game_info()
         game_data = await self._client.get_game_data()
 
+        self._bot.client = self._client
         try:
             from sc2.unit import UnitGameData
             UnitGameData._game_data = game_data
             UnitGameData._bot_object = self._bot
-            self._bot.client = self._client
             self._bot._game_info = game_info
             self._bot._game_data = game_data
-        except ImportError:
+        except (ImportError, AttributeError):
             pass
-        
-        self._bot._prepare_start(client=self._client, player_id=1, game_info=game_info, game_data=game_data)
+
+        self._bot._prepare_start(
+            client=self._client,
+            player_id=1,
+            game_info=game_info,
+            game_data=game_data,
+            realtime=sim_realtime,
+        )
         initial_observation = await self._client.observation()
 
         from src.utils.sc2_observation_compat import game_state_from_response_observation

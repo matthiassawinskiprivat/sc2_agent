@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_pipeline_ipc_error_20260102",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-02T13:03:00Z",
-  "updated_at": "2026-01-02T13:03:00Z",
-  "description": "Fix train_pipeline TypeError in reset_game_state and improve IPC error logging."
-}

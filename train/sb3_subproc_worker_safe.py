@@ -6,13 +6,16 @@ still be inside remote.send() after env.reset() following a terminal step. If th
 parent has already closed its end of the pipe, workers raise BrokenPipeError and
 spam tracebacks. SB3's stock _worker does not catch this.
 
-This module replaces stable_baselines3.common.vec_env.subproc_vec_env._worker with
-an implementation that exits quietly on pipe errors. Training semantics are unchanged
-during normal operation.
+Also retries env.reset() after terminal steps so a single SC2 crash does not kill
+the worker process (which would take down the whole SubprocVecEnv).
 """
 import multiprocessing as mp
-from typing import Any, Optional
+import os
+import time
+from typing import Any, Optional, Tuple
 
+import numpy as np
+from gymnasium import spaces
 from stable_baselines3.common.vec_env.base_vec_env import CloudpickleWrapper
 from stable_baselines3.common.vec_env.patch_gym import _patch_env
 
@@ -23,6 +26,43 @@ def _send_safe(remote: mp.connection.Connection, payload: Any) -> bool:
         return True
     except (BrokenPipeError, EOFError, OSError):
         return False
+
+
+def _zero_observation(env) -> Any:
+    obs_space = env.observation_space
+    if isinstance(obs_space, spaces.Dict):
+        return {
+            k: np.zeros(v.shape, dtype=v.dtype)
+            for k, v in obs_space.spaces.items()
+        }
+    return np.zeros(obs_space.shape, dtype=obs_space.dtype)
+
+
+def _reset_env_with_retry(env, *, seed=None, options=None) -> Tuple[Any, dict]:
+    """Reset with backoff; survive SC2 relaunch failures without killing the worker."""
+    max_retries = int(os.environ.get("SC2_WORKER_RESET_RETRIES", "3"))
+    last_exc: Optional[BaseException] = None
+    for attempt in range(max_retries):
+        try:
+            if seed is not None or options:
+                maybe_options = {"options": options} if options else {}
+                return env.reset(seed=seed, **maybe_options)
+            return env.reset()
+        except Exception as exc:
+            last_exc = exc
+            try:
+                env.close()
+            except Exception:
+                pass
+            if attempt < max_retries - 1:
+                time.sleep(8.0 + attempt * 2.0)
+
+    print(
+        f"[SubprocWorker] env.reset() failed after {max_retries} attempts "
+        f"({type(last_exc).__name__}: {last_exc}); returning zero observation so "
+        "collector can rebuild vec env."
+    )
+    return _zero_observation(env), {"sc2_reset_failed": True}
 
 
 def _safe_worker(
@@ -49,12 +89,13 @@ def _safe_worker(
             info["TimeLimit.truncated"] = truncated and not terminated
             if done:
                 info["terminal_observation"] = observation
-                observation, reset_info = env.reset()
+                observation, reset_info = _reset_env_with_retry(env)
             if not _send_safe(remote, (observation, reward, done, info, reset_info)):
                 break
         elif cmd == "reset":
-            maybe_options = {"options": data[1]} if data[1] else {}
-            observation, reset_info = env.reset(seed=data[0], **maybe_options)
+            observation, reset_info = _reset_env_with_retry(
+                env, seed=data[0], options=data[1] if data[1] else None
+            )
             if not _send_safe(remote, (observation, reset_info)):
                 break
         elif cmd == "render":

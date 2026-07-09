@@ -1,8 +1,0 @@
-{
-  "track_id": "ctf_pylon_objective_20260109",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2026-01-09T21:24:00Z",
-  "updated_at": "2026-01-09T21:24:00Z",
-  "description": "Restrict the CTF command objective layer to only show the enemy pylon's position, including its last known position if hidden."
-}

@@ -23,3 +23,4 @@ dependencies:
     - stable-baselines3
     - sb3-contrib
     - pytest
+    - mpyq

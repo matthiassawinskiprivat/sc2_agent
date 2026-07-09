@@ -14,13 +14,18 @@ class SingleClientSC2Manager:
     """
     Manages a single SC2 process and one or more clients.
     """
-    def __init__(self, sc2_process_cls: Type[SC2Process] = SC2Process, client_cls: Type[Client] = Client, worker_index: int = 0):
+    def __init__(self, sc2_process_cls: Type[SC2Process] = SC2Process, client_cls: Type[Client] = Client, worker_index: int = 0, num_workers: int = 1):
         self.sc2_process_cls = sc2_process_cls
         self.client_cls = client_cls
         self.worker_index = worker_index
+        self.num_workers = max(1, int(num_workers))
         self.process: Optional[SC2Process] = None
         self.clients: List[Client] = []
         self.controller = None
+
+    def _startup_stagger_sec(self) -> float:
+        """Delay between parallel worker SC2 launches (matches single_client_env timeout budget)."""
+        return 8.0 if self.num_workers >= 5 else 6.0
 
     @property
     def client(self) -> Optional[Client]:
@@ -32,6 +37,19 @@ class SingleClientSC2Manager:
         # Deterministic port allocation to prevent race conditions in parallel environments
         # Base port 12000 leaves plenty of room above standard 5000+ ports
         port = 12000 + (self.worker_index * 1000)
+
+        # Stagger SC2 startup across parallel workers to avoid DirectX/GPU init race.
+        # Without this, 5 instances launching simultaneously share GPU init paths and
+        # one or more crash with 0xC0000005 (access violation).
+        stagger_sec = self._startup_stagger_sec()
+        startup_delay = self.worker_index * stagger_sec
+        if startup_delay > 0:
+            logger.info(
+                f"Worker {self.worker_index} waiting {startup_delay:.0f}s before SC2 launch "
+                f"(staggered startup, {stagger_sec:.0f}s × index)..."
+            )
+            await asyncio.sleep(startup_delay)
+
         logger.info(f"Worker {self.worker_index} launching SC2 on port {port}")
         
         self.process = self.sc2_process_cls(
@@ -71,7 +89,9 @@ class SingleClientSC2Manager:
             if result.create_game.HasField("error"):
                 logger.error(f"Engine Error: {result.create_game.error}")
             
-            await asyncio.sleep(2)
+            # SC2 needs a moment to finish lobby setup before join_game; too short a pause
+            # yields WSMsgType.CLOSE (257) on join when multiple instances start in parallel.
+            await asyncio.sleep(3.0)
         except Exception as e:
             logger.error(f"Exception during create_game: {e}")
             raise e
