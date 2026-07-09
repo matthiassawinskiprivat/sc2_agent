@@ -17,3 +17,5 @@ temp_logs/
 temp_sc2_async_buffer/
 /models_universal/
 /logs_universal/
+logs_build_zerg
+models_build_zerg
