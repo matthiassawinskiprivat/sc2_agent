@@ -121,7 +121,7 @@ def test_opponent_squad_batch_single_physics_step():
     env.bot.client.step.assert_called_once()
 
 
-def test_calculate_squad_step_reward_sums_per_unit_penalties():
+def test_calculate_squad_step_reward_applies_step_penalty_once_per_physics_step():
     from src.agent.ctf_bot import CaptureTheFlagBot
 
     bot = CaptureTheFlagBot(
@@ -151,4 +151,4 @@ def test_calculate_squad_step_reward_sums_per_unit_penalties():
     bot.all_units.find_by_tag = MagicMock(return_value=None)
 
     reward = bot.calculate_squad_step_reward([101, 102], perspective_player_id=1)
-    assert reward == pytest.approx(-0.2)
+    assert reward == pytest.approx(-0.1)

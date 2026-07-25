@@ -30,7 +30,8 @@ class MultiClientSC2Manager:
             logger.info(f"Launching SC2 Process {i+1}/{count}...")
             process = self.sc2_process_cls(
                 fullscreen=fullscreen,
-                render=visualize
+                render=visualize,
+                resolution=(1, 1),
             )
             controller = await process.__aenter__()
             

@@ -45,6 +45,8 @@ def _make_bot(role_map: dict, target_map: dict, active_tag: int) -> CaptureTheFl
     bot.prev_pylon_health = {1: 20.0, 2: 20.0}
     bot.prev_enemy_units_health = {1: 0.0, 2: 0.0}
     bot.prev_own_units_health = {1: 0.0, 2: 0.0}
+    bot.prev_enemy_unit_count = {1: 0, 2: 0}
+    bot.prev_own_unit_count = {1: 0, 2: 0}
     bot.enemy_pylon_pos = {1: None, 2: None}
     return bot
 

@@ -171,6 +171,80 @@ class TestCumulativeActiveTacticalLayers:
 
 
 # ===========================================================================
+# get_cumulative_active_unit_scalars
+# ===========================================================================
+
+class TestCumulativeActiveUnitScalars:
+    def test_basic_accumulation(self, tmp_path):
+        _make_pipeline(tmp_path, {
+            "lvl0": {"env": {"active_unit_scalars": ["health_pct", "x_norm"]}},
+            "lvl1": {"env": {"active_unit_scalars": ["role_attack"]}},
+            "lvl2": {"env": {}},
+        })
+        cm = ConfigManager(str(tmp_path))
+        assert cm.get_cumulative_active_unit_scalars("lvl0") == ["health_pct", "x_norm"]
+        assert cm.get_cumulative_active_unit_scalars("lvl1") == [
+            "health_pct", "x_norm", "role_attack"
+        ]
+        assert cm.get_cumulative_active_unit_scalars("lvl2") == [
+            "health_pct", "x_norm", "role_attack"
+        ]
+
+    def test_duplicates_skipped(self, tmp_path):
+        _make_pipeline(tmp_path, {
+            "lvl0": {"env": {"active_unit_scalars": ["health_pct", "x_norm"]}},
+            "lvl1": {"env": {"active_unit_scalars": ["x_norm", "role_defend"]}},
+        })
+        cm = ConfigManager(str(tmp_path))
+        assert cm.get_cumulative_active_unit_scalars("lvl1") == [
+            "health_pct", "x_norm", "role_defend"
+        ]
+
+    def test_case_insensitive_dedup(self, tmp_path):
+        _make_pipeline(tmp_path, {
+            "lvl0": {"env": {"active_unit_scalars": ["Health_Pct", "X_NORM"]}},
+            "lvl1": {"env": {"active_unit_scalars": ["health_pct", "role_attack"]}},
+        })
+        cm = ConfigManager(str(tmp_path))
+        assert cm.get_cumulative_active_unit_scalars("lvl1") == [
+            "health_pct", "x_norm", "role_attack"
+        ]
+
+    def test_pipeline_root_seeds(self, tmp_path):
+        _make_pipeline(
+            tmp_path,
+            {"lvl0": {"env": {"active_unit_scalars": ["role_attack"]}}},
+            active_unit_scalars=["health_pct", "x_norm"],
+        )
+        cm = ConfigManager(str(tmp_path))
+        assert cm.get_cumulative_active_unit_scalars("lvl0") == [
+            "health_pct", "x_norm", "role_attack"
+        ]
+
+    def test_order_preserved_across_levels(self, tmp_path):
+        _make_pipeline(tmp_path, {
+            "lvl0": {"env": {"active_unit_scalars": ["health_pct", "shield_pct"]}},
+            "lvl1": {"env": {"active_unit_scalars": ["is_melee"]}},
+            "lvl2": {"env": {"active_unit_scalars": ["role_defend"]}},
+        })
+        cm = ConfigManager(str(tmp_path))
+        result = cm.get_cumulative_active_unit_scalars("lvl2")
+        assert result == ["health_pct", "shield_pct", "is_melee", "role_defend"]
+        assert result[:2] == cm.get_cumulative_active_unit_scalars("lvl0")
+
+    def test_independent_from_layers(self, tmp_path):
+        _make_pipeline(tmp_path, {
+            "lvl0": {"env": {
+                "active_layers": ["g1"],
+                "active_unit_scalars": ["health_pct"],
+            }},
+        })
+        cm = ConfigManager(str(tmp_path))
+        assert cm.get_cumulative_active_layers("lvl0") == ["g1"]
+        assert cm.get_cumulative_active_unit_scalars("lvl0") == ["health_pct"]
+
+
+# ===========================================================================
 # get_cumulative_action_heads
 # ===========================================================================
 
@@ -272,6 +346,19 @@ class TestGetAgentArchitecture:
         _write_yaml(tmp_path, "pipeline.yaml", {"levels": [], "agent_architecture": "universal"})
         cm = ConfigManager(str(tmp_path))
         assert cm.get_agent_architecture() == "universal"
+
+    def test_level_override_beats_pipeline(self, tmp_path):
+        _write_yaml(tmp_path, "pipeline.yaml", {"levels": ["ctf0"], "agent_architecture": "universal"})
+        _write_yaml(tmp_path, "ctf0.yaml", {"agent_architecture": "squad", "env": {}})
+        cm = ConfigManager(str(tmp_path))
+        assert cm.get_agent_architecture("ctf0") == "squad"
+        assert cm.get_agent_architecture() == "universal"
+
+    def test_level_env_nested_architecture(self, tmp_path):
+        _write_yaml(tmp_path, "pipeline.yaml", {"levels": ["ctf1"], "agent_architecture": "universal"})
+        _write_yaml(tmp_path, "ctf1.yaml", {"env": {"agent_architecture": "squad"}})
+        cm = ConfigManager(str(tmp_path))
+        assert cm.get_agent_architecture("ctf1") == "squad"
 
 
 # ===========================================================================

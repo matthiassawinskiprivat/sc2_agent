@@ -11,6 +11,7 @@ from loguru import logger
 from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.layer_constants import LayerConstants
 from src.utils.perspective_transformer import PerspectiveTransformer
+from src.utils.unit_feature_helpers import is_force_melee_unit, is_temporary_attrition_unit
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
 class CaptureTheFlagBot(BotAI):
@@ -43,6 +44,8 @@ class CaptureTheFlagBot(BotAI):
         self.prev_pylon_health = {1: 20.0, 2: 20.0} # Combined HP + Shield
         self.prev_enemy_units_health = {1: 0.0, 2: 0.0}
         self.prev_own_units_health = {1: 0.0, 2: 0.0}
+        self.prev_enemy_unit_count: Dict[int, int] = {1: 0, 2: 0}
+        self.prev_own_unit_count: Dict[int, int] = {1: 0, 2: 0}
         self.prev_dist_to_pylon = {1: None, 2: None}
         self.prev_dist_per_unit: Dict[int, Optional[float]] = {}
         # Squad CoM distance tracking: (player_id, role) → float distance
@@ -88,6 +91,8 @@ class CaptureTheFlagBot(BotAI):
         self.prev_pylon_health = {1: 20.0, 2: 20.0}
         self.prev_enemy_units_health = {1: 0.0, 2: 0.0}
         self.prev_own_units_health = {1: 0.0, 2: 0.0}
+        self.prev_enemy_unit_count: Dict[int, int] = {1: 0, 2: 0}
+        self.prev_own_unit_count: Dict[int, int] = {1: 0, 2: 0}
         self.prev_dist_to_pylon = {1: None, 2: None}
         self.prev_dist_per_unit = {}
         self.unit_command_map = {}
@@ -116,7 +121,7 @@ class CaptureTheFlagBot(BotAI):
     async def on_start(self):
         env_conf = self.training_conf.get("env", {})
         arch = self.training_conf.get("agent_architecture", "original")
-        if arch == "universal":
+        if arch in ("universal", "squad"):
             # Match SC2BotUniversal / MultiDiscrete 32×32 spatial head (not legacy 128).
             self.grid_size = 32
         else:
@@ -124,10 +129,14 @@ class CaptureTheFlagBot(BotAI):
                 "grid_size", env_conf.get("grid_size", 128)
             )
 
+        decode_conf = dict(self.training_conf)
+        if arch == "squad":
+            decode_conf["agent_architecture"] = "universal"
+
         self.agent_system = HierarchicalAgentSystem(
             map_size=(128, 128),
             grid_size=self.grid_size,
-            training_conf=self.training_conf
+            training_conf=decode_conf,
         )
         self.agent_system.create_unit_agent("active_agent")
 
@@ -290,6 +299,92 @@ class CaptureTheFlagBot(BotAI):
         spatial_mask = np.ones(32 * 32, dtype=bool)
         return np.concatenate([cmd_mask, spatial_mask])
 
+    def squad_action_masks(self, unit_mask: np.ndarray) -> np.ndarray:
+        """Flat mask for squad pointer + command + spatial action vector."""
+        from src.agent.squad_constants import (
+            MAX_SQUAD_UNITS,
+            squad_action_space_nvec,
+        )
+        from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+
+        nvec = squad_action_space_nvec()
+        flat_len = int(sum(nvec))
+        mask = np.ones(flat_len, dtype=bool)
+        unit_mask = np.asarray(unit_mask, dtype=np.float32).reshape(-1)
+        for i in range(min(MAX_SQUAD_UNITS, len(unit_mask))):
+            if unit_mask[i] < 0.5:
+                # Dead/padded slot: force "not selected". Masking BOTH options False
+                # makes MaskableCategorical fall back to uniform 50/50 sampling.
+                mask[i * 2] = True
+                mask[i * 2 + 1] = False
+        n_configured = min(
+            FIXED_UNIVERSAL_COMMAND_DIM,
+            len(self.training_conf.get("action_heads") or [])
+            + len(self.training_conf.get("categorical_heads") or []),
+        )
+        cmd_start = MAX_SQUAD_UNITS * 2
+        mask[cmd_start : cmd_start + FIXED_UNIVERSAL_COMMAND_DIM] = False
+        mask[cmd_start : cmd_start + n_configured] = True
+        return mask
+
+    async def apply_squad_action(
+        self,
+        selected_tags: List[int],
+        *,
+        anchor_tag: int,
+        command_idx: int,
+        spatial_idx: int,
+        perspective_player_id: int,
+    ) -> None:
+        """Apply one squad group order to selected units (shared world target)."""
+        if not self.agent_system or "active_agent" not in self.agent_system.unit_agents:
+            return
+
+        action_heads = self.training_conf.get("action_heads") or []
+        if command_idx >= len(action_heads):
+            return
+        head_name = action_heads[command_idx]
+
+        anchor = self.all_units.find_by_tag(anchor_tag)
+        if anchor is None and selected_tags:
+            anchor = self.all_units.find_by_tag(selected_tags[0])
+        if anchor is None:
+            return
+
+        # CoM / role shaping in calculate_squad_step_reward keys off active_unit_tag.
+        self.active_unit_tag = int(anchor.tag)
+
+        agent = self.agent_system.unit_agents["active_agent"]
+        game_info = getattr(self, "game_info", None)
+        if game_info is not None:
+            agent.last_game_info = game_info
+
+        is_opponent = perspective_player_id != self.player_id
+        if is_opponent:
+            _gs = 32
+            row, col = divmod(int(spatial_idx), _gs)
+            spatial_idx = ((_gs - 1 - row) * _gs) + (_gs - 1 - col)
+
+        decode_unit = anchor
+        if "_local" not in head_name:
+            decode_unit = anchor
+
+        world_x, world_y = agent.convert_spatial_action_to_world(
+            head_name, int(spatial_idx), active_unit=decode_unit
+        )
+        target = Point2((float(world_x), float(world_y)))
+
+        for unit_tag in selected_tags:
+            unit = self.all_units.find_by_tag(unit_tag)
+            if unit is None:
+                continue
+            if "attack" in head_name:
+                self.do(unit.attack(target))
+            else:
+                self.do(unit.move(target))
+            self._unit_last_order[int(unit_tag)] = (head_name, target)
+            self.last_action_was_move_by_unit[int(unit_tag)] = "attack" not in head_name
+
     async def apply_action(self, unit_tag: int, action):
         if not self.agent_system or "active_agent" not in self.agent_system.unit_agents:
             return
@@ -419,10 +514,10 @@ class CaptureTheFlagBot(BotAI):
 
     def _is_ranged_combat_unit(self, unit: Unit, enemies: Iterable[Unit]) -> bool:
         """Cooldown-retreat shaping applies only to units that outrange melee contact."""
-        # HellionTank (Hellbat) is effectively melee for the purpose of cooldown-kite shaping,
-        # even though its weapon range can exceed the generic melee-vs-ranged threshold
-        # in our simplified unit_data.
-        if getattr(unit, "type_id", None) == UnitTypeId.HELLIONTANK:
+        # HellionTank (Hellbat) and Archon are effectively melee for cooldown-kite /
+        # melee damage scaling even though their weapon range can exceed the generic
+        # melee-vs-ranged threshold (1.5) in game/catalog data.
+        if is_force_melee_unit(unit):
             return False
         enemy_list = [e for e in enemies if e is not None]
         if enemy_list:
@@ -714,11 +809,31 @@ class CaptureTheFlagBot(BotAI):
         if curr_enemy_hp < self.prev_enemy_units_health[p_id]:
             reward += (self.prev_enemy_units_health[p_id] - curr_enemy_hp) * damage_reward_coeff
         self.prev_enemy_units_health[p_id] = curr_enemy_hp
-        
-        curr_own_hp = sum(u.health + u.shield for u in own_units if not u.is_structure)
+
+        # Own attrition ignores timed summons (broodlings, locusts, …): they expire
+        # on their own and must not inflate damage_penalty / kill_penalty.
+        def _counts_for_own_attrition(u) -> bool:
+            return (not u.is_structure) and (not is_temporary_attrition_unit(u))
+
+        curr_own_hp = sum(u.health + u.shield for u in own_units if _counts_for_own_attrition(u))
         if curr_own_hp < self.prev_own_units_health[p_id]:
             reward -= (self.prev_own_units_health[p_id] - curr_own_hp) * damage_penalty_coeff
         self.prev_own_units_health[p_id] = curr_own_hp
+
+        # Kill bonuses: flat per-unit reward/penalty on top of continuous HP shaping.
+        # kill_reward (positive) fires when an enemy mobile unit dies.
+        # kill_penalty (negative value in config) fires when an own mobile unit dies
+        # (excluding temporary summons — see ``is_temporary_attrition_unit``).
+        kill_reward_val = float(r_conf.get("kill_reward", 0.0))
+        kill_penalty_val = float(r_conf.get("kill_penalty", 0.0))
+        curr_enemy_count = sum(1 for u in enemy_units if not u.is_structure)
+        if kill_reward_val != 0.0 and curr_enemy_count < self.prev_enemy_unit_count[p_id]:
+            reward += kill_reward_val * (self.prev_enemy_unit_count[p_id] - curr_enemy_count)
+        self.prev_enemy_unit_count[p_id] = curr_enemy_count
+        curr_own_count = sum(1 for u in own_units if _counts_for_own_attrition(u))
+        if kill_penalty_val != 0.0 and curr_own_count < self.prev_own_unit_count[p_id]:
+            reward += kill_penalty_val * (self.prev_own_unit_count[p_id] - curr_own_count)
+        self.prev_own_unit_count[p_id] = curr_own_count
 
         # 3. Progress Rewards — attacker squad Center-of-Mass distance shaping
         #
@@ -750,20 +865,26 @@ class CaptureTheFlagBot(BotAI):
         else:
             self.prev_dist_per_squad.pop((p_id, "defend"), None)
 
-        # 3b–4. Per-unit shaping summed over the acting squad
+        # 3b–4. Per-unit cooldown/zone shaping; step penalty once per physics step.
         own_pylon_pos = own_pylon.position if own_pylon is not None else None
         mobile_enemies = mobile_enemies_for_melee
         saved_active = self.active_unit_tag
+        squad_is_attack = (
+            any(self.unit_command_map.get(tag, "attack") == "attack" for tag in squad_tags)
+            if squad_tags
+            else True
+        )
         for tag in squad_tags:
             self.active_unit_tag = tag
             reward += self.calculate_cooldown_retreat_reward(tag, mobile_enemies)
             reward += self.calculate_defender_zone_penalty(tag, own_pylon_pos)
-            unit_role = self.unit_command_map.get(tag, "attack")
-            if unit_role == "attack":
+        self.active_unit_tag = saved_active
+
+        if squad_tags:
+            if squad_is_attack:
                 reward += r_conf.get("step_penalty", -0.05)
             else:
                 reward += r_conf.get("defender_step_reward", 0.001)
-        self.active_unit_tag = saved_active
 
         return reward
 

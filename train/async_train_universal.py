@@ -4,6 +4,15 @@ import subprocess
 import sys
 import time
 from collections import deque
+
+# Must be set before the CUDA allocator first initialises (i.e. before any tensor.cuda() call).
+# max_split_size_mb: prevents the allocator from splitting large blocks into small fragments
+#   that can never be merged back, which causes the reserved pool to grow indefinitely.
+# garbage_collection_threshold: proactively triggers GC when allocated fraction reaches
+#   this proportion of the total reserved pool, reclaiming freed blocks earlier.
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512,garbage_collection_threshold:0.8"
+
 import torch
 import numpy as np
 import yaml
@@ -24,6 +33,8 @@ from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
 from src.agent.maskable_ppo import MaskablePPO
 from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
 from src.agent.models.universal_policy import UniversalActorCriticPolicy
+from src.agent.models.squad_policy import SquadRecurrentPolicy
+from src.agent.models.squad_network import SquadNetwork
 from src.agent.models.unit_control_network import UnitControlNetwork
 from src.utils.training_device import resolve_training_device, warmup_cuda_if_needed
 from src.utils.rollout_buffer_factory import async_rollout_buffer_class
@@ -36,6 +47,67 @@ from src.agent.utils.async_shared_ram_buffer import AsyncSharedRamBuffer
 from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
 
 import shutil
+
+
+def _vram_log(label: str, logfile: str = "logs/vram_monitor.log") -> None:
+    """Write a VRAM snapshot to a persistent file AND to the logger.
+
+    Also appends an nvidia-smi per-process breakdown so Task Manager growth can be
+    attributed to a concrete PID (PyTorch learner/collector/worker vs SC2.exe).
+    """
+    import torch as _t
+    if not _t.cuda.is_available():
+        return
+    alloc_mb = _t.cuda.memory_allocated() / (1024 ** 2)
+    reserved_mb = _t.cuda.memory_reserved() / (1024 ** 2)
+    import time as _time
+    stamp = _time.strftime("%H:%M:%S")
+    line = (
+        f"[{stamp}] pid={os.getpid()} "
+        f"{label}: allocated={alloc_mb:.0f}MB reserved={reserved_mb:.0f}MB\n"
+    )
+    logger.info(f"[VRAM] {label}: allocated={alloc_mb:.0f}MB reserved={reserved_mb:.0f}MB")
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open(logfile, "a") as _f:
+            _f.write(line)
+            # Attribute dedicated GPU memory by process — torch.cuda.* only sees this PID.
+            if "after-empty_cache" in label or "post-train" in label:
+                breakdown = _gpu_process_breakdown()
+                if breakdown:
+                    _f.write(breakdown)
+    except Exception:
+        pass
+
+
+def _gpu_process_breakdown() -> str:
+    """Return nvidia-smi compute-app lines, or '' if unavailable."""
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return ""
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    # Also count SC2 processes (DirectX VRAM often invisible to nvidia-smi compute-apps).
+    try:
+        from src.utils.sc2_cleanup import count_sc2_processes
+        sc2_n = count_sc2_processes()
+    except Exception:
+        sc2_n = -1
+    rows = [f"  gpu-proc: {ln}" for ln in lines]
+    rows.append(f"  sc2_procs={sc2_n}")
+    return "\n".join(rows) + "\n"
+
 import psutil
 
 # Async buffer: memmaps + payload.npz + hot-swap model zip every rollout — heavy disk I/O.
@@ -266,11 +338,12 @@ def recover_collector_vec_env(vec_env, model, env_fns, num_envs, is_recurrent):
     Keeps the collector alive so the learner does not abort the training session.
     """
     from train.train_pipeline import MaskableSubprocVecEnv, MaskableSyncVecEnv
-    from train.env_utils import vec_env_obs_focus_tags
+    from train.env_utils import vec_env_obs_focus_tags, is_squad_pointer_action_space
     from train.squad_batch_inference import (
         SquadBatchRolloutHelper,
         ensure_collector_lstm_states,
     )
+    from train.squad_pointer_rollout import SquadPointerRolloutHelper
 
     logger.warning(
         "Collector: SubprocVecEnv worker died — rebuilding all SC2 environments "
@@ -292,7 +365,11 @@ def recover_collector_vec_env(vec_env, model, env_fns, num_envs, is_recurrent):
         ensure_collector_lstm_states(model, num_envs)
     reset_out = new_vec.reset()
     obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
-    squad_helper = SquadBatchRolloutHelper(num_envs)
+    squad_helper = (
+        SquadPointerRolloutHelper(num_envs)
+        if is_squad_pointer_action_space(new_vec.action_space)
+        else SquadBatchRolloutHelper(num_envs)
+    )
     last_dones = np.ones(num_envs, dtype=bool)
     prev_focus_tags = vec_env_obs_focus_tags(new_vec, num_envs)
     return new_vec, obs, squad_helper, last_dones, prev_focus_tags
@@ -347,12 +424,14 @@ def _cleanup_after_collector_spawn_failure(backoff_sec: float) -> None:
     """Release GPU handles before retrying collector spawn on Windows."""
     _clear_collector_ready_marker()
     gc.collect()
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-    except Exception as exc:
-        logger.debug(f"CUDA cache cleanup after collector spawn failure: {exc}")
+    # Avoid empty_cache by default — shared GPU with surviving workers.
+    if os.environ.get("SC2_CUDA_EMPTY_CACHE", "").strip() in ("1", "true", "True"):
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception as exc:
+            logger.debug(f"CUDA cache cleanup after collector spawn failure: {exc}")
     time.sleep(backoff_sec)
 
 
@@ -665,12 +744,19 @@ class AsyncCollector(mp.Process):
         
         # Use existing factory to build env
         from train.train_pipeline import MaskableSubprocVecEnv, MaskableSyncVecEnv
-        from train.env_utils import EnvFactory, vec_env_obs_focus_tags, vec_env_requires_policy_action
+        from train.env_utils import (
+            EnvFactory,
+            vec_env_obs_focus_tags,
+            vec_env_requires_policy_action,
+            resolve_level_agent_architecture,
+            is_squad_pointer_action_space,
+        )
         from train.squad_batch_inference import (
             SquadBatchRolloutHelper,
             ensure_collector_lstm_states,
             write_rollout_rows_to_buffer,
         )
+        from train.squad_pointer_rollout import SquadPointerRolloutHelper
         from train.train_pipeline import ENV_REGISTRY
         
         EnvClass = ENV_REGISTRY.get(env_params.get("env_class", "Level0Env"))
@@ -679,12 +765,15 @@ class AsyncCollector(mp.Process):
         combined_conf = training_params.copy()
         combined_conf.update(env_params)
         combined_conf["is_training"] = True
-        combined_conf["agent_architecture"] = "universal"
+        combined_conf["agent_architecture"] = resolve_level_agent_architecture(
+            self.config, self.level_name
+        )
         combined_conf["config_dir"] = self.config.get("config_dir", "config_universal")
         combined_conf["spatial_resolution"] = 32
         for key in (
             "active_layers",
             "active_tactical_layers",
+            "active_unit_scalars",
             "action_heads",
             "categorical_heads",
         ):
@@ -718,17 +807,33 @@ class AsyncCollector(mp.Process):
         rnn_type = model_params.get("rnn_type", "gru")
         hidden_size = model_params.get("policy_kwargs", {}).get("lstm_hidden_size", 512)
         is_recurrent_algo = algo_name == "MaskableRecurrentPPO"
+        is_squad_arch = combined_conf["agent_architecture"] == "squad"
         
         AlgoClass = MaskableRecurrentPPO if is_recurrent_algo else MaskablePPO
-        PolicyClass = UniversalRecurrentPolicy if is_recurrent_algo else UniversalActorCriticPolicy
+        if is_squad_arch:
+            if not is_recurrent_algo:
+                raise ValueError("Squad pointer architecture requires MaskableRecurrentPPO")
+            PolicyClass = SquadRecurrentPolicy
+        else:
+            PolicyClass = UniversalRecurrentPolicy if is_recurrent_algo else UniversalActorCriticPolicy
         
         policy_kwargs = {**model_params.get("policy_kwargs", {}), "normalize_images": False}
         policy_kwargs["spatial_resolution"] = 32
-        # Only recurrent policies accept/need `rnn_type`. For plain PPO we must not
-        # inject it into sb3_contrib's MaskableActorCriticPolicy (non-recurrent).
         if is_recurrent_algo:
-            policy_kwargs["rnn_type"] = rnn_type # CRITICAL: SB3 compares this with stored kwargs
-        if "features_extractor_class" in policy_kwargs and policy_kwargs["features_extractor_class"] == "src.agent.models.unit_control_network.UnitControlNetwork":
+            policy_kwargs["rnn_type"] = rnn_type
+        fe_class = policy_kwargs.get("features_extractor_class")
+        if is_squad_arch:
+            if fe_class in (
+                "src.agent.models.squad_network.SquadNetwork",
+                SquadNetwork,
+            ):
+                policy_kwargs["features_extractor_class"] = SquadNetwork
+            else:
+                policy_kwargs["features_extractor_class"] = SquadNetwork
+        elif fe_class in (
+            "src.agent.models.unit_control_network.UnitControlNetwork",
+            UnitControlNetwork,
+        ):
             policy_kwargs["features_extractor_class"] = UnitControlNetwork
 
         algo_kwargs = {
@@ -753,18 +858,29 @@ class AsyncCollector(mp.Process):
             }
             if is_recurrent_algo:
                 load_kwargs["rnn_type"] = rnn_type
-            from src.utils.model_utils import load_curriculum_checkpoint
+            from src.utils.model_utils import load_curriculum_checkpoint, load_squad_checkpoint
 
-            model = load_curriculum_checkpoint(
-                AlgoClass,
-                self.model_path,
-                algo_kwargs,
-                load_kwargs,
-                vec_env.observation_space,
-                vec_env.action_space,
-                grid_size=_grid,
-                restore_optimizer=self.resume_timesteps_from_save,
-            )
+            if is_squad_arch:
+                model = load_squad_checkpoint(
+                    self.model_path,
+                    algo_kwargs,
+                    load_kwargs,
+                    observation_space=vec_env.observation_space,
+                    action_space=vec_env.action_space,
+                    grid_size=_grid,
+                    restore_optimizer=self.resume_timesteps_from_save,
+                )
+            else:
+                model = load_curriculum_checkpoint(
+                    AlgoClass,
+                    self.model_path,
+                    algo_kwargs,
+                    load_kwargs,
+                    vec_env.observation_space,
+                    vec_env.action_space,
+                    grid_size=_grid,
+                    restore_optimizer=self.resume_timesteps_from_save,
+                )
             from src.utils.model_utils import read_checkpoint_timesteps
 
             init_ts = read_checkpoint_timesteps(self.model_path)
@@ -779,11 +895,22 @@ class AsyncCollector(mp.Process):
         if isinstance(model, MaskableRecurrentPPO):
             ensure_collector_lstm_states(model, num_envs)
 
-        if self.model_path and not self.resume_timesteps_from_save:
-            model.num_timesteps = 0
+        if self.model_path:
+            from src.utils.model_utils import apply_checkpoint_timesteps
+
+            if self.resume_timesteps_from_save:
+                applied = apply_checkpoint_timesteps(model, self.model_path)
+                logger.info(
+                    f"Collector: resumed timestep counter from checkpoint ({applied:,})."
+                )
+            else:
+                model.num_timesteps = 0
 
         fe = model.policy.features_extractor
-        if hasattr(fe, "cnn_trunk"):
+        if hasattr(fe, "global_cnn"):
+            c0 = fe.global_cnn[0]
+            logger.info(f"Collector Model initialized (squad global CNN in_channels={c0.weight.shape[1]})")
+        elif hasattr(fe, "cnn_trunk"):
             c0 = fe.cnn_trunk[0]
             logger.info(f"Collector Model initialized (global CNN in_channels={c0.weight.shape[1]})")
         elif hasattr(fe, "cnn") and len(fe.cnn) > 0:
@@ -836,7 +963,12 @@ class AsyncCollector(mp.Process):
         logger.info("Collector: SC2 environments ready. Entering main loop...")
         obs = _reset_out[0] if isinstance(_reset_out, tuple) else _reset_out
         self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
-        squad_batch_helper = SquadBatchRolloutHelper(num_envs)
+        squad_batch_helper = (
+            SquadPointerRolloutHelper(num_envs)
+            if is_squad_pointer_action_space(vec_env.action_space)
+            else SquadBatchRolloutHelper(num_envs)
+        )
+        is_squad_pointer_rollout = isinstance(squad_batch_helper, SquadPointerRolloutHelper)
 
         def _recover_vec_env(vec_env, model):
             nonlocal vec_env_ref
@@ -855,9 +987,11 @@ class AsyncCollector(mp.Process):
         recent_ep_lengths = []
         weight_sync = CollectorWeightSync()
 
+        rollout_idx = 0
         while not self.stop_event.is_set():
             current_buffer = buffers[buffer_idx % 2]
-            
+            t_rollout_start = time.perf_counter()
+
             # Ensure learner is done with this buffer before overwriting
             consume_timeout = training_params.get("buffer_consumer_timeout", 300)
             if not current_buffer.wait_for_consumer(timeout=consume_timeout):
@@ -880,6 +1014,10 @@ class AsyncCollector(mp.Process):
 
             # FILL BUFFER
             current_buffer.reset()
+            if is_squad_pointer_rollout and torch.cuda.is_available():
+                from src.utils.cuda_memory import log_cuda_memory
+                _vram_log(f"COLLECTOR rollout-start buffer={buffer_idx}")
+                log_cuda_memory(train_device, f"Collector rollout-start (buffer={buffer_idx})")
             # Use class-based detection instead of attribute presence:
             # some model objects may carry compatibility attributes even when
             # running non-recurrent PPO.
@@ -1010,16 +1148,22 @@ class AsyncCollector(mp.Process):
                 
                 # We only need the value
                 if is_recurrent:
-                    focus_last = vec_env_obs_focus_tags(vec_env, num_envs)
-                    lstm_starts_last = np.logical_or(
-                        dones,
-                        focus_last != self._prev_obs_focus_tags,
-                    ).astype(np.float32)
+                    if is_squad_pointer_rollout:
+                        lstm_starts_last = dones.astype(np.float32)
+                    else:
+                        focus_last = vec_env_obs_focus_tags(vec_env, num_envs)
+                        lstm_starts_last = np.logical_or(
+                            dones,
+                            focus_last != self._prev_obs_focus_tags,
+                        ).astype(np.float32)
+                        self._prev_obs_focus_tags = focus_last.copy()
                     starts_tensor = torch.as_tensor(lstm_starts_last).to(model.device)
                     last_values = model.policy.predict_values(obs_tensor, model._last_lstm_states.vf, starts_tensor)
-                    self._prev_obs_focus_tags = focus_last.copy()
                 else:
                     last_values = model.policy.predict_values(obs_tensor)
+                fe = getattr(model.policy, "features_extractor", None)
+                if fe is not None and hasattr(fe, "clear_forward_cache"):
+                    fe.clear_forward_cache()
             
             current_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
 
@@ -1027,12 +1171,25 @@ class AsyncCollector(mp.Process):
             # Ensure the Learner sees the data we just wrote
             for key, mm in current_buffer.observations.items():
                 if isinstance(mm, np.memmap): mm.flush()
-            
+
+            t_rollout_end = time.perf_counter()
+            rollout_wall_sec = t_rollout_end - t_rollout_start
+            filled_steps = int(current_buffer.pos)
+            total_env_steps = filled_steps * training_params.get("num_envs", 1)
+            instant_fps = total_env_steps / rollout_wall_sec if rollout_wall_sec > 0 else 0
+            _emit_collector_status(
+                f"Rollout #{rollout_idx} done: {total_env_steps} env-steps in "
+                f"{rollout_wall_sec:.1f}s  ({instant_fps:.0f} fps this rollout)"
+            )
+            rollout_idx += 1
+
             # SIGNAL LEARNER
             signal_meta = {
                 "level": self.level_name,
                 "steps": training_params["n_steps"],
-                "filled_steps": int(current_buffer.pos),
+                "filled_steps": filled_steps,
+                "collector/rollout_wall_sec": rollout_wall_sec,
+                "collector/instant_fps": instant_fps,
             }
             
             if recent_ep_rewards:
@@ -1049,6 +1206,33 @@ class AsyncCollector(mp.Process):
                         signal_meta[f"{prefix}{key}"] = np.mean(vals)
 
             current_buffer.signal_ready(signal_meta)
+
+            if is_squad_pointer_rollout and torch.cuda.is_available():
+                from src.utils.cuda_memory import log_cuda_memory
+                _vram_log(f"COLLECTOR rollout-end buffer={buffer_idx}")
+                log_cuda_memory(train_device, f"Collector rollout-end (buffer={buffer_idx})")
+
+            # Release cached-but-freed CUDA allocator blocks.
+            # This is safe here: signal_ready() was just called, no inference is in
+            # flight, and the env is idle waiting for the learner. The previous concern
+            # about "unspecified launch failure" only applied to calling empty_cache()
+            # *during* active opponent inference (which is not the case at this point).
+            # Squad levels must clear unconditionally: with multi-epoch training and
+            # frequent opponent syncs (alternate_trainee_race), the reserved pool
+            # grows across rollouts and fills VRAM without this call.
+            _collector_clear = (
+                is_squad_pointer_rollout
+                or os.environ.get("SC2_CUDA_EMPTY_CACHE", "").strip() in ("1", "true", "True")
+                or training_params.get("learner_empty_cache", False)
+            )
+            if _collector_clear and torch.cuda.is_available():
+                import gc as _gc
+                _gc.collect()
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                if is_squad_pointer_rollout:
+                    _vram_log(f"COLLECTOR after-empty_cache buffer={buffer_idx}")
+
             buffer_idx += 1
 
         vec_env.close()
@@ -1123,20 +1307,26 @@ class AsyncLearner:
         model_params = self.config.get("model", {})
         
         # 1. Setup Dummy Env for Model
-        from train.env_utils import create_dummy_env_from_config
+        from train.env_utils import create_dummy_env_from_config, resolve_level_agent_architecture
         dummy_env = create_dummy_env_from_config(self.config, level_name=self.level_name)
         
         algo_name = model_params.get("algorithm", "MaskablePPO")
         rnn_type = model_params.get("rnn_type", "gru")
         hidden_size = model_params.get("policy_kwargs", {}).get("lstm_hidden_size", 512)
         is_recurrent_algo = algo_name == "MaskableRecurrentPPO"
+        is_squad_arch = resolve_level_agent_architecture(self.config, self.level_name) == "squad"
         
         AlgoClass = MaskableRecurrentPPO if is_recurrent_algo else MaskablePPO
-        PolicyClass = UniversalRecurrentPolicy if is_recurrent_algo else UniversalActorCriticPolicy
+        if is_squad_arch:
+            PolicyClass = SquadRecurrentPolicy
+        else:
+            PolicyClass = UniversalRecurrentPolicy if is_recurrent_algo else UniversalActorCriticPolicy
         
         policy_kwargs = {**model_params.get("policy_kwargs", {}), "normalize_images": False}
         policy_kwargs["spatial_resolution"] = 32
-        if "features_extractor_class" in policy_kwargs and policy_kwargs["features_extractor_class"] == "src.agent.models.unit_control_network.UnitControlNetwork":
+        if is_squad_arch:
+            policy_kwargs["features_extractor_class"] = SquadNetwork
+        elif "features_extractor_class" in policy_kwargs and policy_kwargs["features_extractor_class"] == "src.agent.models.unit_control_network.UnitControlNetwork":
             policy_kwargs["features_extractor_class"] = UnitControlNetwork
 
         algo_kwargs = {
@@ -1169,7 +1359,10 @@ class AsyncLearner:
         logger.info(f"Learner model.device={model.device} policy params on {p0.device}")
 
         fe = model.policy.features_extractor
-        if hasattr(fe, "cnn_trunk"):
+        if hasattr(fe, "global_cnn"):
+            c0 = fe.global_cnn[0]
+            logger.info(f"Learner Model initialized (squad global CNN in_channels={c0.weight.shape[1]})")
+        elif hasattr(fe, "cnn_trunk"):
             c0 = fe.cnn_trunk[0]
             logger.info(f"Learner Model initialized (global CNN in_channels={c0.weight.shape[1]})")
         elif hasattr(fe, "cnn") and len(fe.cnn) > 0:
@@ -1221,6 +1414,7 @@ class AsyncLearner:
                             data_content = archive.read('data').decode('utf-8')
                             model_data = json.loads(data_content)
                             total_steps_trained = model_data.get("num_timesteps", 0)
+                            model.num_timesteps = total_steps_trained
                             logger.info(f"Learner: Resuming from {total_steps_trained} timesteps.")
                         else:
                             total_steps_trained = 0
@@ -1376,8 +1570,10 @@ class AsyncLearner:
                         AsyncDiskBuffer.attach_disk_observations(
                             target_buffer, instance_dir, meta
                         )
+                        from src.agent.utils.disk_buffer import is_disk_offloaded_obs_key
+
                         for key in dummy_env.observation_space.keys():
-                            if key in ("map", "tactical"):
+                            if is_disk_offloaded_obs_key(key):
                                 continue
                             if key not in target_buffer.observations:
                                 subspace = dummy_env.observation_space.spaces[key]
@@ -1451,11 +1647,26 @@ class AsyncLearner:
                             logger.warning(f"Learner: could not remove buffer signal {signal_path}: {exc}")
 
                     t_after_train = time.perf_counter()
+                    if is_squad_arch and torch.cuda.is_available():
+                        from src.utils.cuda_memory import log_cuda_memory
+                        _vram_log("LEARNER post-train")
+                        log_cuda_memory(train_device, "Learner post-train")
                     # empty_cache() forces a device sync and allocator churn; it can *lower* throughput
-                    # and make GPU util look low while the CPU waits. Opt-in via env only.
-                    if os.environ.get("SC2_CUDA_EMPTY_CACHE", "").strip() in ("1", "true", "True"):
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                    # and make GPU util look low while the CPU waits.
+                    # Squad/CTF levels run multi-epoch updates over large map observations — PyTorch's
+                    # allocator accumulates reserved-but-freed activation blocks across rollouts and
+                    # eventually saturates dedicated VRAM, stalling collector inference. Always clear
+                    # after training for squad arch. Non-squad levels keep the opt-in env-var behaviour.
+                    _force_clear = (
+                        is_squad_arch
+                        or os.environ.get("SC2_CUDA_EMPTY_CACHE", "").strip() in ("1", "true", "True")
+                        or training_params.get("learner_empty_cache", False)
+                    )
+                    if _force_clear and torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                        if is_squad_arch:
+                            _vram_log("LEARNER after-empty_cache")
 
                     # Force logger to write to disk
                     model.logger.dump(step=total_steps_trained)
@@ -1723,8 +1934,10 @@ def main():
             return None
         cfg["active_layers"] = cm.get_cumulative_active_layers(level_name)
         cfg["active_tactical_layers"] = cm.get_cumulative_active_tactical_layers(level_name)
+        cfg["active_unit_scalars"] = cm.get_cumulative_active_unit_scalars(level_name)
         cfg["action_heads"] = cm.get_cumulative_action_heads(level_name)
         cfg["categorical_heads"] = cm.get_cumulative_categorical_heads(level_name)
+        cfg["agent_architecture"] = cm.get_agent_architecture(level_name)
         cfg["config_dir"] = config_dir
         return cfg
 

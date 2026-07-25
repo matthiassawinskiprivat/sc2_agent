@@ -958,7 +958,7 @@ class ObservationTransformer:
         layers[0:dps_start] = np.log1p(layers[0:dps_start])
         layers[allied_hp_idx] = allied_hp
         layers[enemy_hp_idx] = enemy_hp
-        layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
+        np.clip(layers, 0.0, 1.0, out=layers)
 
         if self.active_layers:
             indices = [LayerConstants.LAYERS[layer_name.lower()] for layer_name in self.active_layers if layer_name.lower() in LayerConstants.LAYERS]
@@ -2621,23 +2621,11 @@ class ObservationTransformer:
 
         python-sc2 ``Unit.ground_range`` / ``air_range`` read static GameData and omit these
         (see ``Unit.calculate_damage_vs_target`` for the same upgrade table).
+        Delegates to the shared ``weapon_range_upgrade_deltas`` helper so the same
+        table is used by SquadObservationBuilder without importing this class.
         """
-        upgrades = self._player_upgrade_ids(unit)
-        if not upgrades:
-            return 0.0, 0.0
-        uid = unit.type_id
-        if uid == UnitTypeId.COLOSSUS and UpgradeId.EXTENDEDTHERMALLANCE in upgrades:
-            return 3.0, 0.0
-        if uid == UnitTypeId.HYDRALISK and UpgradeId.EVOLVEGROOVEDSPINES in upgrades:
-            return 1.0, 1.0
-        if uid == UnitTypeId.PHOENIX and UpgradeId.PHOENIXRANGEUPGRADE in upgrades:
-            return 0.0, 2.0
-        if (
-            uid in {UnitTypeId.PLANETARYFORTRESS, UnitTypeId.MISSILETURRET, UnitTypeId.AUTOTURRET}
-            and UpgradeId.HISECAUTOTRACKING in upgrades
-        ):
-            return 1.0, 1.0
-        return 0.0, 0.0
+        from src.utils.unit_feature_helpers import weapon_range_upgrade_deltas
+        return weapon_range_upgrade_deltas(unit, self._player_upgrade_ids(unit))
 
     def _dps_weapon_game_radius(self, unit: Unit, catalog_range: float) -> Tuple[float, float]:
         """

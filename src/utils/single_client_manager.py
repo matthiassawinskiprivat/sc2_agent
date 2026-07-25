@@ -52,11 +52,17 @@ class SingleClientSC2Manager:
 
         logger.info(f"Worker {self.worker_index} launching SC2 on port {port}")
         
+        # Use a tiny window resolution to minimize DirectX render-buffer VRAM.
+        # SC2 on Windows (headless training) defaults to Ultra texture quality and a
+        # full-size render target, consuming 5-12 GB of VRAM per instance.  A 1×1
+        # window reduces framebuffer allocations without affecting game logic.
+        # Texture VRAM is further controlled by Variables.txt (textureQuality=0 etc.).
         self.process = self.sc2_process_cls(
             fullscreen=fullscreen,
             render=visualize,
             port=port,
-            host="127.0.0.1"
+            host="127.0.0.1",
+            resolution=(1, 1),
         )
         self.controller = await self.process.__aenter__()
         
@@ -113,43 +119,44 @@ class SingleClientSC2Manager:
             raise e
 
     async def close(self):
-        """Closes connections and kills SC2 process."""
+        """Closes connections and kills this worker's SC2 process tree.
+
+        Must stay worker-local (no ``kill_switch_sc2``): parallel SubprocVecEnv
+        workers each own an SC2 instance. Incomplete teardown leaves DirectX
+        VRAM held by zombie SC2 processes — dual-squad CTF (4 armies) leaks
+        that memory across soft resets fast enough to fill a 24 GB GPU in hours.
+        """
         # Close additional clients first
         for client in self.clients[1:]:
             try:
                 await client._ws.close()
-            except:
+            except Exception:
                 pass
 
         if self.process:
-             # Capture PID before exiting for targeted cleanup
-             # SC2Process typically has a ._process which is a subprocess.Popen
-             pid = getattr(self.process, "_process", None)
-             if pid and hasattr(pid, "pid"):
-                 pid = pid.pid
-             elif hasattr(self.process, "pid"):
-                 pid = self.process.pid
-             else:
-                 pid = None
+            # Capture PID before exiting for targeted cleanup
+            # SC2Process typically has a ._process which is a subprocess.Popen
+            pid = getattr(self.process, "_process", None)
+            if pid and hasattr(pid, "pid"):
+                pid = pid.pid
+            elif hasattr(self.process, "pid"):
+                pid = self.process.pid
+            else:
+                pid = None
 
-             try:
-                 await self.process.__aexit__(None, None, None)
-             except:
-                 pass
-             
-             # Targeted cleanup if PID is known
-             if pid:
-                 import psutil
-                 try:
-                     proc = psutil.Process(pid)
-                     if proc.is_running():
-                         logger.info(f"Targeted kill of SC2 process PID: {pid}")
-                         proc.kill()
-                 except (psutil.NoSuchProcess, psutil.AccessDenied):
-                     pass
-        
-        await asyncio.sleep(0.5)
-        
+            try:
+                await self.process.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+            # Kill process tree and wait until OS reaps it (releases DirectX VRAM).
+            from src.utils.sc2_cleanup import kill_sc2_process_tree
+
+            kill_sc2_process_tree(pid, wait_sec=3.0)
+
+        # Extra settle time for WDDM to reclaim dedicated GPU memory before relaunch.
+        await asyncio.sleep(2.0)
+
         self.process = None
         self.clients.clear()
         self.controller = None

@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import copy
 import math
+import os
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from typing import Dict, Any, Optional, Tuple, List, Union
@@ -295,6 +296,30 @@ def read_checkpoint_timesteps(zip_path: str) -> Optional[int]:
         return None
 
 
+def apply_checkpoint_timesteps(model: Any, checkpoint_path: str) -> int:
+    """Copy ``num_timesteps`` from an SB3 zip onto ``model`` (returns applied count)."""
+    ts = read_checkpoint_timesteps(checkpoint_path)
+    if ts is not None:
+        model.num_timesteps = ts
+        return ts
+    return int(getattr(model, "num_timesteps", 0) or 0)
+
+
+def latest_step_checkpoint(paths: list[str]) -> Optional[str]:
+    """Pick the checkpoint with the highest ``*_steps.zip`` step count (mtime tie-break)."""
+    import re
+
+    if not paths:
+        return None
+
+    def sort_key(path: str) -> tuple[int, float]:
+        match = re.search(r"(\d+)_steps\.zip$", os.path.basename(path))
+        steps = int(match.group(1)) if match else 0
+        return steps, os.path.getmtime(path)
+
+    return max(paths, key=sort_key)
+
+
 def load_optimizer_state_from_zip(
     model: Any,
     zip_path: str,
@@ -430,6 +455,7 @@ def load_curriculum_checkpoint(
             logger.warning(
                 f"Optimizer restore skipped after graft from {model_path!r} ({reason})"
             )
+    apply_checkpoint_timesteps(model, model_path)
     return model
 
 
@@ -530,6 +556,107 @@ def load_build_checkpoint(
         )
     else:
         logger.warning(f"Build checkpoint: optimizer restore skipped ({opt_reason})")
+    return model
+
+
+_SQUAD_FE_KEY_REMAP = {
+    "features_extractor.cnn_trunk.": "features_extractor.global_cnn.",
+    "features_extractor.tactical_cnn_to16.": "features_extractor.tactical_cnn.",
+    "features_extractor.linear.": "features_extractor.query_linear.",
+    "features_extractor.reasoning.": "features_extractor.reasoning.",
+}
+
+
+def graft_squad_policy_from_universal(
+    universal_sd: Dict[str, torch.Tensor],
+    squad_sd: Dict[str, torch.Tensor],
+    *,
+    new_in_channels: Optional[int] = None,
+) -> Dict[str, torch.Tensor]:
+    """
+    Map UniversalRecurrentPolicy weights onto SquadRecurrentPolicy.
+
+    Pointer / entity modules are left at squad initialization when missing.
+    """
+    remapped: Dict[str, torch.Tensor] = {}
+    for key, tensor in universal_sd.items():
+        new_key = key
+        for old_prefix, new_prefix in _SQUAD_FE_KEY_REMAP.items():
+            if key.startswith(old_prefix):
+                new_key = new_prefix + key[len(old_prefix):]
+                break
+        if new_key in squad_sd and squad_sd[new_key].shape == tensor.shape:
+            remapped[new_key] = tensor
+
+    for key, tensor in squad_sd.items():
+        if key not in remapped:
+            remapped[key] = tensor
+
+    return graft_model_weights(
+        remapped,
+        new_in_channels=new_in_channels,
+        target_state_dict=squad_sd,
+    )
+
+
+def load_squad_checkpoint(
+    model_path: str,
+    algo_kwargs: Dict[str, Any],
+    load_kwargs: Optional[Dict[str, Any]] = None,
+    *,
+    observation_space: Any = None,
+    action_space: Any = None,
+    grid_size: int = 32,
+    restore_optimizer: bool = False,
+) -> Any:
+    """Load squad policy, grafting from universal checkpoint on shape mismatch."""
+    from stable_baselines3.common.save_util import load_from_zip_file
+    from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
+
+    load_kwargs = dict(load_kwargs or {})
+    AlgoClass = MaskableRecurrentPPO
+    try:
+        model = AlgoClass.load(model_path, **load_kwargs)
+        if restore_optimizer:
+            opt_ok, opt_reason = load_optimizer_state_from_zip(
+                model, model_path, load_kwargs.get("device", "auto")
+            )
+            if not opt_ok and opt_reason != "no_optimizer_in_checkpoint":
+                logger.warning(f"Squad checkpoint optimizer restore skipped ({opt_reason})")
+        return model
+    except Exception as direct_exc:
+        logger.warning(
+            f"Squad direct load failed for {model_path!r} ({direct_exc}); grafting universal weights."
+        )
+
+    model = AlgoClass(**algo_kwargs)
+    _, params, _ = load_from_zip_file(model_path, device="cpu", load_data=False)
+    saved_sd = params.get("policy")
+    if saved_sd is None:
+        logger.error(f"Squad checkpoint {model_path!r} has no policy weights; using fresh model.")
+        return model
+
+    new_in = None
+    if observation_space is not None and hasattr(observation_space, "spaces"):
+        if "map" in observation_space.spaces:
+            new_in = observation_space.spaces["map"].shape[0]
+
+    grafted = graft_squad_policy_from_universal(
+        saved_sd,
+        model.policy.state_dict(),
+        new_in_channels=new_in,
+    )
+    missing, unexpected = model.policy.load_state_dict(grafted, strict=False)
+    logger.info(
+        f"Grafted squad policy from {model_path!r}: missing={len(missing)} unexpected={len(unexpected)}"
+    )
+    if restore_optimizer:
+        opt_ok, opt_reason = load_optimizer_state_from_zip(
+            model, model_path, load_kwargs.get("device", "auto")
+        )
+        if not opt_ok and opt_reason != "no_optimizer_in_checkpoint":
+            logger.warning(f"Squad graft optimizer restore skipped ({opt_reason})")
+    apply_checkpoint_timesteps(model, model_path)
     return model
 
 

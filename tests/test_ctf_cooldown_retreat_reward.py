@@ -112,6 +112,29 @@ def test_no_reward_for_helliontank_even_if_ground_range_is_large():
     assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
 
 
+def test_no_reward_for_archon_even_if_ground_range_is_large():
+    bot = _make_bot(scale=0.8)
+    # Archon catalog range is 3.0 (> melee threshold 1.5) but CTF treats it as melee.
+    ally = _make_unit(
+        101,
+        6.0,
+        0.0,
+        owner_id=1,
+        weapon_cd=5.0,
+        ground_range=3.0,
+        type_id=UnitTypeId.ARCHON,
+    )
+    enemy = _make_unit(201, 0.0, 0.0, owner_id=2, ground_range=3.0)
+    bot.all_units.find_by_tag = MagicMock(return_value=ally)
+
+    bot._pre_action_weapon_cd_by_unit[101] = 5.0
+    bot._pre_action_dist_to_enemy_com[101] = 4.0
+    bot.last_action_was_move_by_unit[101] = True
+
+    assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
+    assert bot._is_melee_combat_unit(ally, [enemy]) is True
+
+
 def test_no_reward_when_weapon_ready():
     bot = _make_bot()
     ally = _make_unit(101, 6.0, 0.0)

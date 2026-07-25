@@ -142,6 +142,10 @@ def test_deferred_state_set_when_p1_wins_during_opponent_step(env):
     """When P2's pylon is destroyed during the opponent's physics step, the
     terminal state should be deferred and the step should return done=False."""
     env.training_conf["rewards"] = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
+    env.unit_pools_config = [
+        {"agent": True, "high_level_command": "attack"},
+        {"agent": False, "high_level_command": "defend"},
+    ]
 
     # P2's pylon is destroyed → P2 lost
     alive_group = _make_alive_pylon_group()
@@ -173,6 +177,10 @@ def test_deferred_state_set_when_p1_wins_during_opponent_step(env):
 def test_deferred_state_set_when_p1_loses_during_opponent_step(env):
     """When P1's pylon is destroyed during the opponent's physics step."""
     env.training_conf["rewards"] = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
+    env.unit_pools_config = [
+        {"agent": True, "high_level_command": "defend"},
+        {"agent": False, "high_level_command": "attack"},
+    ]
 
     dead_group = _make_empty_pylon_group()
     alive_group = _make_alive_pylon_group()
@@ -243,8 +251,11 @@ def test_no_deferral_when_agent_step_terminates(env):
     """When the game ends during an AGENT's physics step, no deferral occurs."""
     env.training_conf["rewards"] = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
 
-    # Switch to agent squad
-    env.unit_pools_config = [{"agent": True, "high_level_command": "attack"}]
+    # Switch to agent squad; opponent owns the defend-pool flag.
+    env.unit_pools_config = [
+        {"agent": True, "high_level_command": "attack"},
+        {"high_level_command": "defend"},
+    ]
     env.squad_unit_tags = [(1, [100])]
     env.active_player_id = 1
     env._has_combat_units = MagicMock(return_value=True)

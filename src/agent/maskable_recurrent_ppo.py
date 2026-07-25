@@ -1,5 +1,6 @@
 import time
 import warnings
+import os
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, NamedTuple, ClassVar
 from copy import deepcopy
 from loguru import logger
@@ -917,6 +918,9 @@ class MaskableRecurrentPPO(RecurrentPPO):
                 self.policy.obs_to_tensor(new_obs)[0], lstm_states.vf, starts_last
             )
             self._prev_obs_focus_tags = focus_last.copy()
+            fe = getattr(self.policy, "features_extractor", None)
+            if fe is not None and hasattr(fe, "clear_forward_cache"):
+                fe.clear_forward_cache()
         rollout_buffer.compute_returns_and_advantage(vals, dones)
         callback.on_rollout_end()
         return True
@@ -924,7 +928,17 @@ class MaskableRecurrentPPO(RecurrentPPO):
     def train(self) -> None:
         self.policy.set_training_mode(True)
         self._update_learning_rate(self.policy.optimizer)
+
+        if torch.cuda.is_available():
+            from src.utils.cuda_memory import log_cuda_memory
+            log_cuda_memory(self.device, "PPO train: before to_device")
+
         self.rollout_buffer.to_device(self.device)
+
+        if torch.cuda.is_available():
+            from src.utils.cuda_memory import log_cuda_memory
+            log_cuda_memory(self.device, "PPO train: after to_device (buffer in VRAM)")
+
         c_r = self.clip_range(self._current_progress_remaining)
         c_r_vf = self.clip_range_vf(self._current_progress_remaining) if self.clip_range_vf is not None else None
 
@@ -943,8 +957,11 @@ class MaskableRecurrentPPO(RecurrentPPO):
         
         entropy_losses, pg_losses, value_losses, approx_kls, clip_fractions, imitation_losses, loss_ls = [], [], [], [], [], [], []
         
+        import gc as _gc
+
         continue_training = True
         logged_logp_check = False
+        logged_first_batch = False
         skipped_nonfinite_batches = 0
         for epoch in range(self.n_epochs):
             for r_data in self.rollout_buffer.get(self.batch_size):
@@ -990,7 +1007,7 @@ class MaskableRecurrentPPO(RecurrentPPO):
                 if self.normalize_advantage and mask.any():
                     adv_sel = adv[mask]
                     adv_mean = adv_sel.mean()
-                    adv_std = adv_sel.std()
+                    adv_std = adv_sel.std() if adv_sel.numel() > 1 else adv_sel.new_tensor(0.0)
                     if torch.isfinite(adv_std) and adv_std > 1e-8:
                         adv = (adv - adv_mean) / (adv_std + 1e-8)
                     elif torch.isfinite(adv_mean):
@@ -1068,6 +1085,9 @@ class MaskableRecurrentPPO(RecurrentPPO):
                 loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss + imitation_loss
                 if not torch.isfinite(loss):
                     skipped_nonfinite_batches += 1
+                    _fe = getattr(self.policy, "features_extractor", None)
+                    if _fe is not None and hasattr(_fe, "clear_forward_cache"):
+                        _fe.clear_forward_cache()
                     if profile_phases:
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
@@ -1089,6 +1109,9 @@ class MaskableRecurrentPPO(RecurrentPPO):
                 if not torch.isfinite(grad_norm):
                     skipped_nonfinite_batches += 1
                     self.policy.optimizer.zero_grad()
+                    _fe = getattr(self.policy, "features_extractor", None)
+                    if _fe is not None and hasattr(_fe, "clear_forward_cache"):
+                        _fe.clear_forward_cache()
                     if profile_phases:
                         if torch.cuda.is_available():
                             torch.cuda.synchronize()
@@ -1098,15 +1121,49 @@ class MaskableRecurrentPPO(RecurrentPPO):
                     continue
                 self.policy.optimizer.step()
 
+                fe = getattr(self.policy, "features_extractor", None)
+                if fe is not None and hasattr(fe, "clear_forward_cache"):
+                    fe.clear_forward_cache()
+
+                if not logged_first_batch:
+                    logged_first_batch = True
+                    if torch.cuda.is_available():
+                        idx = self.device.index if hasattr(self.device, 'index') and self.device.index is not None else torch.cuda.current_device()
+                        alloc_mb    = torch.cuda.memory_allocated(idx)    / (1024 ** 2)
+                        reserved_mb = torch.cuda.memory_reserved(idx)     / (1024 ** 2)
+                        peak_mb     = torch.cuda.max_memory_allocated(idx) / (1024 ** 2)
+                        total_mb    = torch.cuda.get_device_properties(idx).total_memory / (1024 ** 2)
+                        logger.info(
+                            f"PPO train first minibatch (epoch={epoch+1}/{self.n_epochs}): "
+                            f"allocated={alloc_mb:.0f} MB  reserved(cached)={reserved_mb:.0f} MB  "
+                            f"peak_allocated={peak_mb:.0f} MB  gpu_total={total_mb:.0f} MB"
+                        )
+                    else:
+                        logger.info(f"PPO train: first minibatch complete (epoch={epoch+1}/{self.n_epochs})")
+
                 if profile_phases:
                     if torch.cuda.is_available():
                         torch.cuda.synchronize()
                     backward_times.append(time.perf_counter() - t_bwd0)
                 if profile_enabled:
                     batch_times.append(time.perf_counter() - t_batch0)
-            
+
+                # Drop the reference to this mini-batch BEFORE the generator computes
+                # the next one.  Python's for-loop calls next() while the old r_data
+                # binding is still alive, so old + new tensors would otherwise coexist
+                # (doubling peak VRAM at every mini-batch boundary).
+                r_data = None  # type: ignore[assignment]
+                _gc.collect()
+
             if not continue_training:
                 break
+
+            # End-of-epoch: release any remaining refs and let the allocator return
+            # cached blocks.  combined with synchronize() so in-flight ops complete.
+            _gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
 
         if profile_enabled and batch_times:
             bt = np.asarray(batch_times, dtype=np.float64)
@@ -1125,6 +1182,21 @@ class MaskableRecurrentPPO(RecurrentPPO):
             logger.info(" | ".join(parts))
 
         self.rollout_buffer.clear_vram_cache()
+        fe = getattr(self.policy, "features_extractor", None)
+        if fe is not None and hasattr(fe, "clear_forward_cache"):
+            fe.clear_forward_cache()
+        from src.utils.cuda_memory import release_ppo_minibatch_vram
+
+        release_ppo_minibatch_vram(
+            self.device,
+            # Do NOT empty_cache here: async collector workers share the same GPU for
+            # opponent inference. empty_cache in the learner can TDR / poison worker
+            # contexts (CUDA "unspecified launch failure" mid-step). Opt-in via
+            # SC2_CUDA_EMPTY_CACHE if debugging a single-process run.
+            empty_cache=os.environ.get("SC2_CUDA_EMPTY_CACHE", "").strip()
+            in ("1", "true", "True"),
+            reset_peak=True,
+        )
         self._n_updates += self.n_epochs
         
         # Calculate explained variance (only for valid steps)

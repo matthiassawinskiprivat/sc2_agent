@@ -252,6 +252,28 @@ The policy head uses `thought` for the command head and `_spatial_fused` + laten
 
 ---
 
+## CTF squad pointer architecture (`agent_architecture: "squad"`)
+
+CTF levels override the pipeline default (`universal`) with **`agent_architecture: squad`** in each `ctf_level_*.yaml`. Attack curriculum levels remain universal.
+
+| Topic | Contract |
+|-------|----------|
+| **WHO observation** | Per-unit `unit_scalars[N_max,F]` + `unit_mask[N_max]` (pointer keys; no per-unit tactical stack) |
+| **WHERE observation** | Global `map[C_g,128,128]` + `command[10]` + single hard-anchor `anchor_tactical[C_t,32,32]` (previous-step selection, or provisional first-alive) |
+| **Action space** | `MultiDiscrete([2]*N_max + [64, 1024])` — binary pointer slot per padded unit + command + spatial |
+| **Selection** | Env resolves sigmoid/Bernoulli pointer via threshold + min/max clamp (`env.squad_selection`); stores hard `anchor_tag` for the next obs crop |
+| **Local actions** | Decode spatial target in **anchor unit frame**; all selected units share one world `Point2` |
+| **Physics stepping** | **One trainee squad decision per env step**, paired with **one opponent squad** (same `region`) → one `client.step()` → one rollout row |
+| **Recurrent** | LSTM/GRU resets on **episode done only** (`get_obs_focus_unit_tag` returns `-1`) |
+| **Checkpoint graft** | CTF starts from the **last attack level** checkpoint (e.g. `models_universal/level_attack_5/final_model.zip`), **not** legacy CTF zips. Use `load_squad_checkpoint` / `graft_squad_policy_from_universal`. Fresh Adam on architecture switch. Squad `query_linear` must be **64+64+10** (global GAP + tactical GAP + command) so universal fusion weights remap. |
+| **Opponent** | Same `SquadRecurrentPolicy`; synced via `_sync_opponent_model` with squad graft path |
+
+**Key files:** `src/agent/squad_constants.py`, `src/agent/squad_selection.py`, `src/transformers/squad_observation_builder.py`, `src/agent/models/squad_network.py`, `src/agent/models/squad_policy.py`, `train/envs/capture_the_flag_single_env.py` (`_async_step_squad_pointer`), `train/squad_pointer_rollout.py`.
+
+**Tests:** `tests/test_squad_selection.py`, `tests/test_squad_observation_builder.py`, `tests/test_graft_squad_policy.py`, `tests/test_squad_action_masks.py`, `tests/test_squad_pool_pairing.py`, `tests/test_ctf_squad_step.py`.
+
+---
+
 ## Agent-faithful actuation (universal) — no hidden “help”
 
 **Principle:** What the policy outputs for a spatial head (command index + cell → world position) must become the **actual** StarCraft order target. The agent is supposed to **learn** targeting and motion from observations and rewards, not inherit a second, hidden decision layer that overrides or substitutes its chosen point or command semantics.

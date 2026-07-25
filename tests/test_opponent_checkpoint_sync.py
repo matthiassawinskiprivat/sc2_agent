@@ -36,6 +36,8 @@ def _make_env():
         }
     )
     env.action_space = spaces.MultiDiscrete([64, 1024])
+    env.agent_architecture = "universal"
+    env.training_conf["training"] = {"device": "auto"}
     env.episode_counter = 1
     env._log = MagicMock()
     return env
@@ -72,13 +74,15 @@ def test_sync_opponent_model_prefers_latest_learner_over_initial(tmp_path, monke
     mock_model.policy.set_training_mode = MagicMock()
 
     with patch(
-        "src.utils.model_utils.load_curriculum_checkpoint",
+        "src.utils.training_device.warmup_cuda_if_needed",
+    ), patch(
+        "src.utils.opponent_inference.load_opponent_inference_checkpoint",
         return_value=mock_model,
     ) as mock_load:
         ok = env.sync_opponent_model()
 
     assert ok is True
-    assert mock_load.call_args[0][1] == str(tmp_path / "latest_learner_model.zip")
+    assert mock_load.call_args[0][0] == str(tmp_path / "latest_learner_model.zip")
     assert env.opponent_model is mock_model
 
 
@@ -183,18 +187,61 @@ def test_sync_opponent_model_uses_explicit_path(tmp_path, monkeypatch):
     mock_model.policy.set_training_mode = MagicMock()
 
     with patch(
-        "src.utils.model_utils.load_curriculum_checkpoint",
+        "src.utils.training_device.warmup_cuda_if_needed",
+    ), patch(
+        "src.utils.opponent_inference.load_opponent_inference_checkpoint",
         return_value=mock_model,
     ) as mock_load:
         ok = env.sync_opponent_model(str(ckpt))
 
     assert ok is True
     mock_load.assert_called_once()
-    assert mock_load.call_args[0][1] == str(ckpt)
-    load_kwargs = mock_load.call_args[0][3]
-    assert load_kwargs["env"] is env
-    assert load_kwargs["policy_kwargs"]["lstm_hidden_size"] == 512
+    assert mock_load.call_args[0][0] == str(ckpt)
     assert env.opponent_model is mock_model
+
+
+def test_sync_opponent_model_disposes_previous_snapshot(monkeypatch, tmp_path):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    ckpt = tmp_path / "ckpt.zip"
+    ckpt.write_bytes(b"PK")
+
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env.agent_architecture = "squad"
+    env.training_conf = {"training": {"device": "auto"}}
+    env.observation_space = MagicMock()
+    env.action_space = MagicMock()
+    env.episode_counter = 1
+    env._log = MagicMock()
+    env._opponent_checkpoint_candidates = MagicMock(return_value=[str(ckpt)])
+    env._resolve_opponent_algo_bundle = MagicMock(return_value=(MagicMock(), MagicMock(), {}, "gru"))
+    env._build_opponent_algo_kwargs = MagicMock(return_value={})
+    env._build_opponent_model_load_kwargs = MagicMock(return_value={})
+    env._opponent_graft_grid_size = MagicMock(return_value=32)
+
+    old_model = MagicMock()
+    old_model.policy = MagicMock()
+    env.opponent_model = old_model
+
+    new_model = MagicMock()
+    new_model.policy = MagicMock()
+    monkeypatch.setattr(
+        "src.utils.training_device.warmup_cuda_if_needed",
+        lambda _d: None,
+    )
+    monkeypatch.setattr(
+        "src.utils.opponent_inference.load_opponent_inference_checkpoint",
+        lambda *_a, **_k: new_model,
+    )
+    disposed = []
+    monkeypatch.setattr(
+        "src.utils.cuda_memory.dispose_opponent_snapshot",
+        lambda m, **kw: disposed.append(m),
+    )
+
+    assert env._sync_opponent_model() is True
+    assert env.opponent_model is new_model
+    assert disposed == [old_model]
 
 
 def test_push_opponent_checkpoint_to_envs_calls_env_method():

@@ -13,11 +13,12 @@ from typing import Any, Dict, List
 import numpy as np
 from loguru import logger
 
+from src.agent.utils.disk_buffer import is_disk_offloaded_obs_key
 from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
 
 
 def _shared_observation_keys(observation_space) -> List[str]:
-    return [key for key in observation_space.spaces if key in ("map", "tactical")]
+    return [key for key in observation_space.spaces if is_disk_offloaded_obs_key(key)]
 
 
 def _unlink_shm_by_name(name: str) -> None:

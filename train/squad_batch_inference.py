@@ -814,11 +814,14 @@ def _gather_rnn_columns(lstm_states: RNNStates, indices: List[int]) -> RNNStates
 def _scatter_rnn_columns(
     batched_lstm: RNNStates, indices: List[int], sub_lstm: RNNStates
 ) -> RNNStates:
-    updated = RNNStates(
-        tuple(t.clone() for t in batched_lstm.pi),
-        tuple(t.clone() for t in batched_lstm.vf),
-    )
+    # Clone once, then write all columns in-place — avoids N+1 full LSTM clones
+    # that previously pushed the CUDA allocator watermark up with every step.
+    pi_tensors = [t.clone() for t in batched_lstm.pi]
+    vf_tensors = [t.clone() for t in batched_lstm.vf]
     for j, env_idx in enumerate(indices):
         col = select_rnn_state_column(sub_lstm, j)
-        updated = _write_env_lstm_column(updated, env_idx, col)
-    return updated
+        for i, src in enumerate(col.pi):
+            pi_tensors[i][:, env_idx : env_idx + 1, :] = src.to(pi_tensors[i].device)
+        for i, src in enumerate(col.vf):
+            vf_tensors[i][:, env_idx : env_idx + 1, :] = src.to(vf_tensors[i].device)
+    return RNNStates(tuple(pi_tensors), tuple(vf_tensors))

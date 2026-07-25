@@ -13,6 +13,8 @@ from train.envs.ctf.pool_assignment import (
 
 _CONFIG_DIR = Path(__file__).resolve().parents[1] / "config_universal"
 
+_CTF_BOOTSTRAP_LEVELS = frozenset({"ctf_level_01", "ctf_level_01_zergling_vs_marine"})
+
 _RACE_UNITS = {
     "terran": {
         "MARINE", "MARAUDER", "HELLION", "HELLIONTANK", "SIEGETANK", "VIKINGFIGHTER", "BANSHEE", "THOR",
@@ -59,21 +61,72 @@ def test_pool_assignment_legacy_agent_flag_when_not_alternating():
     assert is_pool_trainee(pools[0], pools, 1, alternate=False)
 
 
-def test_ctf_levels_enable_alternate_trainee_race():
+def test_ctf_levels_enable_alternate_trainee_race_except_bootstrap():
     cm = ConfigManager(str(_CONFIG_DIR))
     ctf_levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_level_")]
     for level in ctf_levels:
         env = _load_env(level)
+        if level in _CTF_BOOTSTRAP_LEVELS:
+            assert env.get("alternate_trainee_race") is False, level
+            continue
         assert env.get("alternate_trainee_race") is True, level
 
 
-def test_ctf_levels_define_race_per_pool_not_static_agent_flag():
+def test_ctf_levels_define_race_per_pool_static_agent_only_on_bootstrap():
     cm = ConfigManager(str(_CONFIG_DIR))
     ctf_levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_level_")]
     for level in ctf_levels:
+        env = _load_env(level)
         for pool in _load_unit_pools(level):
             assert "race" in pool, f"{level} missing race on pool"
+            if level in _CTF_BOOTSTRAP_LEVELS and not env.get("alternate_trainee_race", False):
+                if pool.get("agent"):
+                    assert pool.get("high_level_command") == "attack"
+                continue
             assert "agent" not in pool, f"{level} still uses static agent flag"
+
+
+def test_ctf_level_01_zergling_attack_vs_marine_defend():
+    env = _load_env("ctf_level_01_zergling_vs_marine")
+    assert env.get("alternate_trainee_race") is False
+    pools = env["unit_pools"]
+    assert len(pools) == 2
+    assert pools[0]["agent"] is True
+    assert pools[0]["race"] == "zerg"
+    assert pools[0]["high_level_command"] == "attack"
+    assert pools[0]["unit_pool"] == ["ZERGLING"]
+    assert pools[0]["mineral_budget"] == 200
+    assert pools[1]["race"] == "terran"
+    assert pools[1]["high_level_command"] == "defend"
+    assert pools[1]["unit_pool"] == ["MARINE"]
+    assert pools[1]["mineral_budget"] == 150
+    assert pools[0]["region"] == pools[1]["region"] == "A"
+    assert env["squad_selection"]["min_selected_units"] == 8
+
+
+def test_ctf_pipeline_inserts_zergling_vs_marine_after_level_01():
+    cm = ConfigManager(str(_CONFIG_DIR))
+
+    idx_01 = cm.levels.index("ctf_level_01")
+    idx_zvm = cm.levels.index("ctf_level_01_zergling_vs_marine")
+    idx_melee_1 = cm.levels.index("ctf_level_02_melee_zealot_vs_roach")
+
+    assert idx_01 < idx_zvm < idx_melee_1
+
+
+def test_ctf_level_01_reaper_attack_vs_zergling_defend():
+    env = _load_env("ctf_level_01")
+    assert env.get("alternate_trainee_race") is False
+    pools = env["unit_pools"]
+    assert len(pools) == 2
+    assert pools[0]["agent"] is True
+    assert pools[0]["race"] == "terran"
+    assert pools[0]["high_level_command"] == "attack"
+    assert pools[0]["unit_pool"] == ["REAPER"]
+    assert pools[1]["race"] == "zerg"
+    assert pools[1]["high_level_command"] == "defend"
+    assert pools[1]["unit_pool"] == ["ZERGLING"]
+    assert pools[0]["region"] == pools[1]["region"] == "A"
 
 
 def test_ctf_unit_pools_match_declared_race():
@@ -123,6 +176,13 @@ def test_ctf_pipeline_inserts_two_levels_between_01_and_02():
     assert idx_01 < idx_i1 < idx_i2 < idx_02
     # Training should still proceed into what used to be ctf_level_03.
     assert idx_02 < idx_03
+
+
+def test_ctf_level_01_zergling_vs_marine_inherits_layers_without_adding():
+    cm = ConfigManager(str(_CONFIG_DIR))
+    at_01 = set(cm.get_cumulative_active_layers("ctf_level_01"))
+    at_zvm = cm.get_cumulative_active_layers("ctf_level_01_zergling_vs_marine")
+    assert at_zvm == sorted(at_01)
 
 
 def test_ctf_level_01_adds_only_bio_light_layers():

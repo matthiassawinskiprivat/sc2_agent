@@ -1,0 +1,68 @@
+training:
+  training_steps: 250_000
+  num_envs: 4
+  n_steps: 2048
+  batch_size: 256
+  learning_rate: 0.0003
+  render_beacon: false
+  watchdog_timeout: 3600
+  # Match attack curriculum: joint MultiDiscrete KL trips a tight target_kl.
+  target_kl: null
+  rollout_buffer: ram
+env:
+  env_class: CaptureTheFlagEnv
+  max_steps: 200
+  headless: true
+  every_k_episodes: 200
+  alternate_trainee_race: false
+  maps_dir: train/maps/ladder/with_region
+  unit_pools:
+  - agent: true
+    high_level_command: attack
+    race: zerg
+    mineral_budget: 200
+    vespene_budget: 0
+    unit_pool:
+    - ZERGLING
+    region: A
+  - high_level_command: defend
+    race: terran
+    mineral_budget: 150
+    vespene_budget: 0
+    unit_pool:
+    - MARINE
+    region: A
+  rewards:
+    pylon_damage_reward: 2.0
+    pylon_damage_penalty: 0.9
+    damage_reward: 0.4
+    damage_penalty: 0.15
+    melee_multiplier: 0.5
+    kill_reward: 0.5
+    kill_penalty: -0.4
+    distance_multiplier: 2.0
+    defender_zone_radius: 10.0
+    cooldown_retreat_scale: 0.9
+    win_reward: 15.0
+    loss_penalty: -12.5
+    draw_penalty: -10.0
+    step_penalty: -0.03
+    defender_step_reward: 0.001
+  squad_selection:
+    score_threshold: 0.5
+    min_selected_units: 3
+model:
+  algorithm: MaskableRecurrentPPO
+  policy: CnnLstmPolicy
+  rnn_type: gru
+  policy_kwargs:
+    features_extractor_class: src.agent.models.squad_network.SquadNetwork
+    features_extractor_kwargs:
+      features_dim: 512
+      thinking_steps: 3
+    lstm_hidden_size: 512
+    net_arch: []
+  gamma: 0.995
+  ent_coef: 0.015
+  n_epochs: 2
+agent_architecture: squad

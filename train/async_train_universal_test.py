@@ -907,6 +907,7 @@ def main():
             return None
         cfg["active_layers"] = cm.get_cumulative_active_layers(level_name)
         cfg["active_tactical_layers"] = cm.get_cumulative_active_tactical_layers(level_name)
+        cfg["active_unit_scalars"] = cm.get_cumulative_active_unit_scalars(level_name)
         cfg["action_heads"] = cm.get_cumulative_action_heads(level_name)
         cfg["categorical_heads"] = cm.get_cumulative_categorical_heads(level_name)
         cfg["config_dir"] = config_dir

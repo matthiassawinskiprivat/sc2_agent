@@ -89,9 +89,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         config_dir = self.training_conf.get("config_dir", "config_universal")
         self.config_manager = ConfigManager(config_dir)
 
-        self.agent_architecture = self.config_manager.get_agent_architecture()
+        self.agent_architecture = self.training_conf.get(
+            "agent_architecture",
+            self.config_manager.get_agent_architecture(self.level_name),
+        )
         self.training_conf.setdefault("agent_architecture", self.agent_architecture)
-        if self.agent_architecture == "universal":
+        if self.agent_architecture in ("universal", "squad"):
             self.grid_size = 32
         self.training_conf["grid_size"] = self.grid_size
 
@@ -128,6 +131,43 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             obs_dict["tactical"] = spaces.Box(low=0.0, high=1.0, shape=(n_tactical, 32, 32), dtype=np.float32)
             self.observation_space = spaces.Dict(obs_dict)
             self.action_space = spaces.MultiDiscrete([FIXED_UNIVERSAL_COMMAND_DIM, 32 * 32])
+        elif self.agent_architecture == "squad":
+            from src.agent.squad_constants import (
+                MAX_SQUAD_UNITS,
+                SQUAD_COMMAND_DIM,
+                squad_action_space_nvec,
+            )
+            from src.agent.unit_scalar_constants import UnitScalarConstants
+
+            self.active_tactical_layers = self._resolve_cumulative_list(
+                "active_tactical_layers",
+                self.config_manager.get_cumulative_active_tactical_layers,
+            ) or self.active_layers
+            self.training_conf["active_tactical_layers"] = self.active_tactical_layers
+            self.active_unit_scalars = UnitScalarConstants.resolve_active_features(
+                self._resolve_cumulative_list(
+                    "active_unit_scalars",
+                    self.config_manager.get_cumulative_active_unit_scalars,
+                )
+            )
+            self.training_conf["active_unit_scalars"] = self.active_unit_scalars
+            self.training_conf["fixed_universal_command_dim"] = FIXED_UNIVERSAL_COMMAND_DIM
+            n_tactical = len(self.active_tactical_layers)
+            n_unit_scalars = len(self.active_unit_scalars)
+            obs_dict["anchor_tactical"] = spaces.Box(
+                low=0.0, high=1.0, shape=(n_tactical, 32, 32), dtype=np.float32
+            )
+            obs_dict["unit_scalars"] = spaces.Box(
+                low=0.0, high=1.0, shape=(MAX_SQUAD_UNITS, n_unit_scalars), dtype=np.float32
+            )
+            obs_dict["unit_mask"] = spaces.Box(
+                low=0.0, high=1.0, shape=(MAX_SQUAD_UNITS,), dtype=np.float32
+            )
+            self.observation_space = spaces.Dict(obs_dict)
+            self.action_space = spaces.MultiDiscrete(squad_action_space_nvec())
+            self._squad_obs_builder = None
+            self._squad_anchor_tag_by_pool: Dict[int, int] = {}
+            self.current_trainee_pool_index = 0
         else:
             self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32)
             spatial_size = len(self.action_heads) * self.grid_size * self.grid_size
@@ -167,7 +207,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         # None until the first hard reset; also None when using symmetric self-play.
         self.model: Optional[Any] = None           # latest model ref, set by training loop
         self.opponent_model: Optional[Any] = None  # frozen snapshot used for player 2
-        self._opponent_lstm_state: Optional[Any] = None  # stateful LSTM between steps
+        # Per-pool LSTM state for squad-pointer opponent inference: keyed by opponent pool
+        # index so that pool 0 (attacker A) and pool 2 (defender B) in dual-trainee levels
+        # maintain independent recurrent contexts — a single shared tensor would
+        # cross-contaminate the two arenas on alternating steps.
+        self._opponent_lstm_states: Dict[int, Any] = {}
+        # Shared LSTM state for non-squad-pointer inference paths (original/universal archs).
+        self._opponent_lstm_state: Optional[Any] = None
         self._opponent_last_focus_tag: Optional[int] = None
         self._prepared_chunk: Optional[List[_ChunkEntry]] = None
         self._alternate_trainee_race = alternate_trainee_race_enabled(self.training_conf)
@@ -187,6 +233,43 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             getattr(self, "episode_counter", 1),
             alternate=getattr(self, "_alternate_trainee_race", False),
         )
+
+    def _all_trainee_pools_are_defenders(self) -> bool:
+        """True when every P1 pool has high_level_command='defend'.
+
+        In defender-only levels the learner trains only the defend role, so
+        syncing the opponent from latest_learner_model.zip would overwrite the
+        attacker model with a defender policy, causing the opponent to stop
+        advancing on the pylon after the first hard reset.
+        """
+        if not self.unit_pools_config:
+            return False
+        trainee_pools = [p for p in self.unit_pools_config if self._is_pool_trainee(p)]
+        if not trainee_pools:
+            return False
+        return all(
+            str(p.get("high_level_command", "attack")).lower() == "defend"
+            for p in trainee_pools
+        )
+
+    def _player_owns_flag_pylon(self, player_id: int) -> bool:
+        """True when this player spawned a defend-pool flag (pylon) this episode."""
+        if not self.unit_pools_config:
+            return True
+        for pool in self.unit_pools_config:
+            if self._pool_player_id(pool) != player_id:
+                continue
+            if str(pool.get("high_level_command", "attack")).lower() == "defend":
+                return True
+        return False
+
+    def _pylon_loss_flags(self) -> Tuple[bool, bool]:
+        """Pylon-loss termination only applies to players that own a defend-pool flag."""
+        p1_flag_owner = self._player_owns_flag_pylon(1)
+        p2_flag_owner = self._player_owns_flag_pylon(2)
+        p1_no_pylon = self.bot.structures(UnitTypeId.PYLON).amount == 0
+        p2_no_pylon = self.bot.enemy_structures(UnitTypeId.PYLON).amount == 0
+        return p1_flag_owner and p1_no_pylon, p2_flag_owner and p2_no_pylon
 
     def _resolve_cumulative_list(self, key: str, getter):
         """Use flattened training_conf list when the pipeline already computed it."""
@@ -650,6 +733,20 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         return len(alive_p1)
 
+    def _p1_defended_on_timeout(self, r_conf: dict) -> bool:
+        """True when P1 is a pure-defender whose pylon survived to the step limit.
+
+        Only active when ``rewards.defender_wins_on_timeout: true`` is set in the
+        level config — this avoids changing timeout semantics for symmetric
+        (attack + defend) or attacker-only episodes.
+        """
+        if not r_conf.get("defender_wins_on_timeout", False):
+            return False
+        if not self._player_owns_flag_pylon(1):
+            return False
+        p1_lost, _ = self._pylon_loss_flags()
+        return not p1_lost
+
     def _enemy_pylon_target_for_pool(self, promoted_pool_idx: int):
         """Return the enemy defender pylon position for a promoted attack squad."""
         from sc2.position import Point2
@@ -772,6 +869,150 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return self._is_pool_trainee(self._current_pool_config())
         return self.active_player_id == 1
 
+    def _uses_squad_pointer(self) -> bool:
+        return getattr(self, "agent_architecture", None) == "squad"
+
+    def _trainee_pool_indices(self) -> List[int]:
+        from train.envs.ctf.squad_pool_pairing import trainee_pool_indices
+
+        if not self.unit_pools_config:
+            return []
+        return trainee_pool_indices(self.unit_pools_config, self._is_pool_trainee)
+
+    def _paired_opponent_pool_index(self, trainee_pool_idx: int) -> Optional[int]:
+        from train.envs.ctf.squad_pool_pairing import paired_opponent_pool_index
+
+        return paired_opponent_pool_index(
+            trainee_pool_idx,
+            self.unit_pools_config,
+            is_pool_trainee=self._is_pool_trainee,
+        )
+
+    def _pool_alive_tags(self, pool_idx: int) -> List[int]:
+        if pool_idx < 0 or pool_idx >= len(self.squad_unit_tags):
+            return []
+        return list(self.squad_unit_tags[pool_idx][1])
+
+    def _squad_selection_config(self):
+        from src.agent.squad_constants import DEFAULT_MIN_SELECTED_UNITS, DEFAULT_SCORE_THRESHOLD
+        from src.agent.squad_selection import SquadSelectionConfig
+
+        env_conf = self.training_conf.get("env", {})
+        sel = env_conf.get("squad_selection") or self.training_conf.get("squad_selection") or {}
+        max_sel = sel.get("max_selected_units")
+        return SquadSelectionConfig(
+            score_threshold=float(sel.get("score_threshold", DEFAULT_SCORE_THRESHOLD)),
+            min_selected_units=int(sel.get("min_selected_units", DEFAULT_MIN_SELECTED_UNITS)),
+            max_selected_units=int(max_sel) if max_sel is not None else None,
+        )
+
+    def _ensure_squad_obs_builder(self):
+        if getattr(self, "_squad_obs_builder", None) is None:
+            from src.transformers.squad_observation_builder import SquadObservationBuilder
+
+            self._squad_obs_builder = SquadObservationBuilder(self.training_conf)
+        return self._squad_obs_builder
+
+    def _invalidate_squad_action_mask_cache(self) -> None:
+        self._squad_action_mask_cache = None
+
+    def _cache_squad_action_mask(self, obs: Dict[str, np.ndarray], pool_idx: int) -> None:
+        """Reuse mask on collector ``action_masks`` IPC without rebuilding squad obs."""
+        if not self.bot:
+            return
+        mask = self.bot.squad_action_masks(obs["unit_mask"])
+        self._squad_action_mask_cache = (self.steps_count, int(pool_idx), mask)
+
+    def _cached_squad_action_masks(self) -> Optional[np.ndarray]:
+        cached = getattr(self, "_squad_action_mask_cache", None)
+        if cached is None:
+            return None
+        step_count, pool_idx, mask = cached
+        if (
+            step_count == self.steps_count
+            and pool_idx == self.current_trainee_pool_index
+        ):
+            return mask
+        return None
+
+    def _begin_squad_obs_cache(self) -> None:
+        """Per-physics-step cache: at most one full build per pool per step."""
+        self._squad_obs_step_cache: Dict[int, Dict[str, np.ndarray]] = {}
+        builder = getattr(self, "_squad_obs_builder", None)
+        if builder is not None:
+            builder.clear_global_cache()
+
+    def _end_squad_obs_cache(self) -> None:
+        self._squad_obs_step_cache = {}
+        builder = getattr(self, "_squad_obs_builder", None)
+        if builder is not None:
+            builder.clear_global_cache()
+
+    def _squad_unit_mask_for_pool(self, pool_idx: int) -> np.ndarray:
+        from src.agent.squad_constants import MAX_SQUAD_UNITS
+
+        mask = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+        for slot, _tag in enumerate(sorted(self._pool_alive_tags(pool_idx))[:MAX_SQUAD_UNITS]):
+            mask[slot] = 1.0
+        return mask
+
+    def _resolve_squad_anchor_tag(self, pool_idx: int, tags: List[int]) -> Optional[int]:
+        """Hard-anchor tag for obs crop: last selection if still alive, else first alive."""
+        from src.transformers.squad_observation_builder import SquadObservationBuilder
+
+        preferred = getattr(self, "_squad_anchor_tag_by_pool", {}).get(pool_idx)
+        return SquadObservationBuilder.resolve_anchor_tag(
+            sorted(tags), tags, preferred_tag=preferred
+        )
+
+    def _remember_squad_anchor_tag(self, pool_idx: int, anchor_tag: int) -> None:
+        if not hasattr(self, "_squad_anchor_tag_by_pool") or self._squad_anchor_tag_by_pool is None:
+            self._squad_anchor_tag_by_pool = {}
+        if anchor_tag:
+            self._squad_anchor_tag_by_pool[int(pool_idx)] = int(anchor_tag)
+
+    def _get_squad_observation_for_pool(self, pool_idx: int) -> Dict[str, np.ndarray]:
+        cache = getattr(self, "_squad_obs_step_cache", None)
+        if cache is not None and pool_idx in cache:
+            return cache[pool_idx]
+
+        builder = self._ensure_squad_obs_builder()
+        if not self.unit_pools_config or pool_idx >= len(self.unit_pools_config):
+            obs = builder.zero_observation()
+        else:
+            pool = self.unit_pools_config[pool_idx]
+            tags = self._pool_alive_tags(pool_idx)
+            player_id = self._pool_player_id(pool)
+            hlc = pool.get("high_level_command", "attack")
+            playable = (256.0, 256.0)
+            if self.bot is not None and getattr(self.bot, "game_info", None) is not None:
+                playable = self.bot.game_info.playable_area.size
+            obs = builder.build(
+                self.bot,
+                perspective_player_id=player_id,
+                squad_unit_tags=tags,
+                pool_high_level_command=hlc,
+                playable_size=playable,
+                anchor_unit_tag=self._resolve_squad_anchor_tag(pool_idx, tags),
+            )
+        if cache is not None:
+            cache[pool_idx] = obs
+        return obs
+
+    async def _advance_trainee_pool_index(self) -> None:
+        await self._refresh_unit_lists()
+        indices = self._trainee_pool_indices()
+        if not indices:
+            return
+        try:
+            pos = indices.index(self.current_trainee_pool_index)
+        except ValueError:
+            pos = -1
+        next_pos = (pos + 1) % len(indices)
+        self.current_trainee_pool_index = indices[next_pos]
+        pool_idx = self.current_trainee_pool_index
+        self.active_player_id = self._pool_player_id(self.unit_pools_config[pool_idx])
+
     def _squad_tags(self) -> List[int]:
         _, tags = self._current_squad()
         return tags
@@ -892,6 +1133,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """
         if getattr(self, "_deferred_done", False) or getattr(self, "_deferred_truncated", False):
             return True
+        if self._uses_squad_pointer():
+            return len(self._pool_alive_tags(self.current_trainee_pool_index)) > 0
         if self._uses_chunk_physics():
             chunk = self._prepared_chunk or self._peek_acting_chunk()
             return any(entry.is_agent for entry in chunk)
@@ -900,6 +1143,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return len(self._squad_tags()) > 0
 
     async def _get_joint_observation(self):
+        if self._uses_squad_pointer():
+            return self._get_squad_observation_for_pool(self.current_trainee_pool_index)
         player_id, tags = self._current_squad()
         if tags and self.current_unit_index < len(tags):
             self.bot.active_unit_tag = tags[self.current_unit_index]
@@ -990,6 +1235,24 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             UnitControlNetwork,
         ):
             policy_kwargs["features_extractor_class"] = UnitControlNetwork
+
+        arch = self.training_conf.get("agent_architecture", self.agent_architecture)
+        if arch == "squad":
+            from src.agent.models.squad_network import SquadNetwork
+            from src.agent.models.squad_policy import SquadRecurrentPolicy
+
+            if fe_class in (
+                "src.agent.models.squad_network.SquadNetwork",
+                SquadNetwork,
+            ):
+                policy_kwargs["features_extractor_class"] = SquadNetwork
+            else:
+                policy_kwargs["features_extractor_class"] = SquadNetwork
+            if is_recurrent_algo:
+                policy_kwargs["rnn_type"] = rnn_type
+                return MaskableRecurrentPPO, SquadRecurrentPolicy, policy_kwargs, rnn_type
+            raise ValueError("Squad architecture requires MaskableRecurrentPPO")
+
         if is_recurrent_algo:
             policy_kwargs["rnn_type"] = rnn_type
 
@@ -1019,17 +1282,16 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
     def _build_opponent_model_load_kwargs(self) -> Dict[str, Any]:
         """Match collector/learner load kwargs so checkpoint shapes align (512-dim LSTM, UCN)."""
-        from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
         from src.utils.training_device import resolve_opponent_device
 
-        _algo, _policy, policy_kwargs, rnn_type = self._resolve_opponent_algo_bundle()
+        _algo, policy_class, policy_kwargs, rnn_type = self._resolve_opponent_algo_bundle()
         model_conf = self._resolve_opponent_model_conf()
         algo_name = model_conf.get("algorithm", "MaskablePPO")
 
         custom_objects = {
             "lr_schedule": lambda _: 0.0,
             "clip_range": lambda _: 0.2,
-            "policy_class": UniversalRecurrentPolicy,
+            "policy_class": policy_class,
             "policy_kwargs": policy_kwargs,
             "rnn_type": rnn_type,
             "optimizer": None,
@@ -1067,37 +1329,68 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             )
             return False
 
-        from src.utils.model_utils import load_curriculum_checkpoint
+        from src.utils.cuda_memory import dispose_opponent_snapshot
+        from src.utils.opponent_inference import load_opponent_inference_checkpoint
+        from src.utils.training_device import (
+            opponent_load_file_lock,
+            resolve_opponent_device,
+            warmup_cuda_if_needed,
+        )
 
-        AlgoClass, _, _policy_kwargs, _rnn = self._resolve_opponent_algo_bundle()
-        algo_kwargs = self._build_opponent_algo_kwargs()
-        load_kwargs = self._build_opponent_model_load_kwargs()
+        _algo, policy_class, policy_kwargs, rnn_type = self._resolve_opponent_algo_bundle()
+        training_params = self.training_conf.get("training", self.training_conf)
+        device = resolve_opponent_device(training_params)
         grid_size = self._opponent_graft_grid_size()
 
         errors: List[str] = []
         for model_path in existing:
+            new_model = None
             try:
-                new_model = load_curriculum_checkpoint(
-                    AlgoClass,
-                    model_path,
-                    algo_kwargs,
-                    load_kwargs,
-                    self.observation_space,
-                    self.action_space,
-                    grid_size=grid_size,
-                )
-                new_model.policy.set_training_mode(False)
-                self.opponent_model = new_model
+                # One worker at a time: concurrent squad grafts OOM / poison CUDA.
+                with opponent_load_file_lock():
+                    warmup_cuda_if_needed(device)
+                    new_model = load_opponent_inference_checkpoint(
+                        model_path,
+                        agent_architecture=self.agent_architecture,
+                        observation_space=self.observation_space,
+                        action_space=self.action_space,
+                        policy_class=policy_class,
+                        policy_kwargs=policy_kwargs,
+                        rnn_type=rnn_type,
+                        device=device,
+                        grid_size=grid_size,
+                    )
+                    old_model = getattr(self, "opponent_model", None)
+                    self.opponent_model = new_model
+                    new_model = None
+                    if old_model is not None and old_model is not self.opponent_model:
+                        # empty_cache=True: return freed model blocks to CUDA immediately.
+                        # With alternate_trainee_race, syncs happen at every hard reset
+                        # (not just defender-only levels). Keeping freed blocks reserved
+                        # across many syncs causes the collector VRAM pool to grow.
+                        dispose_opponent_snapshot(old_model, empty_cache=True)
                 self._opponent_lstm_state = None
+                self._opponent_lstm_states = {}
                 self._opponent_last_focus_tag = None
                 self._opponent_infer_source = "frozen"
                 self._logged_no_opponent_model = False
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    import os as _os
+                    _alloc = _torch.cuda.memory_allocated() / (1024**2)
+                    _resv = _torch.cuda.memory_reserved() / (1024**2)
+                    self._log(
+                        f"[VRAM-ENV-WORKER pid={_os.getpid()}] post-opponent-sync "
+                        f"allocated={_alloc:.0f}MB reserved={_resv:.0f}MB"
+                    )
                 self._log(
                     f"Opponent synced from '{os.path.basename(model_path)}' "
-                    f"(episode {self.episode_counter})."
+                    f"(episode {self.episode_counter}, inference-only, device={device})."
                 )
                 return True
             except Exception as e:
+                if new_model is not None:
+                    dispose_opponent_snapshot(new_model, empty_cache=False)
                 import traceback
                 errors.append(
                     f"{os.path.basename(model_path)}: {e}\n{traceback.format_exc()}"
@@ -1108,6 +1401,126 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             f"(will retry next hard reset):\n" + "\n---\n".join(errors)
         )
         return False
+
+    async def _predict_opponent_squad_pointer(self, pool_idx: int) -> np.ndarray:
+        """Single opponent squad forward for paired arena physics step."""
+        obs = self._get_squad_observation_for_pool(pool_idx)
+        mask = self.bot.squad_action_masks(obs["unit_mask"])
+        from src.agent.squad_constants import squad_fallback_action
+
+        default = squad_fallback_action(obs["unit_mask"])
+
+        if self.opponent_model is None:
+            self._ensure_opponent_model_loaded()
+
+        opp_model, source = self._resolve_opponent_model()
+        if opp_model is None:
+            if not getattr(self, "_logged_no_opponent_model", False):
+                self._log(
+                    "Opponent squad pointer: no opponent_model — using fallback action."
+                )
+                self._logged_no_opponent_model = True
+            return default
+
+        if getattr(self, "_opponent_infer_source", None) != source:
+            self._opponent_lstm_states = {}
+            self._opponent_infer_source = source
+
+        # Each opponent pool (e.g. pool 0 for arena A, pool 2 for arena B) has its own
+        # independent recurrent context so alternating between arenas does not corrupt the
+        # hidden state of the non-acting pool.
+        pool_lstm = self._opponent_lstm_states.get(pool_idx)
+        episode_start = pool_lstm is None
+
+        opp_model.policy.set_training_mode(False)
+        predict_kwargs: dict = dict(
+            state=pool_lstm,
+            episode_start=np.array([episode_start], dtype=bool),
+            deterministic=True,
+        )
+        try:
+            action, new_lstm = opp_model.predict(
+                obs, action_masks=mask, **predict_kwargs
+            )
+        except TypeError:
+            try:
+                action, new_lstm = opp_model.predict(
+                    obs, **predict_kwargs
+                )
+            except Exception as exc:
+                return self._opponent_predict_fallback(default, exc)
+        except Exception as exc:
+            return self._opponent_predict_fallback(default, exc)
+        self._opponent_lstm_states[pool_idx] = new_lstm
+        fe = getattr(opp_model.policy, "features_extractor", None)
+        if fe is not None and hasattr(fe, "clear_forward_cache"):
+            fe.clear_forward_cache()
+        return np.asarray(action, dtype=np.int64).reshape(-1)
+
+    def _opponent_predict_fallback(self, default: np.ndarray, exc: BaseException) -> np.ndarray:
+        """Keep the env alive when opponent CUDA inference faults.
+
+        CUDA poison errors ("illegal memory access", "unspecified launch failure", etc.)
+        are re-raised so they propagate to the SubprocVecEnv worker handler, which calls
+        os._exit(1) to rebuild the worker with a fresh GPU context.  Silently using a
+        fallback on every step after poison would leave the opponent permanently broken
+        and mask the error, causing invisible training degradation.
+        """
+        msg = str(exc).lower()
+        if "cuda" in msg and any(
+            k in msg
+            for k in (
+                "illegal memory access",
+                "unspecified launch failure",
+                "device-side assert",
+                "out of memory",
+            )
+        ):
+            # Do NOT suppress — let the worker exit and rebuild with a fresh context.
+            raise exc
+
+        self._opponent_lstm_state = None
+        self._opponent_lstm_states = {}
+        fe = None
+        opp_model, _source = self._resolve_opponent_model()
+        if opp_model is not None:
+            fe = getattr(opp_model.policy, "features_extractor", None)
+        if fe is not None and hasattr(fe, "clear_forward_cache"):
+            fe.clear_forward_cache()
+        if not getattr(self, "_logged_opponent_cuda_fallback", False):
+            self._log(
+                f"Opponent squad pointer inference failed ({type(exc).__name__}: {exc}); "
+                "using fallback action and clearing opponent RNN state."
+            )
+            self._logged_opponent_cuda_fallback = True
+        return np.asarray(default, dtype=np.int64).reshape(-1)
+
+    async def _apply_squad_action_for_pool(self, pool_idx: int, action: np.ndarray) -> None:
+        from src.agent.squad_selection import (
+            decode_squad_action,
+            selected_tags_from_indices,
+        )
+
+        unit_mask = self._squad_unit_mask_for_pool(pool_idx)
+        selection, command_idx, spatial_idx = decode_squad_action(
+            action,
+            unit_mask,
+            config=self._squad_selection_config(),
+        )
+        sorted_tags = sorted(self._pool_alive_tags(pool_idx))
+        selected = selected_tags_from_indices(sorted_tags, selection.selected_indices)
+        anchor_tag = sorted_tags[selection.anchor_index] if sorted_tags else 0
+        self._remember_squad_anchor_tag(pool_idx, int(anchor_tag))
+        player_id = self._pool_player_id(self.unit_pools_config[pool_idx])
+        for tag in sorted_tags:
+            self.bot.record_pre_action_retreat_state(tag)
+        await self.bot.apply_squad_action(
+            selected,
+            anchor_tag=int(anchor_tag),
+            command_idx=command_idx,
+            spatial_idx=spatial_idx,
+            perspective_player_id=player_id,
+        )
 
     async def _predict_opponent_squad_batch(self, tags: List[int]) -> List[np.ndarray]:
         """Batched opponent inference for every unit in the acting squad."""
@@ -1427,8 +1840,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             reward_tags, perspective_player_id=acting_player_id
         )
 
-        p1_lost = self.bot.structures(UnitTypeId.PYLON).amount == 0
-        p2_lost = self.bot.enemy_structures(UnitTypeId.PYLON).amount == 0
+        p1_lost, p2_lost = self._pylon_loss_flags()
         p1_army_lost = not self._has_combat_units(owner_id=1)
         p2_army_lost = not self._has_combat_units(owner_id=2)
 
@@ -1467,6 +1879,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             truncated = True
             if self._agent_attack_units_alive() > 0:
                 reward += loss_penalty
+            elif self._p1_defended_on_timeout(r_conf):
+                reward += win_reward
             else:
                 reward += draw_penalty
 
@@ -1503,6 +1917,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if timeout:
             if self._agent_attack_units_alive() > 0:
                 return loss_penalty
+            if self._p1_defended_on_timeout(r_conf):
+                return win_reward
             return draw_penalty
         return 0.0
 
@@ -1539,8 +1955,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             squad_tags, perspective_player_id=acting_player_id
         )
 
-        p1_lost = self.bot.structures(UnitTypeId.PYLON).amount == 0
-        p2_lost = self.bot.enemy_structures(UnitTypeId.PYLON).amount == 0
+        p1_lost, p2_lost = self._pylon_loss_flags()
         p1_army_lost = not self._has_combat_units(owner_id=1)
         p2_army_lost = not self._has_combat_units(owner_id=2)
 
@@ -1581,6 +1996,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             truncated = True
             if self._agent_attack_units_alive() > 0:
                 reward += loss_penalty
+            elif self._p1_defended_on_timeout(r_conf):
+                reward += win_reward
             else:
                 reward += draw_penalty
 
@@ -1613,6 +2030,137 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return obs, 0.0, False, False, {"squad_physics_step": True, "deferred_terminal": True}
 
         return obs, reward, done, truncated, {"squad_physics_step": True}
+
+        return obs, reward, done, truncated, {"squad_physics_step": True}
+
+    async def _finalize_squad_pointer_physics_step(
+        self,
+        trainee_tags: List[int],
+        opponent_tags: List[int],
+        trainee_player_id: int,
+    ):
+        """One physics step after paired trainee+opponent squad actions."""
+        self.steps_count += 1
+        acting_set = set(trainee_tags) | set(opponent_tags)
+
+        await self._flush_bot_actions()
+        await self._reissue_non_squad_orders(acting_set)
+        await self._flush_bot_actions()
+
+        await self.bot.client.step(
+            step_size=self._physics_step_size(len(trainee_tags) + len(opponent_tags))
+        )
+        await self._refresh_bot_state()
+
+        self._maybe_promote_defender_to_attack()
+
+        reward = self.bot.calculate_squad_step_reward(
+            trainee_tags, perspective_player_id=trainee_player_id
+        )
+
+        p1_lost, p2_lost = self._pylon_loss_flags()
+        p1_army_lost = not self._has_combat_units(owner_id=1)
+        p2_army_lost = not self._has_combat_units(owner_id=2)
+
+        done = False
+        truncated = False
+        r_conf = self.training_conf.get("rewards", {})
+        win_reward = r_conf.get("win_reward", 100.0)
+        loss_penalty = r_conf.get("loss_penalty", -100.0)
+        draw_penalty = r_conf.get("draw_penalty", -10.0)
+
+        if p1_lost:
+            done = True
+            reward += win_reward if trainee_player_id == 2 else loss_penalty
+        elif p2_lost:
+            done = True
+            reward += win_reward if trainee_player_id == 1 else loss_penalty
+        elif p1_army_lost and p2_army_lost:
+            done = True
+            reward += draw_penalty
+        elif p1_army_lost:
+            done = True
+            reward += loss_penalty if trainee_player_id == 1 else win_reward
+        elif p2_army_lost:
+            done = True
+            reward += win_reward if trainee_player_id == 1 else loss_penalty
+
+        await self._refresh_unit_lists()
+        p1_units_count = len(self.player_units[1])
+        p2_units_count = len(self.player_units[2])
+
+        all_units_gone = not done and p1_units_count == 0 and p2_units_count == 0
+        if all_units_gone:
+            done = True
+            reward += draw_penalty
+
+        timeout = not done and self.steps_count >= self.max_steps
+        if timeout:
+            truncated = True
+            if self._agent_attack_units_alive() > 0:
+                reward += loss_penalty
+            elif self._p1_defended_on_timeout(r_conf):
+                reward += win_reward
+            else:
+                reward += draw_penalty
+
+        if not done and not truncated:
+            await self._advance_trainee_pool_index()
+
+        obs = await self._get_joint_observation()
+
+        if (done or truncated) and trainee_player_id != 1:
+            p1_terminal = self._compute_p1_terminal_reward(
+                p1_lost,
+                p2_lost,
+                p1_army_lost,
+                p2_army_lost,
+                all_units_gone,
+                timeout,
+                r_conf,
+            )
+            self._deferred_done = done
+            self._deferred_truncated = truncated
+            self._deferred_p1_terminal_reward = p1_terminal
+            self._deferred_terminal_obs = obs
+            self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
+            return obs, 0.0, False, False, {
+                "squad_physics_step": True,
+                "squad_pointer": True,
+                "deferred_terminal": True,
+            }
+
+        self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
+        return obs, reward, done, truncated, {"squad_physics_step": True, "squad_pointer": True}
+
+    async def _async_step_squad_pointer(self, action_p_active):
+        self._begin_squad_obs_cache()
+        try:
+            trainee_idx = self.current_trainee_pool_index
+            trainee_tags = self._pool_alive_tags(trainee_idx)
+            if not trainee_tags:
+                await self._advance_trainee_pool_index()
+                obs = await self._get_joint_observation()
+                return obs, 0.0, False, False, {"squad_physics_step": False, "squad_pointer": True}
+
+            trainee_player_id = self._pool_player_id(self.unit_pools_config[trainee_idx])
+            self.active_player_id = trainee_player_id
+
+            await self._apply_squad_action_for_pool(trainee_idx, np.asarray(action_p_active))
+
+            opponent_idx = self._paired_opponent_pool_index(trainee_idx)
+            opponent_tags: List[int] = []
+            if opponent_idx is not None:
+                opponent_tags = self._pool_alive_tags(opponent_idx)
+                if opponent_tags and not self._preview_computer_opponent():
+                    opp_action = await self._predict_opponent_squad_pointer(opponent_idx)
+                    await self._apply_squad_action_for_pool(opponent_idx, opp_action)
+
+            return await self._finalize_squad_pointer_physics_step(
+                trainee_tags, opponent_tags, trainee_player_id
+            )
+        finally:
+            self._end_squad_obs_cache()
 
     async def _async_step_chunk(self, action_p_active):
         """Apply a fixed-size unit chunk (possibly spanning squads), then one physics step."""
@@ -1660,11 +2208,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     def reset(self, seed=None, options=None):
         self.episode_counter += 1
         self.steps_count = 0
+        self._invalidate_squad_action_mask_cache()
         self.current_unit_index = 0
         self.current_squad_index = 0
         self.active_player_id = 1
         self._promoted_pool_index = None
-        self._opponent_lstm_state = None  # always reset LSTM state between episodes
+        self._opponent_lstm_states = {}   # per-pool (squad-pointer arch)
+        self._opponent_lstm_state = None  # shared (other arch paths)
         self._opponent_last_focus_tag = None
         self._squad_batch_actions = None
         self._prepared_chunk = None
@@ -1673,6 +2223,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._deferred_truncated = False
         self._deferred_p1_terminal_reward = 0.0
         self._deferred_terminal_obs = None
+        if self._uses_squad_pointer():
+            indices = self._trainee_pool_indices()
+            self.current_trainee_pool_index = indices[0] if indices else 0
+            self._squad_anchor_tag_by_pool = {}
+            if indices and self.unit_pools_config:
+                self.active_player_id = self._pool_player_id(
+                    self.unit_pools_config[self.current_trainee_pool_index]
+                )
 
         every_k = every_k_episodes(self.training_conf)
 
@@ -1687,8 +2245,23 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     self._loop.run_until_complete(self._soft_reset_game())
                     obs = self._loop.run_until_complete(self._get_joint_observation())
                     self._last_obs = obs
+                    if self._uses_squad_pointer():
+                        self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
                     self.game_ended = False
                     self._log(f"Soft reset complete (episode {self.episode_counter}).")
+                    if self.episode_counter % 10 == 0:
+                        import torch as _torch
+                        if _torch.cuda.is_available():
+                            import os as _os
+                            from src.utils.sc2_cleanup import count_sc2_processes
+                            _alloc = _torch.cuda.memory_allocated() / (1024 ** 2)
+                            _resv = _torch.cuda.memory_reserved() / (1024 ** 2)
+                            self._log(
+                                f"[VRAM-ENV-WORKER pid={_os.getpid()}] "
+                                f"episode={self.episode_counter}: "
+                                f"allocated={_alloc:.0f}MB reserved={_resv:.0f}MB "
+                                f"sc2_procs={count_sc2_processes()}"
+                            )
                     if self.opponent_model is None:
                         self._ensure_opponent_model_loaded()
                     return obs, {}
@@ -1712,8 +2285,24 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     f"Hard reset at episode {self.episode_counter} "
                     f"(every_k={every_k}), map → {self.map_name}"
                 )
-            # Sync opponent snapshot from latest learner checkpoint
-            self._sync_opponent_model()
+            # Sync opponent snapshot from latest learner checkpoint.
+            # Skip when all trainee pools are defenders: the learner only trains
+            # the defend role so its published model would overwrite the initial
+            # attacker checkpoint with a defender policy, breaking the opponent.
+            if not self._all_trainee_pools_are_defenders():
+                self._sync_opponent_model()
+            import torch as _torch
+            if _torch.cuda.is_available():
+                import os as _os
+                from src.utils.sc2_cleanup import count_sc2_processes
+                _alloc = _torch.cuda.memory_allocated() / (1024 ** 2)
+                _resv = _torch.cuda.memory_reserved() / (1024 ** 2)
+                self._log(
+                    f"[VRAM-ENV-WORKER pid={_os.getpid()}] "
+                    f"hard-reset episode={self.episode_counter}: "
+                    f"allocated={_alloc:.0f}MB reserved={_resv:.0f}MB "
+                    f"sc2_procs={count_sc2_processes()}"
+                )
 
         return super().reset(seed=seed, options=options)
 
@@ -1749,10 +2338,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
     async def _async_step(self, action_p_active):
         # Phantom terminal step: flush deferred reward into the training buffer.
-        # This fires when the episode ended during the opponent's previous physics
-        # step.  No SC2 advance is needed — just return the cached terminal state
-        # with the P1-perspective reward so the collector can write it to the
-        # rollout buffer with policy_active=True.
         if getattr(self, "_deferred_done", False) or getattr(self, "_deferred_truncated", False):
             obs = self._deferred_terminal_obs
             reward = self._deferred_p1_terminal_reward
@@ -1763,6 +2348,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self._deferred_p1_terminal_reward = 0.0
             self._deferred_terminal_obs = None
             return obs, reward, done, truncated, {"squad_physics_step": True, "phantom_terminal": True}
+
+        if self._uses_squad_pointer():
+            return await self._async_step_squad_pointer(action_p_active)
 
         if self._uses_chunk_physics():
             return await self._async_step_chunk(action_p_active)
@@ -1813,15 +2401,26 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     def get_obs_focus_unit_tag(self) -> int:
         """
         Tag of the unit whose egocentric observation the policy will receive next.
-        Used by the recurrent collector to reset LSTM/GRU hidden state when the
-        focal unit changes between steps.  Returns -1 if unknown.
+        Squad pointer returns -1 (no per-unit focal cycling).
         """
+        if self._uses_squad_pointer():
+            return -1
         _, tags = self._current_squad()
         if tags and self.current_unit_index < len(tags):
             return int(tags[self.current_unit_index])
         return -1
 
     def action_masks(self) -> np.ndarray:
+        if self.bot and self._uses_squad_pointer():
+            cached = self._cached_squad_action_masks()
+            if cached is not None:
+                return cached
+            pool_idx = self.current_trainee_pool_index
+            mask = self.bot.squad_action_masks(
+                self._squad_unit_mask_for_pool(pool_idx)
+            )
+            self._squad_action_mask_cache = (self.steps_count, int(pool_idx), mask)
+            return mask
         if self.bot:
             return self.bot.action_masks()
         if isinstance(self.action_space, spaces.MultiDiscrete):

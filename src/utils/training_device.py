@@ -84,6 +84,13 @@ def cuda_init_lock_path() -> str:
     )
 
 
+def opponent_load_lock_path() -> str:
+    return os.environ.get(
+        "SC2_OPPONENT_LOAD_LOCK",
+        os.path.join(tempfile.gettempdir(), "sc2_training_opponent_load.lock"),
+    )
+
+
 @contextlib.contextmanager
 def cuda_init_file_lock(timeout: float = 180.0) -> Iterator[None]:
     """
@@ -93,7 +100,28 @@ def cuda_init_file_lock(timeout: float = 180.0) -> Iterator[None]:
     ``torch.cuda.init()`` concurrently, some driver stacks crash with
     0xC0000005 / WinError 1114 (shm.dll). Only one process may warm up CUDA at a time.
     """
-    lock_path = cuda_init_lock_path()
+    with _cross_process_file_lock(cuda_init_lock_path(), timeout=timeout, label="CUDA init"):
+        yield
+
+
+@contextlib.contextmanager
+def opponent_load_file_lock(timeout: float = 300.0) -> Iterator[None]:
+    """
+    Serialize opponent checkpoint loads across SubprocVecEnv workers.
+
+    Each worker holds a full squad policy on the shared GPU; concurrent grafts
+    spike VRAM and commonly surface as ``CUDA error: unspecified launch failure``.
+    """
+    with _cross_process_file_lock(
+        opponent_load_lock_path(), timeout=timeout, label="opponent load"
+    ):
+        yield
+
+
+@contextlib.contextmanager
+def _cross_process_file_lock(
+    lock_path: str, *, timeout: float, label: str
+) -> Iterator[None]:
     start = time.monotonic()
     fd: int | None = None
     while True:
@@ -103,7 +131,7 @@ def cuda_init_file_lock(timeout: float = 180.0) -> Iterator[None]:
         except FileExistsError:
             if time.monotonic() - start > timeout:
                 raise TimeoutError(
-                    f"Timed out after {timeout:.0f}s waiting for CUDA init lock "
+                    f"Timed out after {timeout:.0f}s waiting for {label} lock "
                     f"({lock_path}). Another training process may be stuck on the GPU."
                 )
             time.sleep(0.25)

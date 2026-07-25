@@ -7,6 +7,7 @@ from typing import Any, Type
 import numpy as np
 from gymnasium import spaces
 
+from src.agent.utils.disk_buffer import is_disk_offloaded_obs_key
 from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
 from src.agent.utils.async_shared_ram_buffer import AsyncSharedRamBuffer
 
@@ -42,7 +43,7 @@ def configure_collector_static_buffer(
 
     buf.disk_files = {}
     for key, subspace in observation_space.spaces.items():
-        if key in ("map", "tactical"):
+        if is_disk_offloaded_obs_key(key):
             filename = os.path.join(buf.instance_dir, f"obs_{key}.bin")
             shape = (buf.buffer_size, buf.n_envs, *subspace.shape)
             if key in buf.observations and isinstance(buf.observations[key], np.memmap):

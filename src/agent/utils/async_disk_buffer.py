@@ -6,7 +6,7 @@ import time
 from typing import Dict, Any, Optional, Union, Tuple
 from gymnasium import spaces
 from loguru import logger
-from src.agent.utils.disk_buffer import DiskDictRolloutBuffer
+from src.agent.utils.disk_buffer import DiskDictRolloutBuffer, is_disk_offloaded_obs_key
 
 class AsyncDiskBuffer(DiskDictRolloutBuffer):
     """
@@ -123,7 +123,7 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
             buffer.disk_files = {}
 
         for key, subspace in buffer.observation_space.spaces.items():
-            if key not in ("map", "tactical"):
+            if not is_disk_offloaded_obs_key(key):
                 continue
             filename = os.path.join(instance_dir, f"obs_{key}.bin")
             if not os.path.exists(filename):

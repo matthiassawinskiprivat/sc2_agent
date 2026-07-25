@@ -31,8 +31,20 @@ class ConfigManager:
         self.pipeline_config = self._load_yaml("pipeline.yaml")
         self.levels = self.pipeline_config.get("levels", [])
 
-    def get_agent_architecture(self) -> str:
-        """Returns the agent architecture from pipeline config, default 'original'."""
+    def get_agent_architecture(self, level_name: str | None = None) -> str:
+        """
+        Returns agent architecture for a level.
+
+        Per-level YAML may set ``agent_architecture`` at the root or under ``env``;
+        otherwise falls back to ``pipeline.yaml``.
+        """
+        if level_name:
+            level_conf = self.get_level_config(level_name)
+            arch = level_conf.get("agent_architecture")
+            if not arch:
+                arch = level_conf.get("env", {}).get("agent_architecture")
+            if arch:
+                return str(arch)
         return self.pipeline_config.get("agent_architecture", "original")
 
     def _load_yaml(self, filename: str) -> Dict[str, Any]:
@@ -264,6 +276,44 @@ class ConfigManager:
                 cn = cmd.lower()
                 if cn not in accumulated:
                     accumulated.append(cn)
+        return accumulated
+
+    def get_cumulative_active_unit_scalars(self, target_level: str) -> List[str]:
+        """
+        Cumulative per-unit scalar feature names for the squad pointer key.
+
+        Same contract as ``active_layers``: pipeline-root list first, then each
+        level's ``env.active_unit_scalars`` appended in order; duplicates skipped
+        (case-insensitive). Config order IS observation feature order.
+        """
+        accumulated: List[str] = []
+
+        root = self.pipeline_config.get("active_unit_scalars", [])
+        for name in root:
+            ln = str(name).lower()
+            if ln not in accumulated:
+                accumulated.append(ln)
+
+        found_target = False
+        for level in self.levels:
+            level_conf = self._load_yaml(f"{level}.yaml")
+            new_feats = level_conf.get("env", {}).get("active_unit_scalars", [])
+            if new_feats:
+                for name in new_feats:
+                    ln = str(name).lower()
+                    if ln not in accumulated:
+                        accumulated.append(ln)
+            if level == target_level:
+                found_target = True
+                break
+
+        if not found_target:
+            level_conf = self._load_yaml(f"{target_level}.yaml")
+            for name in level_conf.get("env", {}).get("active_unit_scalars", []) or []:
+                ln = str(name).lower()
+                if ln not in accumulated:
+                    accumulated.append(ln)
+
         return accumulated
 
     def get_level_config(self, level_name: str) -> Dict[str, Any]:

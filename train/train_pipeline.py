@@ -242,7 +242,9 @@ class PipelineManager:
 
         checkpoints = glob.glob(os.path.join(model_dir, "*_steps.zip"))
         if checkpoints:
-            latest_checkpoint = max(checkpoints, key=os.path.getmtime)
+            from src.utils.model_utils import latest_step_checkpoint
+
+            latest_checkpoint = latest_step_checkpoint(checkpoints)
             logger.info(f"Found checkpoint for level '{level_name}'. Resuming training from: {latest_checkpoint}")
             return "CONTINUE_TRAINING", latest_checkpoint
 

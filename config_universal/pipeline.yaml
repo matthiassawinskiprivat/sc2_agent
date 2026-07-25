@@ -50,6 +50,7 @@ levels:
   - "level_attack_5"
   #- "level_attack_6"
   - "ctf_level_01"
+  - "ctf_level_01_zergling_vs_marine"
   - "ctf_level_02_melee_zealot_vs_roach"
   - "ctf_level_02_melee_helliontank_vs_hydralisk"
   - "ctf_level_02"

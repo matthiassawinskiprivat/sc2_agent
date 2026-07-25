@@ -13,6 +13,11 @@ from sb3_contrib.common.maskable.buffers import MaskableDictRolloutBuffer
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentRolloutBufferSamples, RNNStates
 
 
+def is_disk_offloaded_obs_key(key: str) -> bool:
+    """Large spatial observation channels stored as memmap / shared memory, not RAM npz."""
+    return "map" in key or "tactical" in key or key == "local_map"
+
+
 def build_recurrent_sequence_spans(
     n_envs: int,
     buffer_size: int,
@@ -122,7 +127,7 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
         self.disk_files = {}
         if self.storage_backend == "disk":
             for key, subspace in observation_space.spaces.items():
-                if "map" in key or "tactical" in key or key == "local_map":
+                if is_disk_offloaded_obs_key(key):
                     filename = os.path.join(self.instance_dir, f"obs_{key}.bin")
                     shape = (self.buffer_size, self.n_envs, *subspace.shape)
                     self.observations[key] = np.memmap(
@@ -438,13 +443,22 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
             pa = get_and_pad(self.policy_active)
             mask_batch.append(m * pa)
 
-        def _np_stack_to_device(arr_list, flatten=True):
-            res = th.as_tensor(np.stack(arr_list))
-            res = res.to(self.device, non_blocking=True)
+        def _np_stack_to_device(arr_list, flatten=True, *, key=None):
+            chunk_envs = 4 if key == "anchor_tactical" else len(arr_list)
+            if len(arr_list) <= chunk_envs:
+                res = th.as_tensor(np.stack(arr_list))
+                res = res.to(self.device, non_blocking=True)
+            else:
+                parts = []
+                for i in range(0, len(arr_list), chunk_envs):
+                    sub = th.as_tensor(np.stack(arr_list[i : i + chunk_envs]))
+                    parts.append(sub.to(self.device, non_blocking=True))
+                res = th.cat(parts, dim=0)
+                del parts
             return res.reshape(-1, *res.shape[2:]) if flatten else res
 
-        def to_t(list_of_arr, flatten=True):
-            return _np_stack_to_device(list_of_arr, flatten=flatten)
+        def to_t(list_of_arr, flatten=True, *, key=None):
+            return _np_stack_to_device(list_of_arr, flatten=flatten, key=key)
 
         h_pi = _np_stack_to_device(h_pi_starts, flatten=False).transpose(0, 1).contiguous()
         h_vf = _np_stack_to_device(h_vf_starts, flatten=False).transpose(0, 1).contiguous()
@@ -466,7 +480,7 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
         batch_action_masks = to_t(m_list)
 
         return MaskableRecurrentRolloutBufferSamples(
-            observations={k: to_t(v) for k, v in obs_batch.items()},
+            observations={k: to_t(v, key=k) for k, v in obs_batch.items()},
             actions=to_t(act_batch),
             old_values=to_t(val_batch),
             old_log_prob=to_t(logp_batch),

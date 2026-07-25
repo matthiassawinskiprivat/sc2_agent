@@ -1,81 +1,115 @@
-# CTF 09 — Stalker vs Marauder. Protoss vs Terran armored; trainee alternates (P/T).
 training:
-  training_steps: 1_000_000
-  num_envs: 4
-  n_steps: 2048
-  batch_size: 512
+  training_steps: 250_000
+  num_envs: 1
+  n_steps: 1024
+  batch_size: 128
   learning_rate: 0.0003
-  render_beacon: False
+  render_beacon: false
   watchdog_timeout: 3600
   target_kl: null
-  rollout_buffer: disk
-
+  rollout_buffer: ram
 env:
-  env_class: "CaptureTheFlagEnv"
+  env_class: CaptureTheFlagEnv
   max_steps: 200
-  headless: True
-  every_k_episodes: 50
+  headless: true
+  every_k_episodes: 100
   alternate_trainee_race: true
-
-  maps_dir: "train/maps/ladder/with_region"
+  maps_dir: train/maps/ladder/with_region
   unit_pools:
-    - high_level_command: "attack"
-      race: protoss
-      mineral_budget: 250
-      vespene_budget: 100
-      unit_pool:
-        - "STALKER"
-      region: "A"
-    - high_level_command: "defend"
-      race: terran
-      mineral_budget: 200
-      vespene_budget: 50
-      unit_pool:
-        - "MARAUDER"
-      region: "A"
-    - high_level_command: "defend"
-      race: protoss
-      mineral_budget: 250
-      vespene_budget: 100
-      unit_pool:
-        - "STALKER"
-      region: "B"
-    - high_level_command: "attack"
-      race: terran
-      mineral_budget: 200
-      vespene_budget: 50
-      unit_pool:
-        - "MARAUDER"
-      region: "B"
-
+  - high_level_command: attack
+    race: protoss
+    mineral_budget: 1200
+    vespene_budget: 1200
+    unit_pool:
+    - ZEALOT
+    - STALKER
+    - ADEPT
+    - ARCHON
+    - IMMORTAL
+    - PHOENIX
+    - VOIDRAY
+    region: A
+  - high_level_command: defend
+    race: terran
+    mineral_budget: 900
+    vespene_budget: 900
+    unit_pool:
+    - MARINE
+    - MARAUDER
+    - HELLIONTANK
+    - CYCLONE
+    - SIEGETANK
+    - BANSHEE
+    - VIKINGFIGHTER
+    region: A
+  - high_level_command: defend
+    race: protoss
+    mineral_budget: 900
+    vespene_budget: 900
+    unit_pool:
+    - ZEALOT
+    - STALKER
+    - ADEPT
+    - ARCHON
+    - IMMORTAL
+    - PHOENIX
+    - VOIDRAY
+    region: B
+  - high_level_command: attack
+    race: terran
+    mineral_budget: 1200
+    vespene_budget: 1200
+    unit_pool:
+    - MARINE
+    - MARAUDER
+    - HELLIONTANK
+    - CYCLONE
+    - SIEGETANK
+    - BANSHEE
+    - VIKINGFIGHTER
+    region: B
+  active_layers:
+  - allied_unit_flying
+  - enemy_unit_flying
+  - allied_a_dps_base
+  - enemy_a_dps_base
+  active_tactical_layers:
+  - allied_unit_flying
+  - enemy_unit_flying
+  - allied_a_dps_base
+  - enemy_a_dps_base
   rewards:
     pylon_damage_reward: 1.0
-    pylon_damage_penalty: 1.0
+    pylon_damage_penalty: 0.5
     damage_reward: 0.2
-    damage_penalty: 0.2
+    damage_penalty: 0.1
     melee_multiplier: 0.5
-    kill_reward: 0.5
-    kill_penalty: -0.5
+    kill_reward: 0.25
+    kill_penalty: -0.25
     distance_multiplier: 1.0
     defender_zone_radius: 10.0
     cooldown_retreat_scale: 1.1
-    win_reward: 15.0
+    win_reward: 7.5
     loss_penalty: -5.0
-    draw_penalty: -2.0
-    step_penalty: -0.05
+    draw_penalty: -3.5
+    step_penalty: -0.015
     defender_step_reward: 0.001
-
+  squad_selection:
+    score_threshold: 0.5
+    min_selected_units: 1
 model:
-  algorithm: "MaskableRecurrentPPO"
-  policy: "CnnLstmPolicy"
-  rnn_type: "gru"
+  algorithm: MaskableRecurrentPPO
+  policy: CnnLstmPolicy
+  rnn_type: gru
   policy_kwargs:
-    features_extractor_class: "src.agent.models.unit_control_network.UnitControlNetwork"
+    features_extractor_class: src.agent.models.squad_network.SquadNetwork
     features_extractor_kwargs:
       features_dim: 512
       thinking_steps: 3
+      use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
   gamma: 0.995
-  ent_coef: 0.05
-  n_epochs: 4
+  ent_coef: 0.01
+  n_epochs: 2
+agent_architecture: squad

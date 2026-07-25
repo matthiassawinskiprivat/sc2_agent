@@ -62,10 +62,73 @@ def _configure_opponent_squad(env):
     env.opponent_model = MagicMock()
     env.opponent_model.predict = MagicMock(return_value=(np.array([0, 0]), None))
 
+
+def _configure_bootstrap_attack_vs_defend(env):
+  """ctf_level_01 style: P1 attack marines, P2 defend + flag pylon."""
+  env.unit_pools_config = [
+      {"agent": True, "high_level_command": "attack", "region": "A"},
+      {"high_level_command": "defend", "region": "A"},
+  ]
+  env.squad_unit_tags = [(1, [100]), (2, [200])]
+  env.current_squad_index = 0
+  env.active_player_id = 1
+  env.current_unit_index = 0
+  env.player_units = {1: [100], 2: [200]}
+
+
+def test_pylon_loss_flags_attack_only_agent_has_no_flag(env):
+    _configure_bootstrap_attack_vs_defend(env)
+    env.bot.structures(UnitTypeId.PYLON).amount = 0
+    env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
+
+    p1_lost, p2_lost = env._pylon_loss_flags()
+
+    assert p1_lost is False
+    assert p2_lost is False
+
+
+def test_pylon_loss_flags_defender_flag_destroyed(env):
+    _configure_bootstrap_attack_vs_defend(env)
+    env.bot.structures(UnitTypeId.PYLON).amount = 0
+    env.bot.enemy_structures(UnitTypeId.PYLON).amount = 0
+
+    p1_lost, p2_lost = env._pylon_loss_flags()
+
+    assert p1_lost is False
+    assert p2_lost is True
+
+
+def test_attack_only_agent_does_not_instant_lose_without_pylon(env):
+    """Regression: pure attacker must not lose because it never spawned a pylon."""
+    _configure_bootstrap_attack_vs_defend(env)
+    env.training_conf = {"rewards": {"win_reward": 100.0, "loss_penalty": -50.0}}
+    env.active_player_id = 1
+
+    env.bot.structures(UnitTypeId.PYLON).amount = 0
+    env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
+    env._has_combat_units = MagicMock(return_value=True)
+
+    async def run():
+        return await env._async_step(0)
+
+    obs, reward, done, truncated, info = asyncio.run(run())
+
+    assert done is False
+    assert truncated is False
+
 @pytest.mark.asyncio
 async def test_win_loss_condition_p1_lost(env):
-    """Test termination when Player 1's Pylon is destroyed."""
-    _configure_opponent_squad(env)
+    """Test termination when a defend-pool Player 1 pylon is destroyed."""
+    env.unit_pools_config = [
+        {"agent": True, "high_level_command": "defend"},
+        {"agent": False, "high_level_command": "attack"},
+    ]
+    env.squad_unit_tags = [(2, [200])]
+    env.current_squad_index = 0
+    env.active_player_id = 2
+    env.current_unit_index = 0
+    env.opponent_model = MagicMock()
+    env.opponent_model.predict = MagicMock(return_value=(np.array([0, 0]), None))
     env.training_conf = {"rewards": {"win_reward": 100.0, "loss_penalty": -50.0}}
     
     # P1 Pylon missing (amount == 0)
