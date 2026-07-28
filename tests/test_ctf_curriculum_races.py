@@ -1,15 +1,29 @@
 """Tests for CTF pool assignment and multi-race curriculum configs."""
 
 from pathlib import Path
+import importlib.util
+import sys
+import types
 
 import yaml
 
 from src.utils.config_manager import ConfigManager
-from train.envs.ctf.pool_assignment import (
-    get_trainee_race,
-    is_pool_trainee,
-    pool_player_id,
-)
+
+# Load pool_assignment without importing train.envs (pulls SC2 bot stack).
+_pool_path = Path(__file__).resolve().parents[1] / "train" / "envs" / "ctf" / "pool_assignment.py"
+_train = types.ModuleType("train")
+_train_envs = types.ModuleType("train.envs")
+_train_ctf = types.ModuleType("train.envs.ctf")
+sys.modules.setdefault("train", _train)
+sys.modules.setdefault("train.envs", _train_envs)
+sys.modules.setdefault("train.envs.ctf", _train_ctf)
+_spec = importlib.util.spec_from_file_location("train.envs.ctf.pool_assignment", _pool_path)
+_pool_mod = importlib.util.module_from_spec(_spec)
+sys.modules["train.envs.ctf.pool_assignment"] = _pool_mod
+_spec.loader.exec_module(_pool_mod)
+get_trainee_race = _pool_mod.get_trainee_race
+is_pool_trainee = _pool_mod.is_pool_trainee
+pool_player_id = _pool_mod.pool_player_id
 
 _CONFIG_DIR = Path(__file__).resolve().parents[1] / "config_universal"
 
@@ -213,6 +227,79 @@ def test_ctf_levels_12_14_budgets_and_matchups():
         if attack_race == "protoss" or defend_race == "protoss":
             protoss_pool = a_attack if attack_race == "protoss" else a_defend
             assert "DISRUPTOR" in protoss_pool["unit_pool"]
+
+
+def test_ctf_levels_15_17_mirror_12_14_matchups_and_budgets():
+    """15–17 reuse 12–14 full-army PvT / ZvP / ZvT pools and budgets.
+
+    Zerg pools on 16–17 also include BANELING (splash curriculum).
+    """
+    expected = {
+        "ctf_level_15": ("protoss", "terran"),
+        "ctf_level_16": ("zerg", "protoss"),
+        "ctf_level_17": ("zerg", "terran"),
+    }
+    mirrors = {
+        "ctf_level_15": "ctf_level_12",
+        "ctf_level_16": "ctf_level_13",
+        "ctf_level_17": "ctf_level_14",
+    }
+    for level, (attack_race, defend_race) in expected.items():
+        pools = _load_unit_pools(level)
+        assert len(pools) == 4, level
+        a_attack = next(p for p in pools if p["region"] == "A" and p["high_level_command"] == "attack")
+        a_defend = next(p for p in pools if p["region"] == "A" and p["high_level_command"] == "defend")
+        assert a_attack["race"] == attack_race
+        assert a_defend["race"] == defend_race
+        assert a_attack["mineral_budget"] == 2000
+        assert a_defend["mineral_budget"] == 1500
+        mirrored = _load_unit_pools(mirrors[level])
+        for pool, mirror_pool in zip(pools, mirrored):
+            if pool["race"] == "zerg":
+                assert "BANELING" in pool["unit_pool"], level
+                expected_pool = list(mirror_pool["unit_pool"])
+                if "BANELING" not in expected_pool:
+                    if "ZERGLING" in expected_pool:
+                        idx = expected_pool.index("ZERGLING") + 1
+                        expected_pool.insert(idx, "BANELING")
+                    else:
+                        expected_pool.insert(0, "BANELING")
+                assert pool["unit_pool"] == expected_pool, level
+            else:
+                assert pool["unit_pool"] == mirror_pool["unit_pool"], level
+
+
+def test_ctf_level_15_adds_splash_layers_and_scalars():
+    cm = ConfigManager(str(_CONFIG_DIR))
+    prior_layers = set(cm.get_cumulative_active_layers("ctf_level_14"))
+    at_15 = cm.get_cumulative_active_layers("ctf_level_15")
+    added_layers = [layer for layer in at_15 if layer not in prior_layers]
+    assert added_layers == ["allied_splash", "enemy_splash"]
+
+    prior_tac = set(cm.get_cumulative_active_tactical_layers("ctf_level_14"))
+    at_15_tac = cm.get_cumulative_active_tactical_layers("ctf_level_15")
+    added_tac = [layer for layer in at_15_tac if layer not in prior_tac]
+    assert added_tac == ["allied_splash", "enemy_splash"]
+
+    prior_scalars = set(cm.get_cumulative_active_unit_scalars("ctf_level_14"))
+    at_15_scalars = cm.get_cumulative_active_unit_scalars("ctf_level_15")
+    added_scalars = [s for s in at_15_scalars if s not in prior_scalars]
+    assert added_scalars == [
+        "air_dps_norm",
+        "has_splash",
+        "onetime_unit",
+        "is_friendly_fire",
+        "is_temporary",
+    ]
+
+    # 16/17 inherit without re-listing
+    assert "allied_splash" in cm.get_cumulative_active_layers("ctf_level_16")
+    assert "onetime_unit" in cm.get_cumulative_active_unit_scalars("ctf_level_17")
+    assert "is_friendly_fire" in cm.get_cumulative_active_unit_scalars("ctf_level_17")
+    assert "is_temporary" in cm.get_cumulative_active_unit_scalars("ctf_level_17")
+    env_16 = _load_env("ctf_level_16")
+    assert "active_layers" not in env_16 or not env_16.get("active_layers")
+    assert "active_unit_scalars" not in env_16 or not env_16.get("active_unit_scalars")
 
 
 def test_ctf_levels_cover_all_three_races():

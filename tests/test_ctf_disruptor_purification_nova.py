@@ -27,7 +27,7 @@ def _bot_with_unit(unit):
     mock_game_info.playable_area = MagicMock(x=0, y=0, width=128, height=128)
     mock_game_info.map_size.width = 128
     mock_game_info.map_size.height = 128
-    bot.game_info = mock_game_info
+    object.__setattr__(bot, "_game_info", mock_game_info)
     agent = MagicMock()
     agent.last_game_info = None
     agent.convert_spatial_action_to_world.return_value = (60.0, 70.0)
@@ -78,3 +78,31 @@ def test_ctf_apply_squad_action_attack_disruptor_casts_purification_nova():
     unit.assert_called_once_with(AbilityId.EFFECT_PURIFICATIONNOVA, Point2((60.0, 70.0)))
     bot.do.assert_called_once_with(cast_cmd)
     unit.attack.assert_not_called()
+
+
+def test_ctf_apply_squad_action_attack_nova_ball_moves():
+    unit = MagicMock()
+    unit.owner_id = 1
+    unit.tag = 99
+    unit.type_id = UnitTypeId.DISRUPTORPHASED
+    unit.position = Point2((40.0, 40.0))
+    move_cmd = object()
+    unit.move.return_value = move_cmd
+
+    bot = _bot_with_unit(unit)
+
+    asyncio.run(
+        CaptureTheFlagBot.apply_squad_action(
+            bot,
+            selected_tags=[99],
+            anchor_tag=99,
+            command_idx=2,
+            spatial_idx=100,
+            perspective_player_id=1,
+        )
+    )
+
+    unit.move.assert_called_once_with(Point2((60.0, 70.0)))
+    bot.do.assert_called_once_with(move_cmd)
+    unit.attack.assert_not_called()
+    unit.assert_not_called()

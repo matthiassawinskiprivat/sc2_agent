@@ -24,5 +24,10 @@ def test_layer_constants_transport_layers():
     assert all_indices.count(idx_pass) == 1
     
 def test_layer_count():
-    """Verify total layer count includes new layers."""
-    assert LayerConstants.get_num_layers() == 47
+    """Verify total layer count includes splash layers."""
+    assert LayerConstants.get_num_layers() == 49
+    assert LayerConstants.get_num_tactical_layers() == 39
+    assert LayerConstants.LAYERS[LayerConstants.ALLIED_SPLASH] == 47
+    assert LayerConstants.LAYERS[LayerConstants.ENEMY_SPLASH] == 48
+    assert LayerConstants.TACTICAL_LAYERS[LayerConstants.ALLIED_SPLASH] == 37
+    assert LayerConstants.TACTICAL_LAYERS[LayerConstants.ENEMY_SPLASH] == 38

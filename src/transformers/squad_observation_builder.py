@@ -21,6 +21,12 @@ from src.utils.unit_feature_helpers import (
     is_force_melee_unit,
     weapon_range_upgrade_deltas,
 )
+from src.utils.splash_data import (
+    unit_has_friendly_fire,
+    unit_has_splash,
+    unit_is_onetime,
+    unit_is_temporary,
+)
 from src.transformers.observation_transformer import ObservationTransformer
 
 _F = USC.FEATURES
@@ -248,10 +254,12 @@ class SquadObservationBuilder:
         g_range = _safe_float(getattr(unit, "ground_range", 0.0)) + g_delta
         a_range = _safe_float(getattr(unit, "air_range", 0.0)) + a_delta
         g_dps   = _safe_float(getattr(unit, "ground_dps", 0.0))
+        a_dps   = _safe_float(getattr(unit, "air_dps", 0.0))
         feats[_F[USC.GROUND_RANGE_NORM]] = min(g_range / _MAX_RANGE, 1.0)
         feats[_F[USC.AIR_RANGE_NORM]]    = min(a_range / _MAX_RANGE, 1.0)
         feats[_F[USC.GROUND_DPS_NORM]]   = float(np.tanh(g_dps / 20.0))
-        feats[_F[USC.CAN_ATTACK_AIR]]    = float(_safe_float(getattr(unit, "air_dps", 0.0)) > 0.0)
+        feats[_F[USC.AIR_DPS_NORM]]      = float(np.tanh(a_dps / 20.0))
+        feats[_F[USC.CAN_ATTACK_AIR]]    = float(a_dps > 0.0)
         feats[_F[USC.IS_MELEE]]          = float(
             is_force_melee_unit(unit) or g_range < _MELEE_RANGE_MAX
         )
@@ -266,6 +274,11 @@ class SquadObservationBuilder:
         feats[_F[USC.IS_MASSIVE]]    = float(bool(getattr(unit, "is_massive", False)))
         feats[_F[USC.IS_FLYING]]     = float(bool(getattr(unit, "is_flying", False)))
         feats[_F[USC.HAS_SHIELD]]    = float(sh_max > 0.0)
+
+        # --- Group H: splash / one-shot / friendly-fire flags ---
+        feats[_F[USC.HAS_SPLASH]]       = float(unit_has_splash(unit))
+        feats[_F[USC.ONETIME_UNIT]]     = float(unit_is_onetime(unit))
+        feats[_F[USC.IS_FRIENDLY_FIRE]] = float(unit_has_friendly_fire(unit))
 
         self._static_feat_cache[cache_key] = feats
         return feats
@@ -322,6 +335,9 @@ class SquadObservationBuilder:
         e_max = max(_safe_float(getattr(unit, "energy_max", 0.0)), 1e-3)
         e     = _safe_float(getattr(unit, "energy", 0.0))
         catalog[_F[USC.ENERGY_PCT]] = (e / e_max) if e_max > 1e-3 else 0.0
+
+        # Timed-lifetime / hallucination flag (per-instance; not type-cacheable).
+        catalog[_F[USC.IS_TEMPORARY]] = float(unit_is_temporary(unit))
 
         # --- Group E: Positional / relational ---
         px = float(unit.position.x)

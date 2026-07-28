@@ -134,6 +134,10 @@ class LayerConstants:
     # Layer 45: Enemy weapon cooldown (tactical-only combat timing signal)
     ENEMY_WEAPON_COOLDOWN = "enemy_weapon_cooldown"
 
+    # Layers 47-48: Splash collateral reach (circle / sieged-tank donut)
+    ALLIED_SPLASH = "allied_splash"
+    ENEMY_SPLASH = "enemy_splash"
+
     # --- INDEX MAPPING ---
     LAYERS = {
         ALLIED_UNIT_DENSITY: 0,
@@ -166,6 +170,8 @@ class LayerConstants:
         TRANSPORT_SLOTS: 42, PASSENGER_DENSITY: 43,
         ALLIED_WEAPON_COOLDOWN: 44,
         ENEMY_WEAPON_COOLDOWN: 45,
+        ALLIED_SPLASH: 47,
+        ENEMY_SPLASH: 48,
     }
 
     # Reduced set for tactical/micro view
@@ -210,12 +216,14 @@ class LayerConstants:
         ENEMY_A_DPS_LIGHT: 34,
         ENEMY_A_DPS_ARMOR: 35,
         ENEMY_A_DPS_MASSIVE: 36,
+        ALLIED_SPLASH: 37,
+        ENEMY_SPLASH: 38,
     }
 
     @classmethod
     def get_num_layers(cls) -> int:
-        return 47
+        return 49
 
     @classmethod
     def get_num_tactical_layers(cls) -> int:
-        return 37
+        return 39

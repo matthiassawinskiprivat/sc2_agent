@@ -52,6 +52,13 @@ class UnitScalarConstants:
     ROLE_ATTACK = "role_attack"
     ROLE_DEFEND = "role_defend"
 
+    # === Group H: Combat profile extensions (append-only) ===
+    AIR_DPS_NORM     = "air_dps_norm"
+    HAS_SPLASH       = "has_splash"
+    ONETIME_UNIT     = "onetime_unit"
+    IS_FRIENDLY_FIRE = "is_friendly_fire"
+    IS_TEMPORARY     = "is_temporary"
+
     # --- INDEX MAPPING — never reorder; append new entries at the end ---
     FEATURES = {
         # Group A
@@ -92,6 +99,12 @@ class UnitScalarConstants:
         # Group G
         ROLE_ATTACK: 29,
         ROLE_DEFEND: 30,
+        # Group H
+        AIR_DPS_NORM:     31,
+        HAS_SPLASH:       32,
+        ONETIME_UNIT:     33,
+        IS_FRIENDLY_FIRE: 34,
+        IS_TEMPORARY:     35,
     }
 
     @classmethod

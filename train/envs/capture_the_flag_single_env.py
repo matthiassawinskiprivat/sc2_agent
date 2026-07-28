@@ -713,7 +713,39 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.player_units[1] = [u.tag for u in all_units if u.owner_id == 1 and not u.is_structure]
         self.player_units[2] = [u.tag for u in all_units if u.owner_id == 2 and not u.is_structure]
         if self.unit_pool_index and self.unit_pools_config:
+            self._prune_dead_pool_membership()
+            self._adopt_midgame_summons()
             self._rebuild_squad_unit_tags()
+
+    def _prune_dead_pool_membership(self) -> None:
+        """Remove expired/dead units (including Nova balls) from pool maps."""
+        from src.utils.unit_feature_helpers import prune_dead_from_pool_maps
+
+        alive = set(self.player_units[1] + self.player_units[2])
+        prune_dead_from_pool_maps(
+            alive,
+            self.unit_pool_index,
+            unit_command_map=getattr(self.bot, "unit_command_map", None) if self.bot else None,
+            unit_target_map=getattr(self.bot, "unit_target_map", None) if self.bot else None,
+        )
+        anchors = getattr(self, "_squad_anchor_tag_by_pool", None)
+        if isinstance(anchors, dict):
+            for pool_idx, tag in list(anchors.items()):
+                if int(tag) not in alive:
+                    del anchors[pool_idx]
+
+    def _adopt_midgame_summons(self) -> None:
+        """Attach mid-episode summons (Nova, Locust, Broodling, …) to parent pools."""
+        from src.utils.unit_feature_helpers import adopt_midgame_summons_into_pools
+
+        if self.bot is None or not self.unit_pool_index:
+            return
+        adopt_midgame_summons_into_pools(
+            self.bot.all_units,
+            self.unit_pool_index,
+            unit_command_map=getattr(self.bot, "unit_command_map", None),
+            unit_target_map=getattr(self.bot, "unit_target_map", None),
+        )
 
     def _pool_alive_count(self, pool_idx: int) -> int:
         alive = set(self.player_units[1] + self.player_units[2])

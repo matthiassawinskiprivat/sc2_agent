@@ -27,7 +27,7 @@ def _bot_with_unit(unit):
     mock_game_info.playable_area = MagicMock(x=0, y=0, width=128, height=128)
     mock_game_info.map_size.width = 128
     mock_game_info.map_size.height = 128
-    bot.game_info = mock_game_info
+    object.__setattr__(bot, "_game_info", mock_game_info)
     agent = MagicMock()
     agent.last_game_info = None
     agent.convert_spatial_action_to_world.return_value = (60.0, 70.0)

@@ -20,15 +20,29 @@ from scipy.ndimage import binary_dilation
 # SC2 Dependencies
 from sc2.unit import Unit
 from sc2.game_data import GameData
+from sc2.ids.ability_id import AbilityId
+from sc2.ids.effect_id import EffectId
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.ids.upgrade_id import UpgradeId
-from sc2.ids.effect_id import EffectId
-from sc2.ids.ability_id import AbilityId
-from sc2.constants import IS_DETECTOR, UNIT_PHOTONCANNON
+
+try:
+    from sc2.constants import IS_DETECTOR, UNIT_PHOTONCANNON
+except ImportError:  # pragma: no cover — older burnysc2
+    IS_DETECTOR = {
+        UnitTypeId.OBSERVER,
+        UnitTypeId.OBSERVERSIEGEMODE,
+        UnitTypeId.RAVEN,
+        UnitTypeId.MISSILETURRET,
+        UnitTypeId.OVERSEER,
+        UnitTypeId.OVERSEERSIEGEMODE,
+        UnitTypeId.SPORECRAWLER,
+    }
+    UNIT_PHOTONCANNON = UnitTypeId.PHOTONCANNON
 
 # Project Constants
 from src.utils.layer_constants import LayerConstants
 from src.utils.command_constants import CommandConstants
+from src.utils.splash_data import splash_spec
 from src.utils.obs_geometry import (
     TACTICAL_HALF,
     TACTICAL_OBS_SIZE,
@@ -508,6 +522,12 @@ class ObservationTransformer:
             is_enemy
         )
 
+    def _has_active_splash_layers(self, is_enemy: bool) -> bool:
+        """True when allied/enemy splash channel is configured and active."""
+        name = LayerConstants.ENEMY_SPLASH if is_enemy else LayerConstants.ALLIED_SPLASH
+        idx = self.current_layer_map.get(name)
+        return idx is not None and idx in self.active_indices
+
     def _resolve_axis_dps_layer(
         self, prefix: str, axis: str, suffix: Optional[str] = None
     ) -> Optional[int]:
@@ -633,6 +653,18 @@ class ObservationTransformer:
         dy = abs(unit.position.y - active_unit.position.y)
         return max(dx, dy) <= float(TACTICAL_HALF) + reach
 
+    def _tactical_splash_ring_may_intersect_fovea(self, unit: Unit, active_unit: Unit) -> bool:
+        """True when a splash disc could overlap the 32×32 tactical fovea."""
+        spec = splash_spec(unit)
+        if spec is None:
+            return False
+        reach = float(spec[0])
+        if reach <= 0:
+            return False
+        dx = abs(unit.position.x - active_unit.position.x)
+        dy = abs(unit.position.y - active_unit.position.y)
+        return max(dx, dy) <= float(TACTICAL_HALF) + reach
+
     def _draw_tactical_reach_in_dps(
         self,
         layers: np.ndarray,
@@ -643,12 +675,14 @@ class ObservationTransformer:
         enemy_structures,
         game_data: GameData,
     ) -> None:
-        """Draw weapon rings for units outside the body cull whose reach overlaps the fovea."""
+        """Draw weapon/splash rings for units outside the body cull whose reach overlaps the fovea."""
         for unit_list, is_enemy in (
             (list(allied_units) + list(allied_structures), False),
             (list(enemy_units) + list(enemy_structures), True),
         ):
-            if not self._has_active_dps_layers(is_enemy):
+            want_dps = self._has_active_dps_layers(is_enemy)
+            want_splash = self._has_active_splash_layers(is_enemy)
+            if not want_dps and not want_splash:
                 continue
             for unit in unit_list:
                 if self._is_attached_addon_unit(unit):
@@ -657,11 +691,13 @@ class ObservationTransformer:
                     continue
                 if self._tactical_body_inside_fovea(unit, active_unit):
                     continue
-                if not self._tactical_weapon_ring_may_intersect_fovea(unit, active_unit):
-                    continue
                 px, py = self._get_pixel_coords_unclamped(unit.position)
-                if px is not None:
+                if px is None:
+                    continue
+                if want_dps and self._tactical_weapon_ring_may_intersect_fovea(unit, active_unit):
                     self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
+                if want_splash and self._tactical_splash_ring_may_intersect_fovea(unit, active_unit):
+                    self._draw_unit_splash(unit, layers, is_enemy, px, py)
 
     def _effect_dps_layer_indices(self, prefix: str, hits_air: bool = False) -> List[int]:
         """DPS layer indices for effect zones (storm, nuke, liberator AA zone)."""
@@ -1138,10 +1174,12 @@ class ObservationTransformer:
             self._draw_unit_detection(unit, layers, is_enemy, px, py)
             self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
             self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
+            self._draw_unit_splash(unit, layers, is_enemy, px, py)
         else:
             self._draw_unit_vitals(unit, layers, is_enemy, px, py)
             self._draw_unit_detection(unit, layers, is_enemy, px, py)
             self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
+            self._draw_unit_splash(unit, layers, is_enemy, px, py)
 
     def _unit_is_detector_structure(self, unit: Unit) -> bool:
         type_id = getattr(unit, "type_id", None)
@@ -2646,6 +2684,27 @@ class ObservationTransformer:
         rng_g = max(max(base, g_live, base + g_up) + ur, min_reach)
         rng_a = max(max(base, a_live, base + a_up) + ur, min_reach)
         return rng_g, rng_a
+
+    def _draw_unit_splash(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
+        """Paint splash collateral reach (circle; sieged tank uses min_range donut)."""
+        if not self._has_active_splash_layers(is_enemy):
+            return
+        if not self._unit_is_combat_ready(unit):
+            return
+        if getattr(unit, "is_hallucination", False):
+            return
+        spec = splash_spec(unit)
+        if spec is None:
+            return
+        radius_gu, min_range_gu, splash_damage = spec
+        layer_name = LayerConstants.ENEMY_SPLASH if is_enemy else LayerConstants.ALLIED_SPLASH
+        idx = self.current_layer_map.get(layer_name)
+        if idx is None or idx not in self.active_indices:
+            return
+        self._draw_circle_vectorized(
+            layers, idx, px, py, float(radius_gu), None, float(splash_damage), True,
+            min_radius_game=float(min_range_gu), unit=unit,
+        )
 
     def _draw_unit_dps(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int, game_data: GameData):
         if not self._unit_is_combat_ready(unit):

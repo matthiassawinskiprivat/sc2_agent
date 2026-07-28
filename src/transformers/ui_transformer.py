@@ -79,6 +79,10 @@ class RealTimeUITransformer:
 
             LayerConstants.COMMAND_ASSIGNMENT:      [1.0, 0.0, 1.0],  # Magenta (distinct from allied bio green)
             LayerConstants.COMMAND_OBJECTIVE:       [1.0, 1.0, 0.0],
+
+            # --- SPLASH ---
+            LayerConstants.ALLIED_SPLASH:           [0.2, 0.8, 1.0],  # Light cyan
+            LayerConstants.ENEMY_SPLASH:            [1.0, 0.3, 0.1],  # Hot orange-red
         }
 
     def update_display(self, observation: np.ndarray, enabled_layers: List[str],

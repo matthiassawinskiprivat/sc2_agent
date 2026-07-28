@@ -11,6 +11,7 @@ except ImportError:
 
 from src.utils.unit_feature_helpers import (
     is_force_melee_unit,
+    is_purification_nova_ball,
     is_temporary_attrition_unit,
     issue_attack_at_point,
     uses_purification_nova_for_attack,
@@ -81,6 +82,9 @@ def test_temporary_attrition_includes_broodling_and_locusts():
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.LOCUSTMPFLYING)) is True
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.DISRUPTORPHASED)) is True
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.INTERCEPTOR)) is True
+    assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.ADEPTPHASESHIFT)) is True
+    assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.INFESTORTERRAN)) is True
+    assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.CHANGELING)) is True
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.BROODLORD)) is False
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.SWARMHOSTMP)) is False
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.DISRUPTOR)) is False
@@ -100,6 +104,12 @@ def test_uses_purification_nova_for_disruptor_only():
     assert uses_purification_nova_for_attack(_mock_unit(UnitTypeId.DISRUPTORPHASED)) is False
     assert uses_purification_nova_for_attack(_mock_unit(UnitTypeId.MARINE)) is False
     assert uses_purification_nova_for_attack(_mock_unit(UnitTypeId.SWARMHOSTMP)) is False
+
+
+def test_is_purification_nova_ball_only_phased():
+    assert is_purification_nova_ball(_mock_unit(UnitTypeId.DISRUPTORPHASED)) is True
+    assert is_purification_nova_ball(_mock_unit(UnitTypeId.DISRUPTOR)) is False
+    assert is_purification_nova_ball(_mock_unit(UnitTypeId.MARINE)) is False
 
 
 def test_issue_attack_at_point_swarmhost_casts_spawn_locusts():
@@ -136,6 +146,24 @@ def test_issue_attack_at_point_disruptor_casts_purification_nova():
     unit.assert_called_once_with(AbilityId.EFFECT_PURIFICATIONNOVA, target)
     bot.do.assert_called_once_with(cast_cmd)
     unit.attack.assert_not_called()
+
+
+def test_issue_attack_at_point_nova_ball_moves():
+    from sc2.position import Point2
+
+    bot = MagicMock()
+    unit = MagicMock()
+    unit.type_id = UnitTypeId.DISRUPTORPHASED
+    move_cmd = object()
+    unit.move.return_value = move_cmd
+    target = Point2((12.0, 34.0))
+
+    issue_attack_at_point(bot, unit, target)
+
+    unit.move.assert_called_once_with(target)
+    bot.do.assert_called_once_with(move_cmd)
+    unit.attack.assert_not_called()
+    unit.assert_not_called()
 
 
 def test_issue_attack_at_point_marine_uses_attack():

@@ -5,6 +5,24 @@ import numpy as np
 import pytest
 from sc2.ids.unit_typeid import UnitTypeId
 
+# Older/partial burnysc2 installs may omit detector constants used by ObservationTransformer.
+import sc2.constants as _sc2_constants
+
+if not hasattr(_sc2_constants, "IS_DETECTOR"):
+    _sc2_constants.IS_DETECTOR = frozenset(
+        {
+            UnitTypeId.OBSERVER,
+            UnitTypeId.OBSERVERSIEGEMODE,
+            UnitTypeId.OVERSEER,
+            UnitTypeId.OVERSEERSIEGEMODE,
+            UnitTypeId.RAVEN,
+            UnitTypeId.MISSILETURRET,
+            UnitTypeId.SPORECRAWLER,
+        }
+    )
+if not hasattr(_sc2_constants, "UNIT_PHOTONCANNON"):
+    _sc2_constants.UNIT_PHOTONCANNON = UnitTypeId.PHOTONCANNON
+
 from src.agent.squad_constants import MAX_SQUAD_UNITS, SQUAD_UNIT_FEAT_DIM
 from src.agent.unit_scalar_constants import UnitScalarConstants as USC
 from src.transformers.squad_observation_builder import SquadObservationBuilder
@@ -62,6 +80,7 @@ def _make_unit(
     unit.is_burrowed = is_burrowed
     unit.is_cloaked = is_cloaked
     unit.is_detected = is_detected
+    unit.is_hallucination = False
     unit.calculate_speed = MagicMock(return_value=3.15)
     unit.distance_to_weapon_ready = 0.0
     unit.type_id = type_id if type_id is not None else MagicMock()
@@ -177,6 +196,113 @@ def test_can_attack_air(training_conf):
         upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
     )
     assert feats[USC.FEATURES[USC.CAN_ATTACK_AIR]] == pytest.approx(1.0)
+
+
+def test_air_dps_norm(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    unit = _make_unit(air_dps=20.0)
+    feats = builder._unit_scalars(
+        unit, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )
+    assert feats[USC.FEATURES[USC.AIR_DPS_NORM]] == pytest.approx(float(np.tanh(1.0)))
+
+
+def test_has_splash_and_onetime_for_baneling(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    unit = _make_unit(type_id=UnitTypeId.BANELING)
+    feats = builder._unit_scalars(
+        unit, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )
+    assert feats[USC.FEATURES[USC.HAS_SPLASH]] == pytest.approx(1.0)
+    assert feats[USC.FEATURES[USC.ONETIME_UNIT]] == pytest.approx(1.0)
+
+
+def test_disruptor_caster_not_splash_or_onetime(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    unit = _make_unit(type_id=UnitTypeId.DISRUPTOR)
+    feats = builder._unit_scalars(
+        unit, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )
+    assert feats[USC.FEATURES[USC.HAS_SPLASH]] == pytest.approx(0.0)
+    assert feats[USC.FEATURES[USC.ONETIME_UNIT]] == pytest.approx(0.0)
+
+
+def test_archon_has_splash_not_onetime(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    unit = _make_unit(type_id=UnitTypeId.ARCHON)
+    feats = builder._unit_scalars(
+        unit, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )
+    assert feats[USC.FEATURES[USC.HAS_SPLASH]] == pytest.approx(1.0)
+    assert feats[USC.FEATURES[USC.ONETIME_UNIT]] == pytest.approx(0.0)
+    assert feats[USC.FEATURES[USC.IS_FRIENDLY_FIRE]] == pytest.approx(0.0)
+
+
+def test_broodling_and_locust_are_temporary_not_onetime(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    for type_id in (UnitTypeId.BROODLING, UnitTypeId.LOCUSTMP, UnitTypeId.LOCUSTMPFLYING):
+        feats = builder._unit_scalars(
+            _make_unit(type_id=type_id),
+            "attack",
+            playable_w=128.0,
+            playable_h=128.0,
+            upgrades=frozenset(),
+            objective=None,
+            enemy_com=None,
+            allied_com=None,
+        )
+        assert feats[USC.FEATURES[USC.ONETIME_UNIT]] == pytest.approx(0.0)
+        assert feats[USC.FEATURES[USC.IS_TEMPORARY]] == pytest.approx(1.0)
+
+
+def test_nova_is_onetime_and_temporary(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    feats = builder._unit_scalars(
+        _make_unit(type_id=UnitTypeId.DISRUPTORPHASED),
+        "attack",
+        playable_w=128.0,
+        playable_h=128.0,
+        upgrades=frozenset(),
+        objective=None,
+        enemy_com=None,
+        allied_com=None,
+    )
+    assert feats[USC.FEATURES[USC.ONETIME_UNIT]] == pytest.approx(1.0)
+    assert feats[USC.FEATURES[USC.IS_TEMPORARY]] == pytest.approx(1.0)
+
+
+def test_hallucination_is_temporary(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    unit = _make_unit(type_id=UnitTypeId.ZEALOT)
+    unit.is_hallucination = True
+    feats = builder._unit_scalars(
+        unit, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )
+    assert feats[USC.FEATURES[USC.IS_TEMPORARY]] == pytest.approx(1.0)
+
+
+def test_friendly_fire_for_sieged_tank_and_ravager(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    tank = _make_unit(type_id=UnitTypeId.SIEGETANKSIEGED)
+    ravager = _make_unit(type_id=UnitTypeId.RAVAGER)
+    for unit in (tank, ravager):
+        feats = builder._unit_scalars(
+            unit, "attack", playable_w=128.0, playable_h=128.0,
+            upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+        )
+        assert feats[USC.FEATURES[USC.IS_FRIENDLY_FIRE]] == pytest.approx(1.0)
+
+    baneling = _make_unit(type_id=UnitTypeId.BANELING)
+    feats = builder._unit_scalars(
+        baneling, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )
+    assert feats[USC.FEATURES[USC.IS_FRIENDLY_FIRE]] == pytest.approx(0.0)
 
 
 def test_concealed_when_burrowed(training_conf):
