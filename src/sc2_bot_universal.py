@@ -22,6 +22,7 @@ from src.agent.universal_constants import (
     UNUSED_COMMAND_HEAD,
     build_action_head_manifest,
 )
+from src.utils.unit_feature_helpers import issue_attack_at_point
 
 
 class SC2BotUniversal(BotAI):
@@ -135,7 +136,7 @@ class SC2BotUniversal(BotAI):
             if "move" in head_name:
                 self.do(unit.move(target_pos))
             elif "attack" in head_name:
-                self.do(unit.attack(target_pos))
+                issue_attack_at_point(self, unit, target_pos)
             elif "unload" in head_name:
                 # SPATIAL UNLOAD
                 mapping = {

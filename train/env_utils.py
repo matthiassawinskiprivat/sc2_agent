@@ -110,6 +110,8 @@ def create_dummy_env_from_config(config: dict, level_name: str | None = None):
     if agent_architecture == "squad":
         from src.agent.squad_constants import (
             MAX_SQUAD_UNITS,
+            SQUAD_RACE_DIM,
+            include_race_enabled,
             squad_action_space_nvec,
         )
         from src.agent.unit_scalar_constants import UnitScalarConstants
@@ -126,6 +128,10 @@ def create_dummy_env_from_config(config: dict, level_name: str | None = None):
         obs_dict["unit_mask"] = spaces.Box(
             low=0.0, high=1.0, shape=(MAX_SQUAD_UNITS,), dtype=np.float32
         )
+        if include_race_enabled(config):
+            obs_dict["race"] = spaces.Box(
+                low=0.0, high=1.0, shape=(SQUAD_RACE_DIM,), dtype=np.float32
+            )
         action_space = spaces.MultiDiscrete(squad_action_space_nvec())
     else:
         obs_dict["tactical"] = spaces.Box(

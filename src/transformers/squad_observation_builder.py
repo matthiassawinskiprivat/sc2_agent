@@ -11,6 +11,9 @@ from sc2.unit import Unit
 from src.agent.squad_constants import (
     MAX_SQUAD_UNITS,
     SQUAD_COMMAND_DIM,
+    SQUAD_RACE_DIM,
+    encode_race_vector,
+    include_race_enabled,
 )
 from src.agent.unit_scalar_constants import UnitScalarConstants as USC
 from src.utils.perspective_transformer import PerspectiveTransformer
@@ -61,6 +64,7 @@ class SquadObservationBuilder:
                 "agent_architecture": "universal",
             },
         )
+        self._include_race = include_race_enabled(training_conf)
         self._global_obs_cache: Dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
         # Static-per-type feature cache: cache_key → full catalog vector (USC.get_dim(),).
         # Active subset is gathered afterward so cache stays valid across configs.
@@ -74,7 +78,7 @@ class SquadObservationBuilder:
     def zero_observation(self) -> Dict[str, np.ndarray]:
         n_g = len(self.active_layers) or 1
         n_t = len(self.active_tactical_layers) or n_g
-        return {
+        obs = {
             "map": np.zeros((n_g, 128, 128), dtype=np.float32),
             "command": np.zeros(SQUAD_COMMAND_DIM, dtype=np.float32),
             "anchor_tactical": np.zeros((n_t, 32, 32), dtype=np.float32),
@@ -83,6 +87,9 @@ class SquadObservationBuilder:
             ),
             "unit_mask": np.zeros(MAX_SQUAD_UNITS, dtype=np.float32),
         }
+        if self._include_race:
+            obs["race"] = np.zeros(SQUAD_RACE_DIM, dtype=np.float32)
+        return obs
 
     @staticmethod
     def resolve_anchor_tag(
@@ -108,6 +115,8 @@ class SquadObservationBuilder:
         pool_high_level_command: str,
         playable_size: tuple[float, float] = (256.0, 256.0),
         anchor_unit_tag: Optional[int] = None,
+        own_race: Optional[str] = None,
+        enemy_race: Optional[str] = None,
     ) -> Dict[str, np.ndarray]:
         sorted_tags = [int(t) for t in sorted(squad_unit_tags)]
         alive_tags: List[int] = []
@@ -209,6 +218,8 @@ class SquadObservationBuilder:
             "unit_scalars": unit_scalars,
             "unit_mask": unit_mask,
         }
+        if self._include_race:
+            obs["race"] = encode_race_vector(own_race, enemy_race)
         if perspective_player_id == 2:
             obs = self._flip_obs(obs)
         return obs

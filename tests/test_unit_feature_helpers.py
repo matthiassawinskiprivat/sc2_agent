@@ -12,6 +12,9 @@ except ImportError:
 from src.utils.unit_feature_helpers import (
     is_force_melee_unit,
     is_temporary_attrition_unit,
+    issue_attack_at_point,
+    uses_purification_nova_for_attack,
+    uses_spawn_locusts_for_attack,
     weapon_range_upgrade_deltas,
 )
 
@@ -76,6 +79,75 @@ def test_temporary_attrition_includes_broodling_and_locusts():
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.BROODLING)) is True
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.LOCUSTMP)) is True
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.LOCUSTMPFLYING)) is True
+    assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.DISRUPTORPHASED)) is True
+    assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.INTERCEPTOR)) is True
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.BROODLORD)) is False
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.SWARMHOSTMP)) is False
+    assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.DISRUPTOR)) is False
     assert is_temporary_attrition_unit(_mock_unit(UnitTypeId.MARINE)) is False
+
+
+def test_uses_spawn_locusts_for_swarm_hosts_only():
+    assert uses_spawn_locusts_for_attack(_mock_unit(UnitTypeId.SWARMHOSTMP)) is True
+    assert uses_spawn_locusts_for_attack(_mock_unit(UnitTypeId.SWARMHOSTBURROWEDMP)) is True
+    assert uses_spawn_locusts_for_attack(_mock_unit(UnitTypeId.MARINE)) is False
+    assert uses_spawn_locusts_for_attack(_mock_unit(UnitTypeId.LOCUSTMP)) is False
+    assert uses_spawn_locusts_for_attack(_mock_unit(UnitTypeId.DISRUPTOR)) is False
+
+
+def test_uses_purification_nova_for_disruptor_only():
+    assert uses_purification_nova_for_attack(_mock_unit(UnitTypeId.DISRUPTOR)) is True
+    assert uses_purification_nova_for_attack(_mock_unit(UnitTypeId.DISRUPTORPHASED)) is False
+    assert uses_purification_nova_for_attack(_mock_unit(UnitTypeId.MARINE)) is False
+    assert uses_purification_nova_for_attack(_mock_unit(UnitTypeId.SWARMHOSTMP)) is False
+
+
+def test_issue_attack_at_point_swarmhost_casts_spawn_locusts():
+    from sc2.ids.ability_id import AbilityId
+    from sc2.position import Point2
+
+    bot = MagicMock()
+    unit = MagicMock()
+    unit.type_id = UnitTypeId.SWARMHOSTMP
+    cast_cmd = object()
+    unit.return_value = cast_cmd
+    target = Point2((12.0, 34.0))
+
+    issue_attack_at_point(bot, unit, target)
+
+    unit.assert_called_once_with(AbilityId.EFFECT_SPAWNLOCUSTS, target)
+    bot.do.assert_called_once_with(cast_cmd)
+    unit.attack.assert_not_called()
+
+
+def test_issue_attack_at_point_disruptor_casts_purification_nova():
+    from sc2.ids.ability_id import AbilityId
+    from sc2.position import Point2
+
+    bot = MagicMock()
+    unit = MagicMock()
+    unit.type_id = UnitTypeId.DISRUPTOR
+    cast_cmd = object()
+    unit.return_value = cast_cmd
+    target = Point2((12.0, 34.0))
+
+    issue_attack_at_point(bot, unit, target)
+
+    unit.assert_called_once_with(AbilityId.EFFECT_PURIFICATIONNOVA, target)
+    bot.do.assert_called_once_with(cast_cmd)
+    unit.attack.assert_not_called()
+
+
+def test_issue_attack_at_point_marine_uses_attack():
+    from sc2.position import Point2
+
+    bot = MagicMock()
+    unit = MagicMock()
+    unit.type_id = UnitTypeId.MARINE
+    target = Point2((12.0, 34.0))
+
+    issue_attack_at_point(bot, unit, target)
+
+    unit.attack.assert_called_once_with(target)
+    bot.do.assert_called_once()
+    unit.assert_not_called()

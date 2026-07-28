@@ -47,18 +47,38 @@ class ScriptedManager:
         self.command_queue.clear()
 
     def on_game_step(self) -> None:
-        """Call once per SC2 game step."""
+        """Call once per SC2 game step (macro-tick path for a future learned manager)."""
         self._game_step += 1
         if self._game_step - self._last_macro_step >= self.macro_tick_interval:
             self._last_macro_step = self._game_step
-            self._emit_step_if_available()
+            # Tick-gated dump is not used for the scripted build curriculum;
+            # emit_next_if_idle handles completion-gated emissions instead.
+            self.emit_next_if_idle()
 
-    def _emit_step_if_available(self) -> None:
+    def _macro_queue_idle(self) -> bool:
+        """True when no active or pending macro command is waiting."""
+        if self.command_queue.active is not None:
+            return False
+        return not any(c.is_macro for c in self.command_queue.peek_pending())
+
+    def emit_next_if_idle(self) -> bool:
+        """Emit the next script step only when the macro queue is idle.
+
+        Used by the scripted build curriculum so the manager issues one intent
+        at a time (e.g. BUILD, then TRAIN count=6) without dumping the full
+        script or waiting on ``macro_tick_interval``.
+        """
+        if not self._macro_queue_idle():
+            return False
+        return self._emit_step_if_available()
+
+    def _emit_step_if_available(self) -> bool:
         if self._script_index >= len(self.script_steps):
-            return
+            return False
         step = self.script_steps[self._script_index]
         self._apply_step(step)
         self._script_index += 1
+        return True
 
     def _apply_step(self, step: ManagerScriptStep) -> None:
         for tag, role in step.worker_roles.items():
@@ -73,13 +93,17 @@ class ScriptedManager:
         command_type: CommandType,
         unit_type: Optional[UnitTypeId] = None,
         target_pos: Optional[Point2] = None,
-        urgent: bool = True,
+        worker_count: Optional[int] = None,
+        count: Optional[int] = None,
+        squad_id: Optional[str] = None,
     ) -> Command:
         return Command(
             command_type=command_type,
             unit_type_id=unit_type,
             target_pos=target_pos,
-            urgent=urgent,
+            worker_count=worker_count,
+            count=count,
+            squad_id=squad_id,
         )
 
     @staticmethod
@@ -97,10 +121,28 @@ class ScriptedManager:
             if entry.get("target_pos"):
                 tp = entry["target_pos"]
                 target = Point2((float(tp[0]), float(tp[1])))
-            cmd = ScriptedManager.build_command(cmd_type, unit_type, target, entry.get("urgent", True))
+            worker_count = entry.get("worker_count")
+            if worker_count is not None:
+                worker_count = int(worker_count)
+            count = entry.get("count")
+            if count is not None:
+                count = int(count)
+            # Ignore legacy ``urgent`` YAML keys if present.
+            cmd = ScriptedManager.build_command(
+                cmd_type,
+                unit_type,
+                target,
+                worker_count=worker_count,
+                count=count,
+                squad_id=entry.get("squad_id"),
+            )
             roles = {}
             for tag, role_name in (entry.get("worker_roles") or {}).items():
                 roles[int(tag)] = WorkerRole(role_name.lower())
             micro_tags = {int(t) for t in entry.get("reassign_micro_tags", [])}
-            steps.append(ManagerScriptStep(command=cmd, worker_roles=roles, reassign_micro_tags=micro_tags))
+            steps.append(
+                ManagerScriptStep(
+                    command=cmd, worker_roles=roles, reassign_micro_tags=micro_tags
+                )
+            )
         return ScriptedManager(steps, macro_tick_interval=macro_tick)

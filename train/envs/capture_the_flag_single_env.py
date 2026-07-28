@@ -17,10 +17,13 @@ from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM, universal
 from src.utils.layer_constants import LayerConstants
 from sc2.ids.unit_typeid import UnitTypeId
 from src.utils.spawning_utils import SpawningUtils
+from src.utils.unit_feature_helpers import issue_attack_at_point
 from train.envs.ctf.region_loader import RegionLoader
 from train.envs.ctf.pool_assignment import (
     alternate_trainee_race_enabled,
+    include_race_enabled,
     is_pool_trainee,
+    player_races_for_episode,
     pool_player_id,
 )
 import json
@@ -135,6 +138,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             from src.agent.squad_constants import (
                 MAX_SQUAD_UNITS,
                 SQUAD_COMMAND_DIM,
+                SQUAD_RACE_DIM,
                 squad_action_space_nvec,
             )
             from src.agent.unit_scalar_constants import UnitScalarConstants
@@ -154,6 +158,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self.training_conf["fixed_universal_command_dim"] = FIXED_UNIVERSAL_COMMAND_DIM
             n_tactical = len(self.active_tactical_layers)
             n_unit_scalars = len(self.active_unit_scalars)
+            obs_dict["command"] = spaces.Box(
+                low=0.0, high=1.0, shape=(SQUAD_COMMAND_DIM,), dtype=np.float32
+            )
             obs_dict["anchor_tactical"] = spaces.Box(
                 low=0.0, high=1.0, shape=(n_tactical, 32, 32), dtype=np.float32
             )
@@ -163,6 +170,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             obs_dict["unit_mask"] = spaces.Box(
                 low=0.0, high=1.0, shape=(MAX_SQUAD_UNITS,), dtype=np.float32
             )
+            if include_race_enabled(self.training_conf):
+                obs_dict["race"] = spaces.Box(
+                    low=0.0, high=1.0, shape=(SQUAD_RACE_DIM,), dtype=np.float32
+                )
             self.observation_space = spaces.Dict(obs_dict)
             self.action_space = spaces.MultiDiscrete(squad_action_space_nvec())
             self._squad_obs_builder = None
@@ -971,6 +982,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if anchor_tag:
             self._squad_anchor_tag_by_pool[int(pool_idx)] = int(anchor_tag)
 
+    def _perspective_races(self, perspective_player_id: int) -> tuple:
+        """Own/enemy race strings for the squad obs ``race`` vector."""
+        p1, p2 = player_races_for_episode(
+            self.unit_pools_config,
+            getattr(self, "episode_counter", 1),
+            alternate=getattr(self, "_alternate_trainee_race", False),
+        )
+        if int(perspective_player_id) == 1:
+            return p1, p2
+        return p2, p1
+
     def _get_squad_observation_for_pool(self, pool_idx: int) -> Dict[str, np.ndarray]:
         cache = getattr(self, "_squad_obs_step_cache", None)
         if cache is not None and pool_idx in cache:
@@ -987,6 +1009,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             playable = (256.0, 256.0)
             if self.bot is not None and getattr(self.bot, "game_info", None) is not None:
                 playable = self.bot.game_info.playable_area.size
+            own_race, enemy_race = self._perspective_races(player_id)
             obs = builder.build(
                 self.bot,
                 perspective_player_id=player_id,
@@ -994,6 +1017,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 pool_high_level_command=hlc,
                 playable_size=playable,
                 anchor_unit_tag=self._resolve_squad_anchor_tag(pool_idx, tags),
+                own_race=own_race,
+                enemy_race=enemy_race,
             )
         if cache is not None:
             cache[pool_idx] = obs
@@ -1762,7 +1787,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 continue
             head_name, target = last_order
             if "attack" in head_name:
-                self.bot.do(unit.attack(target))
+                issue_attack_at_point(self.bot, unit, target)
             else:
                 self.bot.do(unit.move(target))
 

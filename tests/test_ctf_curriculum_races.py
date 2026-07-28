@@ -17,15 +17,21 @@ _CTF_BOOTSTRAP_LEVELS = frozenset({"ctf_level_01", "ctf_level_01_zergling_vs_mar
 
 _RACE_UNITS = {
     "terran": {
-        "MARINE", "MARAUDER", "HELLION", "HELLIONTANK", "SIEGETANK", "VIKINGFIGHTER", "BANSHEE", "THOR",
+        "MARINE", "MARAUDER", "GHOST", "HELLION", "HELLIONTANK", "SIEGETANK", "VIKINGFIGHTER", "BANSHEE", "THOR",
+        "CYCLONE", "REAPER", "BATTLECRUISER",
     },
     "zerg": {
         "ZERGLING", "ROACH", "HYDRALISK", "MUTALISK", "ULTRALISK", "RAVAGER", "BANELING",
+        "CORRUPTOR", "SWARMHOSTMP", "BROODLORD",
     },
     "protoss": {
-        "ZEALOT", "STALKER", "ADEPT", "IMMORTAL", "PHOENIX", "VOIDRAY", "COLOSSUS",
+        "ZEALOT", "STALKER", "ADEPT", "IMMORTAL", "PHOENIX", "VOIDRAY", "COLOSSUS", "ARCHON",
+        "DISRUPTOR", "TEMPEST", "CARRIER",
     },
 }
+
+# Levels 06+ grow beyond the early ≤3 unit-type curriculum pools.
+_CTF_LARGE_POOL_MIN_NUMBER = 6
 
 
 def _load_env(level_name: str) -> dict:
@@ -70,6 +76,25 @@ def test_ctf_levels_enable_alternate_trainee_race_except_bootstrap():
             assert env.get("alternate_trainee_race") is False, level
             continue
         assert env.get("alternate_trainee_race") is True, level
+
+
+def test_ctf_levels_include_race_from_level_12():
+    """Race obs encoding starts after ctf_level_11 (query_linear 138→144)."""
+    cm = ConfigManager(str(_CONFIG_DIR))
+    ctf_levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_level_")]
+    for level in ctf_levels:
+        env = _load_env(level)
+        # Extract numeric suffix when present (ctf_level_12 → 12); skip named variants.
+        parts = level.replace("ctf_level_", "").split("_", 1)
+        try:
+            num = int(parts[0])
+        except ValueError:
+            assert not env.get("include_race"), level
+            continue
+        if num >= 12:
+            assert env.get("include_race") is True, level
+        else:
+            assert not env.get("include_race"), level
 
 
 def test_ctf_levels_define_race_per_pool_static_agent_only_on_bootstrap():
@@ -139,12 +164,55 @@ def test_ctf_unit_pools_match_declared_race():
             assert units <= _RACE_UNITS[race], f"{level} {race} pool has {units - _RACE_UNITS[race]}"
 
 
-def test_ctf_levels_use_at_most_three_unit_types_per_pool():
+def test_ctf_levels_use_at_most_three_unit_types_per_pool_before_large_pools():
+    import re
+
     cm = ConfigManager(str(_CONFIG_DIR))
     ctf_levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_level_")]
     for level in ctf_levels:
+        m = re.match(r"ctf_level_(\d+)", level)
+        if m and int(m.group(1)) >= _CTF_LARGE_POOL_MIN_NUMBER:
+            continue
         for pool in _load_unit_pools(level):
             assert len(pool.get("unit_pool", [])) <= 3, level
+
+
+def test_ctf_level_12_adds_remaining_air_dps_layers():
+    cm = ConfigManager(str(_CONFIG_DIR))
+    prior = set(cm.get_cumulative_active_layers("ctf_level_11"))
+    at_12 = cm.get_cumulative_active_layers("ctf_level_12")
+    added = [layer for layer in at_12 if layer not in prior]
+    assert added == [
+        "allied_a_dps_light",
+        "enemy_a_dps_light",
+        "allied_a_dps_armor",
+        "enemy_a_dps_armor",
+        "allied_a_dps_massive",
+        "enemy_a_dps_massive",
+    ]
+
+
+def test_ctf_levels_12_14_budgets_and_matchups():
+    """12–14 continue 09–11 style: PvT / ZvP / ZvT with raised budgets."""
+    expected = {
+        "ctf_level_12": ("protoss", "terran"),
+        "ctf_level_13": ("zerg", "protoss"),
+        "ctf_level_14": ("zerg", "terran"),
+    }
+    for level, (attack_race, defend_race) in expected.items():
+        pools = _load_unit_pools(level)
+        assert len(pools) == 4, level
+        a_attack = next(p for p in pools if p["region"] == "A" and p["high_level_command"] == "attack")
+        a_defend = next(p for p in pools if p["region"] == "A" and p["high_level_command"] == "defend")
+        assert a_attack["race"] == attack_race
+        assert a_defend["race"] == defend_race
+        assert a_attack["mineral_budget"] == 2000
+        assert a_attack["vespene_budget"] == 2000
+        assert a_defend["mineral_budget"] == 1500
+        assert a_defend["vespene_budget"] == 1500
+        if attack_race == "protoss" or defend_race == "protoss":
+            protoss_pool = a_attack if attack_race == "protoss" else a_defend
+            assert "DISRUPTOR" in protoss_pool["unit_pool"]
 
 
 def test_ctf_levels_cover_all_three_races():

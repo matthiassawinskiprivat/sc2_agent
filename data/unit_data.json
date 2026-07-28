@@ -1871,6 +1871,34 @@
       }
     ]
   },
+  "SWARMHOSTMP": {
+    "id": 494,
+    "name": "SWARMHOSTMP",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 100,
+      "vespene": 75,
+      "supply": 3.0
+    },
+    "radius": 0.8125,
+    "sight": 10.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "DISRUPTOR": {
+    "id": 694,
+    "name": "DISRUPTOR",
+    "race": "Race.Protoss",
+    "cost": {
+      "minerals": 150,
+      "vespene": 150,
+      "supply": 3.0
+    },
+    "radius": 0.75,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
   "ORACLE": {
     "id": 495,
     "name": "ORACLE",

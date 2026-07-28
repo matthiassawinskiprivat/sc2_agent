@@ -14,6 +14,7 @@ env:
   headless: true
   every_k_episodes: 200
   alternate_trainee_race: true
+  include_race: true
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack
@@ -44,12 +45,6 @@ env:
     unit_pool:
     - MUTALISK
     region: B
-  active_layers:
-  - allied_a_dps_light
-  - enemy_a_dps_light
-  active_tactical_layers:
-  - allied_a_dps_light
-  - enemy_a_dps_light
   rewards:
     pylon_damage_reward: 1.0
     pylon_damage_penalty: 1.0

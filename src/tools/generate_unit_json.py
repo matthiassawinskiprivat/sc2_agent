@@ -1,7 +1,6 @@
 import sys
 import os
 import json
-import asyncio
 from sc2 import maps
 from sc2.data import Race, Difficulty
 from sc2.main import run_game
@@ -9,22 +8,12 @@ from sc2.player import Bot, Computer
 from sc2.bot_ai import BotAI
 from sc2.ids.unit_typeid import UnitTypeId
 
-# --- 1. UPGRADE BONUSES ---
-WEAPON_UPGRADE_BONUS_DB = {
-    "MARINE": 1, "MARAUDER": 1, "SIEGETANK": 3, "SIEGETANKSIEGED": 3, "THOR": 3,
-    "VIKINGFIGHTER": 1, "VIKINGASSAULT": 1, "BANSHEE": 1, "BATTLECRUISER": 1,
-    "HELLION": 1, "HELLIONTANK": 2, "CYCLONE": 1, "LIBERATOR": 5, "LIBERATORAG": 5,
-    "GHOST": 1, "REAPER": 1, "AUTOTURRET": 0,
-    "ZERGLING": 1, "ROACH": 2, "RAVAGER": 2, "HYDRALISK": 1, "LURKERMP": 2,
-    "MUTALISK": 1, "CORRUPTOR": 1, "ULTRALISK": 3, "BROODLORD": 2, "QUEEN": 1,
-    "BANELING": 2, "INFESTORTERRAN": 1, "BROODLING": 1, "LOCUSTMP": 1, "LOCUSTMPFLYING": 1,
-    "ZEALOT": 1, "STALKER": 1, "IMMORTAL": 2, "COLOSSUS": 1, "ARCHON": 3,
-    "VOIDRAY": 1, "CARRIER": 1, "TEMPEST": 3, "ADEPT": 1, "PHOENIX": 1,
-    "DARKTEMPLAR": 3, "ORACLE": 0, "INTERCEPTOR": 1, "MOTHERSHIP": 4,
-    "HIGHTEMPLAR": 0,
-    "SPINECRAWLER": 0, "SPORECRAWLER": 0, "MISSILETURRET": 0,
-    "PHOTONCANNON": 0, "PLANETARYFORTRESS": 0, "BUNKER": 0
-}
+from src.tools.unit_data_inclusion import (
+    WEAPON_UPGRADE_BONUS_DB,
+    WHITELIST,
+    apply_unit_field_overrides,
+    should_include_unit,
+)
 
 # --- 2. ATTRIBUTE BONUSES & TYPES (Manual Overrides) ---
 # Type: 1=Ground, 2=Air, 3=Any
@@ -76,7 +65,9 @@ class DataExtractorBot(BotAI):
             game_data = await client.get_game_data()
             for unit_id, unit_data in game_data.units.items():
                 name = unit_data.name.upper()
-                if name in WEAPON_UPGRADE_BONUS_DB:
+                # Spawn combat + whitelist units so radius_map is populated for
+                # weaponless casters/spawners (e.g. SWARMHOSTMP / INFESTOR).
+                if name in WEAPON_UPGRADE_BONUS_DB or name in WHITELIST:
                     try:
                         await client.debug_create_unit([[UnitTypeId(unit_id), 1, self.game_info.map_center, 1]])
                     except:
@@ -88,17 +79,6 @@ class DataExtractorBot(BotAI):
             game_data = await client.get_game_data()
             radius_map = {u.type_id.value: u.radius for u in self.all_units}
             unit_db = {}
-
-            WHITELIST = [
-                "SCV", "PROBE", "DRONE", "OVERLORD", "OBSERVER", "WARPPRISM", "MEDIVAC",
-                "COMMANDCENTER", "NEXUS", "HATCHERY", "LAIR", "HIVE", "PLANETARYFORTRESS", "ORBITALCOMMAND",
-                "SUPPLYDEPOT", "PYLON", "GATEWAY", "WARPGATE", "BARRACKS", "FACTORY", "STARPORT",
-                "ROBOTICSFACILITY", "STARGATE", "SPAWNINGPOOL", "ROACHWARREN", "HYDRALISKDEN", "SPIRE",
-                "CREEPTUMOR", "CREEPTUMORBURROWED", "QUEEN", "LARVA", "EGG", "MULE",
-                "PHOTONCANNON", "MISSILETURRET", "BUNKER", "SPINECRAWLER", "SPORECRAWLER", "SHIELDBATTERY",
-                "INTERCEPTOR", "LOCUSTMP", "LOCUSTMPFLYING", "BROODLING", "AUTOTURRET", "HIGHTEMPLAR",
-                "INFESTOR", "VIPER", "SENTRY"
-            ]
 
             for unit_id, unit_data in game_data.units.items():
                 if not unit_data.name: continue
@@ -183,8 +163,10 @@ class DataExtractorBot(BotAI):
                         "bonuses": override["bonuses"]
                     })
 
-                if entry["weapons"] or name in WHITELIST or name in WEAPON_UPGRADE_BONUS_DB:
+                if should_include_unit(name, bool(entry["weapons"])):
                     unit_db[name] = entry
+
+            apply_unit_field_overrides(unit_db)
 
             output_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data",
                                        "unit_data.json")

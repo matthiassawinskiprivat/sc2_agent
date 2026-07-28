@@ -193,7 +193,7 @@ class BuildObservationBuilder:
         if command.target_pos is not None:
             vec[9] = float(command.target_pos.x) / max(pw, 1.0)
             vec[10] = float(command.target_pos.y) / max(ph, 1.0)
-        vec[11] = 1.0 if command.urgent else 0.0
+        # vec[11] reserved (formerly ``urgent``); kept zero for obs dim stability.
         return vec
 
     @staticmethod

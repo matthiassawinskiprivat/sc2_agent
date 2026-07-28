@@ -5,13 +5,15 @@ without importing the full transformer.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, FrozenSet
+from typing import TYPE_CHECKING, Any, FrozenSet
 
 if TYPE_CHECKING:
+    from sc2.position import Point2
     from sc2.unit import Unit
 
 
 try:
+    from sc2.ids.ability_id import AbilityId
     from sc2.ids.unit_typeid import UnitTypeId
     from sc2.ids.upgrade_id import UpgradeId
     _SC2_AVAILABLE = True
@@ -33,10 +35,26 @@ _TEMPORARY_ATTRITION_UNIT_TYPES: FrozenSet = (
             UnitTypeId.BROODLING,
             UnitTypeId.LOCUSTMP,
             UnitTypeId.LOCUSTMPFLYING,
+            UnitTypeId.DISRUPTORPHASED,
+            UnitTypeId.INTERCEPTOR,
         }
     )
     if _SC2_AVAILABLE
     else frozenset()
+)
+
+# Swarm Hosts have no weapon; policy ``attack`` heads map to Spawn Locusts at
+# the same world point (agent-faithful target, unit-correct ability).
+_SPAWN_LOCUSTS_UNIT_TYPES: FrozenSet = (
+    frozenset({UnitTypeId.SWARMHOSTMP, UnitTypeId.SWARMHOSTBURROWEDMP})
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
+# Disruptors have no weapon; policy ``attack`` heads map to Purification Nova at
+# the same world point (same agent-faithful pattern as Swarm Host).
+_PURIFICATION_NOVA_UNIT_TYPES: FrozenSet = (
+    frozenset({UnitTypeId.DISRUPTOR}) if _SC2_AVAILABLE else frozenset()
 )
 
 
@@ -48,6 +66,31 @@ def is_force_melee_unit(unit: "Unit") -> bool:
 def is_temporary_attrition_unit(unit: "Unit") -> bool:
     """True for timed summons excluded from own kill/damage attrition penalties."""
     return getattr(unit, "type_id", None) in _TEMPORARY_ATTRITION_UNIT_TYPES
+
+
+def uses_spawn_locusts_for_attack(unit: "Unit") -> bool:
+    """True when policy attack should cast Spawn Locusts instead of ``unit.attack``."""
+    return getattr(unit, "type_id", None) in _SPAWN_LOCUSTS_UNIT_TYPES
+
+
+def uses_purification_nova_for_attack(unit: "Unit") -> bool:
+    """True when policy attack should cast Purification Nova instead of ``unit.attack``."""
+    return getattr(unit, "type_id", None) in _PURIFICATION_NOVA_UNIT_TYPES
+
+
+def issue_attack_at_point(bot: Any, unit: "Unit", target: "Point2") -> None:
+    """Issue an offensive order at *target*.
+
+    Swarm Hosts (and burrowed) cast ``EFFECT_SPAWNLOCUSTS`` at the same point;
+    Disruptors cast ``EFFECT_PURIFICATIONNOVA`` at the same point;
+    all other units use ``unit.attack(target)``.
+    """
+    if uses_spawn_locusts_for_attack(unit):
+        bot.do(unit(AbilityId.EFFECT_SPAWNLOCUSTS, target))
+    elif uses_purification_nova_for_attack(unit):
+        bot.do(unit(AbilityId.EFFECT_PURIFICATIONNOVA, target))
+    else:
+        bot.do(unit.attack(target))
 
 
 def weapon_range_upgrade_deltas(unit: "Unit", upgrades: frozenset) -> tuple[float, float]:

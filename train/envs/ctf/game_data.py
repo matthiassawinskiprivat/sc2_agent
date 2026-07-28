@@ -105,6 +105,7 @@ _UNIT_LIST: list[UnitInfo] = [
     UnitInfo(uid("HYDRALISK"),   "Hydralisk",   100, 50, frozenset({"biological", "light"}),             0.625),
     UnitInfo(uid("LURKERMP"),    "Lurker",      150, 150, frozenset({"biological", "armored"}),          0.75),
     UnitInfo(uid("INFESTOR"),    "Infestor",    100, 150, frozenset({"biological", "armored"}),          0.75),
+    UnitInfo(uid("SWARMHOSTMP"), "Swarm Host",  100, 75,  frozenset({"biological", "armored"}),          0.8125),
     UnitInfo(uid("ULTRALISK"),   "Ultralisk",   300, 200, frozenset({"biological", "armored", "massive"}), 1.0),
     UnitInfo(uid("MUTALISK"),    "Mutalisk",    100, 100, frozenset({"biological", "light"}),            1.0),
     UnitInfo(uid("CORRUPTOR"),   "Corruptor",   150, 100, frozenset({"biological", "armored"}),          1.0),

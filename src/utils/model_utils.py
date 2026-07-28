@@ -101,24 +101,42 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
             
             logger.info(f"Surgically grafting Fusion Layer '{key}': {old_w.shape} -> {new_w.shape}")
             
-            # Map Structure: [Global_Feat, (Tactical_Feat), Command_Feat]
-            # Command is always the LAST 10 dimensions.
+            # Map Structure: [Global_Feat, (Tactical_Feat), Command_Feat, optional Race]
+            # Default: command is the LAST 10 dimensions.
+            # With include_race: [..., command(10), race(6)] — race is a trailing append.
             old_in_dim = old_w.shape[1]
             new_in_dim = new_w.shape[1]
             
             cmd_dim = 10
+            from src.agent.squad_constants import SQUAD_RACE_DIM
             
             # Create fresh weights based on target (randomized)
             grafted_w = torch.randn_like(new_w) * 0.01
             
-            # 1. Transfer Global (First chunk)
-            # If we added tactical, global is still at the beginning.
-            # We assume Global size doesn't change unless grid size changed (handled by linear resize if needed)
-            global_size = min(old_in_dim - cmd_dim, new_in_dim - cmd_dim)
-            grafted_w[:, :global_size] = old_w[:, :global_size]
-            
-            # 2. Transfer Command (Last chunk)
-            grafted_w[:, -cmd_dim:] = old_w[:, -cmd_dim:]
+            race_extra = new_in_dim - old_in_dim
+            if (
+                race_extra == SQUAD_RACE_DIM
+                and old_in_dim >= cmd_dim
+                and new_in_dim >= cmd_dim + SQUAD_RACE_DIM
+            ):
+                # Trailing race expansion (e.g. CTF 11→12): keep all prior fusion
+                # weights; leave the new race columns randomly initialized.
+                grafted_w[:, :old_in_dim] = old_w
+            elif (
+                race_extra == -SQUAD_RACE_DIM
+                and new_in_dim >= cmd_dim
+                and old_in_dim == new_in_dim + SQUAD_RACE_DIM
+            ):
+                # Trailing race removal (e.g. 144-wide checkpoint → 138-wide target).
+                grafted_w[:, :new_in_dim] = old_w[:, :new_in_dim]
+            else:
+                # 1. Transfer Global (First chunk)
+                # If we added tactical, global is still at the beginning.
+                global_size = min(old_in_dim - cmd_dim, new_in_dim - cmd_dim)
+                grafted_w[:, :global_size] = old_w[:, :global_size]
+                
+                # 2. Transfer Command (Last chunk)
+                grafted_w[:, -cmd_dim:] = old_w[:, -cmd_dim:]
             
             new_state_dict[key] = grafted_w
             
@@ -364,6 +382,8 @@ def load_policy_weights_from_zip(
 
     Safer than ``model.set_parameters`` for rollout snapshots: avoids optimizer /
     ``exact_match`` failures leaving the learner on stale random weights.
+    On tensor shape mismatch (e.g. include_race 138↔144), grafts compatible weights
+    onto the target policy architecture before loading.
     """
     from stable_baselines3.common.save_util import load_from_zip_file
 
@@ -371,6 +391,34 @@ def load_policy_weights_from_zip(
     p_sd = params.get("policy")
     if p_sd is None:
         return False, [], []
+
+    target_sd = policy.state_dict()
+    mismatched = [
+        k
+        for k in p_sd
+        if k in target_sd and target_sd[k].shape != p_sd[k].shape
+    ]
+    if mismatched:
+        new_in_channels = 0
+        for prefix in (
+            "features_extractor.",
+            "pi_features_extractor.",
+            "vf_features_extractor.",
+        ):
+            cnn_key = f"{prefix}global_cnn.0.weight"
+            if cnn_key in target_sd:
+                new_in_channels = int(target_sd[cnn_key].shape[1])
+                break
+        logger.warning(
+            f"Grafting policy weights from {zip_path!r} "
+            f"({len(mismatched)} shape mismatches, e.g. {mismatched[0]})"
+        )
+        p_sd = graft_model_weights(
+            p_sd,
+            new_in_channels=new_in_channels,
+            target_state_dict=target_sd,
+        )
+
     missing, unexpected = policy.load_state_dict(p_sd, strict=strict)
     return True, list(missing), list(unexpected)
 
@@ -585,7 +633,13 @@ def graft_squad_policy_from_universal(
             if key.startswith(old_prefix):
                 new_key = new_prefix + key[len(old_prefix):]
                 break
-        if new_key in squad_sd and squad_sd[new_key].shape == tensor.shape:
+        if new_key not in squad_sd:
+            continue
+        if squad_sd[new_key].shape == tensor.shape:
+            remapped[new_key] = tensor
+        elif new_key.endswith("linear.0.weight") or new_key.endswith("linear.0.bias"):
+            # Shape mismatch (e.g. CTF include_race 138→144): keep old weights so
+            # graft_model_weights can surgically expand the fusion/query layer.
             remapped[new_key] = tensor
 
     for key, tensor in squad_sd.items():

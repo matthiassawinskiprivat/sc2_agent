@@ -54,3 +54,41 @@ def test_dummy_env_level_name_matches_config_manager():
         assert env.observation_space["tactical"].shape[0] == nt
     finally:
         env.close()
+
+
+def test_dummy_squad_env_includes_race_when_configured():
+    from src.agent.squad_constants import SQUAD_RACE_DIM
+    from src.utils.config_manager import ConfigManager
+
+    cm = ConfigManager("config_universal")
+    cfg = cm.get_level_config("ctf_level_12")
+    cfg["config_dir"] = "config_universal"
+    cfg["agent_architecture"] = cm.get_agent_architecture("ctf_level_12")
+    cfg["active_layers"] = cm.get_cumulative_active_layers("ctf_level_12")
+    cfg["active_tactical_layers"] = cm.get_cumulative_active_tactical_layers("ctf_level_12")
+    cfg["active_unit_scalars"] = cm.get_cumulative_active_unit_scalars("ctf_level_12")
+
+    env = create_dummy_env_from_config(cfg, level_name="ctf_level_12")
+    try:
+        assert "race" in env.observation_space.spaces
+        assert env.observation_space["race"].shape == (SQUAD_RACE_DIM,)
+    finally:
+        env.close()
+
+
+def test_dummy_squad_env_omits_race_before_level_12():
+    from src.utils.config_manager import ConfigManager
+
+    cm = ConfigManager("config_universal")
+    cfg = cm.get_level_config("ctf_level_11")
+    cfg["config_dir"] = "config_universal"
+    cfg["agent_architecture"] = cm.get_agent_architecture("ctf_level_11")
+    cfg["active_layers"] = cm.get_cumulative_active_layers("ctf_level_11")
+    cfg["active_tactical_layers"] = cm.get_cumulative_active_tactical_layers("ctf_level_11")
+    cfg["active_unit_scalars"] = cm.get_cumulative_active_unit_scalars("ctf_level_11")
+
+    env = create_dummy_env_from_config(cfg, level_name="ctf_level_11")
+    try:
+        assert "race" not in env.observation_space.spaces
+    finally:
+        env.close()

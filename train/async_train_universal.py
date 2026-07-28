@@ -147,6 +147,28 @@ def resolve_async_log_dir(level_name: str, training_params: dict) -> str:
     return os.path.join("logs_universal", level_name)
 
 
+def _truncate_logs_before_resume(
+    level_name: str,
+    config: dict,
+    checkpoint_path: str,
+) -> None:
+    """
+    Free TensorBoard's file locks, then drop metrics past the resume checkpoint.
+    """
+    from train.training_log_utils import truncate_logs_for_checkpoint_resume
+
+    tb_port = int(os.environ.get("SC2_TENSORBOARD_PORT", "6006"))
+    free_port(tb_port)
+    log_dir = resolve_async_log_dir(level_name, config.get("training", {}))
+    try:
+        truncate_logs_for_checkpoint_resume(log_dir, checkpoint_path)
+    except Exception as exc:
+        logger.warning(
+            f"Could not truncate resume logs in {log_dir} "
+            f"(checkpoint={checkpoint_path!r}): {exc}"
+        )
+
+
 def detect_active_log_level(log_dir_base: str = "logs_universal") -> str | None:
     """Most recently touched curriculum folder under logs_universal (for TensorBoard pinning)."""
     log_dir = os.path.abspath(log_dir_base)
@@ -1437,8 +1459,10 @@ class AsyncLearner:
         self.logger = new_logger
         # Create the TensorBoard run immediately so the level appears in the UI while the
         # collector is still gathering the first rollout (can take many minutes on CTF).
+        # On same-level resume, dump at the restored step — not 0 — to avoid a fake jump.
+        ready_step = total_steps_trained if self.resume_timesteps_from_save else 0
         new_logger.record("async/learner_ready", 1.0)
-        new_logger.dump(step=0)
+        new_logger.dump(step=ready_step)
         logger.info(f"Learner logging configured to: {self.log_dir}")
 
         # PRE-INITIALIZE LEARNER BUFFERS
@@ -1907,8 +1931,11 @@ def run_single_async_training_session(
 
 
 def main():
+    from train.train_pipeline import cleanup_worker_logs
+
     config_dir = "config_universal"
     manager = UniversalPipelineManager(config_dir=config_dir)
+    cleanup_worker_logs()
 
     with open(os.path.join(config_dir, "pipeline.yaml"), "r") as f:
         pipeline_config = yaml.safe_load(f)
@@ -1967,6 +1994,8 @@ def main():
         if not config:
             logger.error(f"Could not load config for {level_name}")
             sys.exit(1)
+        if status == "CONTINUE_TRAINING" and model_to_load:
+            _truncate_logs_before_resume(level_name, config, model_to_load)
         try:
             run_single_async_training_session(
                 level_name, config, model_to_load, resume_timesteps
@@ -2013,6 +2042,10 @@ def main():
                     logger.info(f"Cleaned up async logs: {async_log_dir}")
                 except Exception as e:
                     logger.warning(f"Could not clean async log dir {async_log_dir}: {e}")
+        elif status == "CONTINUE_TRAINING" and model_to_load:
+            # Drop metrics logged after the last persistent *_steps.zip so TensorBoard
+            # does not jump backwards when training resumes from that checkpoint.
+            _truncate_logs_before_resume(level_name, config, model_to_load)
 
         logger.info(
             f"--- [ASYNC] Pipeline stage '{level_name}' "

@@ -6,7 +6,12 @@ import numpy as np
 import pytest
 
 from src.transformers.squad_observation_builder import SquadObservationBuilder
-from src.agent.squad_constants import MAX_SQUAD_UNITS, SQUAD_COMMAND_DIM, SQUAD_UNIT_FEAT_DIM
+from src.agent.squad_constants import (
+    MAX_SQUAD_UNITS,
+    SQUAD_COMMAND_DIM,
+    SQUAD_RACE_DIM,
+    SQUAD_UNIT_FEAT_DIM,
+)
 from src.agent.unit_scalar_constants import UnitScalarConstants as USC
 
 
@@ -26,9 +31,18 @@ def test_zero_observation_shapes(training_conf):
     assert obs["command"].shape == (SQUAD_COMMAND_DIM,)
     assert obs["anchor_tactical"].shape == (2, 32, 32)
     assert "unit_tactical" not in obs
+    assert "race" not in obs
     assert obs["unit_scalars"].shape == (MAX_SQUAD_UNITS, builder.unit_feat_dim)
     assert builder.unit_feat_dim == SQUAD_UNIT_FEAT_DIM  # default = full catalog
     assert obs["unit_mask"].shape == (MAX_SQUAD_UNITS,)
+
+
+def test_zero_observation_includes_race_when_enabled(training_conf):
+    training_conf = {**training_conf, "include_race": True}
+    builder = SquadObservationBuilder(training_conf)
+    obs = builder.zero_observation()
+    assert obs["race"].shape == (SQUAD_RACE_DIM,)
+    assert obs["race"].dtype == np.float32
 
 
 def test_resolve_anchor_tag_prefers_alive_preferred():
@@ -100,6 +114,54 @@ def test_build_masks_and_scalars(training_conf):
     # ROLE_ATTACK lives at USC.FEATURES[USC.ROLE_ATTACK] in the new layout
     assert obs["unit_scalars"][0, USC.FEATURES[USC.ROLE_ATTACK]] == 1.0
     assert obs["map"].shape[0] == 2
+    assert "race" not in obs
+
+
+def test_build_encodes_race_when_enabled(training_conf):
+    training_conf = {**training_conf, "include_race": True}
+    builder = SquadObservationBuilder(training_conf)
+
+    unit_a = MagicMock()
+    unit_a.tag = 10
+    unit_a.position.x = 64.0
+    unit_a.position.y = 32.0
+
+    bot = MagicMock()
+    bot.player_id = 1
+    bot.units = MagicMock()
+    bot.units.exists = True
+    bot.units.first = unit_a
+    bot.enemy_units = MagicMock()
+    bot.structures = MagicMock()
+    bot.enemy_structures = MagicMock()
+    bot.state = MagicMock()
+    bot.state.effects = []
+    bot.state.creep = None
+    bot.state.upgrades = frozenset()
+    bot.game_info = MagicMock()
+    bot.game_data = MagicMock()
+    if hasattr(bot.game_info, "pathing_grid"):
+        del bot.game_info.pathing_grid
+    if hasattr(bot.game_info, "terrain_height"):
+        del bot.game_info.terrain_height
+    bot.unit_target_map = {}
+    bot.unit_command_map = {10: "attack"}
+    bot.enemy_pylon_pos = {}
+    bot.all_units.find_by_tag = lambda tag: unit_a if tag == 10 else None
+
+    fake_tactical = np.ones((2, 32, 32), dtype=np.float32)
+    with patch.object(builder._transformer, "transform_tactical", return_value=fake_tactical):
+        obs = builder.build(
+            bot,
+            perspective_player_id=1,
+            squad_unit_tags=[10],
+            pool_high_level_command="attack",
+            playable_size=(128.0, 128.0),
+            own_race="terran",
+            enemy_race="zerg",
+        )
+    assert obs["race"].shape == (SQUAD_RACE_DIM,)
+    assert np.allclose(obs["race"], [1, 0, 0, 0, 1, 0])
 
 
 def test_build_raw_obs_selected_units_include_all_squad_members(training_conf):

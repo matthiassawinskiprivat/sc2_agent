@@ -409,6 +409,7 @@ def test_apply_action_attack_uses_agent_world_target_not_assignment():
     bot.do = MagicMock()
     bot.last_action_was_attack_by_unit = {}
     bot.last_action_was_move_by_unit = {}
+    bot.last_move_head_by_unit = {}
     bot.last_attack_target_tag_by_unit = {}
     bot._attack_order_weapon_cd_before = {}
 

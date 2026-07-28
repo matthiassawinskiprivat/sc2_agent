@@ -14,6 +14,7 @@ env:
   headless: true
   every_k_episodes: 200
   alternate_trainee_race: true
+  include_race: true
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack

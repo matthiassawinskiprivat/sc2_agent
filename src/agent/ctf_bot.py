@@ -11,7 +11,11 @@ from loguru import logger
 from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.layer_constants import LayerConstants
 from src.utils.perspective_transformer import PerspectiveTransformer
-from src.utils.unit_feature_helpers import is_force_melee_unit, is_temporary_attrition_unit
+from src.utils.unit_feature_helpers import (
+    is_force_melee_unit,
+    is_temporary_attrition_unit,
+    issue_attack_at_point,
+)
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
 class CaptureTheFlagBot(BotAI):
@@ -379,7 +383,7 @@ class CaptureTheFlagBot(BotAI):
             if unit is None:
                 continue
             if "attack" in head_name:
-                self.do(unit.attack(target))
+                issue_attack_at_point(self, unit, target)
             else:
                 self.do(unit.move(target))
             self._unit_last_order[int(unit_tag)] = (head_name, target)
@@ -434,7 +438,7 @@ class CaptureTheFlagBot(BotAI):
             target = Point2((world_x, world_y))
 
             if "attack" in head_name:
-                self.do(unit.attack(target))
+                issue_attack_at_point(self, unit, target)
             else:
                 self.do(unit.move(target))
             self._unit_last_order[unit_tag] = (head_name, target)
@@ -456,7 +460,7 @@ class CaptureTheFlagBot(BotAI):
             target = Point2((world_x, world_y))
 
             if is_attack:
-                self.do(unit.attack(target))
+                issue_attack_at_point(self, unit, target)
             else:
                 self.do(unit.move(target))
             head_name_orig = "attack" if is_attack else "move"

@@ -22,7 +22,7 @@ def test_build_env_spaces_match_constants():
         "terrain_creep",
         "terrain_buildable",
     ]
-    mock_cm.get_cumulative_build_commands.return_value = ["extractor"]
+    mock_cm.get_cumulative_build_commands.return_value = ["spawningpool", "zergling"]
     mock_cm.get_cumulative_active_layers.return_value = []
     mock_cm.get_cumulative_active_tactical_layers.return_value = []
     mock_cm.get_cumulative_action_heads.return_value = ["move"]

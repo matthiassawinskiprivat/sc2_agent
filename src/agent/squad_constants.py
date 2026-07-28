@@ -9,6 +9,9 @@ MAX_SQUAD_UNITS = 24
 # Master catalog size (fallback). Live obs dim is len(active_unit_scalars).
 SQUAD_UNIT_FEAT_DIM = UnitScalarConstants.get_dim()
 SQUAD_COMMAND_DIM = 10
+# Own + enemy race one-hots (terran/zerg/protoss each); gated by env.include_race.
+SQUAD_RACE_DIM = 6
+SQUAD_RACE_ORDER = ("terran", "zerg", "protoss")
 SQUAD_SPATIAL_RESOLUTION = 32
 SQUAD_SPATIAL_CELLS = SQUAD_SPATIAL_RESOLUTION * SQUAD_SPATIAL_RESOLUTION
 SQUAD_POINTER_DIM = MAX_SQUAD_UNITS
@@ -17,6 +20,28 @@ SQUAD_FLAT_ACTION_DIM = (
 )
 DEFAULT_SCORE_THRESHOLD = 0.5
 DEFAULT_MIN_SELECTED_UNITS = 1
+
+
+def encode_race_vector(own_race: str | None, enemy_race: str | None) -> np.ndarray:
+    """Own + enemy one-hots in fixed ``SQUAD_RACE_ORDER`` (terran, zerg, protoss)."""
+    vec = np.zeros(SQUAD_RACE_DIM, dtype=np.float32)
+    own = str(own_race or "").lower().strip()
+    enemy = str(enemy_race or "").lower().strip()
+    n = len(SQUAD_RACE_ORDER)
+    for i, name in enumerate(SQUAD_RACE_ORDER):
+        if own == name:
+            vec[i] = 1.0
+        if enemy == name:
+            vec[n + i] = 1.0
+    return vec
+
+
+def include_race_enabled(training_conf: dict) -> bool:
+    """Whether squad obs include the 6-dim own/enemy race one-hot."""
+    env_conf = training_conf.get("env", {}) if isinstance(training_conf.get("env"), dict) else {}
+    if "include_race" in training_conf:
+        return bool(training_conf["include_race"])
+    return bool(env_conf.get("include_race", False))
 
 
 def squad_action_space_nvec():

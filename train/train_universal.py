@@ -18,7 +18,14 @@ torch.set_num_threads(8)
 # Add path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from train.train_pipeline import PipelineManager, ENV_REGISTRY, BOT_REGISTRY, MaskableSubprocVecEnv, MaskableSyncVecEnv
+from train.train_pipeline import (
+    PipelineManager,
+    ENV_REGISTRY,
+    BOT_REGISTRY,
+    MaskableSubprocVecEnv,
+    MaskableSyncVecEnv,
+    cleanup_worker_logs,
+)
 from train.env_utils import EnvFactory
 from src.sc2_bot_universal import SC2BotUniversal
 
@@ -247,6 +254,7 @@ class UniversalPipelineManager(PipelineManager):
         """Executes the entire universal training pipeline with additive configuration."""
         logger.info(f"Starting universal training pipeline for levels: {self.pipeline_config['levels']}")
         kill_switch_sc2()
+        cleanup_worker_logs()
         
         last_final_model_path = None
         # Initialize base_config with pipeline-level settings
@@ -310,7 +318,23 @@ class UniversalPipelineManager(PipelineManager):
             
             model_to_load = status == "CONTINUE_TRAINING" and model_path or last_final_model_path
             reset_timesteps = status != "CONTINUE_TRAINING"
-            if status == "NEEDS_TRAINING": self._cleanup_logs(level_name)
+            if status == "NEEDS_TRAINING":
+                self._cleanup_logs(level_name)
+            elif status == "CONTINUE_TRAINING" and model_path:
+                from train.training_log_utils import truncate_logs_for_checkpoint_resume
+
+                tb_sub = level_config.get("training", {}).get("tensorboard_subdir", "")
+                log_dir = (
+                    os.path.join(self.log_dir_base, level_name, tb_sub)
+                    if tb_sub
+                    else os.path.join(self.log_dir_base, level_name)
+                )
+                try:
+                    truncate_logs_for_checkpoint_resume(log_dir, model_path)
+                except Exception as exc:
+                    logger.warning(
+                        f"Could not truncate resume logs in {log_dir}: {exc}"
+                    )
             
             # Pass the merged config to train_level
             final_model_path = self._train_level(level_name, model_path_to_load=model_to_load, reset_timesteps=reset_timesteps, merged_config=level_config)

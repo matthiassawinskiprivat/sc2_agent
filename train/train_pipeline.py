@@ -77,6 +77,28 @@ BOT_REGISTRY = {
 CONFIG_DIR = "config"
 MODEL_DIR_BASE = "models"
 LOG_DIR_BASE = "logs"
+WORKER_LOG_DIR = "logs"
+
+
+def cleanup_worker_logs(logs_dir: str = WORKER_LOG_DIR) -> int:
+    """
+    Delete accumulated ``worker_*.log`` files from prior training runs.
+
+    Env workers write to ``logs/worker_<id>.log`` with a fresh random id each
+    process, so these pile up across starts/resumes. Call once at session start
+    (new training or resume) so only the current run's worker logs remain.
+    """
+    pattern = os.path.join(logs_dir, "worker_*.log")
+    deleted = 0
+    for path in glob.glob(pattern):
+        try:
+            os.remove(path)
+            deleted += 1
+        except OSError as e:
+            logger.warning(f"Could not delete worker log {path}: {e}")
+    if deleted:
+        logger.info(f"Deleted {deleted} worker log file(s) from {logs_dir}/")
+    return deleted
 
 # Clean logs
 if __name__ == "__main__":
@@ -618,6 +640,7 @@ class PipelineManager:
         
         # Ensure clean state before starting
         kill_switch_sc2()
+        cleanup_worker_logs()
         
         last_final_model_path = None
 

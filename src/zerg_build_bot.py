@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,7 +11,6 @@ import numpy as np
 from loguru import logger
 from sc2.bot_ai import BotAI
 from sc2.data import Race
-from sc2.ids.ability_id import AbilityId
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 
@@ -30,6 +30,8 @@ from src.transformers.build_observation_builder import BuildObservationBuilder
 
 # SC2 debug_create_unit owner for neutral map resources (geysers / minerals).
 _NEUTRAL_RESOURCE_PLAYER = 3
+# Standard melee opening bank; treat as OK when spawn.minerals == 0 (no debug grant).
+_SC2_DEFAULT_START_MINERALS = 50
 
 
 class ZergBuildBot(BotAI):
@@ -73,6 +75,9 @@ class ZergBuildBot(BotAI):
         self._cached_hatch_spawn_pos: Optional[Point2] = None
         self._debug_show_map_enabled = False
         self._debug_spawned_neutral_tags: set[int] = set()
+        self._train_baseline = 0
+        self._commands_completed = 0
+        self._mine_anchor_pos: Optional[Point2] = None
 
     async def on_step(self, iteration: int):
         """Gym env calls on_step(0) once after _prepare_start to spawn the scenario."""
@@ -116,7 +121,11 @@ class ZergBuildBot(BotAI):
 
     def _resolve_mining_controller(self) -> MiningController:
         controller_name = self._mining_controller_name()
-        if controller_name == "scripted":
+        if controller_name in {"scripted", "speed"}:
+            if controller_name == "speed":
+                from src.runtime.speed_mining_controller import SpeedMiningController
+
+                return SpeedMiningController()
             from src.runtime.mining_controller import ScriptedMiningController
 
             return ScriptedMiningController()
@@ -125,29 +134,77 @@ class ZergBuildBot(BotAI):
     async def reset_game_state(self, verify: bool = True, skip_cleanup: bool = False):
         await self._ensure_map_visible()
         if not skip_cleanup:
+            # Zero mineral/gas bank via map Galaxy trigger (chat SOFT_RESET).
+            await self._request_map_soft_reset_resources()
             await self._clear_debug_spawned_neutrals()
-            await self._clear_map_units()
-            await self._ensure_own_workers_cleared()
+            await self._clear_map_units(strict_empty_map=True)
+            await self._ensure_own_units_cleared()
+            # Bank assert not needed when the map trigger clears resources; hard
+            # remakes still run every env.every_k_episodes (and when patches die).
         self._clear_spawn_session_state()
         self.worker_registry.clear()
         self.command_queue.clear()
         self.scripted_manager.reset()
+        clear = getattr(self.mining_controller, "clear", None)
+        if callable(clear):
+            clear()
         self.episode_step = 0
         self._last_build_attempt_failed = False
+        self._train_baseline = 0
+        self._commands_completed = 0
+        self._mine_anchor_pos = None
         await self._spawn_scenario()
         self._structures_at_step_start = len(self.structures)
         self._patch_script_targets()
-        self._assign_initial_worker_roles()
-        self.scripted_manager._emit_step_if_available()
+        # Completion-gated script: emit MINE (standing) then the first macro only.
+        # Later steps (e.g. TRAIN count=6) appear via emit_next_if_idle when idle.
+        max_emits = len(self.scripted_manager.script_steps) + 1
+        for _ in range(max_emits):
+            if not self.scripted_manager.emit_next_if_idle():
+                break
+            if self.command_queue.active is not None:
+                break
+        # Training default: every worker mines near hatch if manager omitted MINE.
+        self._ensure_training_mine_command()
+        self._apply_standing_mine_command()
+        self._sync_train_baseline()
         active = self.command_queue.active
         if active and active.unit_type_id is not None:
             level = self.training_conf.get("level_name", "?")
+            count = getattr(active, "count", None)
+            count_s = f" count={count}" if count else ""
             logger.info(
                 f"Build level '{level}' macro command: "
-                f"{active.command_type.name} {active.unit_type_id.name} "
-                f"target={active.target_pos}"
+                f"{active.command_type.name} {active.unit_type_id.name}{count_s} "
+                f"target={active.target_pos} "
+                f"(pending={len(self.command_queue.peek_pending())})"
             )
         await self._kick_economy_orders()
+
+    async def _request_map_soft_reset_resources(self) -> None:
+        """Ask the map Galaxy SoftReset trigger to zero minerals/gas via chat.
+
+        Maps under ``train/maps/ladder/build_agent`` must define a SoftReset
+        trigger on exact chat ``SOFT_RESET``. No-op if chat is unavailable.
+        """
+        client = getattr(self, "client", None)
+        if client is None or not hasattr(client, "chat_send"):
+            return
+        try:
+            await self.chat_send("SOFT_RESET")
+        except Exception as exc:
+            logger.warning(f"SOFT_RESET chat failed (map trigger may be missing): {exc}")
+            return
+        # Give Galaxy a couple of simulation steps to apply PlayerModifyPropertyInt.
+        for _ in range(2):
+            try:
+                await client.step()
+            except Exception:
+                break
+        try:
+            await self._refresh_state()
+        except Exception:
+            pass
 
     async def _ensure_map_visible(self) -> None:
         """Reveal the map once per session so neutral minerals/geysers populate bot state."""
@@ -174,6 +231,7 @@ class ZergBuildBot(BotAI):
         self._cached_hatch_spawn_pos = None
         self._target_geyser_pos = None
         self._spawn_hatchery_pos = None
+        self._mine_anchor_pos = None
 
     def _tag_debug_spawned_neutrals(self, hatch_pos: Point2, radius: float = 18.0) -> None:
         """Remember debug-spawned minerals/geysers so the next reset can remove them."""
@@ -204,36 +262,61 @@ class ZergBuildBot(BotAI):
 
     async def _ensure_own_workers_cleared(self) -> None:
         """Kill any surviving drones so respawn count is not short-circuited."""
+        await self._ensure_own_units_cleared()
+
+    async def _ensure_own_units_cleared(self) -> None:
+        """Kill all remaining self-owned units/structures after the main cleanup loop."""
         await self._refresh_state()
-        drones = list(self.workers)
-        if not drones:
+        remaining = self.all_units.filter(self._unit_is_build_scenario_cleanup)
+        if not remaining:
             return
-        await self.client.debug_kill_unit([int(u.tag) for u in drones])
+        await self.client.debug_kill_unit([int(u.tag) for u in remaining])
         for _ in range(2):
             await self.client.step()
         await self._refresh_state()
+        leftover = self.all_units.filter(self._unit_is_build_scenario_cleanup)
+        if leftover:
+            raise MapCleanupFailedError(leftover.amount)
+
+    def _assert_banked_minerals_match_spawn(self) -> None:
+        """Legacy helper kept for tests; soft resets no longer call this.
+
+        SC2 cannot subtract the mineral bank. Soft resets therefore tolerate a
+        leftover bank; ``env.every_k_episodes`` schedules hard remakes that
+        restore opening resources and mineral patches.
+        """
+        target = int(self._spawn_config().get("minerals", 0))
+        current = int(getattr(self, "minerals", 0) or 0)
+        if target == 0 and current > _SC2_DEFAULT_START_MINERALS:
+            logger.debug(
+                f"Soft reset with leftover mineral bank={current} "
+                f"(hard remake via every_k_episodes clears this)."
+            )
 
     def _patch_script_targets(self):
-        """Replace placeholder YAML targets with spawn-time world positions."""
+        """Replace placeholder YAML targets with the hatch/spawn location.
+
+        The management agent only provides a coarse region; ``[-1, -1]`` in YAML
+        means \"use spawn/hatch\" (not a real map coordinate). The build policy
+        then refines placement on the local 16x16 crop around that point.
+        """
         hatch = (
             self.townhalls.first.position
             if self.townhalls.exists
             else (self._spawn_hatchery_pos or self.start_location)
         )
+        patchable = {
+            CommandType.BUILD,
+            CommandType.EXPAND,
+            CommandType.MINE,
+        }
         for step in self.scripted_manager.script_steps:
             cmd = step.command
             if cmd.target_pos is None:
+                if cmd.command_type in patchable:
+                    cmd.target_pos = hatch
                 continue
-            if cmd.target_pos.x != 0 or cmd.target_pos.y != 0:
-                continue
-            if cmd.unit_type_id == UnitTypeId.EXTRACTOR and self._target_geyser_pos:
-                cmd.target_pos = self._target_geyser_pos
-            elif cmd.unit_type_id in {
-                UnitTypeId.SPAWNINGPOOL,
-                UnitTypeId.HATCHERY,
-                UnitTypeId.LAIR,
-                UnitTypeId.HIVE,
-            }:
+            if cmd.target_pos.x == -1 and cmd.target_pos.y == -1:
                 cmd.target_pos = hatch
 
     def _unit_is_build_scenario_cleanup(self, u) -> bool:
@@ -277,11 +360,10 @@ class ZergBuildBot(BotAI):
             type_hist = Counter(
                 getattr(u.type_id, "name", str(u.type_id)) for u in remaining
             )
-            if strict_empty_map:
-                raise MapCleanupFailedError(n)
             logger.warning(
                 f"Build map cleanup incomplete ({n} unit(s) left). Types: {dict(type_hist)}"
             )
+            raise MapCleanupFailedError(n)
 
     @staticmethod
     def _point_in_playable_area(area, pos: Point2) -> bool:
@@ -350,11 +432,14 @@ class ZergBuildBot(BotAI):
         return self._default_hatch_location()
 
     def _spawn_reference_point(self) -> Point2:
-        """Anchor for geyser/hatch placement when ``start_location`` is not set yet."""
+        """Fallback anchor only when no expansion/start locations exist."""
         start = getattr(self, "start_location", None)
         if start is not None:
             return start
         if self.game_info is not None:
+            starts = list(getattr(self.game_info, "start_locations", None) or [])
+            if starts:
+                return starts[0]
             center = getattr(self.game_info, "map_center", None)
             if center is not None:
                 return center
@@ -372,38 +457,103 @@ class ZergBuildBot(BotAI):
                     return Point2((float(x), float(y)))
         return self._spawn_reference_point()
 
-    def _spawn_geometry_key(self) -> str:
-        map_name = getattr(self.game_info, "map_name", "unknown")
-        if self._target_geyser_pos is not None:
-            gx = int(round(self._target_geyser_pos.x))
-            gy = int(round(self._target_geyser_pos.y))
-            return f"{map_name}:{gx}:{gy}"
-        return str(map_name)
+    def _candidate_base_locations(self) -> List[Point2]:
+        """Official map start locations (mains), not every expansion on the map.
 
-    def _resolve_hatch_spawn_pos(self) -> Point2:
-        """Stable hatch location for the session (reuse after first successful spawn)."""
-        geom = self._spawn_geometry_key()
-        if (
-            self._cached_hatch_spawn_pos is not None
-            and self._cached_spawn_geometry_key == geom
-        ):
-            return self._cached_hatch_spawn_pos
+        ``no_trigger`` AIE maps still expose ``game_info.start_locations``; removing
+        triggers does not strip LocStartLoc metadata. Prefer those so the hatch is
+        at a real spawn, not a random natural/third base from
+        ``expansion_locations_list``.
+        """
+        locs: List[Point2] = []
+        if self.game_info is not None:
+            starts = list(getattr(self.game_info, "start_locations", None) or [])
+            locs.extend(starts)
+        # burnysc2 also mirrors starts on the bot (excluding our own when set).
+        for p in list(getattr(self, "enemy_start_locations", None) or []):
+            locs.append(p)
+        own = getattr(self, "start_location", None)
+        if own is not None:
+            locs.append(own)
 
-        ref = self._spawn_reference_point()
+        if not locs:
+            # Last resort: expansions (blank grids / maps without LocStartLoc).
+            try:
+                locs.extend(list(getattr(self, "expansion_locations_list", None) or []))
+            except Exception as exc:
+                logger.debug(f"expansion_locations_list unavailable: {exc}")
+
+        seen = set()
+        unique: List[Point2] = []
+        for p in locs:
+            key = (round(float(p.x), 1), round(float(p.y), 1))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(p)
+        return unique
+
+    def _mineral_amount(self, mineral) -> int:
+        for attr in ("mineral_contents", "health", "energy"):
+            val = getattr(mineral, attr, None)
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    continue
+        return 1500
+
+    def _base_has_healthy_minerals(
+        self,
+        pos: Point2,
+        radius: float = 12.0,
+        min_patches: int = 4,
+        min_total: int = 1000,
+    ) -> bool:
+        fields = [m for m in self.mineral_field if m.distance_to(pos) <= radius]
+        if len(fields) < min_patches:
+            return False
+        total = sum(self._mineral_amount(m) for m in fields)
+        return total >= min_total
+
+    def _pick_episode_base_pos(self, rng: Optional[random.Random] = None) -> Point2:
+        """
+        Random healthy official start location for this episode.
+
+        Raises MapCleanupFailedError when starts exist but none still have healthy
+        mineral fields (soft reset cannot refill patches → Level0Env hard remake).
+        """
+        rng = rng or random
+        candidates = self._candidate_base_locations()
+        if not candidates:
+            logger.warning(
+                "No start_locations on map; falling back to pathable hatch placement."
+            )
+            return self._default_hatch_location()
+
+        healthy = [c for c in candidates if self._base_has_healthy_minerals(c)]
+        if not healthy:
+            raise MapCleanupFailedError(len(candidates))
+
+        pool = list(healthy)
+        rng.shuffle(pool)
+        hatch_pos = pool[0]
+        if not self._is_pathable(hatch_pos):
+            hatch_pos = self._find_buildable_near(hatch_pos, min_dist=0.0, max_dist=4.0)
         if self.vespene_geyser.exists:
-            geyser = self.vespene_geyser.closest_to(ref)
-            self._target_geyser_pos = geyser.position
-            hatch_pos = self._find_buildable_near(geyser.position)
+            self._target_geyser_pos = self.vespene_geyser.closest_to(hatch_pos).position
         else:
             self._target_geyser_pos = None
-            hatch_pos = self._default_hatch_location()
+        return hatch_pos
 
-        if not self._is_pathable(hatch_pos):
-            hatch_pos = self._default_hatch_location()
-
-        geom = self._spawn_geometry_key()
-        self._cached_spawn_geometry_key = geom
+    def _resolve_hatch_spawn_pos(self) -> Point2:
+        """Pick a fresh random optimal base each episode (no cross-episode reuse)."""
+        hatch_pos = self._pick_episode_base_pos()
         self._cached_hatch_spawn_pos = hatch_pos
+        self._cached_spawn_geometry_key = (
+            f"{getattr(self.game_info, 'map_name', 'unknown')}:"
+            f"{round(hatch_pos.x, 1)}:{round(hatch_pos.y, 1)}"
+        )
         return hatch_pos
 
     async def _spawn_drones_near_hatch(
@@ -481,9 +631,10 @@ class ZergBuildBot(BotAI):
     async def _spawn_scenario(self):
         spawn = self._spawn_config()
         env_cfg = self._level_env_config()
-        num_drones = int(spawn.get("drones", 3))
-        minerals = int(spawn.get("minerals", 500))
+        num_drones = int(spawn.get("drones", 8))
+        minerals = int(spawn.get("minerals", 0))
         vespene = int(spawn.get("vespene", 0))
+        num_overlords = int(spawn.get("overlords", 0))
         pre_structures = env_cfg.get("pre_spawn_structures", [])
         spawn_resources_if_missing = bool(
             spawn.get(
@@ -503,6 +654,13 @@ class ZergBuildBot(BotAI):
         await self._refresh_state()
 
         await self._spawn_drones_near_hatch(hatch_pos, num_drones, player)
+
+        # Pre-spawn overlords for supply (scenario setup; not agent help).
+        for i in range(num_overlords):
+            opos = Point2((hatch_pos.x - 3.0 - i, hatch_pos.y + 3.0))
+            await self.client.debug_create_unit(
+                [[UnitTypeId.OVERLORD, 1, opos, player]]
+            )
 
         if not self.vespene_geyser.exists and spawn_resources_if_missing:
             await self._spawn_resource_nodes(hatch_pos)
@@ -537,35 +695,149 @@ class ZergBuildBot(BotAI):
         self._prepare_step(state, ProtoWrapper(self.game_info._proto))
 
     def _assign_initial_worker_roles(self):
+        """Legacy helper — prefer ``_apply_standing_mine_command`` / MINE commands."""
         spawn = self._spawn_config()
         drones_sorted = sorted(self.workers, key=lambda u: u.tag)
         num_drones = len(drones_sorted)
         mining_count = int(spawn.get("mining_drones", 0))
 
-        if mining_count <= 0 and self._mining_controller_name() == "scripted":
-            mining_count = min(2, max(0, num_drones - 1))
+        if mining_count <= 0 and self._mining_controller_name() in {"scripted", "speed"}:
+            mining_count = num_drones
 
-        if num_drones > 1:
-            mining_count = min(mining_count, num_drones - 1)
-        else:
-            mining_count = 0
+        mining_count = min(max(0, mining_count), num_drones)
 
         for i, drone in enumerate(drones_sorted):
             role = WorkerRole.MINING if i < mining_count else WorkerRole.BUILD
             self.worker_registry.assign(drone.tag, role)
 
+    def _closest_hatch_to(self, pos: Point2) -> Point2:
+        if self.townhalls.exists:
+            return self.townhalls.closest_to(pos).position
+        if self._spawn_hatchery_pos is not None:
+            return self._spawn_hatchery_pos
+        return pos
+
+    def _ensure_training_mine_command(self) -> None:
+        """If the manager script omitted MINE, assign every worker to mine at hatch."""
+        if self.command_queue.standing_mine is not None:
+            return
+        if self._mining_controller_name() not in {"scripted", "speed"}:
+            return
+        hatch = (
+            self.townhalls.first.position
+            if self.townhalls.exists
+            else self._spawn_hatchery_pos
+        )
+        if hatch is None:
+            return
+        n_workers = len(list(self.workers))
+        cmd = Command(
+            command_type=CommandType.MINE,
+            target_pos=hatch,
+            worker_count=n_workers if n_workers > 0 else None,
+        )
+        self.command_queue.enqueue(cmd)
+
+    def _apply_standing_mine_command(self) -> None:
+        """Resolve MINE: N drones nearest the region → MINING at closest hatch."""
+        cmd = self.command_queue.standing_mine
+        if cmd is None or cmd.command_type != CommandType.MINE:
+            return
+        region = cmd.target_pos or self._spawn_hatchery_pos
+        if region is None:
+            return
+        hatch = self._closest_hatch_to(region)
+        self._mine_anchor_pos = hatch
+
+        workers = list(self.workers)
+        if not workers:
+            return
+
+        if cmd.assigned_unit_tags:
+            selected = [w for w in workers if int(w.tag) in cmd.assigned_unit_tags]
+        else:
+            n = cmd.worker_count
+            if n is None or n <= 0:
+                n = len(workers)
+            ordered = sorted(workers, key=lambda w: w.distance_to(region))
+            selected = ordered[: min(int(n), len(ordered))]
+
+        selected_tags = {int(w.tag) for w in selected}
+        for worker in workers:
+            tag = int(worker.tag)
+            if tag in selected_tags:
+                self.worker_registry.assign(tag, WorkerRole.MINING)
+            elif self.worker_registry.get_role(tag) == WorkerRole.MINING:
+                # Drop miners not covered by this MINE (pulled off the line).
+                self.worker_registry.remove(tag)
+
+        cmd.assigned_unit_tags = selected_tags
+
     def action_masks(self) -> np.ndarray:
-        """Mask padded worker slots; placement grid stays fully available."""
+        """Mask padded workers; for BUILD, restrict placement to buildable cells."""
         mask = np.ones(MAX_BUILD_WORKERS + BUILD_PLACEMENT_CELLS, dtype=bool)
         n_workers = len(list(self.workers))
         if n_workers < MAX_BUILD_WORKERS:
             mask[n_workers:MAX_BUILD_WORKERS] = False
+        placement = self._placement_action_mask()
+        mask[MAX_BUILD_WORKERS:] = placement
         return mask
 
+    def _placement_action_mask(self) -> np.ndarray:
+        """Legal 16x16 cells near the manager coarse target (creep+path for pool)."""
+        out = np.ones(BUILD_PLACEMENT_CELLS, dtype=bool)
+        cmd = self.command_queue.active
+        if cmd is None or cmd.command_type == CommandType.TRAIN:
+            return out
+        if cmd.command_type not in {CommandType.BUILD, CommandType.EXPAND}:
+            return out
+        center = cmd.target_pos or self._spawn_hatchery_pos
+        if center is None:
+            return out
+
+        needs_creep = cmd.unit_type_id not in {
+            UnitTypeId.HATCHERY,
+            UnitTypeId.LAIR,
+            UnitTypeId.HIVE,
+            UnitTypeId.EXTRACTOR,
+        }
+        legal = np.zeros(BUILD_PLACEMENT_CELLS, dtype=bool)
+        for idx in range(BUILD_PLACEMENT_CELLS):
+            pos = self.decode_placement(idx, center)
+            x, y = int(pos.x), int(pos.y)
+            if not self._grid_pathable(x, y):
+                continue
+            if needs_creep and not self._cell_has_creep(x, y):
+                continue
+            legal[idx] = True
+        # Avoid a fully-masked spatial head (MaskablePPO cannot sample).
+        if not legal.any():
+            return out
+        return legal
+
+    def _cell_has_creep(self, x: int, y: int) -> bool:
+        creep = getattr(getattr(self, "state", None), "creep", None)
+        if creep is None:
+            return True
+        try:
+            if hasattr(creep, "is_set"):
+                return bool(creep.is_set(Point2((float(x), float(y)))))
+            data = getattr(creep, "data_numpy", creep)
+            if hasattr(data, "shape") and len(data.shape) == 2:
+                h, w = data.shape
+                if 0 <= x < w and 0 <= y < h:
+                    return bool(data[y, x])
+        except Exception:
+            return True
+        return True
+
     async def on_build_substep(self):
-        """Per game-step runtime: manager macro tick, mining, command activation."""
+        """Per game-step runtime: manager emit-if-idle, mining, command activation."""
         self.scripted_manager.on_game_step()
+        self.scripted_manager.emit_next_if_idle()
         self.command_queue.activate_next()
+        if self.command_queue.standing_mine is not None:
+            self._apply_standing_mine_command()
         await self.mining_controller.step(self, self.worker_registry.mining_tags())
         if self.training_conf.get("defense_mode"):
             self._maybe_reassign_workers_to_micro()
@@ -599,15 +871,21 @@ class ZergBuildBot(BotAI):
     def _get_step_results(self) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict]:
         obs, info = self._get_observation()
         reward = self._compute_reward()
-        done = self._check_success()
+        if self._try_complete_active_command():
+            reward += float(self.rewards_cfg.get("command_complete", 15.0))
+            # Promote next scripted manager intent (e.g. TRAIN batch after BUILD).
+            self.scripted_manager.emit_next_if_idle()
+            self._sync_train_baseline()
+        done = self._episode_complete()
         if done:
-            reward += float(self.rewards_cfg.get("success", 40.0))
+            reward += float(self.rewards_cfg.get("success", 100.0))
         return obs, reward, done, False, info
 
     def _compute_reward(self) -> float:
         r = float(self.rewards_cfg.get("step_penalty", -0.05))
         if self._last_build_attempt_failed:
             r += float(self.rewards_cfg.get("invalid_build_penalty", -1.0))
+        r += self._compute_mining_reward()
         cmd = self.command_queue.active
         if cmd and cmd.target_pos is not None:
             shaping = float(self.rewards_cfg.get("distance_multiplier", 0.0))
@@ -621,24 +899,90 @@ class ZergBuildBot(BotAI):
                     r += shaping * max(0.0, 20.0 - dist) * 0.01
         return r
 
-    def _check_success(self) -> bool:
+    def _mining_role_workers(self) -> List:
+        tags = self.worker_registry.mining_tags()
+        return [u for u in self.workers if int(u.tag) in tags]
+
+    def _compute_mining_reward(self) -> float:
+        """Reward miners that stay gathering/returning; penalize idle mining-role drones."""
+        active_bonus = float(self.rewards_cfg.get("mining_active_bonus", 0.0))
+        idle_penalty = float(self.rewards_cfg.get("idle_miner_penalty", 0.0))
+        if active_bonus == 0.0 and idle_penalty == 0.0:
+            return 0.0
+        r = 0.0
+        for worker in self._mining_role_workers():
+            carrying = bool(
+                getattr(worker, "is_carrying_minerals", False)
+                or getattr(worker, "is_carrying_vespene", False)
+            )
+            gathering = bool(getattr(worker, "is_gathering", False))
+            idle = bool(getattr(worker, "is_idle", False))
+            if gathering or carrying:
+                r += active_bonus
+            elif idle:
+                r += idle_penalty
+        return r
+
+    def _unit_count(self, unit_type: UnitTypeId) -> int:
+        return int(self.units(unit_type).amount)
+
+    @staticmethod
+    def _train_target_count(cmd: Command) -> int:
+        """How many units a TRAIN command must produce (None/<=0 => 1)."""
+        raw = getattr(cmd, "count", None)
+        if raw is None or int(raw) <= 0:
+            return 1
+        return int(raw)
+
+    def _sync_train_baseline(self) -> None:
+        cmd = self.command_queue.active
+        if (
+            cmd is not None
+            and cmd.command_type == CommandType.TRAIN
+            and cmd.unit_type_id is not None
+        ):
+            self._train_baseline = self._unit_count(cmd.unit_type_id)
+        else:
+            self._train_baseline = 0
+
+    def _try_complete_active_command(self) -> bool:
+        """Complete the active macro command when its goal is met. Not episode done."""
         cmd = self.command_queue.active
         if cmd is None:
             return False
+        completed = False
         if cmd.command_type in {CommandType.BUILD, CommandType.EXPAND}:
-            if cmd.unit_type_id is None:
-                return False
-            if self.structures(cmd.unit_type_id).ready.exists:
-                self.command_queue.complete_active()
-                return True
-        if cmd.command_type == CommandType.TRAIN:
-            if cmd.unit_type_id and self.units(cmd.unit_type_id).exists:
-                self.command_queue.complete_active()
-                return True
-        return False
+            if cmd.unit_type_id is not None and self.structures(cmd.unit_type_id).ready.exists:
+                completed = True
+        elif cmd.command_type == CommandType.TRAIN:
+            if cmd.unit_type_id is not None:
+                target = self._train_target_count(cmd)
+                if self._unit_count(cmd.unit_type_id) >= self._train_baseline + target:
+                    completed = True
+        if not completed:
+            return False
+        self.command_queue.complete_active()
+        self._commands_completed += 1
+        self.command_queue.activate_next()
+        self.scripted_manager.emit_next_if_idle()
+        self._sync_train_baseline()
+        return True
+
+    def _episode_complete(self) -> bool:
+        """True when the full manager script has been finished."""
+        script_done = (
+            self.scripted_manager._script_index
+            >= len(self.scripted_manager.script_steps)
+        )
+        return (
+            script_done
+            and self.command_queue.active is None
+            and not self.command_queue.peek_pending()
+            and self._commands_completed > 0
+        )
 
     async def apply_build_action(self, action: np.ndarray) -> bool:
-        """Decode policy action into SC2 build order. Returns False if no macro command."""
+        """Decode policy action into SC2 build/train order."""
         cmd = self.command_queue.active
         if cmd is None or not cmd.is_macro:
             return False
@@ -655,32 +999,60 @@ class ZergBuildBot(BotAI):
         if cmd.command_type == CommandType.TRAIN:
             return await self._apply_train(cmd, worker)
 
-        target = self.decode_placement(placement_idx, cmd.target_pos or worker.position)
+        return await self._apply_build(cmd, worker, placement_idx)
+
+    async def _apply_build(self, cmd: Command, worker, placement_idx: int) -> bool:
+        """Agent-faithful build: issue worker.build at the decoded placement cell."""
         self._last_build_attempt_failed = False
-
-        if cmd.unit_type_id == UnitTypeId.EXTRACTOR:
-            anchor = cmd.target_pos or target
-            geyser = self._nearest_geyser(anchor)
-            if geyser is None:
-                self._last_build_attempt_failed = True
-                return True
-            self.do(worker.build_gas(geyser))
-            return True
-
-        if cmd.unit_type_id is not None:
-            self.do(worker.build(cmd.unit_type_id, target))
-        return True
-
-    async def _apply_train(self, cmd: Command, worker) -> bool:
-        del worker
         if cmd.unit_type_id is None:
             self._last_build_attempt_failed = True
             return True
-        pool = self.structures(UnitTypeId.SPAWNINGPOOL).ready
-        if pool.exists:
-            self.do(pool.first.train(cmd.unit_type_id))
-        else:
+
+        # Already building / built — wait for _try_complete_active_command.
+        if self.structures(cmd.unit_type_id).exists:
+            return True
+        try:
+            if self.already_pending(cmd.unit_type_id) > 0:
+                return True
+        except Exception:
+            pass
+
+        if not self.can_afford(cmd.unit_type_id):
+            # Waiting for scripted mining to bank minerals — not an invalid attempt.
+            return True
+
+        target = self.decode_placement(
+            placement_idx, cmd.target_pos or worker.position
+        )
+        # Pull selected miner off the mining controller for this build order.
+        self.worker_registry.set_role(worker.tag, WorkerRole.BUILD)
+        self.do(worker.build(cmd.unit_type_id, target))
+        return True
+
+    async def _apply_train(self, cmd: Command, worker) -> bool:
+        """Thin TRAIN helper: morph larva until baseline+count is queued/produced."""
+        del worker
+        self._last_build_attempt_failed = False
+        if cmd.unit_type_id is None:
             self._last_build_attempt_failed = True
+            return True
+        if not self.structures(UnitTypeId.SPAWNINGPOOL).ready.exists:
+            return True
+        target = self._train_target_count(cmd)
+        current = self._unit_count(cmd.unit_type_id)
+        try:
+            pending = int(self.already_pending(cmd.unit_type_id))
+        except Exception:
+            pending = 0
+        # Stop issuing morphs once enough units are alive or already in production.
+        if current + pending >= self._train_baseline + target:
+            return True
+        if not self.can_afford(cmd.unit_type_id):
+            return True
+        larva = self.larva
+        if not larva.exists:
+            return True
+        self.do(larva.random.train(cmd.unit_type_id))
         return True
 
     def decode_placement(self, cell_idx: int, center: Point2) -> Point2:

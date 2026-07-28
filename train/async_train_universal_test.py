@@ -889,8 +889,11 @@ def run_single_async_training_session(
 
 
 def main():
+    from train.train_pipeline import cleanup_worker_logs
+
     config_dir = "config_universal"
     manager = UniversalPipelineManager(config_dir=config_dir)
+    cleanup_worker_logs()
 
     with open(os.path.join(config_dir, "pipeline.yaml"), "r") as f:
         pipeline_config = yaml.safe_load(f)
@@ -939,6 +942,10 @@ def main():
         if not config:
             logger.error(f"Could not load config for {level_name}")
             sys.exit(1)
+        if status == "CONTINUE_TRAINING" and model_to_load:
+            from train.async_train_universal import _truncate_logs_before_resume
+
+            _truncate_logs_before_resume(level_name, config, model_to_load)
         try:
             run_single_async_training_session(
                 level_name, config, model_to_load, resume_timesteps
@@ -987,6 +994,10 @@ def main():
                     logger.info(f"Cleaned up async logs: {async_log_dir}")
                 except Exception as e:
                     logger.warning(f"Could not clean async log dir {async_log_dir}: {e}")
+        elif status == "CONTINUE_TRAINING" and model_to_load:
+            from train.async_train_universal import _truncate_logs_before_resume
+
+            _truncate_logs_before_resume(level_name, config, model_to_load)
 
         logger.info(
             f"--- [ASYNC] Pipeline stage '{level_name}' "

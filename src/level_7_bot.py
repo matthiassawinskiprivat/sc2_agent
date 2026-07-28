@@ -9,6 +9,7 @@ from src.agent.universal_constants import (
     UNUSED_COMMAND_HEAD,
     build_action_head_manifest,
 )
+from src.utils.unit_feature_helpers import issue_attack_at_point
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from sc2.unit import Unit
@@ -106,7 +107,8 @@ class Level7Bot(Level3Bot):
                 else:
                     self.last_attack_target_tag_by_unit[unit_tag] = None
                 # Issue attack at the agent-chosen world position (no actuation remap).
-                self.do(unit.attack(target_pos))
+                # Swarm Hosts map attack → Spawn Locusts at the same point.
+                issue_attack_at_point(self, unit, target_pos)
                 return
             return
         return await super().apply_action(unit_tag, action)

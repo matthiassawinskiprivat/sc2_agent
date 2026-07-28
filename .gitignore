@@ -19,3 +19,11 @@ temp_sc2_async_buffer/
 /logs_universal/
 logs_build_zerg
 models_build_zerg
+
+# Map SoftReset inject tooling / backups
+tools/StormLib.dll
+tools/stormlib_dll/
+tools/stormlib_dll.zip
+tools/storm_release.json
+train/maps/**/*.SC2Map.bak
+train/maps/**/*.SC2Map.bak2

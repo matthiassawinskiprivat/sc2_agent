@@ -16,12 +16,51 @@ def test_required_ctf_units_present():
     with open("data/unit_data.json", "r") as f:
         data = json.load(f)
     
-    required_units = ["ZERGLING", "ROACH", "MARINE", "REAPER", "ZEALOT"]
+    required_units = [
+        "ZERGLING", "ROACH", "MARINE", "REAPER", "ZEALOT", "SWARMHOSTMP", "DISRUPTOR",
+    ]
     for unit in required_units:
         assert unit in data, f"Unit {unit} missing from unit_data.json"
         assert "cost" in data[unit], f"Cost missing for {unit}"
         assert "minerals" in data[unit]["cost"], f"Mineral cost missing for {unit}"
         assert "vespene" in data[unit]["cost"], f"Vespene cost missing for {unit}"
+
+
+def test_swarmhostmp_cost_matches_lotv():
+    with open("data/unit_data.json", "r") as f:
+        data = json.load(f)
+    entry = data["SWARMHOSTMP"]
+    cost = entry["cost"]
+    assert cost["minerals"] == 100
+    assert cost["vespene"] == 75
+    assert cost["supply"] == 3.0
+    assert entry["id"] == 494
+    assert entry["sight"] == 10.0
+    assert entry["radius"] == 0.8125
+    assert entry["weapons"] == []
+
+
+def test_disruptor_cost_matches_lotv():
+    with open("data/unit_data.json", "r") as f:
+        data = json.load(f)
+    entry = data["DISRUPTOR"]
+    cost = entry["cost"]
+    assert cost["minerals"] == 150
+    assert cost["vespene"] == 150
+    assert cost["supply"] == 3.0
+    assert entry["id"] == 694
+    assert entry["radius"] == 0.75
+    assert entry["weapons"] == []
+
+
+def test_swarmhostmp_ctf_attributes_armored_biological():
+    from train.envs.ctf.game_data import UNIT_DATA, uid
+
+    info = UNIT_DATA[uid("SWARMHOSTMP")]
+    assert info.attributes == frozenset({"biological", "armored"})
+    assert info.mineral_cost == 100
+    assert info.vespene_cost == 75
+    assert info.footprint_radius == 0.8125
 
 def test_unit_stats_integrity():
     with open("data/unit_data.json", "r") as f:
