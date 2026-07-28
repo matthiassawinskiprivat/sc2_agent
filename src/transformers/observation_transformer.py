@@ -1178,6 +1178,7 @@ class ObservationTransformer:
         else:
             self._draw_unit_vitals(unit, layers, is_enemy, px, py)
             self._draw_unit_detection(unit, layers, is_enemy, px, py)
+            self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
             self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
             self._draw_unit_splash(unit, layers, is_enemy, px, py)
 
@@ -2640,6 +2641,8 @@ class ObservationTransformer:
         hps, rng = 0.0, 0.0
         if unit.type_id == UnitTypeId.MEDIVAC and unit.energy > 5: hps, rng = 12.6, 4.0
         elif unit.type_id == UnitTypeId.SHIELDBATTERY and unit.energy > 3: hps, rng = 50.4, 6.0
+        elif unit.type_id == UnitTypeId.QUEEN and unit.energy >= 50: hps, rng = 125.0, 7.0
+        elif unit.type_id == UnitTypeId.SCV: hps, rng = 9.3, 1.0
         if hps > 0: self._draw_circle_vectorized(layers, idx, px, py, rng, None, hps, True)
 
     def _player_upgrade_ids(self, unit: Unit) -> frozenset:

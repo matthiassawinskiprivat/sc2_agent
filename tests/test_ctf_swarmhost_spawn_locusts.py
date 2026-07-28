@@ -11,7 +11,7 @@ from src.agent.ctf_bot import CaptureTheFlagBot
 
 
 def _bot_with_unit(unit):
-    bot = CaptureTheFlagBot.__new__(CaptureTheFlagBot)
+    bot = MagicMock(spec=CaptureTheFlagBot)
     bot.player_id = 1
     bot.training_conf = {
         "agent_architecture": "universal",
@@ -21,13 +21,9 @@ def _bot_with_unit(unit):
     bot.do = MagicMock()
     bot._unit_last_order = {}
     bot.last_action_was_move_by_unit = {}
+    bot.game_info = None
     bot.all_units = MagicMock()
     bot.all_units.find_by_tag.return_value = unit
-    mock_game_info = MagicMock()
-    mock_game_info.playable_area = MagicMock(x=0, y=0, width=128, height=128)
-    mock_game_info.map_size.width = 128
-    mock_game_info.map_size.height = 128
-    object.__setattr__(bot, "_game_info", mock_game_info)
     agent = MagicMock()
     agent.last_game_info = None
     agent.convert_spatial_action_to_world.return_value = (60.0, 70.0)
@@ -46,7 +42,7 @@ def test_ctf_apply_action_attack_swarmhost_spawns_locusts():
 
     bot = _bot_with_unit(unit)
     # attack_local is index 2
-    asyncio.run(bot.apply_action(42, np.array([2, 100], dtype=np.int64)))
+    asyncio.run(CaptureTheFlagBot.apply_action(bot, 42, np.array([2, 100], dtype=np.int64)))
 
     unit.assert_called_once_with(AbilityId.EFFECT_SPAWNLOCUSTS, Point2((60.0, 70.0)))
     bot.do.assert_called_once_with(cast_cmd)

@@ -1,0 +1,95 @@
+"""CTF heal_reward: credit own HP gains only when configured."""
+from unittest.mock import MagicMock
+
+from sc2.position import Point2
+
+from src.agent.ctf_bot import CaptureTheFlagBot
+
+
+def _make_unit(tag: int, health: float, shield: float = 0.0) -> MagicMock:
+    u = MagicMock()
+    u.tag = tag
+    u.position = Point2((5.0, 5.0))
+    u.owner_id = 1
+    u.health = health
+    u.shield = shield
+    u.is_structure = False
+    return u
+
+
+def _make_bot(rewards: dict) -> CaptureTheFlagBot:
+    bot = CaptureTheFlagBot(
+        player_id=1,
+        training_conf={
+            "agent_architecture": "squad",
+            "action_heads": ["move_local", "heal_local"],
+            "rewards": rewards,
+        },
+    )
+    bot.unit_command_map = {1: "attack"}
+    bot.unit_target_map = {1: Point2((10.0, 10.0))}
+    bot.active_unit_tag = 1
+    bot.prev_dist_per_squad = {}
+    bot.prev_pylon_health = {1: 20.0, 2: 20.0}
+    bot.prev_enemy_units_health = {1: 0.0, 2: 0.0}
+    bot.prev_own_units_health = {1: 80.0, 2: 0.0}
+    bot.prev_enemy_unit_count = {1: 0, 2: 0}
+    bot.prev_own_unit_count = {1: 1, 2: 0}
+    bot.enemy_pylon_pos = {1: None, 2: None}
+    return bot
+
+
+def _wire(bot, own_units):
+    bot.units = list(own_units)
+    bot.enemy_units = []
+    empty = MagicMock()
+    empty.exists = False
+    empty.first = None
+    bot.structures = MagicMock(return_value=empty)
+    bot.enemy_structures = MagicMock(return_value=empty)
+    bot.is_visible = MagicMock(return_value=False)
+
+
+def test_heal_reward_credits_own_hp_gain():
+    bot = _make_bot(
+        {
+            "heal_reward": 0.1,
+            "damage_reward": 0.0,
+            "damage_penalty": 0.0,
+            "pylon_damage_reward": 0.0,
+            "pylon_damage_penalty": 0.0,
+            "distance_multiplier": 0.0,
+            "step_penalty": 0.0,
+            "defender_step_reward": 0.0,
+            "kill_reward": 0.0,
+            "kill_penalty": 0.0,
+        }
+    )
+    unit = _make_unit(1, health=100.0)  # was 80 → +20 HP
+    _wire(bot, [unit])
+
+    reward = bot.calculate_squad_step_reward([1], perspective_player_id=1)
+    assert abs(reward - 2.0) < 1e-6  # 20 * 0.1
+
+
+def test_heal_reward_absent_does_not_count():
+    """Missing heal_reward key → default 0; HP gain adds nothing."""
+    bot = _make_bot(
+        {
+            "damage_reward": 0.0,
+            "damage_penalty": 0.0,
+            "pylon_damage_reward": 0.0,
+            "pylon_damage_penalty": 0.0,
+            "distance_multiplier": 0.0,
+            "step_penalty": 0.0,
+            "defender_step_reward": 0.0,
+            "kill_reward": 0.0,
+            "kill_penalty": 0.0,
+        }
+    )
+    assert "heal_reward" not in bot.training_conf["rewards"]
+    unit = _make_unit(1, health=100.0)
+    _wire(bot, [unit])
+
+    reward = bot.calculate_squad_step_reward([1], perspective_player_id=1)
+    assert reward == 0.0

@@ -2,6 +2,7 @@ from typing import Dict, Optional, Any, Tuple, List, Iterable
 import math
 import numpy as np
 from sc2.bot_ai import BotAI
+from sc2.ids.ability_id import AbilityId
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from sc2.unit import Unit
@@ -382,12 +383,63 @@ class CaptureTheFlagBot(BotAI):
             unit = self.all_units.find_by_tag(unit_tag)
             if unit is None:
                 continue
-            if "attack" in head_name:
+            if unit.type_id == UnitTypeId.SHIELDBATTERY:
+                # Auto-heals; never issue move/attack/heal orders.
+                continue
+            if "heal" in head_name:
+                self._issue_heal_at_point(unit, target)
+                self._unit_last_order[int(unit_tag)] = (head_name, target)
+                self.last_action_was_move_by_unit[int(unit_tag)] = False
+            elif "attack" in head_name:
                 issue_attack_at_point(self, unit, target)
+                self._unit_last_order[int(unit_tag)] = (head_name, target)
+                self.last_action_was_move_by_unit[int(unit_tag)] = False
             else:
                 self.do(unit.move(target))
-            self._unit_last_order[int(unit_tag)] = (head_name, target)
-            self.last_action_was_move_by_unit[int(unit_tag)] = "attack" not in head_name
+                self._unit_last_order[int(unit_tag)] = (head_name, target)
+                self.last_action_was_move_by_unit[int(unit_tag)] = True
+
+    def _allied_units_for_owner(self, owner_id: int) -> List[Unit]:
+        """Allied units visible from God-Mode for a given owner."""
+        if owner_id == self.player_id:
+            return list(self.units)
+        return list(self.enemy_units)
+
+    @staticmethod
+    def _unit_in_spatial_cell(unit: Unit, target: Point2, cell_half: float = 0.5) -> bool:
+        """True when unit center lies in the world cell around ``target``."""
+        return (
+            abs(float(unit.position.x) - float(target.x)) < cell_half
+            and abs(float(unit.position.y) - float(target.y)) < cell_half
+        )
+
+    def _resolve_heal_target_in_cell(self, healer: Unit, target: Point2) -> Optional[Unit]:
+        """Allied non-structure unit in the clicked spatial cell (not nearest-damaged)."""
+        for ally in self._allied_units_for_owner(int(healer.owner_id)):
+            if ally is None or getattr(ally, "tag", None) == healer.tag:
+                continue
+            if getattr(ally, "is_structure", False):
+                continue
+            if self._unit_in_spatial_cell(ally, target):
+                return ally
+        return None
+
+    def _issue_heal_at_point(self, unit: Unit, target: Point2) -> None:
+        """Issue race-specific heal/repair/transfusion at the cell-local ally."""
+        ability = None
+        if unit.type_id == UnitTypeId.MEDIVAC:
+            ability = AbilityId.MEDIVACHEAL_HEAL
+        elif unit.type_id == UnitTypeId.SCV:
+            ability = AbilityId.EFFECT_REPAIR_SCV
+        elif unit.type_id == UnitTypeId.QUEEN:
+            ability = AbilityId.TRANSFUSION_TRANSFUSION
+        else:
+            return  # non-healers: no-op (do not convert to move)
+
+        heal_target = self._resolve_heal_target_in_cell(unit, target)
+        if heal_target is None:
+            return
+        self.do(unit(ability, heal_target))
 
     async def apply_action(self, unit_tag: int, action):
         if not self.agent_system or "active_agent" not in self.agent_system.unit_agents:
@@ -395,6 +447,9 @@ class CaptureTheFlagBot(BotAI):
 
         unit = self.all_units.find_by_tag(unit_tag)
         if not unit:
+            return
+
+        if unit.type_id == UnitTypeId.SHIELDBATTERY:
             return
 
         arch = self.training_conf.get("agent_architecture", "original")
@@ -437,12 +492,18 @@ class CaptureTheFlagBot(BotAI):
             )
             target = Point2((world_x, world_y))
 
-            if "attack" in head_name:
+            if "heal" in head_name:
+                self._issue_heal_at_point(unit, target)
+                self._unit_last_order[unit_tag] = (head_name, target)
+                self.last_action_was_move_by_unit[unit_tag] = False
+            elif "attack" in head_name:
                 issue_attack_at_point(self, unit, target)
+                self._unit_last_order[unit_tag] = (head_name, target)
+                self.last_action_was_move_by_unit[unit_tag] = False
             else:
                 self.do(unit.move(target))
-            self._unit_last_order[unit_tag] = (head_name, target)
-            self.last_action_was_move_by_unit[unit_tag] = "attack" not in head_name
+                self._unit_last_order[unit_tag] = (head_name, target)
+                self.last_action_was_move_by_unit[unit_tag] = True
         else:
             # Original: flat integer action on grid_size×grid_size grid
             if is_opponent_unit:
@@ -820,8 +881,12 @@ class CaptureTheFlagBot(BotAI):
             return (not u.is_structure) and (not is_temporary_attrition_unit(u))
 
         curr_own_hp = sum(u.health + u.shield for u in own_units if _counts_for_own_attrition(u))
-        if curr_own_hp < self.prev_own_units_health[p_id]:
-            reward -= (self.prev_own_units_health[p_id] - curr_own_hp) * damage_penalty_coeff
+        prev_own_hp = self.prev_own_units_health[p_id]
+        heal_coeff = float(r_conf.get("heal_reward", 0.0))
+        if heal_coeff != 0.0 and curr_own_hp > prev_own_hp:
+            reward += (curr_own_hp - prev_own_hp) * heal_coeff
+        if curr_own_hp < prev_own_hp:
+            reward -= (prev_own_hp - curr_own_hp) * damage_penalty_coeff
         self.prev_own_units_health[p_id] = curr_own_hp
 
         # Kill bonuses: flat per-unit reward/penalty on top of continuous HP shaping.

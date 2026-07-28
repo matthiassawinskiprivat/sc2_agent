@@ -474,6 +474,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             affordable = [u for u in unit_pool if can_afford(u)]
         return spawns
 
+    @staticmethod
+    def _is_squad_eligible_unit(unit) -> bool:
+        """Mobile units only; structures (pylon, battery, tumor, …) are not selectable."""
+        return not getattr(unit, "is_structure", False)
+
     def _assign_unit_commands(
         self,
         pool_spawn_centers: List[Tuple],
@@ -497,7 +502,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if not pool_spawn_centers:
             return
 
-        for unit in self.bot.all_units.filter(lambda u: not u.is_structure):
+        for unit in self.bot.all_units.filter(self._is_squad_eligible_unit):
             best_pool_idx = 0
             best_cmd = pool_spawn_centers[0][1]
             best_label = pool_spawn_centers[0][3]
@@ -652,6 +657,16 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 pylon_pos = get_valid_pos(spawn_center)
                 all_cmds.append([UnitTypeId.PYLON, 1, pylon_pos, player_id])
 
+            # Zerg creep tumors (not squad-selectable): one on the pool region;
+            # attackers also get one on the arena defender (_d) position.
+            if str(pool.get("race", "")).lower() == "zerg":
+                tumor_pos = get_offset_pos(spawn_center, 0, 1)
+                all_cmds.append([UnitTypeId.CREEPTUMOR, 1, tumor_pos, player_id])
+                if command == "attack" and label in label_to_defender_pos:
+                    d_center = label_to_defender_pos[label]
+                    d_tumor = get_offset_pos(d_center, 0, 1)
+                    all_cmds.append([UnitTypeId.CREEPTUMOR, 1, d_tumor, player_id])
+
         if all_cmds:
             await self.bot.client.debug_create_unit(all_cmds)
 
@@ -707,11 +722,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return spawns
 
     async def _refresh_unit_lists(self):
-        # Refresh all units from the bot's God-Mode perspective
+        # Refresh all units from the bot's God-Mode perspective.
+        # Structures (pylon, shield battery, creep tumor, …) are not squad-selectable.
         all_units = self.bot.all_units
-        # Filter for alive and not structure
-        self.player_units[1] = [u.tag for u in all_units if u.owner_id == 1 and not u.is_structure]
-        self.player_units[2] = [u.tag for u in all_units if u.owner_id == 2 and not u.is_structure]
+        self.player_units[1] = [
+            u.tag for u in all_units
+            if u.owner_id == 1 and self._is_squad_eligible_unit(u)
+        ]
+        self.player_units[2] = [
+            u.tag for u in all_units
+            if u.owner_id == 2 and self._is_squad_eligible_unit(u)
+        ]
         if self.unit_pool_index and self.unit_pools_config:
             self._prune_dead_pool_membership()
             self._adopt_midgame_summons()
