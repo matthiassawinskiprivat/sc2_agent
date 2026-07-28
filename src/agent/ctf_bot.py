@@ -345,10 +345,18 @@ class CaptureTheFlagBot(BotAI):
         if not self.agent_system or "active_agent" not in self.agent_system.unit_agents:
             return
 
-        action_heads = self.training_conf.get("action_heads") or []
-        if command_idx >= len(action_heads):
+        action_heads = list(self.training_conf.get("action_heads") or [])
+        categorical_heads = list(self.training_conf.get("categorical_heads") or [])
+        n_spatial = len(action_heads)
+        n_total = n_spatial + len(categorical_heads)
+        if command_idx < 0 or command_idx >= n_total:
             return
-        head_name = action_heads[command_idx]
+
+        is_categorical = command_idx >= n_spatial
+        if is_categorical:
+            head_name = categorical_heads[command_idx - n_spatial]
+        else:
+            head_name = action_heads[command_idx]
 
         anchor = self.all_units.find_by_tag(anchor_tag)
         if anchor is None and selected_tags:
@@ -364,6 +372,21 @@ class CaptureTheFlagBot(BotAI):
         if game_info is not None:
             agent.last_game_info = game_info
 
+        # Categorical cloak/burrow: no spatial decode.
+        if is_categorical and head_name in ("cloak_burrow", "uncloak_unburrow"):
+            conceal = head_name == "cloak_burrow"
+            for unit_tag in selected_tags:
+                unit = self.all_units.find_by_tag(unit_tag)
+                if unit is None or unit.type_id == UnitTypeId.SHIELDBATTERY:
+                    continue
+                self._issue_cloak_burrow(unit, conceal=conceal)
+                self._unit_last_order[int(unit_tag)] = (head_name, None)
+                self.last_action_was_move_by_unit[int(unit_tag)] = False
+            return
+
+        if is_categorical:
+            return  # Unknown categorical head — no-op
+
         is_opponent = perspective_player_id != self.player_id
         if is_opponent:
             _gs = 32
@@ -371,9 +394,6 @@ class CaptureTheFlagBot(BotAI):
             spatial_idx = ((_gs - 1 - row) * _gs) + (_gs - 1 - col)
 
         decode_unit = anchor
-        if "_local" not in head_name:
-            decode_unit = anchor
-
         world_x, world_y = agent.convert_spatial_action_to_world(
             head_name, int(spatial_idx), active_unit=decode_unit
         )
@@ -388,6 +408,14 @@ class CaptureTheFlagBot(BotAI):
                 continue
             if "heal" in head_name:
                 self._issue_heal_at_point(unit, target)
+                self._unit_last_order[int(unit_tag)] = (head_name, target)
+                self.last_action_was_move_by_unit[int(unit_tag)] = False
+            elif "unload" in head_name:
+                self._issue_unload_at_point(unit, target)
+                self._unit_last_order[int(unit_tag)] = (head_name, target)
+                self.last_action_was_move_by_unit[int(unit_tag)] = False
+            elif "load" in head_name:
+                self._issue_load_at_point(unit, target)
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
                 self.last_action_was_move_by_unit[int(unit_tag)] = False
             elif "attack" in head_name:
@@ -441,6 +469,139 @@ class CaptureTheFlagBot(BotAI):
             return
         self.do(unit(ability, heal_target))
 
+    _TRANSPORT_LOAD_ABILITY = {
+        UnitTypeId.MEDIVAC: AbilityId.LOAD_MEDIVAC,
+        UnitTypeId.OVERLORD: AbilityId.LOAD_OVERLORD,
+        UnitTypeId.OVERLORDTRANSPORT: AbilityId.LOAD_OVERLORD,
+        UnitTypeId.WARPPRISM: AbilityId.LOAD_WARPPRISM,
+        UnitTypeId.WARPPRISMPHASING: AbilityId.LOAD_WARPPRISM,
+    }
+    _TRANSPORT_UNLOAD_ABILITY = {
+        UnitTypeId.MEDIVAC: AbilityId.UNLOADALLAT_MEDIVAC,
+        UnitTypeId.OVERLORD: AbilityId.UNLOADALLAT_OVERLORD,
+        UnitTypeId.OVERLORDTRANSPORT: AbilityId.UNLOADALLAT_OVERLORD,
+        UnitTypeId.WARPPRISM: AbilityId.UNLOADALLAT_WARPPRISM,
+        UnitTypeId.WARPPRISMPHASING: AbilityId.UNLOADALL_WARPPRISM,
+    }
+
+    def _resolve_loadable_in_cell(self, transport: Unit, target: Point2) -> Optional[Unit]:
+        """Allied non-transport in the clicked cell (loadable passenger)."""
+        for ally in self._allied_units_for_owner(int(transport.owner_id)):
+            if ally is None or getattr(ally, "tag", None) == transport.tag:
+                continue
+            if getattr(ally, "is_structure", False):
+                continue
+            if int(getattr(ally, "cargo_max", 0) or 0) > 0:
+                continue
+            if self._unit_in_spatial_cell(ally, target):
+                return ally
+        return None
+
+    def _resolve_transport_in_cell(self, passenger: Unit, target: Point2) -> Optional[Unit]:
+        """Allied transport in the clicked cell."""
+        for ally in self._allied_units_for_owner(int(passenger.owner_id)):
+            if ally is None or getattr(ally, "tag", None) == passenger.tag:
+                continue
+            if int(getattr(ally, "cargo_max", 0) or 0) <= 0:
+                continue
+            if self._unit_in_spatial_cell(ally, target):
+                return ally
+        return None
+
+    def _issue_load_at_point(self, unit: Unit, target: Point2) -> None:
+        """Dual-role load: transport LOADs cell ally; non-transport smarts onto cell transport."""
+        cargo_max = int(getattr(unit, "cargo_max", 0) or 0)
+        if cargo_max > 0:
+            ability = self._TRANSPORT_LOAD_ABILITY.get(unit.type_id)
+            if ability is None:
+                return
+            loadable = self._resolve_loadable_in_cell(unit, target)
+            if loadable is None:
+                return
+            self.do(unit(ability, loadable))
+            return
+
+        transport = self._resolve_transport_in_cell(unit, target)
+        if transport is None:
+            return
+        self.do(unit.smart(transport))
+
+    def _issue_unload_at_point(self, unit: Unit, target: Point2) -> None:
+        """Unload all cargo at the decoded world point (transports with cargo only)."""
+        if int(getattr(unit, "cargo_max", 0) or 0) <= 0:
+            return
+        if int(getattr(unit, "cargo_used", 0) or 0) <= 0:
+            return
+        ability = self._TRANSPORT_UNLOAD_ABILITY.get(unit.type_id, AbilityId.UNLOADALLAT)
+        if ability == AbilityId.UNLOADALL_WARPPRISM:
+            self.do(unit(ability))
+        else:
+            self.do(unit(ability, target))
+
+    _BURROW_DOWN_BY_TYPE = {
+        UnitTypeId.ZERGLING: AbilityId.BURROWDOWN_ZERGLING,
+        UnitTypeId.BANELING: AbilityId.BURROWDOWN_BANELING,
+        UnitTypeId.ROACH: AbilityId.BURROWDOWN_ROACH,
+        UnitTypeId.RAVAGER: AbilityId.BURROWDOWN_RAVAGER,
+        UnitTypeId.HYDRALISK: AbilityId.BURROWDOWN_HYDRALISK,
+        UnitTypeId.INFESTOR: AbilityId.BURROWDOWN_INFESTOR,
+        UnitTypeId.SWARMHOSTMP: AbilityId.BURROWDOWN_SWARMHOST,
+        UnitTypeId.ULTRALISK: AbilityId.BURROWDOWN_ULTRALISK,
+        UnitTypeId.QUEEN: AbilityId.BURROWDOWN_QUEEN,
+        UnitTypeId.DRONE: AbilityId.BURROWDOWN_DRONE,
+        UnitTypeId.WIDOWMINE: AbilityId.BURROWDOWN_WIDOWMINE,
+        UnitTypeId.LURKERMP: AbilityId.BURROWDOWN_LURKER,
+    }
+    _BURROW_UP_BY_TYPE = {
+        UnitTypeId.ZERGLINGBURROWED: AbilityId.BURROWUP_ZERGLING,
+        UnitTypeId.BANELINGBURROWED: AbilityId.BURROWUP_BANELING,
+        UnitTypeId.ROACHBURROWED: AbilityId.BURROWUP_ROACH,
+        UnitTypeId.RAVAGERBURROWED: AbilityId.BURROWUP_RAVAGER,
+        UnitTypeId.HYDRALISKBURROWED: AbilityId.BURROWUP_HYDRALISK,
+        UnitTypeId.INFESTORBURROWED: AbilityId.BURROWUP_INFESTOR,
+        UnitTypeId.SWARMHOSTBURROWEDMP: AbilityId.BURROWUP_SWARMHOST,
+        UnitTypeId.ULTRALISKBURROWED: AbilityId.BURROWUP_ULTRALISK,
+        UnitTypeId.QUEENBURROWED: AbilityId.BURROWUP_QUEEN,
+        UnitTypeId.DRONEBURROWED: AbilityId.BURROWUP_DRONE,
+        UnitTypeId.WIDOWMINEBURROWED: AbilityId.BURROWUP_WIDOWMINE,
+        UnitTypeId.LURKERMPBURROWED: AbilityId.BURROWUP_LURKER,
+        UnitTypeId.LURKERBURROWED: AbilityId.BURROWUP_LURKER,
+    }
+
+    def _issue_cloak_burrow(self, unit: Unit, *, conceal: bool) -> None:
+        """Shared categorical head: cloak↔burrow / uncloak↔unburrow by unit type."""
+        tid = unit.type_id
+        if tid == UnitTypeId.DARKTEMPLAR:
+            return  # permanently cloaked
+        if tid == UnitTypeId.GHOST:
+            ability = (
+                AbilityId.BEHAVIOR_CLOAKON_GHOST
+                if conceal
+                else AbilityId.BEHAVIOR_CLOAKOFF_GHOST
+            )
+            self.do(unit(ability))
+            return
+        if tid == UnitTypeId.BANSHEE:
+            ability = (
+                AbilityId.BEHAVIOR_CLOAKON_BANSHEE
+                if conceal
+                else AbilityId.BEHAVIOR_CLOAKOFF_BANSHEE
+            )
+            self.do(unit(ability))
+            return
+        if tid == UnitTypeId.MOTHERSHIP:
+            if conceal:
+                self.do(unit(AbilityId.MOTHERSHIPCLOAK_ORACLECLOAKFIELD))
+            # No reliable cancel id for mothership field in LotV API — no-op on reveal.
+            return
+        if conceal:
+            ability = self._BURROW_DOWN_BY_TYPE.get(tid)
+        else:
+            ability = self._BURROW_UP_BY_TYPE.get(tid)
+        if ability is None:
+            return
+        self.do(unit(ability))
+
     async def apply_action(self, unit_tag: int, action):
         if not self.agent_system or "active_agent" not in self.agent_system.unit_agents:
             return
@@ -467,17 +628,28 @@ class CaptureTheFlagBot(BotAI):
         if game_info is not None:
             agent.last_game_info = game_info
 
-        if arch == "universal":
-            # Universal: action = [head_idx, spatial_idx] on 32×32 grid
+        if arch in ("universal", "squad"):
+            # Universal/squad: action = [head_idx, spatial_idx] on 32×32 grid
             action = np.asarray(action, dtype=np.int64).reshape(-1)
             if action.shape[0] < 2:
                 return
             head_idx = int(action[0])
             spatial_idx = int(action[1])
 
-            action_heads = self.training_conf.get("action_heads", [])
-            if head_idx >= len(action_heads):
-                return  # Padded / unconfigured command slot — no-op
+            action_heads = list(self.training_conf.get("action_heads") or [])
+            categorical_heads = list(self.training_conf.get("categorical_heads") or [])
+            n_spatial = len(action_heads)
+            n_total = n_spatial + len(categorical_heads)
+            if head_idx < 0 or head_idx >= n_total:
+                return
+
+            if head_idx >= n_spatial:
+                head_name = categorical_heads[head_idx - n_spatial]
+                if head_name in ("cloak_burrow", "uncloak_unburrow"):
+                    self._issue_cloak_burrow(unit, conceal=(head_name == "cloak_burrow"))
+                    self._unit_last_order[unit_tag] = (head_name, None)
+                    self.last_action_was_move_by_unit[unit_tag] = False
+                return
 
             head_name = action_heads[head_idx]
 
@@ -494,6 +666,14 @@ class CaptureTheFlagBot(BotAI):
 
             if "heal" in head_name:
                 self._issue_heal_at_point(unit, target)
+                self._unit_last_order[unit_tag] = (head_name, target)
+                self.last_action_was_move_by_unit[unit_tag] = False
+            elif "unload" in head_name:
+                self._issue_unload_at_point(unit, target)
+                self._unit_last_order[unit_tag] = (head_name, target)
+                self.last_action_was_move_by_unit[unit_tag] = False
+            elif "load" in head_name:
+                self._issue_load_at_point(unit, target)
                 self._unit_last_order[unit_tag] = (head_name, target)
                 self.last_action_was_move_by_unit[unit_tag] = False
             elif "attack" in head_name:
@@ -775,6 +955,51 @@ class CaptureTheFlagBot(BotAI):
 
         return 0.0
 
+    @staticmethod
+    def _iter_combat_units_with_passengers(
+        units: Iterable,
+        *,
+        include_filter=None,
+    ) -> List:
+        """Visible non-structure mobiles plus embarked passengers (deduped by tag)."""
+        seen = set()
+        out: List = []
+        for u in units or []:
+            if u is None:
+                continue
+            if include_filter is not None:
+                if not include_filter(u):
+                    continue
+            elif getattr(u, "is_structure", False):
+                continue
+            tag = getattr(u, "tag", None)
+            if tag is not None and tag not in seen:
+                seen.add(tag)
+                out.append(u)
+            for p in getattr(u, "passengers", None) or []:
+                if p is None:
+                    continue
+                if include_filter is not None and not include_filter(p):
+                    continue
+                ptag = getattr(p, "tag", None)
+                if ptag is not None and ptag not in seen:
+                    seen.add(ptag)
+                    out.append(p)
+        return out
+
+    @classmethod
+    def _mobile_combat_count(cls, units: Iterable, *, include_filter=None) -> int:
+        return len(cls._iter_combat_units_with_passengers(units, include_filter=include_filter))
+
+    @classmethod
+    def _mobile_combat_hp_sum(cls, units: Iterable, *, include_filter=None) -> float:
+        total = 0.0
+        for u in cls._iter_combat_units_with_passengers(units, include_filter=include_filter):
+            total += float(getattr(u, "health", 0.0) or 0.0) + float(
+                getattr(u, "shield", 0.0) or 0.0
+            )
+        return total
+
     def calculate_squad_step_reward(
         self,
         squad_tags: List[int],
@@ -870,17 +1095,17 @@ class CaptureTheFlagBot(BotAI):
             r_conf, squad_is_melee=squad_is_melee
         )
 
-        curr_enemy_hp = sum(u.health + u.shield for u in enemy_units if not u.is_structure)
-        if curr_enemy_hp < self.prev_enemy_units_health[p_id]:
-            reward += (self.prev_enemy_units_health[p_id] - curr_enemy_hp) * damage_reward_coeff
-        self.prev_enemy_units_health[p_id] = curr_enemy_hp
-
         # Own attrition ignores timed summons (broodlings, locusts, …): they expire
         # on their own and must not inflate damage_penalty / kill_penalty.
         def _counts_for_own_attrition(u) -> bool:
             return (not u.is_structure) and (not is_temporary_attrition_unit(u))
 
-        curr_own_hp = sum(u.health + u.shield for u in own_units if _counts_for_own_attrition(u))
+        curr_enemy_hp = self._mobile_combat_hp_sum(enemy_units)
+        if curr_enemy_hp < self.prev_enemy_units_health[p_id]:
+            reward += (self.prev_enemy_units_health[p_id] - curr_enemy_hp) * damage_reward_coeff
+        self.prev_enemy_units_health[p_id] = curr_enemy_hp
+
+        curr_own_hp = self._mobile_combat_hp_sum(own_units, include_filter=_counts_for_own_attrition)
         prev_own_hp = self.prev_own_units_health[p_id]
         heal_coeff = float(r_conf.get("heal_reward", 0.0))
         if heal_coeff != 0.0 and curr_own_hp > prev_own_hp:
@@ -890,16 +1115,15 @@ class CaptureTheFlagBot(BotAI):
         self.prev_own_units_health[p_id] = curr_own_hp
 
         # Kill bonuses: flat per-unit reward/penalty on top of continuous HP shaping.
-        # kill_reward (positive) fires when an enemy mobile unit dies.
-        # kill_penalty (negative value in config) fires when an own mobile unit dies
-        # (excluding temporary summons — see ``is_temporary_attrition_unit``).
+        # Counts include embarked passengers so transport deaths credit cargo and
+        # load/unload alone does not look like a kill.
         kill_reward_val = float(r_conf.get("kill_reward", 0.0))
         kill_penalty_val = float(r_conf.get("kill_penalty", 0.0))
-        curr_enemy_count = sum(1 for u in enemy_units if not u.is_structure)
+        curr_enemy_count = self._mobile_combat_count(enemy_units)
         if kill_reward_val != 0.0 and curr_enemy_count < self.prev_enemy_unit_count[p_id]:
             reward += kill_reward_val * (self.prev_enemy_unit_count[p_id] - curr_enemy_count)
         self.prev_enemy_unit_count[p_id] = curr_enemy_count
-        curr_own_count = sum(1 for u in own_units if _counts_for_own_attrition(u))
+        curr_own_count = self._mobile_combat_count(own_units, include_filter=_counts_for_own_attrition)
         if kill_penalty_val != 0.0 and curr_own_count < self.prev_own_unit_count[p_id]:
             reward += kill_penalty_val * (self.prev_own_unit_count[p_id] - curr_own_count)
         self.prev_own_unit_count[p_id] = curr_own_count

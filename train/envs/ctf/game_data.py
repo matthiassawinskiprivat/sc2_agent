@@ -36,7 +36,7 @@ def _load_ids() -> Dict[str, int]:
         "HYDRALISK": 107, "LURKERMP": 502, "LURKERMPBURROWED": 503,
         "INFESTOR": 111, "SWARMHOSTMP": 494, "LOCUSTMP": 489,
         "ULTRALISK": 109, "MUTALISK": 106, "CORRUPTOR": 112, "BROODLORD": 114,
-        "VIPER": 499, "OVERLORD": 108, "OVERSEER": 129, "QUEEN": 126,
+        "VIPER": 499, "OVERLORD": 106, "OVERLORDTRANSPORT": 893, "OVERSEER": 129, "QUEEN": 126,
         "HATCHERY": 86, "LAIR": 100, "HIVE": 101,
         "SPINECRAWLER": 98, "SPORECRAWLER": 99,
     }
@@ -111,6 +111,9 @@ _UNIT_LIST: list[UnitInfo] = [
     UnitInfo(uid("CORRUPTOR"),   "Corruptor",   150, 100, frozenset({"biological", "armored"}),          1.0),
     UnitInfo(uid("BROODLORD"),   "Brood Lord",  300, 250, frozenset({"biological", "armored", "massive"}), 1.75),
     UnitInfo(uid("QUEEN"),       "Queen",       150, 0,  frozenset({"biological", "psionic"}),           0.75),
+    UnitInfo(uid("OVERLORD"),    "Overlord",    100, 0,  frozenset({"biological", "armored"}),            1.0),
+    UnitInfo(uid("OVERLORDTRANSPORT"), "Overlord Transport", 125, 25, frozenset({"biological", "armored"}), 1.0),
+    UnitInfo(uid("WARPPRISM"),   "Warp Prism",  200, 0,  frozenset({"mechanical", "armored", "psionic"}), 0.875),
 ]
 
 UNIT_DATA: Dict[int, UnitInfo] = {u.type_id: u for u in _UNIT_LIST}

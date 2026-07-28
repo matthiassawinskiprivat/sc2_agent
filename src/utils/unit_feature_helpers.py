@@ -297,3 +297,155 @@ def weapon_range_upgrade_deltas(unit: "Unit", upgrades: frozenset) -> tuple[floa
     ):
         return 1.0, 1.0
     return 0.0, 0.0
+
+
+# Morph / burrow states that cannot move (independent of Tunneling Claws).
+_ALWAYS_IMMOBILE_TYPES: FrozenSet = (
+    frozenset(
+        {
+            UnitTypeId.SIEGETANKSIEGED,
+            UnitTypeId.WIDOWMINEBURROWED,
+            UnitTypeId.LURKERMPBURROWED,
+            UnitTypeId.LURKERBURROWED,
+            UnitTypeId.LIBERATORAG,
+            UnitTypeId.OBSERVERSIEGEMODE,
+            UnitTypeId.OVERSEERSIEGEMODE,
+        }
+    )
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
+_TUNNELING_CLAWS_MOBILE_BURROWED: FrozenSet = (
+    frozenset({UnitTypeId.ROACHBURROWED, UnitTypeId.INFESTORBURROWED})
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
+_SWARM_HOST_BURROWED: FrozenSet = (
+    frozenset({UnitTypeId.SWARMHOSTBURROWEDMP})
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
+# Personal cloak activation energy (Ghost / Banshee).
+_CLOAK_ACTIVATION_ENERGY = 25.0
+# Mothership cloak-field energy gate (approximation).
+_MOTHERSHIP_CLOAK_ENERGY = 50.0
+
+
+def unit_is_immobile(unit: "Unit", upgrades: frozenset | None = None) -> bool:
+    """True when the unit cannot move in its current morph/burrow state."""
+    if not _SC2_AVAILABLE or unit is None:
+        return False
+    upgrades = upgrades or frozenset()
+    tid = getattr(unit, "type_id", None)
+    if tid in _ALWAYS_IMMOBILE_TYPES:
+        return True
+    if tid in _SWARM_HOST_BURROWED:
+        return False
+    is_burrowed = bool(getattr(unit, "is_burrowed", False)) or (
+        tid is not None and "BURROWED" in str(getattr(tid, "name", "")).upper()
+    )
+    if not is_burrowed:
+        return False
+    if tid in _TUNNELING_CLAWS_MOBILE_BURROWED and UpgradeId.TUNNELINGCLAWS in upgrades:
+        return False
+    # Burrowed Zerg (and Widow Mine handled above): immobile without claws.
+    return True
+
+
+def unit_can_cloak(unit: "Unit") -> bool:
+    """True when the unit can activate personal/field cloak this step.
+
+    Already-cloaked units return False. Energy-gated for Ghost/Banshee/Mothership.
+    """
+    if not _SC2_AVAILABLE or unit is None:
+        return False
+    if bool(getattr(unit, "is_cloaked", False)):
+        return False
+    tid = getattr(unit, "type_id", None)
+    energy = float(getattr(unit, "energy", 0.0) or 0.0)
+    if tid in {UnitTypeId.GHOST, UnitTypeId.BANSHEE}:
+        return energy >= _CLOAK_ACTIVATION_ENERGY
+    if tid == UnitTypeId.MOTHERSHIP:
+        return energy >= _MOTHERSHIP_CLOAK_ENERGY
+    return False
+
+
+def unit_can_repair(unit: "Unit") -> bool:
+    """True for SCVs (mechanical repair); False for all other types."""
+    if not _SC2_AVAILABLE or unit is None:
+        return False
+    return getattr(unit, "type_id", None) == UnitTypeId.SCV
+
+
+def unit_can_heal(unit: "Unit") -> bool:
+    """True when a non-SCV healer can cast heal this step (energy-gated).
+
+    Medivac / Queen / Shield Battery. SCV uses ``unit_can_repair`` instead.
+    """
+    if not _SC2_AVAILABLE or unit is None:
+        return False
+    tid = getattr(unit, "type_id", None)
+    energy = float(getattr(unit, "energy", 0.0) or 0.0)
+    if tid == UnitTypeId.MEDIVAC:
+        return energy > 5.0
+    if tid == UnitTypeId.QUEEN:
+        return energy >= 50.0
+    if tid == UnitTypeId.SHIELDBATTERY:
+        return energy > 3.0
+    return False
+
+
+_CARGO_SIZE_NORM_DIVISOR = 8.0
+
+
+def unit_is_transport(unit: "Unit") -> bool:
+    if unit is None:
+        return False
+    return int(getattr(unit, "cargo_max", 0) or 0) > 0
+
+
+def unit_cargo_used_norm(unit: "Unit") -> float:
+    cargo_max = int(getattr(unit, "cargo_max", 0) or 0)
+    if cargo_max <= 0:
+        return 0.0
+    used = int(getattr(unit, "cargo_used", 0) or 0)
+    return min(float(used) / float(cargo_max), 1.0)
+
+
+def unit_cargo_free_norm(unit: "Unit") -> float:
+    cargo_max = int(getattr(unit, "cargo_max", 0) or 0)
+    if cargo_max <= 0:
+        return 0.0
+    used = int(getattr(unit, "cargo_used", 0) or 0)
+    return max(float(cargo_max - used) / float(cargo_max), 0.0)
+
+
+def unit_cargo_size_norm(unit: "Unit") -> float:
+    """Embark cost for non-transports; 0 for transports / unloadable."""
+    if unit is None or unit_is_transport(unit):
+        return 0.0
+    size = float(getattr(unit, "cargo_size", 0) or 0)
+    if size <= 0:
+        return 0.0
+    return min(size / _CARGO_SIZE_NORM_DIVISOR, 1.0)
+
+
+def unit_can_load(unit: "Unit") -> bool:
+    """Transport with free space, or non-transport with positive cargo_size."""
+    if unit is None:
+        return False
+    cargo_max = int(getattr(unit, "cargo_max", 0) or 0)
+    if cargo_max > 0:
+        return int(getattr(unit, "cargo_used", 0) or 0) < cargo_max
+    return float(getattr(unit, "cargo_size", 0) or 0) > 0
+
+
+def unit_can_unload(unit: "Unit") -> bool:
+    if unit is None:
+        return False
+    return int(getattr(unit, "cargo_max", 0) or 0) > 0 and int(
+        getattr(unit, "cargo_used", 0) or 0
+    ) > 0

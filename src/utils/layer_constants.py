@@ -218,6 +218,13 @@ class LayerConstants:
         ENEMY_A_DPS_MASSIVE: 36,
         ALLIED_SPLASH: 37,
         ENEMY_SPLASH: 38,
+        # Heal / cloak / transport (CTF curriculum tactical channels)
+        ALLIED_HPS_FIELD: 39,
+        ENEMY_HPS_FIELD: 40,
+        ALLIED_UNIT_CLOAK: 41,
+        ENEMY_UNIT_CLOAK: 42,
+        TRANSPORT_SLOTS: 43,
+        PASSENGER_DENSITY: 44,
     }
 
     @classmethod
@@ -226,4 +233,4 @@ class LayerConstants:
 
     @classmethod
     def get_num_tactical_layers(cls) -> int:
-        return 39
+        return 45

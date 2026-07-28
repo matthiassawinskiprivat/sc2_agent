@@ -1374,6 +1374,20 @@
     "detect": 0.0,
     "weapons": []
   },
+  "OVERLORDTRANSPORT": {
+    "id": 893,
+    "name": "OVERLORDTRANSPORT",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 125,
+      "vespene": 25,
+      "supply": 0.0
+    },
+    "radius": 0.0,
+    "sight": 9.0,
+    "detect": 0.0,
+    "weapons": []
+  },
   "HYDRALISK": {
     "id": 107,
     "name": "HYDRALISK",

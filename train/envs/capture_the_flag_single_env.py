@@ -588,6 +588,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             await self.bot.client.debug_set_unit_value(tags, 2, 10.0)  # HP
             await self.bot.client.debug_set_unit_value(tags, 3, 10.0)  # Shield
 
+        await self._apply_cloak_env_mode_upgrades()
+        await self._apply_drop_env_mode_upgrades()
+
         await self.bot.client.step()
         await self._refresh_bot_state()
 
@@ -657,9 +660,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 pylon_pos = get_valid_pos(spawn_center)
                 all_cmds.append([UnitTypeId.PYLON, 1, pylon_pos, player_id])
 
-            # Zerg creep tumors (not squad-selectable): one on the pool region;
-            # attackers also get one on the arena defender (_d) position.
-            if str(pool.get("race", "")).lower() == "zerg":
+            # Heal curriculum: Zerg creep tumors (not squad-selectable).
+            if self._has_env_mode("heal") and str(pool.get("race", "")).lower() == "zerg":
                 tumor_pos = get_offset_pos(spawn_center, 0, 1)
                 all_cmds.append([UnitTypeId.CREEPTUMOR, 1, tumor_pos, player_id])
                 if command == "attack" and label in label_to_defender_pos:
@@ -667,10 +669,69 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     d_tumor = get_offset_pos(d_center, 0, 1)
                     all_cmds.append([UnitTypeId.CREEPTUMOR, 1, d_tumor, player_id])
 
+            # Cloak curriculum: free detector per squad (not from mineral budget).
+            if self._has_env_mode("cloak"):
+                detector = self._cloak_mode_detector_type(pool.get("race", ""))
+                if detector is not None:
+                    det_pos = get_offset_pos(spawn_center, max(len(unit_names), 1), max(len(unit_names), 1) + 1)
+                    all_cmds.append([detector, 1, det_pos, player_id])
+
         if all_cmds:
             await self.bot.client.debug_create_unit(all_cmds)
 
         return pool_spawn_centers, label_to_defender_pos
+
+    def _parse_env_modes(self) -> frozenset:
+        """Comma-separated env_mode string → frozenset of lowercase mode names."""
+        raw = (
+            self.training_conf.get("env_mode")
+            or self.training_conf.get("env", {}).get("env_mode")
+            or ""
+        )
+        return frozenset(part.strip().lower() for part in str(raw).split(",") if part.strip())
+
+    def _has_env_mode(self, mode: str) -> bool:
+        return str(mode).lower() in self._parse_env_modes()
+
+    def _is_cloak_env_mode(self) -> bool:
+        """Backward-compatible alias for cloak membership in multi-mode env_mode."""
+        return self._has_env_mode("cloak")
+
+    @staticmethod
+    def _cloak_mode_detector_type(race: str):
+        from sc2.ids.unit_typeid import UnitTypeId
+
+        r = str(race).lower()
+        if r == "protoss":
+            return UnitTypeId.OBSERVER
+        if r == "terran":
+            return UnitTypeId.RAVEN
+        if r == "zerg":
+            return UnitTypeId.OVERSEER
+        return None
+
+    async def _apply_cloak_env_mode_upgrades(self) -> None:
+        """Unlock burrow/claws/cloak/overlord-speed via repeated debug_upgrade tiers."""
+        if not self._has_env_mode("cloak") or self.bot is None:
+            return
+        # debug_upgrade unlocks the next research tier each call; enough iterations
+        # cover Burrow, Tunneling Claws, Personal/Banshee Cloak, Overlord Speed.
+        for _ in range(20):
+            await self.bot.client.debug_upgrade()
+            await self.bot.client.step()
+            await self._refresh_bot_state()
+
+    async def _apply_drop_env_mode_upgrades(self) -> None:
+        """Ensure OVERLORDSPEED for drop curriculum (idempotent if cloak already upgraded)."""
+        if not self._has_env_mode("drop") or self.bot is None:
+            return
+        # Cloak mode already runs the full debug_upgrade ladder (includes Overlord Speed).
+        if self._has_env_mode("cloak"):
+            return
+        for _ in range(20):
+            await self.bot.client.debug_upgrade()
+            await self.bot.client.step()
+            await self._refresh_bot_state()
 
     async def _spawn_legacy(self, get_valid_pos, get_offset_pos, to_id):
         """Fallback: random pylon positions when unit_pools_config is absent."""

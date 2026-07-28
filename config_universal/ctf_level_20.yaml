@@ -15,6 +15,7 @@ env:
   every_k_episodes: 100
   alternate_trainee_race: true
   include_race: true
+  env_mode: heal
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack

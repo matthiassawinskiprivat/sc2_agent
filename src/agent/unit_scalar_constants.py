@@ -59,6 +59,22 @@ class UnitScalarConstants:
     IS_FRIENDLY_FIRE = "is_friendly_fire"
     IS_TEMPORARY     = "is_temporary"
 
+    # === Group I: Cloak / immobility (append-only) ===
+    IS_IMMOBILE = "is_immobile"
+    CAN_CLOAK   = "can_cloak"
+
+    # === Group J: Heal / repair readiness (append-only) ===
+    CAN_HEAL   = "can_heal"
+    CAN_REPAIR = "can_repair"
+
+    # === Group K: Transport / cargo (append-only) ===
+    IS_TRANSPORT     = "is_transport"
+    CARGO_USED_NORM  = "cargo_used_norm"
+    CARGO_FREE_NORM  = "cargo_free_norm"
+    CARGO_SIZE_NORM  = "cargo_size_norm"
+    CAN_LOAD         = "can_load"
+    CAN_UNLOAD       = "can_unload"
+
     # --- INDEX MAPPING — never reorder; append new entries at the end ---
     FEATURES = {
         # Group A
@@ -105,6 +121,19 @@ class UnitScalarConstants:
         ONETIME_UNIT:     33,
         IS_FRIENDLY_FIRE: 34,
         IS_TEMPORARY:     35,
+        # Group I
+        IS_IMMOBILE: 36,
+        CAN_CLOAK:   37,
+        # Group J
+        CAN_HEAL:   38,
+        CAN_REPAIR: 39,
+        # Group K
+        IS_TRANSPORT:    40,
+        CARGO_USED_NORM: 41,
+        CARGO_FREE_NORM: 42,
+        CARGO_SIZE_NORM: 43,
+        CAN_LOAD:        44,
+        CAN_UNLOAD:      45,
     }
 
     @classmethod

@@ -19,6 +19,16 @@ from src.agent.unit_scalar_constants import UnitScalarConstants as USC
 from src.utils.perspective_transformer import PerspectiveTransformer
 from src.utils.unit_feature_helpers import (
     is_force_melee_unit,
+    unit_can_cloak,
+    unit_can_heal,
+    unit_can_load,
+    unit_can_repair,
+    unit_can_unload,
+    unit_cargo_free_norm,
+    unit_cargo_size_norm,
+    unit_cargo_used_norm,
+    unit_is_immobile,
+    unit_is_transport,
     weapon_range_upgrade_deltas,
 )
 from src.utils.splash_data import (
@@ -372,6 +382,22 @@ class SquadObservationBuilder:
         is_cloaked  = bool(getattr(unit, "is_cloaked", False))
         catalog[_F[USC.IS_CONCEALED]] = float(is_burrowed or is_cloaked)
         catalog[_F[USC.IS_DETECTED]]  = float(bool(getattr(unit, "is_detected", False)))
+
+        # --- Group I: Immobility / cloak readiness ---
+        catalog[_F[USC.IS_IMMOBILE]] = float(unit_is_immobile(unit, upgrades))
+        catalog[_F[USC.CAN_CLOAK]] = float(unit_can_cloak(unit))
+
+        # --- Group J: Heal / repair readiness ---
+        catalog[_F[USC.CAN_HEAL]] = float(unit_can_heal(unit))
+        catalog[_F[USC.CAN_REPAIR]] = float(unit_can_repair(unit))
+
+        # --- Group K: Transport / cargo ---
+        catalog[_F[USC.IS_TRANSPORT]] = float(unit_is_transport(unit))
+        catalog[_F[USC.CARGO_USED_NORM]] = float(unit_cargo_used_norm(unit))
+        catalog[_F[USC.CARGO_FREE_NORM]] = float(unit_cargo_free_norm(unit))
+        catalog[_F[USC.CARGO_SIZE_NORM]] = float(unit_cargo_size_norm(unit))
+        catalog[_F[USC.CAN_LOAD]] = float(unit_can_load(unit))
+        catalog[_F[USC.CAN_UNLOAD]] = float(unit_can_unload(unit))
 
         # --- Group G: Role ---
         role = str(pool_command).lower()

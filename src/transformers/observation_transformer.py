@@ -853,6 +853,7 @@ class ObservationTransformer:
                 selected = [active_unit]
             tactical_raw_obs["selected_units"] = selected
             self._draw_command_info(tactical_raw_obs, layers)
+            self._draw_transport_info(raw_obs, layers)
 
             self._collect_liberator_positions(
                 allied_units, allied_structures, enemy_units, enemy_structures
@@ -870,6 +871,7 @@ class ObservationTransformer:
                 LayerConstants.ALLIED_A_DPS_LIGHT, LayerConstants.ENEMY_A_DPS_LIGHT,
                 LayerConstants.ALLIED_A_DPS_ARMOR, LayerConstants.ENEMY_A_DPS_ARMOR,
                 LayerConstants.ALLIED_A_DPS_MASSIVE, LayerConstants.ENEMY_A_DPS_MASSIVE,
+                LayerConstants.ALLIED_HPS_FIELD, LayerConstants.ENEMY_HPS_FIELD,
             ]:
                 dps_layer_idx = LayerConstants.TACTICAL_LAYERS.get(dps_layer_name)
                 if dps_layer_idx is not None:
