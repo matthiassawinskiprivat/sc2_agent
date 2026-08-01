@@ -51,6 +51,11 @@ class SquadNetwork(BaseFeaturesExtractor):
             if "race" in observation_space.spaces
             else 0
         )
+        self.upgrades_dim = (
+            int(observation_space.spaces["upgrades"].shape[0])
+            if "upgrades" in observation_space.spaces
+            else 0
+        )
         self.max_units = int(observation_space.spaces["unit_mask"].shape[0])
         self.unit_feat_dim = int(observation_space.spaces["unit_scalars"].shape[1])
         n_global = int(map_space.shape[0])
@@ -83,10 +88,13 @@ class SquadNetwork(BaseFeaturesExtractor):
         self.pointer_attention = PointerAttention(
             query_dim=features_dim, embed_dim=64, use_sigmoid=False
         )
-        # Query: global GAP + tactical GAP + command (+ optional race trailing).
+        # Query: global GAP + tactical GAP + command (+ optional race/upgrades trailing).
         # (Entity keys stay on the pointer path only — do not GAP-concat into keys.)
         self.query_linear = nn.Sequential(
-            nn.Linear(64 + 64 + self.command_dim + self.race_dim, features_dim),
+            nn.Linear(
+                64 + 64 + self.command_dim + self.race_dim + self.upgrades_dim,
+                features_dim,
+            ),
             nn.ReLU(),
         )
         self.reasoning = ReasoningCore(input_dim=features_dim, hidden_dim=features_dim)
@@ -120,6 +128,8 @@ class SquadNetwork(BaseFeaturesExtractor):
         parts = [gap_g, gap_t, command_obs]
         if self.race_dim > 0:
             parts.append(observations["race"])
+        if self.upgrades_dim > 0:
+            parts.append(observations["upgrades"])
         combined = torch.cat(parts, dim=1)
         query = self.query_linear(combined)
         thought = self.reasoning(

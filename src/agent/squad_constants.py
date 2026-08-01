@@ -12,6 +12,8 @@ SQUAD_COMMAND_DIM = 10
 # Own + enemy race one-hots (terran/zerg/protoss each); gated by env.include_race.
 SQUAD_RACE_DIM = 6
 SQUAD_RACE_ORDER = ("terran", "zerg", "protoss")
+# Own + enemy armor/shield upgrade cache (ground, air, shields each); gated by include_upgrades.
+SQUAD_UPGRADES_DIM = 6
 SQUAD_SPATIAL_RESOLUTION = 32
 SQUAD_SPATIAL_CELLS = SQUAD_SPATIAL_RESOLUTION * SQUAD_SPATIAL_RESOLUTION
 SQUAD_POINTER_DIM = MAX_SQUAD_UNITS
@@ -42,6 +44,47 @@ def include_race_enabled(training_conf: dict) -> bool:
     if "include_race" in training_conf:
         return bool(training_conf["include_race"])
     return bool(env_conf.get("include_race", False))
+
+
+def include_upgrades_enabled(training_conf: dict) -> bool:
+    """Whether squad obs include the 6-dim own/enemy armor+shield upgrade cache."""
+    env_conf = training_conf.get("env", {}) if isinstance(training_conf.get("env"), dict) else {}
+    if "include_upgrades" in training_conf:
+        return bool(training_conf["include_upgrades"])
+    return bool(env_conf.get("include_upgrades", False))
+
+
+def encode_upgrades_vector(
+    own_ground: float,
+    own_air: float,
+    own_shields: float,
+    enemy_ground: float,
+    enemy_air: float,
+    enemy_shields: float,
+) -> np.ndarray:
+    """Pack normalized armor/shield levels (already in [0, 1])."""
+    return np.asarray(
+        [own_ground, own_air, own_shields, enemy_ground, enemy_air, enemy_shields],
+        dtype=np.float32,
+    )
+
+
+def update_armor_shield_cache(
+    cache: np.ndarray,
+    *,
+    is_enemy: bool,
+    is_flying: bool,
+    armor_upgrade_level: int,
+    shield_upgrade_level: int,
+) -> None:
+    """In-place max-update of a length-6 upgrades cache from one sighted unit."""
+    base = 3 if is_enemy else 0
+    armor_slot = base + (1 if is_flying else 0)
+    shield_slot = base + 2
+    armor_norm = min(max(int(armor_upgrade_level), 0), 3) / 3.0
+    shield_norm = min(max(int(shield_upgrade_level), 0), 3) / 3.0
+    cache[armor_slot] = max(float(cache[armor_slot]), armor_norm)
+    cache[shield_slot] = max(float(cache[shield_slot]), shield_norm)
 
 
 def squad_action_space_nvec():

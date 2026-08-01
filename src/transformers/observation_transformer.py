@@ -2739,9 +2739,12 @@ class ObservationTransformer:
             if u_name:
                 db = self._get_unit_data_from_json(u_name)
                 if db:
+                    atk_lvl = int(getattr(unit, "attack_upgrade_level", 0) or 0)
                     for w in db.get('weapons', []):
                         period = w.get('period') or 1.0
+                        upgrade_bonus = float(w.get('upgrade_bonus', 0) or 0)
                         dps = (w['damage'] * w['attacks']) / period
+                        dps += (upgrade_bonus * atk_lvl) / period
                         weapon_stats.append({
                             'base': dps,
                             'range': float(w['range']),

@@ -12,8 +12,11 @@ from src.agent.squad_constants import (
     MAX_SQUAD_UNITS,
     SQUAD_COMMAND_DIM,
     SQUAD_RACE_DIM,
+    SQUAD_UPGRADES_DIM,
     encode_race_vector,
     include_race_enabled,
+    include_upgrades_enabled,
+    update_armor_shield_cache,
 )
 from src.agent.unit_scalar_constants import UnitScalarConstants as USC
 from src.utils.perspective_transformer import PerspectiveTransformer
@@ -81,6 +84,11 @@ class SquadObservationBuilder:
             },
         )
         self._include_race = include_race_enabled(training_conf)
+        self._include_upgrades = include_upgrades_enabled(training_conf)
+        self._upgrade_caches: Dict[int, np.ndarray] = {
+            1: np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
+            2: np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
+        }
         self._global_obs_cache: Dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
         # Static-per-type feature cache: cache_key → full catalog vector (USC.get_dim(),).
         # Active subset is gathered afterward so cache stays valid across configs.
@@ -90,6 +98,13 @@ class SquadObservationBuilder:
         """Drop cached global map/command tensors (call once per env physics step)."""
         self._global_obs_cache.clear()
         self._static_feat_cache.clear()
+
+    def reset_upgrade_cache(self) -> None:
+        """Clear armor/shield sighting cache (call on episode reset)."""
+        self._upgrade_caches = {
+            1: np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
+            2: np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
+        }
 
     def zero_observation(self) -> Dict[str, np.ndarray]:
         n_g = len(self.active_layers) or 1
@@ -105,6 +120,8 @@ class SquadObservationBuilder:
         }
         if self._include_race:
             obs["race"] = np.zeros(SQUAD_RACE_DIM, dtype=np.float32)
+        if self._include_upgrades:
+            obs["upgrades"] = np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32)
         return obs
 
     @staticmethod
@@ -236,9 +253,41 @@ class SquadObservationBuilder:
         }
         if self._include_race:
             obs["race"] = encode_race_vector(own_race, enemy_race)
+        if self._include_upgrades:
+            self._update_upgrade_cache_from_units(bot, perspective_player_id)
+            cache = self._upgrade_caches.get(
+                int(perspective_player_id),
+                np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
+            )
+            obs["upgrades"] = np.asarray(cache, dtype=np.float32).copy()
         if perspective_player_id == 2:
             obs = self._flip_obs(obs)
         return obs
+
+    def _update_upgrade_cache_from_units(self, bot, perspective_player_id: int) -> None:
+        """Max-update armor/shield cache from visible mobiles (perspective-relative)."""
+        own_id = int(perspective_player_id)
+        enemy_id = 2 if own_id == 1 else 1
+        cache = self._upgrade_caches.setdefault(
+            own_id, np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32)
+        )
+        for unit in list(getattr(bot, "all_units", []) or []):
+            if unit is None or getattr(unit, "is_structure", False):
+                continue
+            owner = int(getattr(unit, "owner_id", 0) or 0)
+            if owner == own_id:
+                is_enemy = False
+            elif owner == enemy_id:
+                is_enemy = True
+            else:
+                continue
+            update_armor_shield_cache(
+                cache,
+                is_enemy=is_enemy,
+                is_flying=bool(getattr(unit, "is_flying", False)),
+                armor_upgrade_level=int(getattr(unit, "armor_upgrade_level", 0) or 0),
+                shield_upgrade_level=int(getattr(unit, "shield_upgrade_level", 0) or 0),
+            )
 
     # ------------------------------------------------------------------
     # Static (per-type) feature helpers

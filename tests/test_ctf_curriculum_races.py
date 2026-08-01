@@ -269,6 +269,56 @@ def test_ctf_levels_15_17_mirror_12_14_matchups_and_budgets():
                 assert pool["unit_pool"] == mirror_pool["unit_pool"], level
 
 
+def test_ctf_pipeline_inserts_mirror_matchups_after_level_17():
+    cm = ConfigManager(str(_CONFIG_DIR))
+    idx_17 = cm.levels.index("ctf_level_17")
+    idx_t = cm.levels.index("ctf_level_17_mirror_terran")
+    idx_z = cm.levels.index("ctf_level_17_mirror_zerg")
+    idx_p = cm.levels.index("ctf_level_17_mirror_protoss")
+    idx_18 = cm.levels.index("ctf_level_18")
+    assert idx_17 < idx_t < idx_z < idx_p < idx_18
+
+
+def test_ctf_level_17_mirror_matchups_reuse_level_17_config_and_prior_pools():
+    """Mirror TvT / ZvZ / PvP after 17: level-17 budgets/rewards, pools from 14–16."""
+    source_pools = {
+        "terran": next(
+            p["unit_pool"]
+            for p in _load_unit_pools("ctf_level_14")
+            if p["race"] == "terran"
+        ),
+        "zerg": next(
+            p["unit_pool"]
+            for p in _load_unit_pools("ctf_level_16")
+            if p["race"] == "zerg"
+        ),
+        "protoss": next(
+            p["unit_pool"]
+            for p in _load_unit_pools("ctf_level_15")
+            if p["race"] == "protoss"
+        ),
+    }
+    env_17 = _load_env("ctf_level_17")
+    for race in ("terran", "zerg", "protoss"):
+        level = f"ctf_level_17_mirror_{race}"
+        env = _load_env(level)
+        assert env["rewards"] == env_17["rewards"], level
+        assert env["squad_selection"] == env_17["squad_selection"], level
+        assert env.get("alternate_trainee_race") is True, level
+        assert env.get("include_race") is True, level
+        pools = env["unit_pools"]
+        assert len(pools) == 4, level
+        for pool in pools:
+            assert pool["race"] == race, level
+            assert pool["unit_pool"] == source_pools[race], level
+        a_attack = next(p for p in pools if p["region"] == "A" and p["high_level_command"] == "attack")
+        a_defend = next(p for p in pools if p["region"] == "A" and p["high_level_command"] == "defend")
+        assert a_attack["mineral_budget"] == 2000, level
+        assert a_attack["vespene_budget"] == 2000, level
+        assert a_defend["mineral_budget"] == 1500, level
+        assert a_defend["vespene_budget"] == 1500, level
+
+
 def test_ctf_level_15_adds_splash_layers_and_scalars():
     cm = ConfigManager(str(_CONFIG_DIR))
     prior_layers = set(cm.get_cumulative_active_layers("ctf_level_14"))

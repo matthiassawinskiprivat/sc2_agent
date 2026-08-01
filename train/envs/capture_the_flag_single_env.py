@@ -26,6 +26,19 @@ from train.envs.ctf.pool_assignment import (
     player_races_for_episode,
     pool_player_id,
 )
+from src.utils.combat_upgrades import (
+    buildings_needed_for_tracks,
+    sample_pool_upgrades,
+    upgrade_ids_for_tiers,
+)
+from src.agent.squad_constants import (
+    MAX_SQUAD_UNITS,
+    SQUAD_COMMAND_DIM,
+    SQUAD_RACE_DIM,
+    SQUAD_UPGRADES_DIM,
+    include_upgrades_enabled,
+    squad_action_space_nvec,
+)
 import json
 import os
 
@@ -139,6 +152,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 MAX_SQUAD_UNITS,
                 SQUAD_COMMAND_DIM,
                 SQUAD_RACE_DIM,
+                SQUAD_UPGRADES_DIM,
+                include_upgrades_enabled,
                 squad_action_space_nvec,
             )
             from src.agent.unit_scalar_constants import UnitScalarConstants
@@ -174,11 +189,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 obs_dict["race"] = spaces.Box(
                     low=0.0, high=1.0, shape=(SQUAD_RACE_DIM,), dtype=np.float32
                 )
+            if include_upgrades_enabled(self.training_conf):
+                obs_dict["upgrades"] = spaces.Box(
+                    low=0.0, high=1.0, shape=(SQUAD_UPGRADES_DIM,), dtype=np.float32
+                )
             self.observation_space = spaces.Dict(obs_dict)
             self.action_space = spaces.MultiDiscrete(squad_action_space_nvec())
             self._squad_obs_builder = None
             self._squad_anchor_tag_by_pool: Dict[int, int] = {}
             self.current_trainee_pool_index = 0
+            self._upgrade_cache = np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32)
+            self._pool_upgrade_tiers: Dict[int, Dict[str, int]] = {}
         else:
             self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(num_layers, 128, 128), dtype=np.float32)
             spatial_size = len(self.action_heads) * self.grid_size * self.grid_size
@@ -590,6 +611,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         await self._apply_cloak_env_mode_upgrades()
         await self._apply_drop_env_mode_upgrades()
+        await self._apply_upgrades_env_mode()
 
         await self.bot.client.step()
         await self._refresh_bot_state()
@@ -637,8 +659,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         all_cmds: List = []
         # (player_id, command, spawn_center, arena_label)
         pool_spawn_centers: List[Tuple] = []
+        self._pool_upgrade_tiers = {}
+        # player_id → merged track tiers (max across that player's pools)
+        self._player_upgrade_tiers: Dict[int, Dict[str, int]] = {}
 
-        for pool in self.unit_pools_config:
+        for pool_idx, pool in enumerate(self.unit_pools_config):
             label = pool["region"]
             player_id = self._pool_player_id(pool)
             pair_idx = label_to_pair[label]
@@ -650,7 +675,23 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             spawn_center = Point2((center.x, center.y))
             pool_spawn_centers.append((player_id, command, spawn_center, label))
 
-            unit_names = self._calculate_spawns_for_pool(pool)
+            spawn_pool = pool
+            if self._has_env_mode("upgrades"):
+                chosen, rem_m, rem_v = sample_pool_upgrades(
+                    pool.get("race", ""),
+                    int(pool.get("mineral_budget", 0)),
+                    int(pool.get("vespene_budget", 0)),
+                )
+                self._pool_upgrade_tiers[pool_idx] = chosen
+                merged = dict(self._player_upgrade_tiers.get(player_id, {}))
+                for k, tier in chosen.items():
+                    merged[k] = max(int(merged.get(k, 0)), int(tier))
+                self._player_upgrade_tiers[player_id] = merged
+                spawn_pool = dict(pool)
+                spawn_pool["mineral_budget"] = rem_m
+                spawn_pool["vespene_budget"] = rem_v
+
+            unit_names = self._calculate_spawns_for_pool(spawn_pool)
             for i, name in enumerate(unit_names):
                 pos = get_offset_pos(spawn_center, i, len(unit_names))
                 all_cmds.append([to_id(name), 1, pos, player_id])
@@ -714,6 +755,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """Unlock burrow/claws/cloak/overlord-speed via repeated debug_upgrade tiers."""
         if not self._has_env_mode("cloak") or self.bot is None:
             return
+        # Upgrades curriculum uses selective combat research; blanket debug_upgrade
+        # would also pull in spell tech and invalidate budgeted combat tiers.
+        if self._has_env_mode("upgrades"):
+            return
         # debug_upgrade unlocks the next research tier each call; enough iterations
         # cover Burrow, Tunneling Claws, Personal/Banshee Cloak, Overlord Speed.
         for _ in range(20):
@@ -725,13 +770,163 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """Ensure OVERLORDSPEED for drop curriculum (idempotent if cloak already upgraded)."""
         if not self._has_env_mode("drop") or self.bot is None:
             return
-        # Cloak mode already runs the full debug_upgrade ladder (includes Overlord Speed).
-        if self._has_env_mode("cloak"):
+        # Cloak mode already runs the full debug_upgrade ladder (includes Overlord Speed),
+        # except when upgrades mode disables that ladder — then research OVERLORDSPEED.
+        if self._has_env_mode("cloak") and not self._has_env_mode("upgrades"):
+            return
+        if self._has_env_mode("upgrades"):
+            await self._research_overlord_speed()
             return
         for _ in range(20):
             await self.bot.client.debug_upgrade()
             await self.bot.client.step()
             await self._refresh_bot_state()
+
+    async def _research_overlord_speed(self) -> None:
+        """Grant Pneumatized Carapace without the full debug_upgrade ladder."""
+        from sc2.ids.upgrade_id import UpgradeId
+        from sc2.ids.unit_typeid import UnitTypeId
+        from sc2.position import Point2
+
+        if self.bot is None:
+            return
+        # Spawn a hatchery-adjacent spire path is heavy; use debug_upgrade once is too
+        # broad. Prefer researching via a spawned Hatchery is not enough for overlord
+        # speed (needs Lair). Use tech_tree cheat + hatchery/lair + research.
+        try:
+            await self.bot.client.debug_tech_tree()
+            await self.bot.client.debug_fast_build()
+            await self.bot.client.debug_all_resources()
+        except Exception as exc:
+            logger.warning(f"OVERLORDSPEED prep cheats failed: {exc}")
+            return
+        # Place a Lair for each zerg player that has units (research owner).
+        zerg_players = set()
+        for pool in self.unit_pools_config or []:
+            if str(pool.get("race", "")).lower() == "zerg":
+                zerg_players.add(self._pool_player_id(pool))
+        cmds = []
+        for pid in zerg_players:
+            pos = Point2((5.0 + pid, 5.0))
+            cmds.append([UnitTypeId.LAIR, 1, pos, pid])
+        if cmds:
+            await self.bot.client.debug_create_unit(cmds)
+            await self.bot.client.step()
+            await self._refresh_bot_state()
+        # Research for bot player; opponent lair: issue research via do() if possible.
+        upg = UpgradeId.OVERLORDSPEED
+        if self.bot.player_id in zerg_players:
+            try:
+                self.bot.research(upg)
+            except Exception as exc:
+                logger.warning(f"OVERLORDSPEED research (P1) failed: {exc}")
+        for _ in range(30):
+            await self.bot.client.step()
+            await self._refresh_bot_state()
+            if upg in getattr(self.bot.state, "upgrades", set()):
+                break
+        # Cleanup research structures
+        lairs = self.bot.all_units(UnitTypeId.LAIR)
+        if lairs.exists:
+            await self.bot.client.debug_kill_unit(lairs.tags)
+            await self.bot.client.step()
+            await self._refresh_bot_state()
+
+    async def _apply_upgrades_env_mode(self) -> None:
+        """Research sampled combat weapon/armor/shield upgrades per player."""
+        if not self._has_env_mode("upgrades") or self.bot is None:
+            return
+        from sc2.position import Point2
+
+        player_tiers = getattr(self, "_player_upgrade_tiers", {}) or {}
+        if not player_tiers:
+            return
+        try:
+            await self.bot.client.debug_tech_tree()
+            await self.bot.client.debug_fast_build()
+            await self.bot.client.debug_all_resources()
+        except Exception as exc:
+            logger.warning(f"upgrades mode prep cheats failed: {exc}")
+
+        research_tags: List[int] = []
+        for player_id, chosen in player_tiers.items():
+            ids = upgrade_ids_for_tiers(chosen)
+            if not ids:
+                continue
+            bnames = buildings_needed_for_tracks(chosen)
+            cmds = []
+            base = Point2((8.0 + float(player_id) * 3.0, 8.0))
+            for i, bname in enumerate(bnames):
+                tid = getattr(UnitTypeId, bname, None)
+                if tid is None:
+                    continue
+                cmds.append([tid, 1, Point2((base.x + i * 2.0, base.y)), player_id])
+            # Protoss research buildings need power
+            if any(str(pool.get("race", "")).lower() == "protoss"
+                   for pool in (self.unit_pools_config or [])
+                   if self._pool_player_id(pool) == player_id):
+                cmds.append([UnitTypeId.PYLON, 1, Point2((base.x, base.y + 3.0)), player_id])
+            if cmds:
+                await self.bot.client.debug_create_unit(cmds)
+                await self.bot.client.step()
+                await self._refresh_bot_state()
+                for u in self.bot.all_units:
+                    if u.owner_id == player_id and u.is_structure and u.type_id != UnitTypeId.PYLON:
+                        # Keep pylons for power until research done; track all new structs
+                        research_tags.append(int(u.tag))
+
+            for upg in ids:
+                if player_id == self.bot.player_id:
+                    try:
+                        self.bot.research(upg)
+                    except Exception as exc:
+                        logger.debug(f"research {upg} failed: {exc}")
+                else:
+                    # Opponent: try research via available abilities on their structures
+                    await self._research_upgrade_on_player_structures(player_id, upg)
+                for _ in range(40):
+                    await self.bot.client.step()
+                    await self._refresh_bot_state()
+                    if player_id == self.bot.player_id and upg in getattr(
+                        self.bot.state, "upgrades", set()
+                    ):
+                        break
+
+        # Kill research buildings (and temporary pylons far from arenas)
+        if research_tags:
+            existing = [t for t in research_tags if self.bot.all_units.find_by_tag(t)]
+            if existing:
+                await self.bot.client.debug_kill_unit(existing)
+                await self.bot.client.step()
+                await self._refresh_bot_state()
+
+        if include_upgrades_enabled(self.training_conf):
+            self._upgrade_cache = np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32)
+            builder = getattr(self, "_squad_obs_builder", None)
+            if builder is not None and hasattr(builder, "reset_upgrade_cache"):
+                builder.reset_upgrade_cache()
+
+    async def _research_upgrade_on_player_structures(self, player_id: int, upg) -> None:
+        """Best-effort research for non-bot owners via structure abilities."""
+        try:
+            structures = [
+                u
+                for u in self.bot.all_units
+                if u.owner_id == player_id and u.is_structure
+            ]
+            if not structures:
+                return
+            abilities_map = await self.bot.get_available_abilities(structures)
+            for structure, abilities in zip(structures, abilities_map):
+                for ab in abilities or []:
+                    # Ability enums often share the upgrade name fragment
+                    aname = getattr(ab, "name", str(ab)).upper()
+                    uname = getattr(upg, "name", str(upg)).upper()
+                    if uname.replace("LEVEL", "")[:12] in aname.replace("LEVEL", ""):
+                        self.bot.do(structure(ab))
+                        return
+        except Exception as exc:
+            logger.debug(f"opponent research {upg} failed: {exc}")
 
     async def _spawn_legacy(self, get_valid_pos, get_offset_pos, to_id):
         """Fallback: random pylon positions when unit_pools_config is absent."""
@@ -2450,6 +2645,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self._refresh_bot_state()
         if self.bot is not None:
             self.bot.reset_episode_state()
+        builder = getattr(self, "_squad_obs_builder", None)
+        if builder is not None and hasattr(builder, "reset_upgrade_cache"):
+            builder.reset_upgrade_cache()
         await self._spawn_initial_units()
         await self._refresh_unit_lists()
 
