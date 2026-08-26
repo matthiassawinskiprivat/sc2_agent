@@ -1,19 +1,20 @@
 training:
-  training_steps: 250_000
-  num_envs: 1
+  training_steps: 500_000
+  num_envs: 6
   n_steps: 1024
-  batch_size: 128
+  batch_size: 256
   learning_rate: 0.0003
   render_beacon: false
   watchdog_timeout: 3600
   target_kl: null
-  rollout_buffer: ram
+  rollout_buffer: disk
 env:
   env_class: CaptureTheFlagEnv
   max_steps: 200
   headless: true
   every_k_episodes: 100
   alternate_trainee_race: true
+  include_race: true
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack
@@ -99,7 +100,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.99
   ent_coef: 0.01
   n_epochs: 2
 agent_architecture: squad

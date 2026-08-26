@@ -1,10 +1,16 @@
-from train.envs.level_0_env import Level0Env, ProtoWrapper
-from train.envs.sc2_session_config import session_realtime, use_computer_player
-from src.level_3_bot import Level3Bot
-from sc2.player import Bot, Computer
-from sc2.data import Race, Difficulty
 import numpy as np
 from gymnasium import spaces as gym_spaces
+from sc2.data import Race, Difficulty
+from sc2.player import Bot, Computer
+
+from src.level_3_bot import Level3Bot
+from train.envs.level_0_env import Level0Env, ProtoWrapper
+from train.envs.sc2_session_config import (
+    DEFAULT_POST_CREATE_GAME_DELAY_SECS,
+    host_local_sc2_game,
+    session_realtime,
+    use_computer_player,
+)
 
 
 class Level3Env(Level0Env):
@@ -136,16 +142,27 @@ class Level3Env(Level0Env):
             players.append(Computer(Race.Zerg, difficulty))
             self._log(f"Starting game with Computer ({difficulty_name})")
         else:
-            self._log("Starting game WITHOUT Computer (Movement Level)")
+            self._log("Starting game without Computer (solo Bot)")
 
         sim_realtime = session_realtime(self.training_conf)
-        await self._controller.create_game(
-            game_map,
-            players,
-            realtime=sim_realtime,
+        post_delay = float(
+            self.training_conf.get(
+                "post_create_game_delay_sec",
+                DEFAULT_POST_CREATE_GAME_DELAY_SECS,
+            )
         )
-        await self._client.join_game(race=Race.Zerg)
-        
+        self._client = await host_local_sc2_game(
+            controller=self._controller,
+            client_cls=self._client_cls,
+            game_map=game_map,
+            players=players,
+            realtime=sim_realtime,
+            join_race=Race.Zerg,
+            log=self._log,
+            post_create_delay_sec=post_delay,
+            player_name="Trainee",
+        )
+
         self._bot._generated_frame = -1
         game_info = await self._client.get_game_info()
         game_data = await self._client.get_game_data()

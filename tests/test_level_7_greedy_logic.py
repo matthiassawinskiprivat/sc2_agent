@@ -412,6 +412,7 @@ def test_apply_action_attack_uses_agent_world_target_not_assignment():
     bot.last_move_head_by_unit = {}
     bot.last_attack_target_tag_by_unit = {}
     bot._attack_order_weapon_cd_before = {}
+    bot.enemy_structures = []
 
     # attack_local head index = 1
     asyncio.run(bot.apply_action(1, np.array([1, 0], dtype=np.int64)))

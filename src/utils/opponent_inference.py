@@ -78,24 +78,16 @@ def build_opponent_policy(
     return policy.to(device)
 
 
-def load_opponent_inference_checkpoint(
+def _fill_opponent_policy(
+    policy: torch.nn.Module,
     model_path: str,
     *,
     agent_architecture: str,
     observation_space: Any,
     action_space: Any,
-    policy_class: Any,
-    policy_kwargs: dict,
-    rnn_type: str,
-    device: torch.device,
-    grid_size: int = 32,
-) -> OpponentInferenceModel:
-    """
-    Load checkpoint weights into a policy-only opponent snapshot.
-
-    Tries a strict policy state-dict load first; falls back to curriculum graft
-    (squad or universal) when shapes differ.
-    """
+    grid_size: int,
+) -> None:
+    """Load or graft checkpoint weights into an existing policy (CPU zip → policy device)."""
     from stable_baselines3.common.save_util import load_from_zip_file
 
     from src.utils.model_utils import (
@@ -104,17 +96,12 @@ def load_opponent_inference_checkpoint(
         load_policy_weights_from_zip,
     )
 
-    dev = torch.device(device)
-    policy = build_opponent_policy(
-        policy_class, observation_space, action_space, policy_kwargs, dev
-    )
-
     ok, missing, unexpected = load_policy_weights_from_zip(
-        policy, model_path, dev, strict=True
+        policy, model_path, "cpu", strict=True
     )
     if ok and not missing:
         logger.debug(f"Opponent inference: strict load from {model_path!r}")
-        return OpponentInferenceModel(policy=policy)
+        return
 
     if unexpected:
         logger.debug(
@@ -157,4 +144,44 @@ def load_opponent_inference_checkpoint(
         f"Opponent inference graft from {model_path!r}: "
         f"missing={len(load_missing)} unexpected={len(load_unexpected)}"
     )
+
+
+def load_opponent_inference_checkpoint(
+    model_path: str,
+    *,
+    agent_architecture: str,
+    observation_space: Any,
+    action_space: Any,
+    policy_class: Any,
+    policy_kwargs: dict,
+    rnn_type: str,
+    device: torch.device,
+    grid_size: int = 32,
+    existing: Optional[OpponentInferenceModel] = None,
+) -> OpponentInferenceModel:
+    """
+    Load checkpoint weights into a policy-only opponent snapshot.
+
+    Tries a strict policy state-dict load first; falls back to curriculum graft
+    (squad or universal) when shapes differ.
+
+    When ``existing`` is a live snapshot, weights are copied in place so Subproc
+    workers do not allocate a second squad policy on the shared GPU.
+    """
+    _ = rnn_type
+    fill_kwargs = dict(
+        agent_architecture=agent_architecture,
+        observation_space=observation_space,
+        action_space=action_space,
+        grid_size=grid_size,
+    )
+    if existing is not None and getattr(existing, "policy", None) is not None:
+        _fill_opponent_policy(existing.policy, model_path, **fill_kwargs)
+        return existing
+
+    dev = torch.device(device)
+    policy = build_opponent_policy(
+        policy_class, observation_space, action_space, policy_kwargs, dev
+    )
+    _fill_opponent_policy(policy, model_path, **fill_kwargs)
     return OpponentInferenceModel(policy=policy)

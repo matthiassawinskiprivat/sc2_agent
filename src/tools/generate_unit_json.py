@@ -39,7 +39,7 @@ UNIT_WEAPON_OVERRIDES = {
     "LIBERATOR": {"damage": 5.0, "type": 2, "bonuses": [{"type": 1, "bonus": 2.0}]},
 
     # ZERG
-    "BANELING": {"damage": 20.0, "type": 1, "bonuses": [{"type": 1, "bonus": 15.0}]},
+    "BANELING": {"damage": 20.0, "type": 1, "range": 0.25, "bonuses": [{"type": 1, "bonus": 15.0}]},
     "LURKERMP": {"damage": 20.0, "type": 1, "bonuses": [{"type": 2, "bonus": 10.0}]},
     "SPINECRAWLER": {"damage": 25.0, "type": 1, "bonuses": [{"type": 2, "bonus": 5.0}]},
     "SPORECRAWLER": {"damage": 15.0, "type": 2, "bonuses": []},
@@ -125,13 +125,15 @@ class DataExtractorBot(BotAI):
                         period = getattr(w, "speed", 0.0)
                         if period == 0 and hasattr(w, "period"): period = getattr(w, "period", 0.0)
 
-                        # Check override for Damage/Bonus/Type fix
+                        w_range = getattr(w, "range", 0.0)
                         if override and idx < 1:  # Assuming primary weapon override
                             damage = override["damage"]
                             bonuses = override["bonuses"]
                             # Important: If override specifies type, use it. Otherwise use API type.
                             if "type" in override:
                                 w_type = override["type"]
+                            if "range" in override:
+                                w_range = override["range"]
                         else:
                             damage = getattr(w, "damage", 0.0)
                             bonuses = []
@@ -146,7 +148,7 @@ class DataExtractorBot(BotAI):
                             "damage": damage,
                             "attacks": getattr(w, "attacks", 1),
                             "period": period,
-                            "range": getattr(w, "range", 0.0),
+                            "range": w_range,
                             "upgrade_bonus": WEAPON_UPGRADE_BONUS_DB.get(name, 0.0),
                             "bonuses": bonuses
                         })
@@ -158,7 +160,7 @@ class DataExtractorBot(BotAI):
                         "damage": override["damage"],
                         "attacks": 1,
                         "period": override.get("period", 1.0),
-                        "range": 6.0,
+                        "range": override.get("range", 6.0),
                         "upgrade_bonus": WEAPON_UPGRADE_BONUS_DB.get(name, 0.0),
                         "bonuses": override["bonuses"]
                     })

@@ -70,7 +70,7 @@
         "damage": 20.0,
         "attacks": 1,
         "period": 1.0,
-        "range": 6.0,
+        "range": 0.25,
         "upgrade_bonus": 2,
         "bonuses": [
           {
@@ -1911,6 +1911,48 @@
     "radius": 0.75,
     "sight": 9.0,
     "detect": 0.0,
+    "weapons": []
+  },
+  "WIDOWMINE": {
+    "id": 498,
+    "name": "WIDOWMINE",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 75,
+      "vespene": 25,
+      "supply": 2.0
+    },
+    "radius": 0.5,
+    "sight": 7.0,
+    "detect": 0.0,
+    "weapons": []
+  },
+  "RAVEN": {
+    "id": 56,
+    "name": "RAVEN",
+    "race": "Race.Terran",
+    "cost": {
+      "minerals": 100,
+      "vespene": 200,
+      "supply": 2.0
+    },
+    "radius": 0.625,
+    "sight": 11.0,
+    "detect": 11.0,
+    "weapons": []
+  },
+  "OVERSEER": {
+    "id": 129,
+    "name": "OVERSEER",
+    "race": "Race.Zerg",
+    "cost": {
+      "minerals": 150,
+      "vespene": 50,
+      "supply": 0.0
+    },
+    "radius": 0.875,
+    "sight": 11.0,
+    "detect": 11.0,
     "weapons": []
   },
   "ORACLE": {

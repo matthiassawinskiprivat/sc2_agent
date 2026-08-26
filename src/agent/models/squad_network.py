@@ -7,6 +7,7 @@ from typing import Dict, Optional
 import gymnasium as gym
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from src.models.components.entity_encoder import EntityEncoder, PointerAttention
@@ -28,13 +29,16 @@ class SquadNetwork(BaseFeaturesExtractor):
         observation_space: gym.spaces.Space,
         features_dim: int = 512,
         thinking_steps: int = 3,
-        tactical_cnn_chunk_size: int = 256,
+        cnn_chunk_size: int = 16,
+        tactical_cnn_chunk_size: Optional[int] = None,
         use_self_attention: bool = False,
         **kwargs,
     ):
         super().__init__(observation_space, features_dim)
-        # Kept for checkpoint/config compatibility; single-crop CNN no longer chunks.
-        self._tactical_cnn_chunk_size = max(1, int(tactical_cnn_chunk_size))
+        # Legacy alias: older YAML used tactical_cnn_chunk_size for the unit-crop CNN.
+        chunk = tactical_cnn_chunk_size if tactical_cnn_chunk_size is not None else cnn_chunk_size
+        self._cnn_chunk_size = max(1, int(chunk))
+        self._tactical_cnn_chunk_size = self._cnn_chunk_size
         if not isinstance(observation_space, gym.spaces.Dict):
             raise TypeError("SquadNetwork requires Dict observation space")
 
@@ -109,6 +113,22 @@ class SquadNetwork(BaseFeaturesExtractor):
         self._pointer_logits = None
         self._spatial_fused = None
 
+    def _cnn_forward(self, cnn: nn.Module, x: torch.Tensor) -> torch.Tensor:
+        """Run a CNN in sample chunks; checkpoint in train to cap activation VRAM."""
+        n = int(x.shape[0])
+        chunk = self._cnn_chunk_size
+        if n <= chunk:
+            return cnn(x)
+        parts = []
+        use_ckpt = bool(self.training and torch.is_grad_enabled())
+        for start in range(0, n, chunk):
+            sl = x[start : start + chunk]
+            if use_ckpt:
+                parts.append(torch_checkpoint(cnn, sl, use_reentrant=False))
+            else:
+                parts.append(cnn(sl))
+        return torch.cat(parts, dim=0)
+
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
         map_obs = observations["map"]
         command_obs = observations["command"]
@@ -117,9 +137,9 @@ class SquadNetwork(BaseFeaturesExtractor):
         unit_mask = observations["unit_mask"]
 
         # --- WHERE path: global + single hard-anchor tactical CNN ---
-        global_16 = self.global_cnn(map_obs)
+        global_16 = self._cnn_forward(self.global_cnn, map_obs)
         gap_g = global_16.mean(dim=(2, 3))
-        tactical_16 = self.tactical_cnn(anchor_tactical)
+        tactical_16 = self._cnn_forward(self.tactical_cnn, anchor_tactical)
         gap_t = tactical_16.mean(dim=(2, 3))
 
         # --- WHO path: rich unit scalars only ---

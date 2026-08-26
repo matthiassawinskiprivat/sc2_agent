@@ -1,0 +1,207 @@
+"""Synchronous manager-agent training pipeline (frozen build under the hood)."""
+
+import copy
+import os
+import sys
+
+import torch
+import yaml
+from loguru import logger
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from train.train_pipeline import PipelineManager, MaskableSubprocVecEnv, MaskableSyncVecEnv
+from train.env_utils import EnvFactory
+from train.envs.manager_env import ManagerEnv
+from train.envs.zerg_manager_env import ZergManagerEnv
+from src.agent.maskable_ppo import MaskablePPO
+from src.agent.models.manager_policy import ManagerActorCriticPolicy, ManagerFeaturesExtractor
+from src.utils.training_device import resolve_training_device, warmup_cuda_if_needed
+from src.utils.rollout_buffer_factory import sync_rollout_buffer_config
+from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
+
+torch.distributions.Distribution.set_default_validate_args(False)
+
+MANAGER_ENV_REGISTRY = {
+    "ManagerEnv": ManagerEnv,
+    "ZergManagerEnv": ZergManagerEnv,
+}
+
+
+def _default_frozen_build_path(model_dir_base: str, prior_build_level: str = "level_build_zerg_0") -> str:
+    return os.path.join(model_dir_base, prior_build_level, "final_model.zip")
+
+
+class ManagerPipelineManager(PipelineManager):
+    global_sc2_kill_on_boundaries = False
+
+    def __init__(
+        self,
+        config_dir: str = "config_build_zerg",
+        model_dir_base: str = "models_build_zerg",
+        log_dir_base: str = "logs_build_zerg",
+        frozen_build_checkpoint: str | None = None,
+    ):
+        super().__init__(
+            config_dir=config_dir,
+            model_dir_base=model_dir_base,
+            log_dir_base=log_dir_base,
+        )
+        self.frozen_build_checkpoint = frozen_build_checkpoint
+
+    def _train_level(
+        self,
+        level_name,
+        model_path_to_load=None,
+        reset_timesteps=True,
+        merged_config=None,
+    ):
+        logger.info(f"--- [MANAGER] Starting Training for Level: {level_name} ---")
+
+        if merged_config is not None:
+            level_config = copy.deepcopy(merged_config)
+        else:
+            with open(os.path.join(self.config_dir, f"{level_name}.yaml"), "r") as f:
+                level_config = yaml.safe_load(f)
+
+        training_params = level_config["training"]
+        env_params = level_config["env"]
+        model_params = level_config["model"]
+
+        pipeline_training = self.pipeline_config.get("training", {})
+        if isinstance(pipeline_training, dict) and "num_envs" in pipeline_training:
+            training_params = {**training_params, "num_envs": pipeline_training["num_envs"]}
+
+        model_dir = os.path.join(self.model_dir_base, level_name)
+        log_dir = os.path.join(self.log_dir_base, level_name)
+        os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
+
+        num_envs = training_params["num_envs"]
+        headless = env_params.get("headless", True)
+        env_class_name = env_params.get("env_class", "ZergManagerEnv")
+        EnvClass = MANAGER_ENV_REGISTRY.get(env_class_name)
+        if EnvClass is None:
+            raise ValueError(f"Unknown manager env class: {env_class_name}")
+
+        frozen = (
+            self.frozen_build_checkpoint
+            or env_params.get("frozen_build_checkpoint")
+            or _default_frozen_build_path(self.model_dir_base)
+        )
+        logger.info(
+            f"[MANAGER] Level '{level_name}': num_envs={num_envs}, "
+            f"frozen_build={frozen!r}"
+        )
+
+        if "policy_kwargs" in model_params:
+            pk = model_params["policy_kwargs"]
+            fe = pk.get("features_extractor_class")
+            if isinstance(fe, str) and "ManagerFeaturesExtractor" in fe:
+                pk["features_extractor_class"] = ManagerFeaturesExtractor
+
+        vec_env_cls = (
+            MaskableSyncVecEnv
+            if (not headless or num_envs == 1)
+            else MaskableSubprocVecEnv
+        )
+
+        combined_conf = training_params.copy()
+        combined_conf.update(env_params)
+        combined_conf["is_training"] = True
+        combined_conf["agent_architecture"] = "manager"
+        combined_conf["config_dir"] = self.config_dir
+        combined_conf["race"] = combined_conf.get("race", "zerg")
+        combined_conf["frozen_build_checkpoint"] = frozen
+        combined_conf["keep_enemy_alive"] = True
+        combined_conf.setdefault("use_computer", True)
+
+        env_fns = [
+            EnvFactory(
+                EnvClass,
+                level_name,
+                not headless,
+                16,
+                i,
+                num_envs,
+                self.sc2_process_cls,
+                self.client_cls,
+                combined_conf,
+                env_params.get("max_steps", 2000),
+                initial_steps=0,
+            )
+            for i in range(num_envs)
+        ]
+        env = vec_env_cls(env_fns) if vec_env_cls is MaskableSyncVecEnv else vec_env_cls(
+            env_fns, start_method="spawn"
+        )
+
+        train_device = resolve_training_device(training_params)
+        warmup_cuda_if_needed(train_device)
+
+        policy_kwargs = {**model_params.get("policy_kwargs", {}), "normalize_images": False}
+        rollout_buffer_class, rollout_buffer_kwargs = sync_rollout_buffer_config(
+            training_params, env_params, namespace="manager"
+        )
+        rollout_buffer_kwargs["enable_rnn_sampling"] = False
+        model_kwargs = {
+            "policy": ManagerActorCriticPolicy,
+            "env": env,
+            "verbose": 1,
+            "tensorboard_log": log_dir,
+            "learning_rate": training_params["learning_rate"],
+            "batch_size": training_params["batch_size"],
+            "n_steps": training_params["n_steps"],
+            "gamma": model_params["gamma"],
+            "ent_coef": model_params["ent_coef"],
+            "n_epochs": model_params["n_epochs"],
+            "policy_kwargs": policy_kwargs,
+            "device": train_device,
+            "level_name": level_name,
+            "rollout_buffer_class": rollout_buffer_class,
+            "rollout_buffer_kwargs": rollout_buffer_kwargs,
+        }
+
+        # Manager is a new architecture — always fresh Adam (no graft from build zip).
+        if model_path_to_load and "level_manager" in level_name:
+            model = MaskablePPO.load(
+                model_path_to_load,
+                env=env,
+                device=train_device,
+                tensorboard_log=log_dir,
+                custom_objects={
+                    "rollout_buffer_class": rollout_buffer_class,
+                    "rollout_buffer_kwargs": rollout_buffer_kwargs,
+                },
+            )
+        else:
+            model = MaskablePPO(**model_kwargs)
+
+        callbacks = CallbackList(
+            [
+                CheckpointCallback(
+                    save_freq=max(training_params["n_steps"], 10_000),
+                    save_path=model_dir,
+                    name_prefix="manager",
+                )
+            ]
+        )
+        model.learn(
+            total_timesteps=training_params["training_steps"],
+            callback=callbacks,
+            reset_num_timesteps=reset_timesteps,
+        )
+        final_path = os.path.join(model_dir, "final_model.zip")
+        model.save(final_path)
+        env.close()
+        return final_path
+
+
+def is_manager_level(level_config: dict) -> bool:
+    env = level_config.get("env") or {}
+    cls = str(env.get("env_class", ""))
+    return "Manager" in cls or str(env.get("agent_architecture", "")).lower() == "manager"
+
+
+if __name__ == "__main__":
+    ManagerPipelineManager().run()

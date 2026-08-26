@@ -1,19 +1,20 @@
 training:
   training_steps: 250_000
-  num_envs: 4
-  n_steps: 2048
+  num_envs: 6
+  n_steps: 1024
   batch_size: 256
   learning_rate: 0.0003
   render_beacon: false
   watchdog_timeout: 3600
   target_kl: null
-  rollout_buffer: ram
+  rollout_buffer: disk
 env:
   env_class: CaptureTheFlagEnv
   max_steps: 200
   headless: true
   every_k_episodes: 200
   alternate_trainee_race: false
+  include_race: true
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - agent: true
@@ -62,7 +63,7 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.994
   ent_coef: 0.01
   n_epochs: 4
 agent_architecture: squad

@@ -9,7 +9,11 @@ from src.agent.universal_constants import (
     UNUSED_COMMAND_HEAD,
     build_action_head_manifest,
 )
-from src.utils.unit_feature_helpers import issue_attack_at_point
+from src.utils.unit_feature_helpers import (
+    disable_cyclone_lock_on_autocast,
+    issue_aoe_at_point,
+    issue_attack_at_point,
+)
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 from sc2.unit import Unit
@@ -96,7 +100,13 @@ class Level7Bot(Level3Bot):
                 self._attack_order_weapon_cd_before[unit_tag] = float(
                     getattr(unit, "weapon_cooldown", 0.0) or 0.0
                 )
-                # Track nearest enemy to the policy-chosen point for reward attribution bookkeeping.
+                # Hard-target enemy in the clicked cell when present; else attack-move.
+                # Swarm Hosts map attack → Spawn Locusts; Corruptors spray buildings.
+                hard_target = issue_attack_at_point(self, unit, target_pos)
+                if hard_target is not None:
+                    self.last_attack_target_tag_by_unit[unit_tag] = hard_target.tag
+                    return
+                # Attribution bookkeeping when attack-moving: nearest enemy to the click.
                 enemies = self.enemy_units(self.enemy_unit_type)
                 if enemies is not None and getattr(enemies, "exists", False):
                     nearest_enemy = min(
@@ -106,9 +116,10 @@ class Level7Bot(Level3Bot):
                     self.last_attack_target_tag_by_unit[unit_tag] = nearest_enemy.tag
                 else:
                     self.last_attack_target_tag_by_unit[unit_tag] = None
-                # Issue attack at the agent-chosen world position (no actuation remap).
-                # Swarm Hosts map attack → Spawn Locusts at the same point.
-                issue_attack_at_point(self, unit, target_pos)
+                return
+
+            if "aoe" in head_name:
+                issue_aoe_at_point(self, unit, target_pos)
                 return
             return
         return await super().apply_action(unit_tag, action)
@@ -428,6 +439,7 @@ class Level7Bot(Level3Bot):
                 self._finalize_combat_spawn_topology(locations)
                 if self.allied_unit_type == UnitTypeId.COLOSSUS:
                     await self._debug_unlock_colossus_extended_thermal_lance()
+                await disable_cyclone_lock_on_autocast(self)
                 return
             
             logger.warning(f"Spawning attempt {spawn_attempt+1} failed. Expected {expected_allied}/{expected_enemy}, got {actual_allied}/{actual_enemy}. Retrying cleanup.")

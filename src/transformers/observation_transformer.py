@@ -42,7 +42,14 @@ except ImportError:  # pragma: no cover — older burnysc2
 # Project Constants
 from src.utils.layer_constants import LayerConstants
 from src.utils.command_constants import CommandConstants
-from src.utils.splash_data import splash_spec
+from src.utils.splash_data import (
+    LIBERATOR_ZONE_DAMAGE,
+    LIBERATOR_ZONE_RADIUS_GU,
+    PARASITIC_BOMB_DAMAGE,
+    PARASITIC_BOMB_DPS,
+    PARASITIC_BOMB_RADIUS_GU,
+    splash_spec,
+)
 from src.utils.obs_geometry import (
     TACTICAL_HALF,
     TACTICAL_OBS_SIZE,
@@ -241,6 +248,20 @@ def _build_threat_effect_specs() -> Dict[int, Tuple[float, float, bool]]:
 
 
 _THREAT_EFFECT_SPECS = _build_threat_effect_specs()
+
+
+def _build_named_effect_ids(enum_name: str, *legacy: int) -> frozenset:
+    """SC2 effect ids from a live ``EffectId`` name plus legacy numeric snapshots."""
+    ids: set = set(legacy)
+    enum_val = getattr(EffectId, enum_name, None)
+    if enum_val is not None:
+        ids.add(int(getattr(enum_val, "value", enum_val)))
+    return frozenset(ids)
+
+
+_BILE_EFFECT_IDS = _build_named_effect_ids("RAVAGERCORROSIVEBILECP", 11)
+_STORM_EFFECT_IDS = _build_named_effect_ids("PSISTORMPERSISTENT", 1)
+_NUKE_EFFECT_IDS = _build_named_effect_ids("NUKEPERSISTENT", 7)
 _SCAN_EFFECT_IDS = frozenset(
     eid
     for eid in (
@@ -362,6 +383,13 @@ class ObservationTransformer:
         self._grid_x = np.arange(self.feature_map_width).reshape(1, -1)
 
         self._liberator_positions = {'allied': [], 'enemy': []}
+        self._ravager_positions = {'allied': [], 'enemy': []}
+        self._ht_positions = {'allied': [], 'enemy': []}
+        self._ghost_positions = {'allied': [], 'enemy': []}
+        # (x, y, detect_range) discs from the current allied lists — used so a
+        # P2 trainee can still see P1 cloaked enemies when a P2 detector covers
+        # them. Proto ``is_detected`` is the P1-client view after god-mode.
+        self._allied_detector_discs: List[Tuple[float, float, float]] = []
         self._cached_path_data: Optional[np.ndarray] = None
         self._current_game_data: Optional[GameData] = None
 
@@ -473,6 +501,33 @@ class ObservationTransformer:
                     self._display_radius_db[name] = float(val)
                     break
 
+    def _positions_for_unit_type(
+        self,
+        type_id,
+        allied_units,
+        allied_structures,
+        enemy_units,
+        enemy_structures,
+    ) -> Dict[str, list]:
+        """Collect unit positions by type from perspective-split lists."""
+        out: Dict[str, list] = {"allied": [], "enemy": []}
+        if type_id is None:
+            return out
+        type_val = type_id.value if hasattr(type_id, "value") else type_id
+
+        def _matches(unit: Unit) -> bool:
+            tid = getattr(unit, "type_id", None)
+            tid = tid.value if hasattr(tid, "value") else tid
+            return tid == type_val
+
+        for unit in list(allied_units or []) + list(allied_structures or []):
+            if _matches(unit):
+                out["allied"].append(unit.position)
+        for unit in list(enemy_units or []) + list(enemy_structures or []):
+            if _matches(unit):
+                out["enemy"].append(unit.position)
+        return out
+
     def _collect_liberator_positions(
         self,
         allied_units,
@@ -480,23 +535,20 @@ class ObservationTransformer:
         enemy_units,
         enemy_structures,
     ) -> None:
-        """Track sieged liberator positions for liberation-zone ownership (global + tactical)."""
-        self._liberator_positions = {"allied": [], "enemy": []}
-        lib_enum = getattr(UnitTypeId, "LIBERATORAG", None)
-        if lib_enum is None:
-            return
-        lib_val = lib_enum.value if hasattr(lib_enum, "value") else lib_enum
-
-        def _is_liberator(unit: Unit) -> bool:
-            tid = unit.type_id.value if hasattr(unit.type_id, "value") else unit.type_id
-            return tid == lib_val
-
-        for unit in list(allied_units or []) + list(allied_structures or []):
-            if _is_liberator(unit):
-                self._liberator_positions["allied"].append(unit.position)
-        for unit in list(enemy_units or []) + list(enemy_structures or []):
-            if _is_liberator(unit):
-                self._liberator_positions["enemy"].append(unit.position)
+        """Track caster positions for effect ownership (liberator, bile, storm, nuke)."""
+        args = (allied_units, allied_structures, enemy_units, enemy_structures)
+        self._liberator_positions = self._positions_for_unit_type(
+            getattr(UnitTypeId, "LIBERATORAG", None), *args
+        )
+        self._ravager_positions = self._positions_for_unit_type(
+            getattr(UnitTypeId, "RAVAGER", None), *args
+        )
+        self._ht_positions = self._positions_for_unit_type(
+            getattr(UnitTypeId, "HIGHTEMPLAR", None), *args
+        )
+        self._ghost_positions = self._positions_for_unit_type(
+            getattr(UnitTypeId, "GHOST", None), *args
+        )
 
     def _has_active_ground_dps_layers(self, is_enemy: bool) -> bool:
         """True when any configured ground DPS channel is active for allied/enemy."""
@@ -547,17 +599,47 @@ class ObservationTransformer:
             return fallback
         return None
 
+    def _primary_axis_dps_base_active(self, prefix: str, axis: str) -> bool:
+        """True when ``{prefix}_{axis}_dps_base`` is active (no cross-axis fallback).
+
+        Typed bonus channels are bonus-only only when *this* axis carries base DPS.
+        Cross-axis fallback for drawing must not suppress base+bonus on typed layers.
+        """
+        idx = self.current_layer_map.get(f"{prefix}_{axis}_dps_base")
+        return idx is not None and idx in self.active_indices
+
     @staticmethod
     def _unit_on_cloak_layer(unit: Unit) -> bool:
         """True when the unit should stamp the cloak attribute layer."""
         return getattr(unit, "is_cloaked", False) or getattr(unit, "is_burrowed", False)
 
     @staticmethod
-    def _skip_undetected_cloaked_enemy(unit: Unit, is_enemy: bool) -> bool:
-        """True when an enemy unit should be omitted (cloaked and not detected)."""
+    def _unit_is_burrowed(unit: Unit) -> bool:
+        """True for burrowed morphs (flag and/or *BURROWED type id)."""
+        if bool(getattr(unit, "is_burrowed", False)):
+            return True
+        name = getattr(getattr(unit, "type_id", None), "name", None)
+        return bool(name) and "BURROWED" in str(name).upper()
+
+    @staticmethod
+    def _skip_undetected_cloaked_enemy(
+        unit: Unit,
+        is_enemy: bool,
+        *,
+        allied_detector_covers: bool = False,
+    ) -> bool:
+        """True when an enemy unit should be omitted (cloaked and not detected).
+
+        ``is_detected`` is the P1-client proto. After ``debug_control_enemy``, a
+        P1 cloaked unit often has ``is_detected=False`` even when a P2 Observer
+        covers it. Pass ``allied_detector_covers=True`` from owner-split allied
+        detector discs so a P2 trainee still paints that enemy.
+        """
         if not is_enemy:
             return False
         if not ObservationTransformer._unit_on_cloak_layer(unit):
+            return False
+        if allied_detector_covers:
             return False
         if getattr(unit, "is_detected", True):
             return False
@@ -618,8 +700,6 @@ class ObservationTransformer:
             return 0.0
         if uid == UnitTypeId.WIDOWMINEBURROWED:
             return 5.0 + self._footprint_game_radius(unit)
-        if uid == UnitTypeId.BANELING:
-            return 2.2
         if uid == UnitTypeId.ORACLE and unit.energy >= 25:
             return 4.0 + self._footprint_game_radius(unit)
         u_name = getattr(unit.type_id, "name", None)
@@ -687,7 +767,10 @@ class ObservationTransformer:
             for unit in unit_list:
                 if self._is_attached_addon_unit(unit):
                     continue
-                if self._skip_undetected_cloaked_enemy(unit, is_enemy):
+                covers = is_enemy and self._allied_detector_covers(unit)
+                if self._skip_undetected_cloaked_enemy(
+                    unit, is_enemy, allied_detector_covers=covers
+                ):
                     continue
                 if self._tactical_body_inside_fovea(unit, active_unit):
                     continue
@@ -699,17 +782,20 @@ class ObservationTransformer:
                 if want_splash and self._tactical_splash_ring_may_intersect_fovea(unit, active_unit):
                     self._draw_unit_splash(unit, layers, is_enemy, px, py)
 
-    def _effect_dps_layer_indices(self, prefix: str, hits_air: bool = False) -> List[int]:
-        """DPS layer indices for effect zones (storm, nuke, liberator AA zone)."""
+    def _effect_dps_layer_indices(
+        self, prefix: str, hits_air: bool = False, hits_ground: bool = True
+    ) -> List[int]:
+        """DPS layer indices for effect zones (storm, nuke, liberator AA zone, parasitic bomb)."""
         indices: List[int] = []
-        base_idx = self.current_layer_map.get(f"{prefix}_g_dps_base")
-        if base_idx is not None and base_idx in self.active_indices:
-            indices.append(base_idx)
-        else:
-            for suffix in ("light", "armor", "massive"):
-                idx = self.current_layer_map.get(f"{prefix}_g_dps_{suffix}")
-                if idx is not None and idx in self.active_indices:
-                    indices.append(idx)
+        if hits_ground:
+            base_idx = self.current_layer_map.get(f"{prefix}_g_dps_base")
+            if base_idx is not None and base_idx in self.active_indices:
+                indices.append(base_idx)
+            else:
+                for suffix in ("light", "armor", "massive"):
+                    idx = self.current_layer_map.get(f"{prefix}_g_dps_{suffix}")
+                    if idx is not None and idx in self.active_indices:
+                        indices.append(idx)
         if hits_air:
             air_base = self.current_layer_map.get(f"{prefix}_a_dps_base")
             if air_base is not None and air_base in self.active_indices:
@@ -719,6 +805,8 @@ class ObservationTransformer:
                     idx = self.current_layer_map.get(f"{prefix}_a_dps_{suffix}")
                     if idx is not None and idx in self.active_indices:
                         indices.append(idx)
+        if hits_air and not hits_ground and not indices:
+            return self._effect_dps_layer_indices(prefix, hits_air=False, hits_ground=True)
         return indices
 
     def _update_active_indices(self):
@@ -804,6 +892,7 @@ class ObservationTransformer:
             game_data = raw_obs.get('game_data')
             effects = raw_obs.get('effects') or []
             self._refresh_attached_addon_tags(allied_structures, enemy_structures)
+            self._collect_allied_detector_discs(allied_units, allied_structures)
             
             # Draw
             cliff_walker = self._detect_cliff_walker(raw_obs, active_unit=active_unit)
@@ -811,6 +900,10 @@ class ObservationTransformer:
                 u for u in list(allied_units) + list(enemy_units)
                 + list(allied_structures) + list(enemy_structures)
                 if not getattr(u, "is_flying", False)
+                and (
+                    getattr(u, "is_structure", False)
+                    or not self._unit_is_burrowed(u)
+                )
             ]
             self._draw_terrain_pathing(
                 game_info, layers, cliff_walker=cliff_walker, ground_units=blocking_ground
@@ -971,6 +1064,7 @@ class ObservationTransformer:
         )
 
         self._refresh_attached_addon_tags(allied_structures, enemy_structures)
+        self._collect_allied_detector_discs(allied_units, allied_structures)
 
         for unit in list(allied_units) + list(allied_structures):
             if "MINERAL" in getattr(unit.type_id, "name", "").upper(): continue
@@ -1155,7 +1249,10 @@ class ObservationTransformer:
             return
 
         # Normal Units
-        if self._skip_undetected_cloaked_enemy(unit, is_enemy):
+        covers = is_enemy and self._allied_detector_covers(unit)
+        if self._skip_undetected_cloaked_enemy(
+            unit, is_enemy, allied_detector_covers=covers
+        ):
             return
 
         if u_id == 170: # ScannerSweep
@@ -1221,6 +1318,30 @@ class ObservationTransformer:
                 if catalog > 0:
                     return catalog
         return 0.0
+
+    def _collect_allied_detector_discs(self, allied_units, allied_structures) -> None:
+        """Cache allied detector (x, y, range) for cloak skip after god-mode."""
+        discs: List[Tuple[float, float, float]] = []
+        for unit in list(allied_units or []) + list(allied_structures or []):
+            rng = self._unit_detection_range(unit)
+            if rng <= 0:
+                continue
+            pos = getattr(unit, "position", None)
+            if pos is None:
+                continue
+            discs.append((float(pos.x), float(pos.y), float(rng)))
+        self._allied_detector_discs = discs
+
+    def _allied_detector_covers(self, unit: Unit) -> bool:
+        """True when an owner-split allied detector disc covers *unit*."""
+        pos = getattr(unit, "position", None)
+        if pos is None:
+            return False
+        ux, uy = float(pos.x), float(pos.y)
+        for dx, dy, rng in self._allied_detector_discs:
+            if (ux - dx) ** 2 + (uy - dy) ** 2 <= rng * rng:
+                return True
+        return False
 
     def _catalog_footprint_radius(self, unit: Unit) -> Optional[float]:
         """Footprint from python-sc2 GameData (creation ability), when available."""
@@ -2237,6 +2358,9 @@ class ObservationTransformer:
         for unit in ground_units:
             if getattr(unit, "is_flying", False):
                 continue
+            # Burrowed mobiles do not block ground pathing in SC2.
+            if not getattr(unit, "is_structure", False) and self._unit_is_burrowed(unit):
+                continue
             if getattr(unit, "is_structure", False):
                 x0, x1, y0, y1 = self._unit_draw_obs_bounds(unit)
                 if x0 > x1 or y0 > y1:
@@ -2394,7 +2518,7 @@ class ObservationTransformer:
 
     def _draw_terrain_buildable(self, raw_obs, layers):
         idx = self.current_layer_map.get(LayerConstants.TERRAIN_BUILDABLE)
-        if idx is None:
+        if idx is None or idx not in self.active_indices:
             return
         game_info = raw_obs.get("game_info")
         if game_info is None or not hasattr(game_info, "pathing_grid"):
@@ -2409,6 +2533,8 @@ class ObservationTransformer:
         placement_data = None
         if hasattr(game_info, "placement_grid"):
             placement_data = self._get_numpy_data(game_info.placement_grid)
+            if not isinstance(placement_data, np.ndarray):
+                placement_data = None
 
         race_name = (raw_obs.get("race") or "zerg").lower()
         race = Race.Zerg
@@ -2648,9 +2774,13 @@ class ObservationTransformer:
         if hps > 0: self._draw_circle_vectorized(layers, idx, px, py, rng, None, hps, True)
 
     def _player_upgrade_ids(self, unit: Unit) -> frozenset:
-        """Researched upgrades for this unit's owner (python-sc2 ``state.upgrades`` is own-player only)."""
-        if not getattr(unit, "is_mine", False):
-            return frozenset()
+        """Researched upgrades from the P1-client game state.
+
+        CTF ``debug_upgrade`` is game-wide (both SC2 owners). Do not gate on
+        proto ``is_mine``: after ``debug_control_enemy`` that flag is the P1
+        client view, so a P2 trainee's allied DPS rings would miss range techs.
+        Same contract as ``SquadObservationBuilder._bot_state_upgrades``.
+        """
         bot = getattr(unit, "_bot_object", None)
         state = getattr(bot, "state", None) if bot is not None else None
         upgrades = getattr(state, "upgrades", None) if state is not None else None
@@ -2729,9 +2859,6 @@ class ObservationTransformer:
                     'typ': 3,
                 }
             ]
-        elif uid == UnitTypeId.BANELING:
-            # Explosion radius — not driven by unit.ground_range; keep legacy fixed draw size.
-            weapon_stats = [{'base': 20.0, 'rng': 2.2, 'typ': 1}]
         elif uid == UnitTypeId.ORACLE and unit.energy >= 25:
             weapon_stats = [{'base': 24.6, 'range': 4.0, 'typ': 1}]
         else:
@@ -2742,8 +2869,9 @@ class ObservationTransformer:
                     atk_lvl = int(getattr(unit, "attack_upgrade_level", 0) or 0)
                     for w in db.get('weapons', []):
                         period = w.get('period') or 1.0
+                        attacks = float(w.get('attacks', 1) or 1)
                         upgrade_bonus = float(w.get('upgrade_bonus', 0) or 0)
-                        dps = (w['damage'] * w['attacks']) / period
+                        dps = (w['damage'] * attacks) / period
                         dps += (upgrade_bonus * atk_lvl) / period
                         weapon_stats.append({
                             'base': dps,
@@ -2751,6 +2879,7 @@ class ObservationTransformer:
                             'min_range': float(w.get('min_range', 0.0)),
                             'typ': w['type'],
                             'period': period,
+                            'attacks': attacks,
                             'bonuses': w.get('bonuses', []),
                         })
 
@@ -2771,8 +2900,10 @@ class ObservationTransformer:
             typ = int(w['typ'])
             idx_g = self._resolve_axis_dps_layer(p, "g") if typ in (1, 3) else None
             idx_a = self._resolve_axis_dps_layer(p, "a") if typ in (2, 3) else None
-            base_on_ground = idx_g is not None
-            base_on_air = idx_a is not None
+            # Bonus-only only when this axis's own _dps_base is active — not when base was
+            # merely projected onto the other axis via cross-axis fallback.
+            base_on_ground = self._primary_axis_dps_base_active(p, "g")
+            base_on_air = self._primary_axis_dps_base_active(p, "a")
             if typ in (1, 3) and idx_g is not None:
                 self._draw_circle_vectorized(
                     layers, idx_g, px, py, rng_g, None, w['base'], True,
@@ -2787,11 +2918,19 @@ class ObservationTransformer:
             # Typed DPS channels: bonus-only when _dps_base is active; otherwise base+bonus
             # (CTF uses typed layers without _dps_base — siege threat must still show as a donut).
             period = w.get('period', 1.0) or 1.0
+            attacks = float(w.get('attacks', 1) or 1)
             for bonus in w.get('bonuses', []):
-                suffix = _BONUS_TYPE_SUFFIX.get(bonus.get('type'))
+                raw_type = bonus.get('type')
+                if hasattr(raw_type, "value"):
+                    raw_type = raw_type.value
+                try:
+                    suffix = _BONUS_TYPE_SUFFIX.get(int(raw_type))
+                except (TypeError, ValueError):
+                    suffix = None
                 if suffix is None:
                     continue
-                bonus_dps = bonus.get('bonus', 0.0) / period
+                # damage_bonus is per attack hit (Phoenix/Viking fire multiple attacks).
+                bonus_dps = (float(bonus.get('bonus', 0.0) or 0.0) * attacks) / period
                 if typ in (1, 3):
                     idx_gb = self._resolve_axis_dps_layer(p, "g", suffix)
                     if idx_gb is not None:
@@ -2809,18 +2948,100 @@ class ObservationTransformer:
                             min_radius_game=min_rng, unit=unit,
                         )
 
+    def _stamp_effect_splash(self, layers, is_ally, positions, radius, intensity):
+        """Paint allied/enemy splash at effect positions (e.g. Parasitic Bomb cloud)."""
+        is_enemy = not is_ally
+        if not self._has_active_splash_layers(is_enemy):
+            return
+        layer_name = LayerConstants.ALLIED_SPLASH if is_ally else LayerConstants.ENEMY_SPLASH
+        idx = self.current_layer_map.get(layer_name)
+        if idx is None or idx not in self.active_indices:
+            return
+        for pos in positions:
+            px, py = self._get_pixel_coords(pos)
+            if px is not None:
+                self._draw_circle_vectorized(
+                    layers, idx, px, py, radius, None, intensity, True
+                )
+
+    @staticmethod
+    def _nearest_caster_is_ally(positions, caster_positions, max_dist: float) -> Optional[bool]:
+        """True/False when a caster is within max_dist of the effect; else None."""
+        allied = list((caster_positions or {}).get("allied") or [])
+        enemy = list((caster_positions or {}).get("enemy") or [])
+        best_a = 999.0
+        best_e = 999.0
+        for pos in positions or []:
+            dist_a = min([math.hypot(p.x - pos.x, p.y - pos.y) for p in allied] + [999.0])
+            dist_e = min([math.hypot(p.x - pos.x, p.y - pos.y) for p in enemy] + [999.0])
+            best_a = min(best_a, dist_a)
+            best_e = min(best_e, dist_e)
+        if min(best_a, best_e) >= max_dist:
+            return None
+        return best_a < best_e
+
+    @staticmethod
+    def _effect_proto_is_ally(effect) -> bool:
+        """True when the SC2 effect proto marks this as Self/Ally (not MagicMock truthy)."""
+        if getattr(effect, "is_mine", False) is True:
+            return True
+        if getattr(effect, "is_enemy", False) is True:
+            return False
+        alliance = getattr(effect, "alliance", None)
+        if alliance is None:
+            return False
+        value = alliance if isinstance(alliance, int) and not isinstance(alliance, bool) else getattr(alliance, "value", None)
+        try:
+            return int(value) in (1, 2)
+        except (TypeError, ValueError):
+            name = str(getattr(alliance, "name", alliance)).upper()
+            return name in ("SELF", "ALLY")
+
+    def _resolve_threat_effect_owner(self, eid, effect) -> bool:
+        """Allied vs enemy for bile / storm / nuke (nearest caster, else proto alliance)."""
+        caster_map = None
+        max_dist = 16.0
+        if eid in _BILE_EFFECT_IDS:
+            caster_map = self._ravager_positions
+        elif eid in _STORM_EFFECT_IDS:
+            caster_map = self._ht_positions
+        elif eid in _NUKE_EFFECT_IDS:
+            caster_map = self._ghost_positions
+            max_dist = 128.0
+        else:
+            return False
+        owner = self._nearest_caster_is_ally(effect.positions, caster_map, max_dist)
+        if owner is not None:
+            return owner
+        # Proto alliance / is_mine is the P1-client view. After debug_control_enemy
+        # that is not perspective-relative, so leftover storms/bile/nukes with no
+        # live caster must not paint as allied.
+        return False
+
     def _draw_effects(self, effects, layers):
         for effect in effects:
             eid = getattr(effect.id, "value", effect.id)
-            dps, radius, hits_air, is_ally = 0.0, 0.0, False, False
-            if eid in _LIBERATOR_ZONE_EFFECT_IDS:
-                dps, radius = 85.0, 5.0
-                for pos in effect.positions:
-                    dist_a = min([math.hypot(p.x-pos.x, p.y-pos.y) for p in self._liberator_positions['allied']] + [999])
-                    dist_e = min([math.hypot(p.x-pos.x, p.y-pos.y) for p in self._liberator_positions['enemy']] + [999])
-                    if dist_a < dist_e and dist_a < 16.0: is_ally = True
+            fake_name = eid.upper() if isinstance(eid, str) else None
+            dps, radius, hits_air, hits_ground, is_ally = 0.0, 0.0, False, True, False
+            stamp_splash = False
+            splash_intensity = 0.0
+            if fake_name in ("PARASITICBOMB", "PARASITICBOMBDUMMY"):
+                # python-sc2 converts PARASITICBOMBDUMMY → fake effect id "PARASITICBOMB".
+                # Air-only, no friendly fire: always enemy DPS + splash (cloud follows the target).
+                dps, radius = PARASITIC_BOMB_DPS, PARASITIC_BOMB_RADIUS_GU
+                hits_air, hits_ground, is_ally = True, False, False
+                stamp_splash = True
+                splash_intensity = PARASITIC_BOMB_DAMAGE
+            elif eid in _LIBERATOR_ZONE_EFFECT_IDS:
+                # Concord Cannon is single-target; zone is a DPS threat disc, not splash.
+                dps, radius = LIBERATOR_ZONE_DAMAGE, LIBERATOR_ZONE_RADIUS_GU
+                owner = self._nearest_caster_is_ally(
+                    effect.positions, self._liberator_positions, 16.0
+                )
+                is_ally = bool(owner)
             elif eid in _THREAT_EFFECT_SPECS:
                 dps, radius, hits_air = _THREAT_EFFECT_SPECS[eid]
+                is_ally = self._resolve_threat_effect_owner(eid, effect)
             elif eid in _SCAN_EFFECT_IDS:
                 idx = self.current_layer_map.get(LayerConstants.ENEMY_DETECTION)
                 if idx is not None:
@@ -2830,7 +3051,9 @@ class ObservationTransformer:
                 continue
             if dps > 0:
                 p = "allied" if is_ally else "enemy"
-                layer_indices = self._effect_dps_layer_indices(p, hits_air=hits_air)
+                layer_indices = self._effect_dps_layer_indices(
+                    p, hits_air=hits_air, hits_ground=hits_ground
+                )
                 for idx in layer_indices:
                     for pos in effect.positions:
                         px, py = self._get_pixel_coords(pos)
@@ -2838,6 +3061,10 @@ class ObservationTransformer:
                             self._draw_circle_vectorized(
                                 layers, idx, px, py, radius, None, dps, True
                             )
+                if stamp_splash:
+                    self._stamp_effect_splash(
+                        layers, is_ally, effect.positions, radius, splash_intensity
+                    )
 
     def _draw_transport_info(self, raw_obs, layers):
         units = raw_obs.get('units') or []

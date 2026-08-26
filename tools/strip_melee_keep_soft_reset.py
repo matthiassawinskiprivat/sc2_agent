@@ -129,14 +129,6 @@ def main() -> int:
         try:
             script = _read_archive_text(map_path, "MapScript.galaxy") or ""
             triggers = _read_archive_text(map_path, "Triggers") or ""
-            needs = (
-                "MeleeInit" in script
-                or "gt_MeleeInitialization" in script
-                or "MeleeInit" in triggers
-                or SOFT_RESET_CHAT not in script
-                or SOFT_RESET_CHAT not in triggers
-                or script.count("gt_SoftReset") == 0
-            )
             # Always rewrite to the canonical SoftReset-only pair for consistency.
             patches = {
                 "MapScript.galaxy": SOFT_RESET_ONLY_MAPSCRIPT.encode("utf-8"),
@@ -146,14 +138,15 @@ def main() -> int:
                 existing = _read_archive_text(map_path, key)
                 patches[key] = _soft_reset_only_triggerstrings(existing)
 
+            # Do not match the comment "MeleeInit removed" — check the trigger id.
             already_clean = (
-                "MeleeInit" not in script
-                and "gt_MeleeInitialization" not in script
+                "gt_MeleeInitialization" not in script
+                and "gt_MeleeInitialization" not in triggers
                 and SOFT_RESET_CHAT in script
                 and SOFT_RESET_CHAT in triggers
-                and "gt_MeleeInitialization" not in triggers
+                and script.strip() == SOFT_RESET_ONLY_MAPSCRIPT.strip()
             )
-            if already_clean and script.strip() == SOFT_RESET_ONLY_MAPSCRIPT.strip():
+            if already_clean:
                 print(f"[ok]     {map_path.name}")
                 skipped += 1
                 continue
@@ -172,13 +165,14 @@ def main() -> int:
 
             verify_s = _read_archive_text(map_path, "MapScript.galaxy") or ""
             verify_t = _read_archive_text(map_path, "Triggers") or ""
-            if "MeleeInit" in verify_s or "gt_MeleeInitialization" in verify_s:
-                raise RuntimeError("MeleeInit still present in MapScript")
+            if "gt_MeleeInitialization" in verify_s or "gt_MeleeInitialization" in verify_t:
+                raise RuntimeError("gt_MeleeInitialization still present after write")
             if SOFT_RESET_CHAT not in verify_s or SOFT_RESET_CHAT not in verify_t:
                 raise RuntimeError("SoftReset missing after write")
+            if verify_s.strip() != SOFT_RESET_ONLY_MAPSCRIPT.strip():
+                raise RuntimeError("MapScript is not the canonical SoftReset-only script")
             print(f"[wrote]  {map_path.name}")
             ok += 1
-            _ = needs
         except Exception as exc:
             print(f"[FAIL]   {map_path.name}: {exc}", file=sys.stderr)
             failed += 1

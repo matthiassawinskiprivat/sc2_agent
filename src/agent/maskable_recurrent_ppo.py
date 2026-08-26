@@ -50,6 +50,18 @@ def _multi_discrete_nvec_tuple(space: gym.spaces.Space) -> Optional[Tuple[int, .
     return None
 
 
+def sanitize_obs_tensors_inplace(obs):
+    """Replace NaN/Inf in rollout obs without allocating a second GPU copy of maps."""
+    if isinstance(obs, dict):
+        for value in obs.values():
+            if torch.is_tensor(value) and torch.is_floating_point(value):
+                torch.nan_to_num(value, nan=0.0, posinf=1.0, neginf=0.0, out=value)
+        return obs
+    if torch.is_tensor(obs) and torch.is_floating_point(obs):
+        torch.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0, out=obs)
+    return obs
+
+
 def checkpoint_obs_action_mismatch_env(checkpoint_path: str, env: GymEnv) -> bool:
     """
     True when the zip was saved with different observation/action shapes than ``env``.
@@ -977,14 +989,7 @@ class MaskableRecurrentPPO(RecurrentPPO):
                     acts = r_data.actions.long()
                 else:
                     acts = r_data.actions
-                obs = r_data.observations
-                if isinstance(obs, dict):
-                    obs = {
-                        k: torch.nan_to_num(v, nan=0.0, posinf=1.0, neginf=0.0)
-                        for k, v in obs.items()
-                    }
-                else:
-                    obs = torch.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=0.0)
+                obs = sanitize_obs_tensors_inplace(r_data.observations)
                 vals, log_p, entropy = self.policy.evaluate_actions(
                     obs,
                     acts,
@@ -1133,10 +1138,14 @@ class MaskableRecurrentPPO(RecurrentPPO):
                         reserved_mb = torch.cuda.memory_reserved(idx)     / (1024 ** 2)
                         peak_mb     = torch.cuda.max_memory_allocated(idx) / (1024 ** 2)
                         total_mb    = torch.cuda.get_device_properties(idx).total_memory / (1024 ** 2)
+                        map_shape = ""
+                        if isinstance(obs, dict) and "map" in obs:
+                            map_shape = f"  map_shape={tuple(obs['map'].shape)}"
                         logger.info(
                             f"PPO train first minibatch (epoch={epoch+1}/{self.n_epochs}): "
                             f"allocated={alloc_mb:.0f} MB  reserved(cached)={reserved_mb:.0f} MB  "
                             f"peak_allocated={peak_mb:.0f} MB  gpu_total={total_mb:.0f} MB"
+                            f"{map_shape}"
                         )
                     else:
                         logger.info(f"PPO train: first minibatch complete (epoch={epoch+1}/{self.n_epochs})")
@@ -1158,12 +1167,13 @@ class MaskableRecurrentPPO(RecurrentPPO):
             if not continue_training:
                 break
 
-            # End-of-epoch: release any remaining refs and let the allocator return
-            # cached blocks.  combined with synchronize() so in-flight ops complete.
+            # End-of-epoch: drop leftover Python refs. Do not empty_cache — async
+            # collector workers and SC2 share this GPU; returning the CUDA pool to
+            # WDDM lets those processes expand and the next epoch reallocates into
+            # dedicated+shared memory (24 GB spikes on the first learner update).
             _gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-                torch.cuda.empty_cache()
 
         if profile_enabled and batch_times:
             bt = np.asarray(batch_times, dtype=np.float64)

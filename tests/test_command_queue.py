@@ -44,6 +44,49 @@ def test_command_queue_mine_is_standing_not_active_macro():
     assert q.standing_mine.worker_count == 8
 
 
+def test_command_queue_mine_gas_is_standing_not_active_macro():
+    q = CommandQueue()
+    q.enqueue(
+        Command(
+            command_type=CommandType.MINE_GAS,
+            target_pos=Point2((10, 10)),
+            worker_count=3,
+        )
+    )
+    q.enqueue(
+        Command(
+            command_type=CommandType.BUILD,
+            unit_type_id=UnitTypeId.SPAWNINGPOOL,
+            target_pos=Point2((10, 10)),
+        )
+    )
+    assert q.standing_mine_gas is not None
+    assert q.standing_mine_gas.worker_count == 3
+    assert q.active is None
+    active = q.activate_next()
+    assert active.command_type == CommandType.BUILD
+    assert q.standing_mine_gas.worker_count == 3
+
+
+def test_scripted_manager_parses_mine_gas():
+    mgr = ScriptedManager.from_level_config(
+        {
+            "manager_script": [
+                {
+                    "command_type": "MINE_GAS",
+                    "target_pos": [-1, -1],
+                    "worker_count": 3,
+                },
+            ],
+        }
+    )
+    assert mgr.script_steps[0].command.command_type == CommandType.MINE_GAS
+    assert mgr.script_steps[0].command.worker_count == 3
+    mgr._emit_step_if_available()
+    assert mgr.command_queue.standing_mine_gas is not None
+    assert mgr.command_queue.active is None
+
+
 def test_scripted_manager_parses_mine_worker_count():
     mgr = ScriptedManager.from_level_config(
         {
@@ -131,3 +174,19 @@ def test_scripted_manager_emits_on_reset_and_macro_tick():
     mgr.on_game_step()
     assert mgr.command_queue.active is not None
     assert mgr.command_queue.active.unit_type_id == UnitTypeId.SPAWNINGPOOL
+
+
+def test_scripted_manager_emit_clones_command():
+    """Queued command mutations must not rewrite the script template."""
+    cmd = Command(
+        command_type=CommandType.BUILD,
+        unit_type_id=UnitTypeId.EXTRACTOR,
+        target_pos=Point2((-1.0, -1.0)),
+    )
+    mgr = ScriptedManager(script_steps=[ManagerScriptStep(command=cmd)])
+    mgr._emit_step_if_available()
+    active = mgr.command_queue.active
+    assert active is not None
+    assert active is not mgr.script_steps[0].command
+    active.target_pos = Point2((99.0, 99.0))
+    assert mgr.script_steps[0].command.target_pos == Point2((-1.0, -1.0))

@@ -36,6 +36,10 @@ WHITELIST: FrozenSet[str] = frozenset({
     "PHOTONCANNON", "MISSILETURRET", "BUNKER", "SPINECRAWLER", "SPORECRAWLER", "SHIELDBATTERY",
     "INTERCEPTOR", "LOCUSTMP", "LOCUSTMPFLYING", "BROODLING", "AUTOTURRET", "HIGHTEMPLAR",
     "INFESTOR", "VIPER", "SENTRY", "SWARMHOSTMP", "DISRUPTOR", "DISRUPTORPHASED",
+    # Unburrowed Widow Mine has no weapons; combat is on WIDOWMINEBURROWED.
+    "WIDOWMINE",
+    # Cloak curriculum free detectors (Observer already extracted with detect>0).
+    "RAVEN", "OVERSEER",
 })
 
 # Applied after live extraction so regenerate keeps LotV-correct fields when the
@@ -54,6 +58,41 @@ UNIT_FIELD_OVERRIDES = {
         "sight": 9.0,
         "detect": 0.0,
         "weapons": [],
+    },
+    "WIDOWMINE": {
+        "cost": {"minerals": 75, "vespene": 25, "supply": 2.0},
+        "radius": 0.5,
+        "sight": 7.0,
+        "detect": 0.0,
+        "weapons": [],
+    },
+    "RAVEN": {
+        "cost": {"minerals": 100, "vespene": 200, "supply": 2.0},
+        "radius": 0.625,
+        "sight": 11.0,
+        "detect": 11.0,
+        "weapons": [],
+    },
+    "OVERSEER": {
+        "cost": {"minerals": 150, "vespene": 50, "supply": 0.0},
+        "radius": 0.875,
+        "sight": 11.0,
+        "detect": 11.0,
+        "weapons": [],
+    },
+    # Baneling explode radius is splash-only; DPS uses melee contact range.
+    "BANELING": {
+        "weapons": [
+            {
+                "type": 1,
+                "damage": 20.0,
+                "attacks": 1,
+                "period": 1.0,
+                "range": 0.25,
+                "upgrade_bonus": 2,
+                "bonuses": [{"type": 1, "bonus": 15.0}],
+            }
+        ],
     },
 }
 

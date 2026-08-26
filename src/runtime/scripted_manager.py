@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
@@ -18,6 +18,26 @@ class ManagerScriptStep:
     reassign_micro_tags: Set[int] = field(default_factory=set)
 
 
+def _clone_command(command: Command) -> Command:
+    """Fresh Command so episode resets do not keep mutated target_pos."""
+    return replace(
+        command,
+        target_pos=command.target_pos,
+        assigned_unit_tags=set(command.assigned_unit_tags),
+    )
+
+
+def _clone_script_steps(steps: List[ManagerScriptStep]) -> List[ManagerScriptStep]:
+    return [
+        ManagerScriptStep(
+            command=_clone_command(step.command),
+            worker_roles=dict(step.worker_roles),
+            reassign_micro_tags=set(step.reassign_micro_tags),
+        )
+        for step in steps
+    ]
+
+
 class ScriptedManager:
     """
     Level-driven manager with no neural net. Emits Command objects and worker role
@@ -30,11 +50,16 @@ class ScriptedManager:
         macro_tick_interval: int = 8,
         worker_registry: Optional[WorkerRegistry] = None,
         command_queue: Optional[CommandQueue] = None,
+        can_emit_step: Optional[Callable[[ManagerScriptStep], bool]] = None,
     ) -> None:
-        self.script_steps = list(script_steps)
+        # Pristine YAML templates — never mutate these. Working copies live in
+        # ``script_steps`` and are restored on every ``reset()``.
+        self._pristine_steps = _clone_script_steps(script_steps)
+        self.script_steps = _clone_script_steps(self._pristine_steps)
         self.macro_tick_interval = max(1, int(macro_tick_interval))
         self.worker_registry = worker_registry or WorkerRegistry()
         self.command_queue = command_queue or CommandQueue()
+        self.can_emit_step = can_emit_step
         self._script_index = 0
         self._game_step = 0
         self._last_macro_step = -self.macro_tick_interval
@@ -45,6 +70,9 @@ class ScriptedManager:
         self._last_macro_step = -self.macro_tick_interval
         self.worker_registry.clear()
         self.command_queue.clear()
+        # Restore YAML sentinels (e.g. target_pos [-1,-1]) so hatch/geyser
+        # re-anchoring works every soft-reset episode.
+        self.script_steps = _clone_script_steps(self._pristine_steps)
 
     def on_game_step(self) -> None:
         """Call once per SC2 game step (macro-tick path for a future learned manager)."""
@@ -67,6 +95,9 @@ class ScriptedManager:
         Used by the scripted build curriculum so the manager issues one intent
         at a time (e.g. BUILD, then TRAIN count=6) without dumping the full
         script or waiting on ``macro_tick_interval``.
+
+        Steps may be gated by ``can_emit_step`` (e.g. INJECT waits for queen
+        energy) without advancing ``_script_index``.
         """
         if not self._macro_queue_idle():
             return False
@@ -76,6 +107,8 @@ class ScriptedManager:
         if self._script_index >= len(self.script_steps):
             return False
         step = self.script_steps[self._script_index]
+        if self.can_emit_step is not None and not self.can_emit_step(step):
+            return False
         self._apply_step(step)
         self._script_index += 1
         return True
@@ -85,7 +118,8 @@ class ScriptedManager:
             self.worker_registry.assign(tag, role)
         if step.reassign_micro_tags:
             self.worker_registry.reassign_to_micro(step.reassign_micro_tags)
-        self.command_queue.enqueue(step.command)
+        # Clone so build actuation mutating target_pos cannot poison script_steps.
+        self.command_queue.enqueue(_clone_command(step.command))
         self.command_queue.activate_next()
 
     @staticmethod
@@ -107,7 +141,10 @@ class ScriptedManager:
         )
 
     @staticmethod
-    def from_level_config(level_env: Dict[str, Any]) -> "ScriptedManager":
+    def from_level_config(
+        level_env: Dict[str, Any],
+        can_emit_step: Optional[Callable[[ManagerScriptStep], bool]] = None,
+    ) -> "ScriptedManager":
         """Parse manager_script from level YAML env section."""
         script_cfg = level_env.get("manager_script", [])
         macro_tick = int(level_env.get("macro_tick_interval", 8))
@@ -145,4 +182,8 @@ class ScriptedManager:
                     command=cmd, worker_roles=roles, reassign_micro_tags=micro_tags
                 )
             )
-        return ScriptedManager(steps, macro_tick_interval=macro_tick)
+        return ScriptedManager(
+            steps,
+            macro_tick_interval=macro_tick,
+            can_emit_step=can_emit_step,
+        )

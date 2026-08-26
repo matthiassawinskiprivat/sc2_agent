@@ -1,31 +1,30 @@
 """
-Regression test: opponent (player 2) spatial actions must be perspective-un-flipped
-before being converted to world coordinates.
+Spatial actions are applied in world coordinates for all SC2 owners.
 
-The policy sees a 180°-rotated observation for player 2, so it emits a spatial
-index in *flipped* space.  apply_action must invert that flip before calling
-convert_spatial_action_to_world so the unit moves to the correct location.
+P1 and P2 use the same observation/action frame as legacy P1-only training:
+no 180° map rotation and no spatial index un-flip on apply.
 """
 
 import asyncio
-import pytest
 import numpy as np
-from unittest.mock import MagicMock, patch, AsyncMock
+import pytest
+from unittest.mock import MagicMock
+
+from sc2.ids.unit_typeid import UnitTypeId
 
 from src.agent.ctf_bot import CaptureTheFlagBot
 
 
-def _make_bot(player_id: int = 1) -> CaptureTheFlagBot:
+def _make_bot(player_id: int = 1, action_heads=None) -> CaptureTheFlagBot:
     bot = CaptureTheFlagBot(
         player_id=player_id,
         training_conf={
             "agent_architecture": "universal",
-            "action_heads": ["move", "attack_local"],
+            "action_heads": list(action_heads or ["move_global", "attack_local"]),
             "categorical_heads": [],
             "grid_size": 128,
         },
     )
-    # Minimal SC2 state mocks
     bot.agent_system = MagicMock()
     bot.do = MagicMock()
     return bot
@@ -33,98 +32,115 @@ def _make_bot(player_id: int = 1) -> CaptureTheFlagBot:
 
 def _make_unit(owner: int) -> MagicMock:
     unit = MagicMock()
-    unit.owner_id = owner  # sc2 Python API uses owner_id, not owner
+    unit.owner_id = owner
+    unit.type_id = UnitTypeId.MARINE
     unit.position = MagicMock()
     unit.attack = MagicMock(return_value=MagicMock())
     unit.move = MagicMock(return_value=MagicMock())
     return unit
 
 
-def _expected_flip(spatial_idx: int, grid_size: int = 32) -> int:
-    row, col = divmod(spatial_idx, grid_size)
-    return (grid_size - 1 - row) * grid_size + (grid_size - 1 - col)
-
-
-@pytest.mark.parametrize("spatial_idx", [0, 1, 100, 512, 1023])
-def test_opponent_unit_spatial_idx_is_unflipped(spatial_idx):
-    """
-    For a player-2 unit the spatial index must be un-flipped (180° rotation
-    on a 32×32 grid) before convert_spatial_action_to_world is called.
-    """
-    bot = _make_bot(player_id=1)
-    opp_unit = _make_unit(owner=2)
-
-    # all_units.find_by_tag returns the opponent unit
-    bot.all_units = MagicMock()
-    bot.all_units.find_by_tag.return_value = opp_unit
-
-    # Track what spatial_idx is actually passed to convert_spatial_action_to_world
+def _capture_convert(bot):
     captured = {}
 
     def fake_convert(head_name, s_idx, active_unit=None):
         captured["spatial_idx"] = s_idx
+        captured["head_name"] = head_name
         return (64.0, 64.0)
 
     bot.agent_system.unit_agents = {
         "active_agent": MagicMock(convert_spatial_action_to_world=fake_convert)
     }
-
-    action = np.array([0, spatial_idx])  # head_idx=0 ("move"), spatial_idx
-    asyncio.run(bot.apply_action(unit_tag=99, action=action))
-
-    assert "spatial_idx" in captured, "convert_spatial_action_to_world was not called"
-    expected = _expected_flip(spatial_idx)
-    assert captured["spatial_idx"] == expected, (
-        f"spatial_idx={spatial_idx}: expected flipped={expected}, "
-        f"got {captured['spatial_idx']}"
-    )
+    return captured
 
 
 @pytest.mark.parametrize("spatial_idx", [0, 1, 100, 512, 1023])
-def test_own_unit_spatial_idx_is_not_flipped(spatial_idx):
-    """
-    For a player-1 unit the spatial index must be passed through unchanged.
-    """
-    bot = _make_bot(player_id=1)
-    own_unit = _make_unit(owner=1)
-
+@pytest.mark.parametrize("owner", [1, 2])
+def test_apply_action_local_spatial_idx_is_not_flipped(spatial_idx, owner):
+    bot = _make_bot(action_heads=["attack_local"])
+    unit = _make_unit(owner=owner)
     bot.all_units = MagicMock()
-    bot.all_units.find_by_tag.return_value = own_unit
+    bot.all_units.find_by_tag.return_value = unit
+    captured = _capture_convert(bot)
 
-    captured = {}
+    asyncio.run(bot.apply_action(unit_tag=99, action=np.array([0, spatial_idx])))
 
-    def fake_convert(head_name, s_idx, active_unit=None):
-        captured["spatial_idx"] = s_idx
-        return (64.0, 64.0)
+    assert captured.get("spatial_idx") == spatial_idx
 
-    bot.agent_system.unit_agents = {
-        "active_agent": MagicMock(convert_spatial_action_to_world=fake_convert)
-    }
 
-    action = np.array([0, spatial_idx])
-    asyncio.run(bot.apply_action(unit_tag=42, action=action))
+@pytest.mark.parametrize("spatial_idx", [0, 1, 100, 512, 1023])
+def test_apply_action_global_spatial_idx_unchanged_for_p2(spatial_idx):
+    bot = _make_bot(action_heads=["move_global"])
+    unit = _make_unit(owner=2)
+    bot.all_units = MagicMock()
+    bot.all_units.find_by_tag.return_value = unit
+    captured = _capture_convert(bot)
 
-    assert "spatial_idx" in captured, "convert_spatial_action_to_world was not called"
-    assert captured["spatial_idx"] == spatial_idx, (
-        f"Own unit spatial_idx should be unchanged: expected {spatial_idx}, "
-        f"got {captured['spatial_idx']}"
+    asyncio.run(bot.apply_action(unit_tag=99, action=np.array([0, spatial_idx])))
+
+    assert captured.get("spatial_idx") == spatial_idx
+
+
+@pytest.mark.parametrize("spatial_idx", [0, 1, 100, 512, 1023])
+def test_apply_action_global_spatial_idx_unchanged_for_p1(spatial_idx):
+    bot = _make_bot(action_heads=["move_global"])
+    unit = _make_unit(owner=1)
+    bot.all_units = MagicMock()
+    bot.all_units.find_by_tag.return_value = unit
+    captured = _capture_convert(bot)
+
+    asyncio.run(bot.apply_action(unit_tag=99, action=np.array([0, spatial_idx])))
+
+    assert captured.get("spatial_idx") == spatial_idx
+
+
+@pytest.mark.parametrize("spatial_idx", [0, 1, 100, 512, 1023])
+@pytest.mark.parametrize("perspective", [1, 2])
+def test_apply_squad_action_local_spatial_idx_is_not_flipped(spatial_idx, perspective):
+    bot = _make_bot(action_heads=["attack_local"])
+    unit = _make_unit(owner=perspective)
+    unit.tag = 99
+    bot.all_units = MagicMock()
+    bot.all_units.find_by_tag.return_value = unit
+    captured = _capture_convert(bot)
+
+    asyncio.run(
+        bot.apply_squad_action(
+            [99],
+            anchor_tag=99,
+            command_idx=0,
+            spatial_idx=spatial_idx,
+            perspective_player_id=perspective,
+        )
     )
 
+    assert captured.get("spatial_idx") == spatial_idx
 
-def test_flip_is_its_own_inverse():
-    """
-    Applying the 180° flip twice must yield the original index.
-    """
-    for idx in [0, 1, 31, 32, 100, 512, 993, 1023]:
-        once = _expected_flip(idx)
-        twice = _expected_flip(once)
-        assert twice == idx, f"Double-flip of {idx} gave {twice}, expected {idx}"
+
+@pytest.mark.parametrize("spatial_idx", [0, 1, 100, 512, 1023])
+def test_apply_squad_action_global_spatial_idx_unchanged_for_p2(spatial_idx):
+    bot = _make_bot(action_heads=["move_global"])
+    unit = _make_unit(owner=2)
+    unit.tag = 99
+    bot.all_units = MagicMock()
+    bot.all_units.find_by_tag.return_value = unit
+    captured = _capture_convert(bot)
+
+    asyncio.run(
+        bot.apply_squad_action(
+            [99],
+            anchor_tag=99,
+            command_idx=0,
+            spatial_idx=spatial_idx,
+            perspective_player_id=2,
+        )
+    )
+
+    assert captured.get("spatial_idx") == spatial_idx
 
 
 def test_padded_command_head_is_no_op():
-    """
-    A command head index beyond the configured list must be a no-op (no SC2 order).
-    """
+    """A command head index beyond the configured list must be a no-op."""
     bot = _make_bot(player_id=1)
     opp_unit = _make_unit(owner=2)
 
@@ -138,8 +154,7 @@ def test_padded_command_head_is_no_op():
         )
     }
 
-    # head_idx=5 is beyond the 2 configured heads → padded slot → no-op
     action = np.array([5, 100])
     asyncio.run(bot.apply_action(unit_tag=99, action=action))
 
-    assert "called" not in captured, "convert_spatial_action_to_world should not be called for padded head"
+    assert "called" not in captured

@@ -126,6 +126,23 @@ def test_squad_pointer_step_applies_trainee_and_advances(squad_env):
     assert info.get("squad_pointer") is True
 
 
+def test_squad_pointer_step_applies_paired_opponent_action(squad_env):
+    """Policy opponent (not Computer preview) must get a squad order each physics step."""
+    squad_env._preview_computer_opponent = MagicMock(return_value=False)
+    squad_env._predict_opponent_squad_pointer = AsyncMock(
+        return_value=np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
+    )
+    action = np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
+    action[0] = 1
+    asyncio.run(squad_env._async_step_squad_pointer(action))
+    assert squad_env._apply_squad_action_for_pool.await_count == 2
+    squad_env._predict_opponent_squad_pointer.assert_awaited_once_with(1)
+    applied_pools = [
+        call.args[0] for call in squad_env._apply_squad_action_for_pool.await_args_list
+    ]
+    assert applied_pools == [0, 1]
+
+
 def test_paired_opponent_pool_index_integration(squad_env):
     from train.envs.ctf.squad_pool_pairing import paired_opponent_pool_index
 
@@ -184,3 +201,53 @@ def test_hard_anchor_tag_remembered_and_resolved(squad_env):
     # No memory → provisional first sorted alive.
     squad_env._squad_anchor_tag_by_pool = {}
     assert squad_env._resolve_squad_anchor_tag(0, [102, 101]) == 101
+
+
+def test_squad_pointer_p2_trainee_does_not_defer_terminal(squad_env):
+    """Pointer steps always record a trainee action; P2 trainee terminals are not deferred."""
+    squad_env.training_conf["rewards"] = {
+        "win_reward": 15.0,
+        "loss_penalty": -5.0,
+        "draw_penalty": -2.0,
+    }
+    squad_env._alternate_trainee_race = True
+    squad_env.episode_counter = 2
+    squad_env._is_pool_trainee = lambda pool: pool["race"] == "zerg"
+    squad_env._pool_player_id = lambda pool: 1 if pool["race"] == "terran" else 2
+    squad_env.current_trainee_pool_index = 1
+    squad_env.bot.structures.return_value = MagicMock(amount=1)
+    squad_env.bot.enemy_structures.return_value = MagicMock(amount=0)
+
+    obs, reward, done, truncated, info = asyncio.run(
+        squad_env._finalize_squad_pointer_physics_step(
+            trainee_tags=[201],
+            opponent_tags=[101],
+            trainee_player_id=2,
+        )
+    )
+    assert done is True
+    assert truncated is False
+    assert reward == 0.5 - 5.0
+    assert info.get("deferred_terminal") is None
+    assert squad_env._deferred_done is False
+
+
+def test_empty_trainee_army_forces_physics_terminal(squad_env):
+    """Skip-loop must not freeze: no trainee tags → one physics step that can end."""
+    squad_env.squad_unit_tags = [
+        (1, []),
+        (2, [201]),
+        (1, []),
+        (2, [401]),
+    ]
+    squad_env.current_trainee_pool_index = 0
+    squad_env._has_combat_units = MagicMock(side_effect=lambda owner_id: owner_id != 1)
+    action = np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
+    obs, reward, done, truncated, info = asyncio.run(
+        squad_env._async_step_squad_pointer(action)
+    )
+    squad_env.bot.client.step.assert_awaited()
+    squad_env._apply_squad_action_for_pool.assert_not_awaited()
+    assert info.get("squad_physics_step") is True
+    assert done is True
+    assert squad_env.steps_count == 1

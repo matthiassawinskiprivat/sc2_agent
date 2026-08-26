@@ -4,6 +4,22 @@ import threading
 from unittest.mock import MagicMock
 from src.utils.watchdog import Watchdog
 
+def test_watchdog_start_rearms_if_already_running():
+    event = threading.Event()
+
+    def callback():
+        event.set()
+
+    watchdog = Watchdog(timeout=0.3, callback=callback)
+    watchdog.start()
+    watchdog.start()
+    time.sleep(0.15)
+    assert not event.is_set()
+    triggered = event.wait(timeout=0.5)
+    assert triggered, "Watchdog start() while running should rearm, not no-op"
+    watchdog.stop()
+
+
 def test_watchdog_triggers_on_timeout():
     """Test that watchdog triggers the callback after timeout."""
     event = threading.Event()

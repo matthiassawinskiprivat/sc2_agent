@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from sc2.ids.unit_typeid import UnitTypeId
 
 from src.transformers.squad_observation_builder import SquadObservationBuilder
 from src.agent.squad_constants import (
@@ -205,6 +206,87 @@ def test_build_raw_obs_selected_units_include_all_squad_members(training_conf):
 
     selected_tags = {u.tag for u in raw_obs["selected_units"]}
     assert selected_tags == {10, 20}
-    assert raw_obs["command_target"] is not None or True  # target may be None without map
+    # Anchor 20 has no unit_target_map entry → attack fallback uses enemy_pylon_pos.
+    assert raw_obs["command_target"] is bot.enemy_pylon_pos[1]
     # active_unit for command_target should be the hard anchor when provided
     assert bot.all_units.find_by_tag(20) is unit_b
+
+
+def test_p2_trainee_uses_bot_state_upgrades_for_range_scalars(training_conf):
+    """debug_upgrade is global; P2 trainee must not drop state.upgrades (bot is P1)."""
+    from sc2.ids.upgrade_id import UpgradeId
+
+    training_conf = {
+        **training_conf,
+        "active_unit_scalars": ["ground_range_norm", "air_range_norm"],
+    }
+    builder = SquadObservationBuilder(training_conf)
+
+    hydra = MagicMock()
+    hydra.tag = 10
+    hydra.owner_id = 2
+    hydra.type_id = UnitTypeId.HYDRALISK
+    hydra.position.x = 40.0
+    hydra.position.y = 40.0
+    hydra.ground_range = 5.0
+    hydra.air_range = 5.0
+    hydra.ground_dps = 10.0
+    hydra.air_dps = 10.0
+    hydra.health = 90.0
+    hydra.health_max = 90.0
+    hydra.shield = 0.0
+    hydra.shield_max = 0.0
+    hydra.energy = 0.0
+    hydra.energy_max = 0.0
+    hydra.weapon_cooldown = 0.0
+    hydra.weapon_ready = True
+    hydra.calculate_speed = MagicMock(return_value=3.15)
+    hydra.distance_to_weapon_ready = 0.0
+    hydra.movement_speed = 3.15
+
+    bot = MagicMock()
+    bot.player_id = 1
+    bot.units = MagicMock()
+    bot.units.exists = True
+    bot.units.first = hydra
+    bot.enemy_units = MagicMock()
+    bot.structures = MagicMock()
+    bot.enemy_structures = MagicMock()
+    bot.state = MagicMock()
+    bot.state.effects = []
+    bot.state.creep = None
+    bot.state.upgrades = frozenset({UpgradeId.EVOLVEGROOVEDSPINES})
+    bot.game_info = MagicMock()
+    bot.game_data = MagicMock()
+    if hasattr(bot.game_info, "pathing_grid"):
+        del bot.game_info.pathing_grid
+    if hasattr(bot.game_info, "terrain_height"):
+        del bot.game_info.terrain_height
+    bot.unit_target_map = {}
+    bot.unit_command_map = {10: "attack"}
+    bot.enemy_pylon_pos = {}
+    bot.all_units.find_by_tag = lambda tag: hydra if tag == 10 else None
+
+    fake_tactical = np.zeros((2, 32, 32), dtype=np.float32)
+    with patch.object(builder._transformer, "transform_tactical", return_value=fake_tactical):
+        obs_p2 = builder.build(
+            bot,
+            perspective_player_id=2,
+            squad_unit_tags=[10],
+            pool_high_level_command="attack",
+            playable_size=(128.0, 128.0),
+        )
+        builder.clear_global_cache()
+        obs_p1 = builder.build(
+            bot,
+            perspective_player_id=1,
+            squad_unit_tags=[10],
+            pool_high_level_command="attack",
+            playable_size=(128.0, 128.0),
+        )
+
+    # Grooved spines: +1 ground and air on a 5.0 catalog range → 6/10.
+    expected = 6.0 / 10.0
+    assert abs(float(obs_p2["unit_scalars"][0, 0]) - expected) < 1e-5
+    assert abs(float(obs_p2["unit_scalars"][0, 1]) - expected) < 1e-5
+    assert np.allclose(obs_p2["unit_scalars"][0], obs_p1["unit_scalars"][0])

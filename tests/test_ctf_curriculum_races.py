@@ -67,8 +67,12 @@ def test_pool_assignment_alternates_trainee_race_each_episode():
     assert get_trainee_race(pools, 3, alternate=True) == "terran"
     assert pool_player_id(pools[0], pools, 1, alternate=True) == 1
     assert pool_player_id(pools[1], pools, 1, alternate=True) == 2
-    assert pool_player_id(pools[0], pools, 2, alternate=True) == 2
-    assert pool_player_id(pools[1], pools, 2, alternate=True) == 1
+    assert pool_player_id(pools[0], pools, 2, alternate=True) == 1
+    assert pool_player_id(pools[1], pools, 2, alternate=True) == 2
+    assert is_pool_trainee(pools[0], pools, 1, alternate=True)
+    assert not is_pool_trainee(pools[1], pools, 1, alternate=True)
+    assert not is_pool_trainee(pools[0], pools, 2, alternate=True)
+    assert is_pool_trainee(pools[1], pools, 2, alternate=True)
 
 
 def test_pool_assignment_legacy_agent_flag_when_not_alternating():

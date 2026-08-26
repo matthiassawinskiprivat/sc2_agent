@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from train.async_train_universal import (
     _start_tensorboard,
     build_tensorboard_logdir_spec,
+    build_viewer_tensorboard_logdir_spec,
     detect_active_log_level,
     free_port,
     refresh_tensorboard,
@@ -30,6 +31,31 @@ def test_build_tensorboard_logdir_spec_active_and_all(tmp_path):
     log_base.mkdir()
     spec = build_tensorboard_logdir_spec(str(log_base), "ctf_level_04")
     assert spec == f"active:{(log_base / 'ctf_level_04').resolve()},all:{log_base.resolve()}"
+
+
+def test_build_viewer_tensorboard_logdir_spec_includes_control_and_build(tmp_path):
+    univ = tmp_path / "logs_universal"
+    build = tmp_path / "logs_build_zerg"
+    (univ / "ctf_level_04").mkdir(parents=True)
+    (build / "level_build_zerg_0").mkdir(parents=True)
+    old_ts = time.time() - 100
+    os.utime(univ / "ctf_level_04", (old_ts, old_ts))
+    # build level is newer
+    os.utime(build / "level_build_zerg_0", None)
+
+    spec = build_viewer_tensorboard_logdir_spec(str(tmp_path))
+    assert f"control_active:{(univ / 'ctf_level_04').resolve()}" in spec
+    assert f"control:{univ.resolve()}" in spec
+    assert f"build_active:{(build / 'level_build_zerg_0').resolve()}" in spec
+    assert f"build:{build.resolve()}" in spec
+
+
+def test_build_viewer_tensorboard_logdir_spec_registers_missing_dirs(tmp_path):
+    spec = build_viewer_tensorboard_logdir_spec(str(tmp_path))
+    assert "control:" in spec
+    assert "build:" in spec
+    assert "logs_universal" in spec
+    assert "logs_build_zerg" in spec
 
 
 @patch("train.async_train_universal._tensorboard_port_open", return_value=False)

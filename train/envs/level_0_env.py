@@ -39,7 +39,16 @@ from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.config_manager import ConfigManager
 from src.utils.layer_constants import LayerConstants
 from src.utils.proto_utils import ProtoWrapper
-from train.envs.sc2_session_config import every_k_episodes, session_realtime, use_computer_player
+from train.envs.sc2_session_config import (
+    DEFAULT_POST_CREATE_GAME_DELAY_SECS,
+    every_k_episodes,
+    host_local_sc2_game,
+    resolve_computer_difficulty,
+    session_realtime,
+    use_computer_player,
+)
+from src.utils.sc2_cleanup import close_sc2_process_local
+from src.utils.sc2_map_files import list_usable_sc2map_stems
 from src.agent.universal_constants import (
     FIXED_UNIVERSAL_COMMAND_DIM,
     build_action_head_manifest,
@@ -253,9 +262,8 @@ class Level0Env(gym.Env):
             
         if not maps_dir.exists():
             return []
-        map_files = [f.stem for f in maps_dir.glob("*.SC2Map")]
-        map_files.sort()
-        return map_files
+        # Skip truncated downloads (e.g. exactly-1MiB stubs) that break join_game.
+        return list_usable_sc2map_stems(maps_dir)
 
     def _log(self, message):
         # Print to stdout too so it gets captured by redirection
@@ -366,7 +374,8 @@ class Level0Env(gym.Env):
                 current_port = getattr(self._sc2_process, "_port", None)
                 if current_port is None:
                     self._log(f"WARNING: SC2Process launched with port=None on attempt {attempt+1}")
-                    await self._sc2_process.__aexit__(None, None, None)
+                    await close_sc2_process_local(self._sc2_process)
+                    self._sc2_process = None
                     if attempt == max_launch_attempts - 1:
                         raise RuntimeError("Failed to obtain a valid port for SC2Process after multiple attempts.")
                     continue
@@ -375,7 +384,8 @@ class Level0Env(gym.Env):
                 ws = getattr(self._sc2_process, "_ws", getattr(self._sc2_process, "ws", None))
                 if ws is None:
                     self._log(f"WARNING: WebSocket is None on attempt {attempt+1}")
-                    await self._sc2_process.__aexit__(None, None, None)
+                    await close_sc2_process_local(self._sc2_process)
+                    self._sc2_process = None
                     continue
 
                 self._client = self._client_cls(ws)
@@ -386,20 +396,14 @@ class Level0Env(gym.Env):
             except Exception as e:
                 self._log(f"Error during SC2 launch attempt {attempt+1}: {e}")
                 try:
-                    await self._sc2_process.__aexit__(None, None, None)
-                except:
+                    await close_sc2_process_local(self._sc2_process)
+                except Exception:
                     pass
+                self._sc2_process = None
                 if attempt == max_launch_attempts - 1:
                     raise e
 
     async def _setup_game_session(self):
-        # Verify connection
-        try:
-             await self._client.ping()
-        except Exception as e:
-             self._log(f"Initial ping failed: {e}")
-             raise e
-
         game_map = self._resolve_map(self.map_name)
         if self._bot is None:
             self._log(f"Creating {self._bot_cls.__name__}...")
@@ -412,10 +416,10 @@ class Level0Env(gym.Env):
 
         self._log("Creating game...")
         use_computer = use_computer_player(self.level_name, self.training_conf)
-        
+
         players = [Bot(Race.Zerg, self._bot)]
         if use_computer:
-            difficulty_name = self.training_conf.get("env", {}).get("difficulty", "Easy")
+            difficulty_name = resolve_computer_difficulty(self.training_conf)
             try:
                 difficulty = getattr(Difficulty, difficulty_name)
             except AttributeError:
@@ -423,16 +427,28 @@ class Level0Env(gym.Env):
             players.append(Computer(Race.Zerg, difficulty))
             self._log(f"Starting game with Computer ({difficulty_name})")
         else:
-            self._log("Starting game WITHOUT Computer (Movement Level)")
+            self._log("Starting game without Computer (solo Bot)")
 
         sim_realtime = session_realtime(self.training_conf)
-        await self._controller.create_game(
-            game_map,
-            players,
-            realtime=sim_realtime,
+        post_delay = float(
+            self.training_conf.get(
+                "post_create_game_delay_sec",
+                DEFAULT_POST_CREATE_GAME_DELAY_SECS,
+            )
         )
-        await self._client.join_game(race=Race.Zerg)
-        
+        # Burnysc2 pattern: create on controller, then a fresh Client for join.
+        self._client = await host_local_sc2_game(
+            controller=self._controller,
+            client_cls=self._client_cls,
+            game_map=game_map,
+            players=players,
+            realtime=sim_realtime,
+            join_race=Race.Zerg,
+            log=self._log,
+            post_create_delay_sec=post_delay,
+            player_name="Trainee",
+        )
+
         self._bot._generated_frame = -1
         game_info = await self._client.get_game_info()
         game_data = await self._client.get_game_data()
@@ -535,35 +551,43 @@ class Level0Env(gym.Env):
         return self._bot._get_step_results()
 
     def close(self):
+        """Worker-local teardown — never call burnysc2 ``__aexit__`` (kill_all)."""
         self._log("close() called.")
         if self._sc2_process:
+            proc = self._sc2_process
+            self._sc2_process = None
             if self._loop and not self._loop.is_closed():
                 try:
-                    self._log("Attempting to close SC2 connection (with timeout)...")
-                    if hasattr(self._sc2_process, "_close_connection"):
-                         try:
-                             self._loop.run_until_complete(asyncio.wait_for(self._sc2_process._close_connection(), timeout=5.0))
-                         except asyncio.TimeoutError:
-                             self._log("Timeout while closing SC2 connection.")
-                    
-                    self._log("Attempting to kill SC2 process (with timeout)...")
+                    self._log("Attempting worker-local SC2 teardown (no kill_all)...")
+                    self._loop.run_until_complete(
+                        asyncio.wait_for(close_sc2_process_local(proc), timeout=15.0)
+                    )
+                except asyncio.TimeoutError:
+                    self._log("Timeout while closing SC2 process locally.")
                     try:
-                        self._loop.run_until_complete(asyncio.wait_for(self._sc2_process.__aexit__(None, None, None), timeout=5.0))
-                    except asyncio.TimeoutError:
-                        self._log("Timeout while killing SC2 process.")
-                        self._sc2_process._clean()
+                        proc._clean()
+                    except Exception:
+                        pass
                 except Exception as e:
                     self._log(f"Error during close: {e}")
-                    self._sc2_process._clean()
+                    try:
+                        proc._clean()
+                    except Exception:
+                        pass
             else:
                 self._log("Cleaning up SC2 process (loop closed/missing)...")
-                self._sc2_process._clean()
-            self._sc2_process = None
-        
+                try:
+                    from src.utils.sc2_cleanup import unregister_sc2_process
+
+                    unregister_sc2_process(proc)
+                    proc._clean()
+                except Exception:
+                    pass
+
         self._client = None
         self._controller = None
         self._bot = None
-        
+
         if self._loop:
             if not self._loop.is_closed():
                 try:

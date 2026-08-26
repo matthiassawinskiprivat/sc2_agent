@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import random
 from collections import Counter
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from loguru import logger
@@ -14,17 +15,22 @@ from sc2.data import Race
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 
-from src.sc2_bot import MapCleanupFailedError, unit_is_subject_to_map_cleanup
+from src.sc2_bot import (
+    MapCleanupFailedError,
+    alliance_value,
+    unit_is_subject_to_map_cleanup,
+)
 from src.agent.build_constants import (
     BUILD_MAP_RESOLUTION,
     BUILD_PLACEMENT_CELLS,
     MAX_BUILD_WORKERS,
 )
-from src.agent.commands import Command, CommandType
+from src.agent.commands import INJECT_ENERGY_COST, Command, CommandType
 from src.runtime.command_queue import CommandQueue
 from src.runtime.mining_controller import MiningController, NoOpMiningController
-from src.runtime.scripted_manager import ScriptedManager
+from src.runtime.scripted_manager import ManagerScriptStep, ScriptedManager
 from src.runtime.squad_registry import SquadRegistry
+from src.runtime.stub_combat_controller import StubCombatController
 from src.runtime.worker_registry import WorkerRegistry, WorkerRole
 from src.transformers.build_observation_builder import BuildObservationBuilder
 
@@ -51,7 +57,9 @@ class ZergBuildBot(BotAI):
         self.command_queue = CommandQueue()
         env_cfg = self._level_env_config()
         if env_cfg.get("manager_script"):
-            self.scripted_manager = ScriptedManager.from_level_config(env_cfg)
+            self.scripted_manager = ScriptedManager.from_level_config(
+                env_cfg, can_emit_step=self._can_emit_script_step
+            )
             self.scripted_manager.worker_registry = self.worker_registry
             self.scripted_manager.command_queue = self.command_queue
         else:
@@ -60,9 +68,15 @@ class ZergBuildBot(BotAI):
                 macro_tick_interval=int(env_cfg.get("macro_tick_interval", 8)),
                 worker_registry=self.worker_registry,
                 command_queue=self.command_queue,
+                can_emit_step=self._can_emit_script_step,
             )
+        # Remember which script steps used hatch placeholders ([-1,-1] / None).
+        # Command objects are mutated in place; without this, episode 2+ keep the
+        # previous hatch coordinates and placement desyncs from the new base.
+        self._script_anchor_to_hatch = self._compute_script_hatch_anchors()
         self.obs_builder = BuildObservationBuilder(self.training_conf)
         self.mining_controller: MiningController = self._resolve_mining_controller()
+        self.stub_combat = StubCombatController()
         self.rewards_cfg = self.training_conf.get("rewards", {})
         self.episode_step = 0
         self._last_build_attempt_failed = False
@@ -78,6 +92,14 @@ class ZergBuildBot(BotAI):
         self._train_baseline = 0
         self._commands_completed = 0
         self._mine_anchor_pos: Optional[Point2] = None
+        self._gas_worker_quota: int = 0
+        self._gas_anchor_pos: Optional[Point2] = None
+        self._inject_succeeded = False
+        self._keep_enemy_alive = bool(
+            self.training_conf.get("keep_enemy_alive")
+            or (self.training_conf.get("env") or {}).get("keep_enemy_alive")
+            or str(self.training_conf.get("level_name", "")).startswith("level_manager_")
+        )
 
     async def on_step(self, iteration: int):
         """Gym env calls on_step(0) once after _prepare_start to spawn the scenario."""
@@ -137,14 +159,18 @@ class ZergBuildBot(BotAI):
             # Zero mineral/gas bank via map Galaxy trigger (chat SOFT_RESET).
             await self._request_map_soft_reset_resources()
             await self._clear_debug_spawned_neutrals()
-            await self._clear_map_units(strict_empty_map=True)
-            await self._ensure_own_units_cleared()
             # Bank assert not needed when the map trigger clears resources; hard
             # remakes still run every env.every_k_episodes (and when patches die).
+        # Always clear trainee + Computer seat-filler units (ladder openers / AI).
+        await self._clear_map_units(strict_empty_map=not skip_cleanup)
+        if not skip_cleanup:
+            await self._ensure_own_units_cleared()
         self._clear_spawn_session_state()
         self.worker_registry.clear()
         self.command_queue.clear()
         self.scripted_manager.reset()
+        # Refresh hatch-anchor flags from restored pristine YAML sentinels.
+        self._script_anchor_to_hatch = self._compute_script_hatch_anchors()
         clear = getattr(self.mining_controller, "clear", None)
         if callable(clear):
             clear()
@@ -152,8 +178,13 @@ class ZergBuildBot(BotAI):
         self._last_build_attempt_failed = False
         self._train_baseline = 0
         self._commands_completed = 0
+        self._inject_succeeded = False
         self._mine_anchor_pos = None
+        self._gas_worker_quota = 0
+        self._gas_anchor_pos = None
         await self._spawn_scenario()
+        # Computer may have respawned during spawn steps — wipe again.
+        await self._suppress_seat_filler()
         self._structures_at_step_start = len(self.structures)
         self._patch_script_targets()
         # Completion-gated script: emit MINE (standing) then the first macro only.
@@ -167,6 +198,7 @@ class ZergBuildBot(BotAI):
         # Training default: every worker mines near hatch if manager omitted MINE.
         self._ensure_training_mine_command()
         self._apply_standing_mine_command()
+        self._apply_standing_mine_gas_command()
         self._sync_train_baseline()
         active = self.command_queue.active
         if active and active.unit_type_id is not None:
@@ -293,46 +325,137 @@ class ZergBuildBot(BotAI):
                 f"(hard remake via every_k_episodes clears this)."
             )
 
-    def _patch_script_targets(self):
-        """Replace placeholder YAML targets with the hatch/spawn location.
+    def _compute_script_hatch_anchors(self) -> List[bool]:
+        """True for script steps whose target should track the current hatch.
 
-        The management agent only provides a coarse region; ``[-1, -1]`` in YAML
-        means \"use spawn/hatch\" (not a real map coordinate). The build policy
-        then refines placement on the local 16x16 crop around that point.
+        Prefer pristine YAML templates so soft-reset rebinding still works after
+        working ``script_steps`` have been patched to real map coordinates.
         """
-        hatch = (
-            self.townhalls.first.position
-            if self.townhalls.exists
-            else (self._spawn_hatchery_pos or self.start_location)
-        )
+        pristine = getattr(self.scripted_manager, "_pristine_steps", None)
+        steps = pristine if pristine is not None else self.scripted_manager.script_steps
         patchable = {
             CommandType.BUILD,
             CommandType.EXPAND,
             CommandType.MINE,
+            CommandType.MINE_GAS,
         }
-        for step in self.scripted_manager.script_steps:
+        flags: List[bool] = []
+        for step in steps:
             cmd = step.command
-            if cmd.target_pos is None:
-                if cmd.command_type in patchable:
-                    cmd.target_pos = hatch
+            if cmd.command_type not in patchable:
+                flags.append(False)
                 continue
-            if cmd.target_pos.x == -1 and cmd.target_pos.y == -1:
+            tp = cmd.target_pos
+            if tp is None:
+                flags.append(True)
+            elif float(tp.x) == -1.0 and float(tp.y) == -1.0:
+                flags.append(True)
+            else:
+                flags.append(False)
+        return flags
+
+    def _patch_script_targets(self):
+        """Bind hatch-anchored script targets to the current hatch/spawn location.
+
+        The management agent only provides a coarse region; ``[-1, -1]`` in YAML
+        means \"use spawn/hatch\" (not a real map coordinate). The build policy
+        then refines placement on the local 16x16 crop around that point.
+
+        EXTRACTOR is special: the crop centers on the **local geyser** next to the
+        episode hatch (not the hatch footprint, and never a far-side geyser).
+
+        Must re-run every episode. ``ScriptedManager.reset`` restores pristine
+        YAML sentinels, then this rebinds hatch/geyser for the new spawn.
+        Always recompute the local geyser from the current hatch.
+        """
+        hatch = self._episode_hatch_pos()
+        if hatch is None:
+            return
+        # Anchors come from pristine YAML sentinels (set at init / after reset),
+        # never from already-patched coordinates.
+        anchors = getattr(self, "_script_anchor_to_hatch", None)
+        if anchors is None:
+            anchors = self._compute_script_hatch_anchors()
+            self._script_anchor_to_hatch = anchors
+
+        # Force a fresh geyser for this hatch (ignore any leftover coords).
+        local_geyser = self._force_local_geyser_pos(hatch)
+
+        for i, step in enumerate(self.scripted_manager.script_steps):
+            cmd = step.command
+            anchored = i < len(anchors) and anchors[i]
+            # Always rebind EXTRACTOR from this episode's hatch geyser.
+            if (
+                cmd.command_type == CommandType.BUILD
+                and cmd.unit_type_id
+                in {UnitTypeId.EXTRACTOR, UnitTypeId.EXTRACTORRICH}
+            ):
+                cmd.target_pos = local_geyser if local_geyser is not None else hatch
+                continue
+            if anchored:
+                cmd.target_pos = hatch
+                continue
+            # Legacy / dynamic scripts still using the placeholder sentinel.
+            tp = cmd.target_pos
+            if tp is not None and float(tp.x) == -1.0 and float(tp.y) == -1.0:
                 cmd.target_pos = hatch
 
+    def _episode_hatch_pos(self) -> Optional[Point2]:
+        """Prefer this episode's spawned hatch — never an arbitrary townhalls.first."""
+        if self._spawn_hatchery_pos is not None:
+            return self._spawn_hatchery_pos
+        if self.townhalls and self.townhalls.exists:
+            return self.townhalls.first.position
+        return getattr(self, "start_location", None)
+
+    def _force_local_geyser_pos(self, hatch: Point2) -> Optional[Point2]:
+        """Recompute the episode geyser from ``hatch`` (never keep a stale point)."""
+        geyser_unit = self._local_geyser_unit(hatch)
+        if geyser_unit is None:
+            self._target_geyser_pos = None
+            return None
+        self._target_geyser_pos = geyser_unit.position
+        return self._target_geyser_pos
+
+    def _resolve_local_geyser_pos(self, hatch: Point2) -> Optional[Point2]:
+        """Geyser used for EXTRACTOR / MINE_GAS near the episode hatch."""
+        return self._force_local_geyser_pos(hatch)
+
+    def _local_geyser_unit(self, near: Point2, max_dist: float = 20.0):
+        """Closest geyser within ``max_dist`` of ``near`` (None if none local)."""
+        geysers = getattr(self, "vespene_geyser", None)
+        if not geysers:
+            return None
+        if hasattr(geysers, "exists") and not geysers.exists:
+            return None
+        try:
+            closest = geysers.closest_to(near)
+        except Exception:
+            return None
+        try:
+            dist = float(closest.distance_to(near))
+        except (TypeError, ValueError):
+            return closest
+        if dist > max_dist:
+            return None
+        return closest
+
     def _unit_is_build_scenario_cleanup(self, u) -> bool:
-        """Only remove units owned by the training bot (keep map/neutral/other slots)."""
+        """Remove trainee + Computer seat-filler units; keep neutrals/resources."""
         if not unit_is_subject_to_map_cleanup(u):
             return False
-        owner = getattr(u, "owner_id", None)
-        if owner is not None:
-            return int(owner) == int(self.player_id)
-        alliance = getattr(u, "alliance", None)
         from sc2.data import Alliance
 
-        return alliance == Alliance.Self
+        av = alliance_value(getattr(u, "alliance", None))
+        if av is None:
+            return False
+        # Self=1, Enemy=4. Neutral=3 must never be killed (minerals/geysers).
+        if av == Alliance.Enemy.value and self._keep_enemy_alive:
+            return False
+        return av in {Alliance.Self.value, Alliance.Enemy.value}
 
     async def _clear_map_units(self, strict_empty_map: bool = False):
-        """Kill training-bot units so resets do not stack hatcheries."""
+        """Kill trainee + seat-filler units so resets do not stack hatcheries."""
         await self._refresh_state()
 
         max_cleanup_attempts = 8
@@ -355,7 +478,7 @@ class ZergBuildBot(BotAI):
             await self._refresh_state()
 
         remaining = self.all_units.filter(self._unit_is_build_scenario_cleanup)
-        if remaining:
+        if remaining and strict_empty_map:
             n = remaining.amount
             type_hist = Counter(
                 getattr(u.type_id, "name", str(u.type_id)) for u in remaining
@@ -364,6 +487,22 @@ class ZergBuildBot(BotAI):
                 f"Build map cleanup incomplete ({n} unit(s) left). Types: {dict(type_hist)}"
             )
             raise MapCleanupFailedError(n)
+
+    async def _suppress_seat_filler(self) -> None:
+        """Keep Computer opponent from interfering with the build curriculum.
+
+        Manager levels with a live Computer must not wipe the enemy every step.
+        """
+        if self._keep_enemy_alive:
+            return
+        tags = []
+        for group in (getattr(self, "enemy_units", None), getattr(self, "enemy_structures", None)):
+            if not group:
+                continue
+            tags.extend(int(u.tag) for u in group)
+        if not tags:
+            return
+        await self.client.debug_kill_unit(tags)
 
     @staticmethod
     def _point_in_playable_area(area, pos: Point2) -> bool:
@@ -458,30 +597,35 @@ class ZergBuildBot(BotAI):
         return self._spawn_reference_point()
 
     def _candidate_base_locations(self) -> List[Point2]:
-        """Official map start locations (mains), not every expansion on the map.
+        """Optimal townhall spots: expansion locations (mineral/gas clusters).
 
-        ``no_trigger`` AIE maps still expose ``game_info.start_locations``; removing
-        triggers does not strip LocStartLoc metadata. Prefer those so the hatch is
-        at a real spawn, not a random natural/third base from
-        ``expansion_locations_list``.
+        Prefer burnysc2 ``expansion_locations_list`` — these are the standard
+        base centers as close to minerals as the map layout allows. Fall back to
+        LocStartLoc mains, then mineral-cluster centroids.
         """
         locs: List[Point2] = []
-        if self.game_info is not None:
-            starts = list(getattr(self.game_info, "start_locations", None) or [])
-            locs.extend(starts)
-        # burnysc2 also mirrors starts on the bot (excluding our own when set).
-        for p in list(getattr(self, "enemy_start_locations", None) or []):
-            locs.append(p)
-        own = getattr(self, "start_location", None)
-        if own is not None:
-            locs.append(own)
+        try:
+            locs.extend(list(getattr(self, "expansion_locations_list", None) or []))
+        except Exception as exc:
+            logger.debug(f"expansion_locations_list unavailable: {exc}")
+        if not locs:
+            try:
+                exp_dict = getattr(self, "expansion_locations_dict", None) or {}
+                locs.extend(list(exp_dict.keys()))
+            except Exception as exc:
+                logger.debug(f"expansion_locations_dict unavailable: {exc}")
 
         if not locs:
-            # Last resort: expansions (blank grids / maps without LocStartLoc).
-            try:
-                locs.extend(list(getattr(self, "expansion_locations_list", None) or []))
-            except Exception as exc:
-                logger.debug(f"expansion_locations_list unavailable: {exc}")
+            if self.game_info is not None:
+                locs.extend(list(getattr(self.game_info, "start_locations", None) or []))
+            for p in list(getattr(self, "enemy_start_locations", None) or []):
+                locs.append(p)
+            own = getattr(self, "start_location", None)
+            if own is not None:
+                locs.append(own)
+
+        if not locs:
+            locs.extend(self._bases_from_mineral_clusters())
 
         seen = set()
         unique: List[Point2] = []
@@ -492,6 +636,52 @@ class ZergBuildBot(BotAI):
             seen.add(key)
             unique.append(p)
         return unique
+
+    def _bases_from_mineral_clusters(
+        self, cluster_radius: float = 10.0
+    ) -> List[Point2]:
+        """Derive base centers from mineral patch clusters when expansions missing."""
+        fields = list(self.mineral_field) if self.mineral_field else []
+        if not fields:
+            return []
+        unused = set(range(len(fields)))
+        centers: List[Point2] = []
+        while unused:
+            seed = unused.pop()
+            cluster = [seed]
+            queue = [seed]
+            while queue:
+                j = queue.pop()
+                j_pos = fields[j].position
+                for i in list(unused):
+                    if fields[i].distance_to(j_pos) <= cluster_radius:
+                        unused.remove(i)
+                        cluster.append(i)
+                        queue.append(i)
+            if len(cluster) < 4:
+                continue
+            members = [fields[i] for i in cluster]
+            cx = sum(float(m.position.x) for m in members) / len(members)
+            cy = sum(float(m.position.y) for m in members) / len(members)
+            mineral_center = Point2((cx, cy))
+            # Offset hatch toward map center so it sits in front of the mineral line.
+            map_center = getattr(
+                getattr(self, "game_info", None), "map_center", None
+            )
+            if map_center is not None:
+                toward_x = float(map_center.x) - mineral_center.x
+                toward_y = float(map_center.y) - mineral_center.y
+                norm = math.hypot(toward_x, toward_y) or 1.0
+                hatch = Point2(
+                    (
+                        mineral_center.x + 5.5 * toward_x / norm,
+                        mineral_center.y + 5.5 * toward_y / norm,
+                    )
+                )
+            else:
+                hatch = mineral_center
+            centers.append(hatch)
+        return centers
 
     def _mineral_amount(self, mineral) -> int:
         for attr in ("mineral_contents", "health", "energy"):
@@ -516,20 +706,142 @@ class ZergBuildBot(BotAI):
         total = sum(self._mineral_amount(m) for m in fields)
         return total >= min_total
 
+    @staticmethod
+    def _half_tile(pos: Point2) -> Point2:
+        """Townhall centers sit on (*.5, *.5) because the footprint is 5×5."""
+        return Point2((math.floor(float(pos.x)) + 0.5, math.floor(float(pos.y)) + 0.5))
+
+    def _map_start_locations(self) -> List[Point2]:
+        """Exact LocStartLoc positions from the map (perfect main-base hatch spots)."""
+        locs: List[Point2] = []
+        if self.game_info is not None:
+            locs.extend(list(getattr(self.game_info, "start_locations", None) or []))
+        for p in list(getattr(self, "enemy_start_locations", None) or []):
+            locs.append(p)
+        own = getattr(self, "start_location", None)
+        if own is not None:
+            locs.append(own)
+        seen = set()
+        unique: List[Point2] = []
+        for p in locs:
+            key = (round(float(p.x), 1), round(float(p.y), 1))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(p)
+        return unique
+
+    def _resources_for_base(self, base_pos: Point2) -> List:
+        """Mineral/gas units belonging to this base (expansion dict, else radius)."""
+        try:
+            exp_dict = getattr(self, "expansion_locations_dict", None) or {}
+            if exp_dict:
+                nearest = min(exp_dict.keys(), key=lambda p: p.distance_to(base_pos))
+                if nearest.distance_to(base_pos) <= 8.0:
+                    resources = list(exp_dict[nearest])
+                    if resources:
+                        return resources
+        except Exception as exc:
+            logger.debug(f"expansion resource lookup failed: {exc}")
+        minerals = [
+            m for m in (self.mineral_field or []) if m.distance_to(base_pos) <= 12.0
+        ]
+        geysers = [
+            g
+            for g in (list(self.vespene_geyser) if self.vespene_geyser else [])
+            if g.distance_to(base_pos) <= 12.0
+        ]
+        return minerals + geysers
+
+    def _refine_hatch_on_placement_grid(self, resources: Sequence) -> Optional[Point2]:
+        """Burnysc2-style search: closest legal (*.5,*.5) townhall to the resource pack."""
+        if not resources or self.game_info is None:
+            return None
+        placement = getattr(self.game_info, "placement_grid", None)
+        if placement is None:
+            return None
+        try:
+            from sc2.constants import geyser_ids
+        except Exception:
+            geyser_ids = set()
+
+        amount = len(resources)
+        center_x = int(sum(float(r.position.x) for r in resources) / amount) + 0.5
+        center_y = int(sum(float(r.position.y) for r in resources) / amount) + 0.5
+        offset_range = 7
+        offsets = [
+            (x, y)
+            for x, y in itertools.product(
+                range(-offset_range, offset_range + 1), repeat=2
+            )
+            if 4 < math.hypot(x, y) <= 8
+        ]
+        possible: List[Point2] = []
+        for ox, oy in offsets:
+            point = Point2((center_x + ox, center_y + oy))
+            try:
+                if int(placement[point.rounded]) != 1:
+                    continue
+            except Exception:
+                continue
+            legal = True
+            for resource in resources:
+                min_dist = 6.0
+                try:
+                    ut = resource._proto.unit_type
+                    if ut in geyser_ids:
+                        min_dist = 7.0
+                except Exception:
+                    name = str(getattr(resource, "name", "") or "")
+                    if "Geyser" in name or "Vespene" in name:
+                        min_dist = 7.0
+                if point.distance_to(resource) < min_dist:
+                    legal = False
+                    break
+            if legal:
+                possible.append(point)
+        if not possible:
+            return None
+        return min(
+            possible, key=lambda p: sum(p.distance_to(r) for r in resources)
+        )
+
+    def _optimal_hatch_at_base(self, base_pos: Point2) -> Point2:
+        """Exact main LocStartLoc, else placement-grid refine, else half-tile snap."""
+        # 1) Map-authored start locations beat computed expansions for mains.
+        for start in self._map_start_locations():
+            if start.distance_to(base_pos) <= 5.0:
+                return self._half_tile(start)
+
+        # 2) Recompute the burnysc2 optimal townhall against this base's resources.
+        resources = self._resources_for_base(base_pos)
+        refined = self._refine_hatch_on_placement_grid(resources)
+        if refined is not None:
+            return refined
+
+        # 3) Fall back to expansion dict key / half-tile of the candidate.
+        try:
+            exp_dict = getattr(self, "expansion_locations_dict", None) or {}
+            if exp_dict:
+                nearest = min(exp_dict.keys(), key=lambda p: p.distance_to(base_pos))
+                if nearest.distance_to(base_pos) <= 6.0:
+                    return self._half_tile(nearest)
+        except Exception as exc:
+            logger.debug(f"expansion_locations_dict snap failed: {exc}")
+        return self._half_tile(base_pos)
+
     def _pick_episode_base_pos(self, rng: Optional[random.Random] = None) -> Point2:
         """
-        Random healthy official start location for this episode.
+        Random healthy optimal base for this episode (near minerals).
 
-        Raises MapCleanupFailedError when starts exist but none still have healthy
+        Raises MapCleanupFailedError when bases exist but none still have healthy
         mineral fields (soft reset cannot refill patches → Level0Env hard remake).
+        Never falls back to a random pathable tile elsewhere on the map.
         """
         rng = rng or random
         candidates = self._candidate_base_locations()
         if not candidates:
-            logger.warning(
-                "No start_locations on map; falling back to pathable hatch placement."
-            )
-            return self._default_hatch_location()
+            raise MapCleanupFailedError(0)
 
         healthy = [c for c in candidates if self._base_has_healthy_minerals(c)]
         if not healthy:
@@ -537,9 +849,7 @@ class ZergBuildBot(BotAI):
 
         pool = list(healthy)
         rng.shuffle(pool)
-        hatch_pos = pool[0]
-        if not self._is_pathable(hatch_pos):
-            hatch_pos = self._find_buildable_near(hatch_pos, min_dist=0.0, max_dist=4.0)
+        hatch_pos = self._optimal_hatch_at_base(pool[0])
         if self.vespene_geyser.exists:
             self._target_geyser_pos = self.vespene_geyser.closest_to(hatch_pos).position
         else:
@@ -547,12 +857,16 @@ class ZergBuildBot(BotAI):
         return hatch_pos
 
     def _resolve_hatch_spawn_pos(self) -> Point2:
-        """Pick a fresh random optimal base each episode (no cross-episode reuse)."""
+        """Pick a fresh optimal base each episode (rotates among healthy expansions)."""
         hatch_pos = self._pick_episode_base_pos()
         self._cached_hatch_spawn_pos = hatch_pos
         self._cached_spawn_geometry_key = (
             f"{getattr(self.game_info, 'map_name', 'unknown')}:"
             f"{round(hatch_pos.x, 1)}:{round(hatch_pos.y, 1)}"
+        )
+        logger.info(
+            f"Build hatch spawn at optimal base "
+            f"({hatch_pos.x:.1f}, {hatch_pos.y:.1f})"
         )
         return hatch_pos
 
@@ -738,8 +1052,51 @@ class ZergBuildBot(BotAI):
         )
         self.command_queue.enqueue(cmd)
 
+    def _prune_missing_worker_roles(self) -> None:
+        """Drop registry entries for drones that left (e.g. morphed into a building)."""
+        live = {int(w.tag) for w in self.workers}
+        for tag in list(self.worker_registry.snapshot().keys()):
+            if tag not in live:
+                self.worker_registry.remove(tag)
+
+    def _release_idle_builders(self) -> None:
+        """Return idle BUILD-role drones to mining (failed / cancelled build orders).
+
+        While a BUILD/EXPAND macro is still unsatisfied (no structure / pending),
+        keep BUILD roles so a one-frame idle observation cannot demote a traveler
+        and let mining cancel the order.
+        """
+        from src.runtime.mining_controller import _worker_is_building
+
+        cmd = self.command_queue.active
+        if (
+            cmd is not None
+            and cmd.command_type in {CommandType.BUILD, CommandType.EXPAND}
+            and cmd.unit_type_id is not None
+            and not self._has_structure_near_episode_hatch(cmd.unit_type_id)
+        ):
+            try:
+                if int(self.already_pending(cmd.unit_type_id)) == 0:
+                    return
+            except Exception:
+                return
+
+        for tag in list(self.worker_registry.build_pool_tags()):
+            worker = next((w for w in self.workers if int(w.tag) == tag), None)
+            if worker is None:
+                self.worker_registry.remove(tag)
+                continue
+            if _worker_is_building(worker):
+                continue
+            if bool(getattr(worker, "is_idle", False)):
+                self.worker_registry.assign(tag, WorkerRole.MINING)
+
     def _apply_standing_mine_command(self) -> None:
-        """Resolve MINE: N drones nearest the region → MINING at closest hatch."""
+        """Resolve MINE: N drones nearest the region → MINING at closest hatch.
+
+        Never overwrite BUILD/MICRO roles — otherwise speed-mining cancels an
+        in-flight ``worker.build`` on the next substep.
+        """
         cmd = self.command_queue.standing_mine
         if cmd is None or cmd.command_type != CommandType.MINE:
             return
@@ -749,71 +1106,160 @@ class ZergBuildBot(BotAI):
         hatch = self._closest_hatch_to(region)
         self._mine_anchor_pos = hatch
 
+        self._prune_missing_worker_roles()
         workers = list(self.workers)
         if not workers:
             return
 
+        protected = {WorkerRole.BUILD, WorkerRole.MICRO}
+        # Prefer free workers for the mine quota; leave builders alone.
+        free = [
+            w
+            for w in workers
+            if self.worker_registry.get_role(int(w.tag)) not in protected
+        ]
+
         if cmd.assigned_unit_tags:
-            selected = [w for w in workers if int(w.tag) in cmd.assigned_unit_tags]
+            # Keep sticky assignment only for workers still free / already mining.
+            selected = [
+                w
+                for w in free
+                if int(w.tag) in cmd.assigned_unit_tags
+            ]
+            if len(selected) < len(cmd.assigned_unit_tags):
+                # Refill from nearest free workers if builders ate some slots.
+                n = cmd.worker_count
+                if n is None or n <= 0:
+                    n = len(free)
+                need = min(int(n), len(free)) - len(selected)
+                if need > 0:
+                    chosen = {int(w.tag) for w in selected}
+                    ordered = sorted(
+                        (w for w in free if int(w.tag) not in chosen),
+                        key=lambda w: w.distance_to(region),
+                    )
+                    selected.extend(ordered[:need])
         else:
             n = cmd.worker_count
             if n is None or n <= 0:
-                n = len(workers)
-            ordered = sorted(workers, key=lambda w: w.distance_to(region))
+                n = len(free)
+            ordered = sorted(free, key=lambda w: w.distance_to(region))
             selected = ordered[: min(int(n), len(ordered))]
 
         selected_tags = {int(w.tag) for w in selected}
         for worker in workers:
             tag = int(worker.tag)
+            role = self.worker_registry.get_role(tag)
+            if role in protected:
+                continue
             if tag in selected_tags:
                 self.worker_registry.assign(tag, WorkerRole.MINING)
-            elif self.worker_registry.get_role(tag) == WorkerRole.MINING:
+            elif role == WorkerRole.MINING:
                 # Drop miners not covered by this MINE (pulled off the line).
                 self.worker_registry.remove(tag)
 
         cmd.assigned_unit_tags = selected_tags
 
-    def action_masks(self) -> np.ndarray:
-        """Mask padded workers; for BUILD, restrict placement to buildable cells."""
-        mask = np.ones(MAX_BUILD_WORKERS + BUILD_PLACEMENT_CELLS, dtype=bool)
-        n_workers = len(list(self.workers))
-        if n_workers < MAX_BUILD_WORKERS:
-            mask[n_workers:MAX_BUILD_WORKERS] = False
-        placement = self._placement_action_mask()
-        mask[MAX_BUILD_WORKERS:] = placement
-        return mask
+    def _apply_standing_mine_gas_command(self) -> None:
+        """Resolve MINE_GAS: set gas worker quota for the mining controller.
 
-    def _placement_action_mask(self) -> np.ndarray:
-        """Legal 16x16 cells near the manager coarse target (creep+path for pool)."""
-        out = np.ones(BUILD_PLACEMENT_CELLS, dtype=bool)
-        cmd = self.command_queue.active
-        if cmd is None or cmd.command_type == CommandType.TRAIN:
-            return out
+        ``worker_count`` None / <=0 clears gas (pull drones off extractors).
+        Does not change WorkerRegistry roles — gas workers stay MINING and are
+        reserved inside the mining controller.
+        """
+        cmd = self.command_queue.standing_mine_gas
+        if cmd is None or cmd.command_type != CommandType.MINE_GAS:
+            self._gas_worker_quota = 0
+            self._gas_anchor_pos = None
+            return
+        n = cmd.worker_count
+        if n is None or int(n) <= 0:
+            self._gas_worker_quota = 0
+        else:
+            self._gas_worker_quota = int(n)
+        region = cmd.target_pos or self._spawn_hatchery_pos or self._mine_anchor_pos
+        if region is not None:
+            self._gas_anchor_pos = self._closest_hatch_to(region)
+        else:
+            self._gas_anchor_pos = self._mine_anchor_pos
+
+    def action_masks(self) -> np.ndarray:
+        """Vacuous mask for MaskablePPO — build agent does not gate actions."""
+        return np.ones(MAX_BUILD_WORKERS + BUILD_PLACEMENT_CELLS, dtype=bool)
+
+    def _structures_near_episode_hatch(
+        self, unit_type: UnitTypeId, max_dist: float = 20.0
+    ) -> list:
+        """Own structures of ``unit_type`` near this episode's hatch (not leftovers)."""
+        structs = self.structures(unit_type)
+        if not structs:
+            return []
+        hatch = self._episode_hatch_pos()
+        if hatch is None:
+            return list(structs)
+        local = []
+        for s in structs:
+            try:
+                if float(s.distance_to(hatch)) <= max_dist:
+                    local.append(s)
+            except (TypeError, ValueError):
+                local.append(s)
+        return local
+
+    def _has_structure_near_episode_hatch(
+        self, unit_type: UnitTypeId, *, ready: bool = False, max_dist: float = 20.0
+    ) -> bool:
+        local = self._structures_near_episode_hatch(unit_type, max_dist=max_dist)
+        if not local:
+            return False
+        if not ready:
+            return True
+        return any(bool(getattr(s, "is_ready", True)) for s in local)
+
+    def _placement_cell_legal(self, cmd: Command, placement_idx: int) -> bool:
+        """True if the decoded cell is pathable (and on creep when required)."""
         if cmd.command_type not in {CommandType.BUILD, CommandType.EXPAND}:
-            return out
+            return True
         center = cmd.target_pos or self._spawn_hatchery_pos
         if center is None:
-            return out
-
+            return False
+        pos = self.decode_placement(placement_idx, center)
+        x, y = int(pos.x), int(pos.y)
+        # Gas buildings always target the geyser Unit — spatial cell is not the
+        # build coordinate. Requiring the exact geyser tile made the policy bank
+        # hundreds of minerals before a rare correct click.
+        if cmd.unit_type_id in {
+            UnitTypeId.EXTRACTOR,
+            UnitTypeId.EXTRACTORRICH,
+        }:
+            if self._target_geyser_pos is not None:
+                return True
+            hatch = self._episode_hatch_pos()
+            anchor = hatch or cmd.target_pos
+            return (
+                anchor is not None and self._local_geyser_unit(anchor) is not None
+            )
         needs_creep = cmd.unit_type_id not in {
             UnitTypeId.HATCHERY,
             UnitTypeId.LAIR,
             UnitTypeId.HIVE,
-            UnitTypeId.EXTRACTOR,
         }
-        legal = np.zeros(BUILD_PLACEMENT_CELLS, dtype=bool)
-        for idx in range(BUILD_PLACEMENT_CELLS):
-            pos = self.decode_placement(idx, center)
-            x, y = int(pos.x), int(pos.y)
-            if not self._grid_pathable(x, y):
-                continue
-            if needs_creep and not self._cell_has_creep(x, y):
-                continue
-            legal[idx] = True
-        # Avoid a fully-masked spatial head (MaskablePPO cannot sample).
-        if not legal.any():
-            return out
-        return legal
+        if not self._grid_pathable(x, y):
+            return False
+        if needs_creep and not self._cell_has_creep(x, y):
+            return False
+        return True
+
+    def _cell_has_geyser(self, x: int, y: int) -> bool:
+        """True when (x, y) is the episode-local geyser cell (not any map geyser)."""
+        geyser = self._target_geyser_pos
+        if geyser is None:
+            hatch = self._episode_hatch_pos()
+            if hatch is not None:
+                geyser = self._resolve_local_geyser_pos(hatch)
+        if geyser is None:
+            return False
+        return int(geyser.x) == x and int(geyser.y) == y
 
     def _cell_has_creep(self, x: int, y: int) -> bool:
         creep = getattr(getattr(self, "state", None), "creep", None)
@@ -831,13 +1277,52 @@ class ZergBuildBot(BotAI):
             return True
         return True
 
+    def _can_emit_script_step(self, step: ManagerScriptStep) -> bool:
+        """Gate scripted INJECT until a queen has enough energy."""
+        if step.command.command_type != CommandType.INJECT:
+            return True
+        return self._any_queen_can_inject()
+
+    def _any_queen_can_inject(self) -> bool:
+        queens = self._queens()
+        for queen in queens:
+            energy = float(getattr(queen, "energy", 0.0) or 0.0)
+            if energy >= INJECT_ENERGY_COST:
+                return True
+        return False
+
+    def _queens(self) -> List:
+        units = getattr(self, "units", None)
+        if units is None:
+            return []
+        try:
+            return list(units(UnitTypeId.QUEEN))
+        except Exception:
+            return [
+                u
+                for u in units
+                if getattr(u, "type_id", None) == UnitTypeId.QUEEN
+            ]
+
+    def _pointer_units(self, cmd: Optional[Command] = None) -> List:
+        """Units selectable by the build pointer (workers, or queens for INJECT)."""
+        active = cmd if cmd is not None else self.command_queue.active
+        if active is not None and active.command_type == CommandType.INJECT:
+            return sorted(self._queens(), key=lambda u: u.tag)
+        return sorted(self.workers, key=lambda u: u.tag)
+
     async def on_build_substep(self):
         """Per game-step runtime: manager emit-if-idle, mining, command activation."""
+        await self._suppress_seat_filler()
         self.scripted_manager.on_game_step()
         self.scripted_manager.emit_next_if_idle()
         self.command_queue.activate_next()
+        self._prune_missing_worker_roles()
+        self._release_idle_builders()
         if self.command_queue.standing_mine is not None:
             self._apply_standing_mine_command()
+        self._apply_standing_mine_gas_command()
+        self.stub_combat.apply(self, self.command_queue.standing_combat)
         await self.mining_controller.step(self, self.worker_registry.mining_tags())
         if self.training_conf.get("defense_mode"):
             self._maybe_reassign_workers_to_micro()
@@ -871,8 +1356,11 @@ class ZergBuildBot(BotAI):
     def _get_step_results(self) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict]:
         obs, info = self._get_observation()
         reward = self._compute_reward()
+        completed_cmd = self.command_queue.active
         if self._try_complete_active_command():
             reward += float(self.rewards_cfg.get("command_complete", 15.0))
+            if completed_cmd is not None and completed_cmd.command_type == CommandType.INJECT:
+                reward += float(self.rewards_cfg.get("inject_reward", 20.0))
             # Promote next scripted manager intent (e.g. TRAIN batch after BUILD).
             self.scripted_manager.emit_next_if_idle()
             self._sync_train_baseline()
@@ -927,12 +1415,31 @@ class ZergBuildBot(BotAI):
         return int(self.units(unit_type).amount)
 
     @staticmethod
+    def _units_per_train(unit_type: Optional[UnitTypeId]) -> int:
+        """How many finished units one TRAIN order yields (Zergling egg → 2)."""
+        if unit_type in {UnitTypeId.ZERGLING, UnitTypeId.ZERGLINGBURROWED}:
+            return 2
+        return 1
+
+    @staticmethod
     def _train_target_count(cmd: Command) -> int:
         """How many units a TRAIN command must produce (None/<=0 => 1)."""
         raw = getattr(cmd, "count", None)
         if raw is None or int(raw) <= 0:
             return 1
         return int(raw)
+
+    def _pending_unit_equivalent(self, unit_type: UnitTypeId) -> int:
+        """Pending production counted in finished-unit equivalents."""
+        try:
+            pending_orders = int(self.already_pending(unit_type))
+        except Exception:
+            pending_orders = 0
+        return pending_orders * self._units_per_train(unit_type)
+
+    def _train_progress_units(self, unit_type: UnitTypeId) -> int:
+        """Alive + pending (in unit equivalents) toward a TRAIN command."""
+        return self._unit_count(unit_type) + self._pending_unit_equivalent(unit_type)
 
     def _sync_train_baseline(self) -> None:
         cmd = self.command_queue.active
@@ -945,6 +1452,19 @@ class ZergBuildBot(BotAI):
         else:
             self._train_baseline = 0
 
+    def _build_macro_started(self, unit_type: UnitTypeId) -> bool:
+        """True once a BUILD/EXPAND order is in flight or a local structure exists.
+
+        Used to pipeline the next manager macro without waiting for the building
+        to finish (``.ready``). Tech-gated TRAIN still waits on ``.ready``.
+        """
+        if self._has_structure_near_episode_hatch(unit_type, ready=False):
+            return True
+        try:
+            return int(self.already_pending(unit_type)) > 0
+        except Exception:
+            return False
+
     def _try_complete_active_command(self) -> bool:
         """Complete the active macro command when its goal is met. Not episode done."""
         cmd = self.command_queue.active
@@ -952,13 +1472,23 @@ class ZergBuildBot(BotAI):
             return False
         completed = False
         if cmd.command_type in {CommandType.BUILD, CommandType.EXPAND}:
-            if cmd.unit_type_id is not None and self.structures(cmd.unit_type_id).ready.exists:
+            # Pipeline: advance as soon as the build is started, not when finished.
+            if cmd.unit_type_id is not None and self._build_macro_started(cmd.unit_type_id):
                 completed = True
         elif cmd.command_type == CommandType.TRAIN:
             if cmd.unit_type_id is not None:
                 target = self._train_target_count(cmd)
-                if self._unit_count(cmd.unit_type_id) >= self._train_baseline + target:
+                # Pipeline: eggs/pending count so the next macro can start while
+                # morphs finish.
+                if (
+                    self._train_progress_units(cmd.unit_type_id)
+                    >= self._train_baseline + target
+                ):
                     completed = True
+        elif cmd.command_type == CommandType.INJECT:
+            if self._inject_succeeded:
+                completed = True
+                self._inject_succeeded = False
         if not completed:
             return False
         self.command_queue.complete_active()
@@ -982,34 +1512,38 @@ class ZergBuildBot(BotAI):
         )
 
     async def apply_build_action(self, action: np.ndarray) -> bool:
-        """Decode policy action into SC2 build/train order."""
+        """Decode policy action into SC2 build/train/inject order."""
+        self._last_build_attempt_failed = False
         cmd = self.command_queue.active
         if cmd is None or not cmd.is_macro:
             return False
 
-        worker_idx = int(action[0])
+        actor_idx = int(action[0])
         placement_idx = int(action[1])
-        workers_sorted = sorted(self.workers, key=lambda u: u.tag)
-        if worker_idx >= len(workers_sorted):
+        actors = self._pointer_units(cmd)
+        if actor_idx >= len(actors):
             self._last_build_attempt_failed = True
             return True
-        worker = workers_sorted[worker_idx]
-        self._focus_worker_tag = int(worker.tag)
+        actor = actors[actor_idx]
+        self._focus_worker_tag = int(actor.tag)
 
         if cmd.command_type == CommandType.TRAIN:
-            return await self._apply_train(cmd, worker)
+            return await self._apply_train(cmd, actor)
+        if cmd.command_type == CommandType.INJECT:
+            return await self._apply_inject(cmd, actor, placement_idx)
 
-        return await self._apply_build(cmd, worker, placement_idx)
+        return await self._apply_build(cmd, actor, placement_idx)
 
     async def _apply_build(self, cmd: Command, worker, placement_idx: int) -> bool:
         """Agent-faithful build: issue worker.build at the decoded placement cell."""
-        self._last_build_attempt_failed = False
         if cmd.unit_type_id is None:
             self._last_build_attempt_failed = True
             return True
 
-        # Already building / built — wait for _try_complete_active_command.
-        if self.structures(cmd.unit_type_id).exists:
+        # Already building / built near this episode's hatch — wait for complete.
+        # Global ``structures(...).exists`` would treat leftover extractors/pools
+        # from a prior soft-reset episode as done and skip the new build.
+        if self._has_structure_near_episode_hatch(cmd.unit_type_id):
             return True
         try:
             if self.already_pending(cmd.unit_type_id) > 0:
@@ -1021,38 +1555,137 @@ class ZergBuildBot(BotAI):
             # Waiting for scripted mining to bank minerals — not an invalid attempt.
             return True
 
+        is_gas_building = cmd.unit_type_id in {
+            UnitTypeId.EXTRACTOR,
+            UnitTypeId.EXTRACTORRICH,
+            UnitTypeId.ASSIMILATOR,
+            UnitTypeId.ASSIMILATORRICH,
+            UnitTypeId.REFINERY,
+            UnitTypeId.REFINERYRICH,
+        }
+        if is_gas_building:
+            # Resolve geyser from the episode hatch BEFORE placement/legality so
+            # obs crop and actuation cannot stay locked on a previous episode.
+            # Never fall back to a global nearest geyser (cross-base bug).
+            hatch = self._episode_hatch_pos()
+            anchor = hatch or self._target_geyser_pos or cmd.target_pos
+            geyser = self._local_geyser_unit(anchor) if anchor is not None else None
+            if geyser is None:
+                self._last_build_attempt_failed = True
+                return True
+            cmd.target_pos = geyser.position
+            self._target_geyser_pos = geyser.position
+
+        if not self._placement_cell_legal(cmd, placement_idx):
+            self._last_build_attempt_failed = True
+            return True
+
         target = self.decode_placement(
             placement_idx, cmd.target_pos or worker.position
         )
+        # Burnysc2 requires gas buildings to target the geyser Unit, not a Point2.
+        if is_gas_building:
+            target = geyser
         # Pull selected miner off the mining controller for this build order.
         self.worker_registry.set_role(worker.tag, WorkerRole.BUILD)
         self.do(worker.build(cmd.unit_type_id, target))
         return True
 
+    def _train_tech_ready(self, cmd: Command) -> bool:
+        """Structure prerequisites for the active TRAIN unit type."""
+        unit_type = cmd.unit_type_id
+        if unit_type is None:
+            return False
+        # Larva morphs with no building tech.
+        if unit_type in {UnitTypeId.DRONE, UnitTypeId.OVERLORD}:
+            return True
+        # Queens train from a hatch/lair/hive; pool required in melee.
+        if unit_type == UnitTypeId.QUEEN:
+            halls = self.townhalls.ready if hasattr(self.townhalls, "ready") else self.townhalls
+            has_hall = bool(getattr(halls, "exists", False) or len(list(halls)) > 0)
+            has_pool = bool(self.structures(UnitTypeId.SPAWNINGPOOL).ready.exists)
+            return has_hall and has_pool
+        if unit_type in {UnitTypeId.ZERGLING, UnitTypeId.ZERGLINGBURROWED}:
+            return bool(self.structures(UnitTypeId.SPAWNINGPOOL).ready.exists)
+        if unit_type in {UnitTypeId.ROACH, UnitTypeId.ROACHBURROWED}:
+            return bool(self.structures(UnitTypeId.ROACHWARREN).ready.exists)
+        # Conservative default: pool for other early Zerg army units.
+        return bool(self.structures(UnitTypeId.SPAWNINGPOOL).ready.exists)
+
     async def _apply_train(self, cmd: Command, worker) -> bool:
-        """Thin TRAIN helper: morph larva until baseline+count is queued/produced."""
+        """TRAIN helper: larva morphs, or hatchery train for queens."""
         del worker
-        self._last_build_attempt_failed = False
         if cmd.unit_type_id is None:
             self._last_build_attempt_failed = True
             return True
-        if not self.structures(UnitTypeId.SPAWNINGPOOL).ready.exists:
+        if not self._train_tech_ready(cmd):
+            self._last_build_attempt_failed = True
             return True
         target = self._train_target_count(cmd)
-        current = self._unit_count(cmd.unit_type_id)
-        try:
-            pending = int(self.already_pending(cmd.unit_type_id))
-        except Exception:
-            pending = 0
-        # Stop issuing morphs once enough units are alive or already in production.
-        if current + pending >= self._train_baseline + target:
+        goal = self._train_baseline + target
+        # Zergling eggs count as 1 pending order but yield 2 units — use equivalents.
+        if self._train_progress_units(cmd.unit_type_id) >= goal:
             return True
         if not self.can_afford(cmd.unit_type_id):
+            return True
+        if cmd.unit_type_id == UnitTypeId.QUEEN:
+            halls = self.townhalls.ready if hasattr(self.townhalls, "ready") else self.townhalls
+            if not getattr(halls, "exists", True) or not halls:
+                return True
+            hatch = halls.random if hasattr(halls, "random") else list(halls)[0]
+            self.do(hatch.train(UnitTypeId.QUEEN))
             return True
         larva = self.larva
         if not larva.exists:
             return True
         self.do(larva.random.train(cmd.unit_type_id))
+        return True
+
+    def _townhall_near_cell(self, world_pos: Point2, max_dist: float = 3.5):
+        """Nearest ready hatch/lair/hive to a decoded placement point."""
+        halls = list(self.townhalls) if self.townhalls else []
+        if not halls:
+            return None
+        nearest = min(halls, key=lambda h: h.distance_to(world_pos))
+        if nearest.distance_to(world_pos) <= max_dist:
+            return nearest
+        return None
+
+    async def _apply_inject(self, cmd: Command, queen, placement_idx: int) -> bool:
+        """Agent-faithful inject: selected queen casts InjectLarva on clicked hatch."""
+        from sc2.ids.ability_id import AbilityId
+
+        if getattr(queen, "type_id", None) != UnitTypeId.QUEEN:
+            self._last_build_attempt_failed = True
+            return True
+        energy = float(getattr(queen, "energy", 0.0) or 0.0)
+        if energy < INJECT_ENERGY_COST:
+            self._last_build_attempt_failed = True
+            return True
+
+        center = cmd.target_pos or queen.position
+        if center is None or (
+            isinstance(center, Point2) and center.x < 0 and center.y < 0
+        ):
+            center = (
+                self.townhalls.first.position
+                if self.townhalls and getattr(self.townhalls, "exists", True)
+                else queen.position
+            )
+        world = self.decode_placement(placement_idx, center)
+        hatch = self._townhall_near_cell(world)
+        if hatch is None:
+            self._last_build_attempt_failed = True
+            return True
+
+        ability = getattr(AbilityId, "EFFECT_INJECTLARVA", None) or getattr(
+            AbilityId, "QUEENFEEDLARVA_INJECTLARVA_QUEEN", None
+        )
+        if ability is None:
+            self._last_build_attempt_failed = True
+            return True
+        self.do(queen(ability, hatch))
+        self._inject_succeeded = True
         return True
 
     def decode_placement(self, cell_idx: int, center: Point2) -> Point2:
@@ -1066,9 +1699,12 @@ class ZergBuildBot(BotAI):
         return Point2((world_x, world_y))
 
     def _nearest_geyser(self, pos: Point2):
-        if not self.vespene_geyser:
+        geysers = getattr(self, "vespene_geyser", None)
+        if not geysers:
             return None
-        return self.vespene_geyser.closest_to(pos)
+        if hasattr(geysers, "exists") and not geysers.exists:
+            return None
+        return geysers.closest_to(pos)
 
     def get_obs_focus_unit_tag(self) -> int:
         return int(self._focus_worker_tag)

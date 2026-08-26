@@ -37,3 +37,35 @@ def test_recover_collector_vec_env_rebuilds_and_resets_lstm():
     assert obs is fake_obs
     assert last_dones.shape == (1,)
     assert last_dones.all()
+
+
+def test_unblock_stuck_collector_vec_env_kills_sc2_and_alive_workers():
+    from train.async_train_universal import unblock_stuck_collector_vec_env
+
+    alive = MagicMock()
+    alive.is_alive.return_value = True
+    dead = MagicMock()
+    dead.is_alive.return_value = False
+    vec = MagicMock()
+    vec.processes = [alive, dead]
+
+    with patch("train.async_train_universal.force_kill_sc2") as mock_kill:
+        terminated = unblock_stuck_collector_vec_env(vec)
+
+    mock_kill.assert_called_once()
+    alive.terminate.assert_called_once()
+    alive.kill.assert_called_once()
+    dead.terminate.assert_not_called()
+    dead.kill.assert_not_called()
+    assert terminated == 1
+
+
+def test_unblock_stuck_collector_vec_env_sync_vec_has_no_processes():
+    from train.async_train_universal import unblock_stuck_collector_vec_env
+
+    vec = MagicMock(spec=[])
+    with patch("train.async_train_universal.force_kill_sc2") as mock_kill:
+        terminated = unblock_stuck_collector_vec_env(vec)
+
+    mock_kill.assert_called_once()
+    assert terminated == 0

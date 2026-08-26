@@ -46,9 +46,42 @@ MAP_CLEANUP_IGNORE_TYPE_IDS = frozenset(
 )
 
 
+def alliance_value(alliance) -> Optional[int]:
+    """Normalize ``Alliance`` enum / raw proto int to a comparable int."""
+    if alliance is None:
+        return None
+    if isinstance(alliance, int) and not isinstance(alliance, bool):
+        return int(alliance)
+    value = getattr(alliance, "value", None)
+    if value is not None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return int(alliance)
+    except (TypeError, ValueError):
+        return None
+
+
 def unit_is_subject_to_map_cleanup(u) -> bool:
     """True if reset should try debug_kill on this unit (shared by SC2Bot and Level7Bot)."""
-    return u.alliance != Alliance.Neutral and u.type_id not in MAP_CLEANUP_IGNORE_TYPE_IDS
+    if u.type_id in MAP_CLEANUP_IGNORE_TYPE_IDS:
+        return False
+    # Resource nodes must never be cleaned (alliance may be raw int 3, not Enum).
+    # Use `is True` so MagicMock auto-attrs do not falsely mark every unit as a mineral.
+    if getattr(u, "is_mineral_field", False) is True:
+        return False
+    # burnysc2: Extractor/Refinery/Assimilator also report ``is_vespene_geyser``
+    # because ``has_vespene`` is true — only skip Neutral geysers, not gas buildings.
+    if getattr(u, "is_vespene_geyser", False) is True:
+        av = alliance_value(getattr(u, "alliance", None))
+        if av is None or av == Alliance.Neutral.value:
+            return False
+    av = alliance_value(getattr(u, "alliance", None))
+    if av is None:
+        return True
+    return av != Alliance.Neutral.value
 
 
 class MapCleanupFailedError(RuntimeError):

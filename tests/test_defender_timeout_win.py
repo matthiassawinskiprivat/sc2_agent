@@ -84,6 +84,32 @@ class TestP1DefendedOnTimeout:
         _pylon_alive(env)
         assert env._p1_defended_on_timeout(_REWARDS_DEFENDER) is False
 
+    def test_p2_trainee_defender_timeout_win(self, env):
+        """Trainee on SC2 player 2 still wins timeout when its pylon survives."""
+        env._alternate_trainee_race = True
+        env.episode_counter = 2
+        env.unit_pools_config = [
+            {"race": "terran", "high_level_command": "attack", "region": "B"},
+            {"race": "zerg", "high_level_command": "defend", "region": "B"},
+        ]
+        env.player_units = {1: [10], 2: [20]}
+        env.bot.unit_command_map = {20: "defend"}
+        env.bot.structures(UnitTypeId.PYLON).amount = 1
+        env.bot.enemy_structures(UnitTypeId.PYLON).amount = 1
+        assert env._p1_defended_on_timeout(_REWARDS_DEFENDER) is True
+
+
+def test_agent_attack_units_alive_counts_p2_trainee(env):
+    env._alternate_trainee_race = True
+    env.episode_counter = 2
+    env.unit_pools_config = [
+        {"race": "terran", "high_level_command": "defend", "region": "B"},
+        {"race": "zerg", "high_level_command": "attack", "region": "B"},
+    ]
+    env.player_units = {1: [10], 2: [20, 21]}
+    env.bot.unit_command_map = {20: "attack", 21: "attack"}
+    assert env._agent_attack_units_alive() == 2
+
 
 # ---------------------------------------------------------------------------
 # _compute_p1_terminal_reward — timeout branch

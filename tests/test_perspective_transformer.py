@@ -52,10 +52,18 @@ def test_flip_mask():
     #            False, True]
     assert np.array_equal(flipped, np.array([False, False, False, True]))
 
+
+def test_decode_world_spatial_idx_is_identity_for_all_owners():
+    for owner in (1, 2):
+        assert PerspectiveTransformer.decode_world_spatial_idx("move_global", 0, owner) == 0
+        assert PerspectiveTransformer.decode_world_spatial_idx("attack_local", 512, owner) == 512
+        assert PerspectiveTransformer.decode_world_spatial_idx("move_global", 1023, owner) == 1023
+
 if __name__ == "__main__":
     # Manual run if needed
     test_flip_observation()
     test_flip_action_idx_single_head()
     test_flip_action_idx_dual_head()
     test_flip_mask()
+    test_decode_world_spatial_idx_is_identity_for_all_owners()
     print("Tests passed!")

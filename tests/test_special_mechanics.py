@@ -189,18 +189,23 @@ class TestTransformerComprehensive(unittest.TestCase):
 
         self.assertGreater(np.sum(self.get_layer(layers, "enemy_g_dps_base")), 0)
         self.assertGreater(np.sum(self.get_layer(layers, "enemy_a_dps_base")), 0)
+        self.assertEqual(np.sum(self.get_layer(layers, "allied_g_dps_base")), 0)
+        self.assertEqual(np.sum(self.get_layer(layers, "allied_a_dps_base")), 0)
 
     def test_bile_hits_air_and_ground(self):
         bile = MockEffect(EffectId.RAVAGERCORROSIVEBILECP, 64, 64)
         layers = self.run_obs(effects=[bile])
         self.assertGreater(np.sum(self.get_layer(layers, "enemy_g_dps_base")), 0)
         self.assertGreater(np.sum(self.get_layer(layers, "enemy_a_dps_base")), 0)
+        self.assertEqual(np.sum(self.get_layer(layers, "allied_g_dps_base")), 0)
+        self.assertEqual(np.sum(self.get_layer(layers, "allied_a_dps_base")), 0)
 
     def test_storm_ground_only(self):
         storm = MockEffect(EffectId.PSISTORMPERSISTENT, 64, 64)
         layers = self.run_obs(effects=[storm])
         self.assertGreater(np.sum(self.get_layer(layers, "enemy_g_dps_base")), 0)
         self.assertEqual(np.sum(self.get_layer(layers, "enemy_a_dps_base")), 0)
+        self.assertEqual(np.sum(self.get_layer(layers, "allied_g_dps_base")), 0)
 
     def test_scan_effect_detection(self):
         scan = MockEffect(EffectId.SCANNERSWEEP, 64, 64)

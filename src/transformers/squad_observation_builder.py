@@ -19,9 +19,12 @@ from src.agent.squad_constants import (
     update_armor_shield_cache,
 )
 from src.agent.unit_scalar_constants import UnitScalarConstants as USC
-from src.utils.perspective_transformer import PerspectiveTransformer
 from src.utils.unit_feature_helpers import (
+    first_unit,
+    first_unit_of_type,
     is_force_melee_unit,
+    perspective_unit_groups,
+    unit_can_aoe,
     unit_can_cloak,
     unit_can_heal,
     unit_can_load,
@@ -56,6 +59,18 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
         return float(val)
     except (TypeError, ValueError):
         return default
+
+
+def _bot_state_upgrades(bot) -> frozenset:
+    """Researched upgrade ids from the P1-client game state.
+
+    CTF ``debug_upgrade`` applies to all players, so a P2-trainee observation
+    must still consume this set. Do not gate on ``bot.player_id``.
+    """
+    raw_upg = getattr(getattr(bot, "state", None), "upgrades", None)
+    if isinstance(raw_upg, (set, frozenset, list, tuple)):
+        return frozenset(raw_upg)
+    return frozenset()
 
 
 class SquadObservationBuilder:
@@ -186,18 +201,13 @@ class SquadObservationBuilder:
         pw, ph = playable_size
 
         # --- Contextual quantities used by relational features ---
-        # Own-side upgrades (only available for the perspective player)
-        upgrades: frozenset = frozenset()
-        if perspective_player_id == bot.player_id:
-            raw_upg = getattr(getattr(bot, "state", None), "upgrades", None)
-            if isinstance(raw_upg, (set, frozenset, list, tuple)):
-                upgrades = frozenset(raw_upg)
+        # debug_upgrade is a game-wide cheat (both SC2 owners). python-sc2
+        # ``state.upgrades`` is the P1-client view of that shared set — use it
+        # for P2 trainees too, or range/speed scalars silently drop the techs.
+        upgrades = _bot_state_upgrades(bot)
 
-        # Enemy center-of-mass (perspective-correct enemy_units)
-        if perspective_player_id == bot.player_id:
-            vis_enemies = bot.enemy_units
-        else:
-            vis_enemies = bot.units
+        # Enemy center-of-mass (owner-id; god-mode alliance buckets mix armies)
+        _, vis_enemies, _, _ = perspective_unit_groups(bot, int(perspective_player_id))
         enemy_com = _center_of_mass(vis_enemies)
 
         # Allied squad center-of-mass from live unit positions
@@ -235,6 +245,7 @@ class SquadObservationBuilder:
                 objective=objective,
                 enemy_com=enemy_com,
                 allied_com=allied_com,
+                enemy_race=enemy_race,
             )
 
         # Single hard-anchor crop (Option A): O(1) vs previous O(N) transform_tactical.
@@ -260,8 +271,6 @@ class SquadObservationBuilder:
                 np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
             )
             obs["upgrades"] = np.asarray(cache, dtype=np.float32).copy()
-        if perspective_player_id == 2:
-            obs = self._flip_obs(obs)
         return obs
 
     def _update_upgrade_cache_from_units(self, bot, perspective_player_id: int) -> None:
@@ -357,6 +366,7 @@ class SquadObservationBuilder:
         objective,
         enemy_com,
         allied_com,
+        enemy_race: Optional[str] = None,
     ) -> np.ndarray:
         # Fill the full catalog buffer (catalog index order), then gather into
         # active_unit_scalars config order — same pattern as active_layers slicing.
@@ -440,6 +450,9 @@ class SquadObservationBuilder:
         catalog[_F[USC.CAN_HEAL]] = float(unit_can_heal(unit))
         catalog[_F[USC.CAN_REPAIR]] = float(unit_can_repair(unit))
 
+        # --- Group L: AoE spell readiness ---
+        catalog[_F[USC.CAN_AOE]] = float(unit_can_aoe(unit, enemy_race=enemy_race))
+
         # --- Group K: Transport / cargo ---
         catalog[_F[USC.IS_TRANSPORT]] = float(unit_is_transport(unit))
         catalog[_F[USC.CARGO_USED_NORM]] = float(unit_cargo_used_norm(unit))
@@ -463,19 +476,6 @@ class SquadObservationBuilder:
         return out
 
     # ------------------------------------------------------------------
-    # Perspective flip
-    # ------------------------------------------------------------------
-
-    def _flip_obs(self, obs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """Flip spatial maps for player-2 perspective; leave scalars/mask unchanged."""
-        flipped = dict(obs)
-        for key in ("map", "anchor_tactical"):
-            val = flipped.get(key)
-            if isinstance(val, np.ndarray) and val.ndim >= 2:
-                flipped[key] = PerspectiveTransformer.flip_observation(val)
-        return flipped
-
-    # ------------------------------------------------------------------
     # Raw obs assembly
     # ------------------------------------------------------------------
 
@@ -489,16 +489,9 @@ class SquadObservationBuilder:
         anchor_unit_tag: Optional[int] = None,
     ) -> Dict[str, Any]:
         p_id = perspective_player_id
-        if p_id == bot.player_id:
-            units = bot.units
-            enemy_units = bot.enemy_units
-            structures = bot.structures
-            enemy_structures = bot.enemy_structures
-        else:
-            units = bot.enemy_units
-            enemy_units = bot.units
-            structures = bot.enemy_structures
-            enemy_structures = bot.structures
+        units, enemy_units, structures, enemy_structures = perspective_unit_groups(
+            bot, p_id
+        )
 
         active_unit: Optional[Unit] = None
         selected_units: List[Unit] = []
@@ -511,24 +504,31 @@ class SquadObservationBuilder:
             active_unit = bot.all_units.find_by_tag(int(anchor_unit_tag))
         if active_unit is None and selected_units:
             active_unit = selected_units[0]
-        if active_unit is None and units.exists:
-            active_unit = units.first
-            selected_units = [active_unit]
+        if active_unit is None:
+            active_unit = first_unit(units)
+            if active_unit is not None:
+                selected_units = [active_unit]
+
+        # Keep fog-of-war pylon memory fresh (mirrors CaptureTheFlagBot._get_observation).
+        # Squad path never called that method, so enemy_pylon_pos stayed None and the
+        # attack fallback below could leave command_target empty → blank COMMAND_OBJECTIVE.
+        enemy_pylon = first_unit_of_type(enemy_structures, UnitTypeId.PYLON)
+        if enemy_pylon is not None:
+            if not isinstance(getattr(bot, "enemy_pylon_pos", None), dict):
+                bot.enemy_pylon_pos = {1: None, 2: None}
+            bot.enemy_pylon_pos[p_id] = enemy_pylon.position
 
         target_pos = None
         if active_unit is not None and active_unit.tag in bot.unit_target_map:
             target_pos = bot.unit_target_map[active_unit.tag]
         elif active_unit is not None:
             role = bot.unit_command_map.get(active_unit.tag, pool_high_level_command)
-            if role == "defend":
-                own_pylon = (
-                    structures(UnitTypeId.PYLON).first
-                    if structures(UnitTypeId.PYLON).exists
-                    else None
-                )
+            if str(role).lower() == "defend":
+                own_pylon = first_unit_of_type(structures, UnitTypeId.PYLON)
                 target_pos = own_pylon.position if own_pylon else None
             else:
-                target_pos = bot.enemy_pylon_pos.get(p_id)
+                ep = getattr(bot, "enemy_pylon_pos", None)
+                target_pos = ep.get(p_id) if isinstance(ep, dict) else None
 
         from src.utils.command_constants import CommandConstants
 

@@ -1,5 +1,9 @@
 from train.envs.level_3_env import Level3Env
-from train.envs.sc2_session_config import session_realtime
+from train.envs.sc2_session_config import (
+    DEFAULT_POST_CREATE_GAME_DELAY_SECS,
+    host_local_sc2_game,
+    session_realtime,
+)
 from src.level_7_bot import Level7Bot
 from sc2.player import Bot, Computer
 from sc2.data import Race, Difficulty
@@ -58,12 +62,6 @@ class Level7Env(Level3Env):
 
     async def _setup_game_session(self):
         # Override to use Level7Bot and dynamic Race
-        try:
-             await self._client.ping()
-        except Exception as e:
-             self._log(f"Initial ping failed: {e}")
-             raise e
-
         game_map = self._resolve_map(self.map_name)
         if self._bot is None:
             self._log("Creating Level7Bot...")
@@ -80,12 +78,23 @@ class Level7Env(Level3Env):
 
         self._log(f"Creating game ({allied_race.name} vs {enemy_race.name})...")
         sim_realtime = session_realtime(self.training_conf)
-        await self._controller.create_game(
-            game_map,
-            [Bot(allied_race, self._bot), Computer(enemy_race, Difficulty.Easy)],
-            realtime=sim_realtime,
+        post_delay = float(
+            self.training_conf.get(
+                "post_create_game_delay_sec",
+                DEFAULT_POST_CREATE_GAME_DELAY_SECS,
+            )
         )
-        await self._client.join_game(race=allied_race)
+        self._client = await host_local_sc2_game(
+            controller=self._controller,
+            client_cls=self._client_cls,
+            game_map=game_map,
+            players=[Bot(allied_race, self._bot), Computer(enemy_race, Difficulty.Easy)],
+            realtime=sim_realtime,
+            join_race=allied_race,
+            log=self._log,
+            post_create_delay_sec=post_delay,
+            player_name="Trainee",
+        )
         # Enable full vision for unit cleanup and observation.
         # Mark the flag on the bot so reset_game_state doesn't toggle it back.
         await self._client.debug_show_map()

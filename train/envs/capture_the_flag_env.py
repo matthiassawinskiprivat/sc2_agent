@@ -506,48 +506,20 @@ class CaptureTheFlagEnv(MultiClientEnv):
 
     def _calculate_spawns(self, m, v):
         """Legacy budget-greedy spawn for the flat unit_pool path."""
-        spawns = []
+        from train.envs.ctf.budgeted_spawns import calculate_budgeted_spawns
 
-        def can_afford(u):
-            if u not in self.unit_data:
-                logger.error(f"Unit {u} not found in unit_data.json. Skipping.")
-                return False
-            cost = self.unit_data[u]["cost"]
-            return cost["minerals"] <= m and cost["vespene"] <= v
-
-        affordable = [u for u in self.unit_pool if can_afford(u)]
-        while affordable:
-            u = random.choice(affordable)
-            spawns.append(u)
-            cost = self.unit_data[u]["cost"]
-            m -= cost["minerals"]
-            v -= cost["vespene"]
-            affordable = [u for u in self.unit_pool if can_afford(u)]
-        return spawns
+        return calculate_budgeted_spawns(self.unit_pool, self.unit_data, m, v)
 
     def _calculate_spawns_for_pool(self, pool: Dict) -> List[str]:
         """Budget-greedy spawn list derived from a single unit_pools entry."""
-        m = pool.get("mineral_budget", 0)
-        v = pool.get("vespene_budget", 0)
-        unit_pool = pool.get("unit_pool", [])
+        from train.envs.ctf.budgeted_spawns import calculate_budgeted_spawns
 
-        def can_afford(u):
-            if u not in self.unit_data:
-                logger.error(f"Unit {u} not found in unit_data.json. Skipping.")
-                return False
-            cost = self.unit_data[u]["cost"]
-            return cost["minerals"] <= m and cost["vespene"] <= v
-
-        spawns = []
-        affordable = [u for u in unit_pool if can_afford(u)]
-        while affordable:
-            u = random.choice(affordable)
-            spawns.append(u)
-            cost = self.unit_data[u]["cost"]
-            m -= cost["minerals"]
-            v -= cost["vespene"]
-            affordable = [u for u in unit_pool if can_afford(u)]
-        return spawns
+        return calculate_budgeted_spawns(
+            pool.get("unit_pool", []),
+            self.unit_data,
+            pool.get("mineral_budget", 0),
+            pool.get("vespene_budget", 0),
+        )
 
     async def _refresh_unit_lists(self):
         ignored_types = {UnitTypeId.LARVA, UnitTypeId.EGG, UnitTypeId.OVERLORD, UnitTypeId.PYLON}

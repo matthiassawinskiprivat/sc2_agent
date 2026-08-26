@@ -49,7 +49,6 @@ class BuildEnv(Level0Env):
         env_section = training_conf.setdefault("env", {})
         if isinstance(env_section, dict):
             env_section.setdefault("maps_dir", "train/maps/ladder/build_agent")
-            env_section.setdefault("use_computer", False)
         if "rewards" not in training_conf and "env" in level_conf:
             training_conf["rewards"] = level_conf["env"].get("rewards", {})
 

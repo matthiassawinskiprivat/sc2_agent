@@ -9,3 +9,5 @@ build_map_layers:
   - terrain_buildable
 levels:
   - level_build_zerg_0
+  - level_manager_zerg_0
+  # level_build_zerg_1 remains available for expand curricula later

@@ -3,9 +3,9 @@ Regression test: multi-squad observation perspective handoff.
 
 Bug: in _finalize_squad_physics_step the squad index was advanced AFTER
 _get_joint_observation was called.  When P2's squad finished its step, the
-observation returned to the collector was from P2's (spatially-flipped)
-perspective.  The collector then fed that flipped obs to the policy for P1's
-next squad, causing P1's defender to navigate in the completely wrong direction.
+observation returned to the collector was from P2's squad, not the next
+P1 squad.  The collector then fed that obs to the policy for P1's next
+squad, so P1's defender acted from the wrong army's view.
 
 Fix: advance the squad index BEFORE calling _get_joint_observation so the
 returned obs always reflects the NEXT acting squad.
@@ -88,7 +88,7 @@ def env():
 def test_obs_after_opponent_step_reflects_next_p1_squad():
     """
     After P2's squad acts (non-terminal), the returned observation must come
-    from the NEXT squad's perspective (P1 squad), not P2's flipped view.
+    from the NEXT squad's perspective (P1 squad), not the just-acted P2 squad.
 
     Mechanism: _advance_squad_index is called BEFORE _get_joint_observation
     inside _finalize_squad_physics_step.  We verify the order by recording
@@ -153,7 +153,7 @@ def test_obs_after_opponent_step_reflects_next_p1_squad():
     assert call_log == ["advance", "get_obs"], (
         f"Expected advance before get_obs, got: {call_log}. "
         "The observation perspective bug is back: obs was generated before advancing "
-        "the squad, so the collector sees the wrong (flipped) squad's view."
+        "the squad, so the collector sees the wrong squad's view."
     )
 
 

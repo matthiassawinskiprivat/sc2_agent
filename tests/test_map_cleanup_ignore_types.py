@@ -59,6 +59,8 @@ def test_unit_is_subject_to_map_cleanup_includes_non_neutral_marine():
     u = MagicMock()
     u.alliance = Alliance.Self
     u.type_id = UnitTypeId.MARINE
+    u.is_mineral_field = False
+    u.is_vespene_geyser = False
     assert unit_is_subject_to_map_cleanup(u) is True
 
 
@@ -66,4 +68,53 @@ def test_unit_is_subject_to_map_cleanup_skips_neutral():
     u = MagicMock()
     u.alliance = Alliance.Neutral
     u.type_id = UnitTypeId.MARINE
+    u.is_mineral_field = False
+    u.is_vespene_geyser = False
     assert unit_is_subject_to_map_cleanup(u) is False
+
+
+def test_unit_is_subject_to_map_cleanup_skips_raw_int_neutral():
+    """Proto often exposes alliance as int 3; Enum inequality used to miss this."""
+    u = MagicMock()
+    u.alliance = 3
+    u.type_id = UnitTypeId.MINERALFIELD
+    u.is_mineral_field = False
+    u.is_vespene_geyser = False
+    assert unit_is_subject_to_map_cleanup(u) is False
+
+
+def test_unit_is_subject_to_map_cleanup_skips_mineral_field_flag():
+    u = MagicMock()
+    u.alliance = Alliance.Self  # mislabeled; flag still wins
+    u.type_id = UnitTypeId.MINERALFIELD
+    u.is_mineral_field = True
+    u.is_vespene_geyser = False
+    assert unit_is_subject_to_map_cleanup(u) is False
+
+
+def test_unit_is_subject_to_map_cleanup_skips_neutral_geyser_flag():
+    u = MagicMock()
+    u.alliance = Alliance.Neutral
+    u.type_id = UnitTypeId.VESPENEGEYSER
+    u.is_mineral_field = False
+    u.is_vespene_geyser = True
+    assert unit_is_subject_to_map_cleanup(u) is False
+
+
+def test_unit_is_subject_to_map_cleanup_includes_self_extractor():
+    """Regression: burnysc2 Extractors report is_vespene_geyser=True but must be killed."""
+    u = MagicMock()
+    u.alliance = Alliance.Self
+    u.type_id = UnitTypeId.EXTRACTOR
+    u.is_mineral_field = False
+    u.is_vespene_geyser = True
+    assert unit_is_subject_to_map_cleanup(u) is True
+
+
+def test_unit_is_subject_to_map_cleanup_includes_enemy_refinery():
+    u = MagicMock()
+    u.alliance = Alliance.Enemy
+    u.type_id = UnitTypeId.REFINERY
+    u.is_mineral_field = False
+    u.is_vespene_geyser = True
+    assert unit_is_subject_to_map_cleanup(u) is True

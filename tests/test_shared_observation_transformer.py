@@ -106,6 +106,15 @@ class TestCaching:
 
         assert mock_inner.transform.call_count == 2
 
+    def test_cache_miss_when_player_id_changes(self):
+        st, mock_inner = _make_shared_transformer()
+        u = MagicMock()
+        u.tag = 1
+        st.transform_observation({"a": 1}, observation_id="obs_1", player_id=1, active_unit=u)
+        st.transform_observation({"a": 1}, observation_id="obs_1", player_id=2, active_unit=u)
+
+        assert mock_inner.transform.call_count == 2
+
     def test_clear_cache_resets_state(self):
         st, mock_inner = _make_shared_transformer()
         st.transform_observation({"a": 1}, observation_id="obs_1")

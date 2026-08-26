@@ -1,0 +1,56 @@
+training:
+  training_steps: 200_000
+  num_envs: 1
+  n_steps: 1024
+  batch_size: 256
+  learning_rate: 0.0003
+  device: auto
+
+env:
+  env_class: ZergManagerEnv
+  maps_dir: train/maps/ladder/build_agent
+  max_steps: 2000
+  headless: true
+  every_k_episodes: 20
+  macro_tick_interval: 8
+  mining_controller: speed
+  use_computer: true
+  keep_enemy_alive: true
+  difficulty: Easy
+  opponent:
+    mode: computer
+    difficulty: Easy
+    # Later: mode: unit_control, agent: zerg_unit_control, checkpoint: ..., freeze: true
+  # Cumulative from prior build levels; manager seeds spatial layers here.
+  active_layers:
+    - terrain_pathable
+    - terrain_creep
+    - terrain_buildable
+    - allied_unit_density
+    - enemy_unit_density
+  # No new build_commands — inherit overlord/queen/inject/ling/pool from L0/L1.
+  spawn:
+    drones: 8
+    minerals: 50
+    overlords: 2
+  # Empty script — learned manager emits commands.
+  manager_script: []
+  rewards:
+    win: 100.0
+    loss: -100.0
+    step_penalty: -0.02
+    wrong_build_order_penalty: -5.0
+    surplus_building_penalty: -5.0
+    invalid_command_penalty: -2.0
+    command_complete: 5.0
+
+model:
+  algorithm: MaskablePPO
+  gamma: 0.995
+  ent_coef: 0.01
+  n_epochs: 4
+  policy_kwargs:
+    features_extractor_class: src.agent.models.manager_policy.ManagerFeaturesExtractor
+    features_extractor_kwargs:
+      features_dim: 128
+      map_resolution: 32

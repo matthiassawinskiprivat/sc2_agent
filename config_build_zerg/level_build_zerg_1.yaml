@@ -1,0 +1,73 @@
+training:
+  training_steps: 400_000
+  num_envs: 1
+  n_steps: 2048
+  batch_size: 512
+  learning_rate: 0.0003
+  device: auto
+
+env:
+  env_class: ZergBuildEnv
+  maps_dir: train/maps/ladder/build_agent
+  max_steps: 5000
+  headless: true
+  every_k_episodes: 20
+  macro_tick_interval: 8
+  mining_controller: speed
+  # New commands only (appended after level_0). Zerg gas building = EXTRACTOR.
+  build_commands:
+    - extractor
+    - drone
+    - roachwarren
+    - overlord
+    - roach
+  spawn:
+    # Enough supply for 14 drones + 20 roaches after training 3 more overlords.
+    drones: 6
+    minerals: 0
+    overlords: 3
+  manager_script:
+    - command_type: BUILD
+      unit_type: EXTRACTOR
+      target_pos: [-1, -1]
+    - command_type: TRAIN
+      unit_type: DRONE
+      count: 8
+    - command_type: MINE
+      target_pos: [-1, -1]
+      worker_count: 14
+    - command_type: MINE_GAS
+      target_pos: [-1, -1]
+      worker_count: 3
+    - command_type: BUILD
+      unit_type: SPAWNINGPOOL
+      target_pos: [-1, -1]
+    - command_type: BUILD
+      unit_type: ROACHWARREN
+      target_pos: [-1, -1]
+    - command_type: TRAIN
+      unit_type: OVERLORD
+      count: 3
+    - command_type: TRAIN
+      unit_type: ROACH
+      count: 20
+  rewards:
+    success: 100.0
+    command_complete: 15.0
+    step_penalty: -0.02
+    invalid_build_penalty: -1.0
+    distance_multiplier: 0.5
+    mining_active_bonus: 0.02
+    idle_miner_penalty: -0.05
+
+model:
+  algorithm: MaskablePPO
+  gamma: 0.995
+  ent_coef: 0.01
+  n_epochs: 4
+  policy_kwargs:
+    features_extractor_class: src.agent.models.build_policy.BuildFeaturesExtractor
+    features_extractor_kwargs:
+      features_dim: 128
+      thinking_steps: 3
+      map_resolution: 16

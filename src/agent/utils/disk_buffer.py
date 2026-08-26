@@ -18,6 +18,49 @@ def is_disk_offloaded_obs_key(key: str) -> bool:
     return "map" in key or "tactical" in key or key == "local_map"
 
 
+def pack_recurrent_sequence_batches(
+    sequence_spans: list[tuple[int, int, int]],
+    batch_size: Optional[int],
+) -> list[list[tuple[int, int, int]]]:
+    """
+    Group RNN spans into minibatches whose *padded* timestep count fits ``batch_size``.
+
+    ``_get_samples_by_sequences`` pads every span to the longest span in the batch, so
+    GPU tensors are ``n_seq * max_len`` — not the sum of unpadded lengths. Packing by
+    unpadded sum mixed one long span with many short ones (episode / ``policy_active``
+    cuts) and uploaded thousands of 128×128 maps on the first PPO update.
+    """
+    if not sequence_spans:
+        return []
+    if not batch_size:
+        return [list(sequence_spans)]
+
+    limit = int(batch_size)
+    batches: list[list[tuple[int, int, int]]] = []
+    current: list[tuple[int, int, int]] = []
+    current_max_len = 0
+    for span in sequence_spans:
+        span_len = int(span[2])
+        if span_len <= 0:
+            continue
+        if current and (len(current) + 1) * max(current_max_len, span_len) > limit:
+            batches.append(current)
+            current = []
+            current_max_len = 0
+        current.append(span)
+        current_max_len = max(current_max_len, span_len)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def padded_sequence_batch_timesteps(batch_spans: list[tuple[int, int, int]]) -> int:
+    """Timesteps after pad-to-max-len (matches ``_get_samples_by_sequences``)."""
+    if not batch_spans:
+        return 0
+    return len(batch_spans) * max(int(span[2]) for span in batch_spans)
+
+
 def build_recurrent_sequence_spans(
     n_envs: int,
     buffer_size: int,
@@ -331,22 +374,7 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
         if not sequence_spans:
             return
 
-        if batch_size:
-            batches: list[list[tuple[int, int, int]]] = []
-            current: list[tuple[int, int, int]] = []
-            current_steps = 0
-            for span in sequence_spans:
-                span_len = span[2]
-                if current and current_steps + span_len > batch_size:
-                    batches.append(current)
-                    current = []
-                    current_steps = 0
-                current.append(span)
-                current_steps += span_len
-            if current:
-                batches.append(current)
-        else:
-            batches = [sequence_spans]
+        batches = pack_recurrent_sequence_batches(sequence_spans, batch_size)
 
         for batch_spans in batches:
             yield self._get_samples_by_sequences(batch_spans)
@@ -444,7 +472,13 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
             mask_batch.append(m * pa)
 
         def _np_stack_to_device(arr_list, flatten=True, *, key=None):
-            chunk_envs = 4 if key == "anchor_tactical" else len(arr_list)
+            # Spatial keys are huge (map is C×128×128). Stack/copy in small groups so
+            # a CPU np.stack of the full minibatch does not coexist with the GPU copy.
+            chunk_envs = (
+                4
+                if key is not None and is_disk_offloaded_obs_key(key)
+                else len(arr_list)
+            )
             if len(arr_list) <= chunk_envs:
                 res = th.as_tensor(np.stack(arr_list))
                 res = res.to(self.device, non_blocking=True)

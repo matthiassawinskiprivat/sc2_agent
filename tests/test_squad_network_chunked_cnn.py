@@ -29,6 +29,31 @@ def _squad_obs_space(max_units: int = 24, n_tactical: int = 4) -> gym.spaces.Dic
     )
 
 
+def test_squad_network_chunked_cnn_matches_full_batch():
+    obs_space = _squad_obs_space()
+    torch.manual_seed(0)
+    net = SquadNetwork(
+        obs_space, features_dim=64, thinking_steps=1, cnn_chunk_size=2
+    )
+    net.eval()
+    batch = 5
+    obs = {
+        "map": torch.randn(batch, 6, 128, 128),
+        "command": torch.randn(batch, 10),
+        "anchor_tactical": torch.randn(batch, 4, 32, 32),
+        "unit_scalars": torch.randn(batch, 24, SQUAD_UNIT_FEAT_DIM),
+        "unit_mask": torch.ones(batch, 24),
+    }
+    with torch.no_grad():
+        chunked = net(obs)
+        fused_chunked = net._spatial_fused.clone()
+        net._cnn_chunk_size = 256
+        full = net(obs)
+        fused_full = net._spatial_fused
+    assert torch.allclose(chunked, full, atol=1e-5)
+    assert torch.allclose(fused_chunked, fused_full, atol=1e-5)
+
+
 def test_squad_network_single_anchor_forward():
     obs_space = _squad_obs_space()
     net = SquadNetwork(obs_space, features_dim=64, thinking_steps=1)

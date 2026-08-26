@@ -281,6 +281,80 @@ def test_no_deferral_when_agent_step_terminates(env):
     assert info.get("deferred_terminal") is None
 
 
+def test_p1_terminal_reward_swaps_when_perspective_is_p2(env):
+    r_conf = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
+    result = env._compute_p1_terminal_reward(
+        p1_lost=False, p2_lost=True, p1_army_lost=False, p2_army_lost=False,
+        all_units_gone=False, timeout=False, r_conf=r_conf,
+        perspective_player_id=2,
+    )
+    assert result == -5.0, "P2 trainee loses when its (P2) pylon is destroyed"
+
+
+def test_no_deferral_when_p2_trainee_step_terminates(env):
+    """Trainee on SC2 player 2: a trainee-acting terminal step is not deferred."""
+    env.training_conf["rewards"] = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
+    env._alternate_trainee_race = True
+    env.episode_counter = 2
+    env.unit_pools_config = [
+        {"race": "terran", "high_level_command": "attack"},
+        {"race": "zerg", "high_level_command": "defend"},
+    ]
+    env.squad_unit_tags = [(2, [200])]
+    env.active_player_id = 2
+    env._has_combat_units = MagicMock(return_value=True)
+
+    alive_group = _make_alive_pylon_group()
+    dead_group = _make_empty_pylon_group()
+    env.bot.structures.return_value = alive_group
+    env.bot.enemy_structures.return_value = dead_group
+
+    async def run():
+        return await env._finalize_squad_physics_step(
+            squad_tags=[200], acting_player_id=2
+        )
+
+    obs, reward, done, truncated, info = asyncio.run(run())
+
+    assert done is True
+    assert reward == -5.0  # P2 trainee lost its pylon
+    assert env._deferred_done is False
+    assert info.get("deferred_terminal") is None
+
+
+def test_deferred_when_opponent_p1_terminates_p2_trainee_episode(env):
+    """Opponent (P1) step ends the episode while trainee is P2 → defer trainee reward."""
+    env.training_conf["rewards"] = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
+    env._alternate_trainee_race = True
+    env.episode_counter = 2
+    env.unit_pools_config = [
+        {"race": "terran", "high_level_command": "attack"},
+        {"race": "zerg", "high_level_command": "defend"},
+    ]
+    env.squad_unit_tags = [(1, [100])]
+    env.active_player_id = 1
+    env._has_combat_units = MagicMock(return_value=True)
+
+    alive_group = _make_alive_pylon_group()
+    dead_group = _make_empty_pylon_group()
+    env.bot.structures.return_value = alive_group
+    env.bot.enemy_structures.return_value = dead_group
+
+    async def run():
+        return await env._finalize_squad_physics_step(
+            squad_tags=[100], acting_player_id=1
+        )
+
+    obs, reward, done, truncated, info = asyncio.run(run())
+
+    assert done is False
+    assert truncated is False
+    assert reward == 0.0
+    assert info.get("deferred_terminal") is True
+    assert env._deferred_done is True
+    assert env._deferred_p1_terminal_reward == -5.0  # P2 trainee lost pylon
+
+
 def test_reset_clears_deferred_state(env):
     """reset() must clear any leftover deferred terminal state from prev episode."""
     env._deferred_done = True

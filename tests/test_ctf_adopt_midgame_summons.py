@@ -86,7 +86,8 @@ def test_adopt_broodling_inherits_broodlord_pool():
     assert unit_pool_index[20] == 0
 
 
-def test_adopt_interceptor_inherits_carrier_pool():
+def test_adopt_interceptor_is_not_added_to_carrier_pool():
+    """Carrier AI owns Interceptors — adopting them floods the 24-slot pointer."""
     carrier = _unit(tag=10, owner_id=1, type_id=UnitTypeId.CARRIER, position=(10.0, 10.0))
     interceptor = _unit(
         tag=20,
@@ -96,7 +97,8 @@ def test_adopt_interceptor_inherits_carrier_pool():
         distance_to=lambda other: 1.0,
     )
     unit_pool_index, _, _ = _adopt(interceptor, [carrier])
-    assert unit_pool_index[20] == 0
+    assert 20 not in unit_pool_index
+    assert unit_pool_index == {10: 0}
 
 
 def test_adopt_adept_shade_inherits_adept_pool():

@@ -230,6 +230,10 @@ class PipelineManager:
     - The pipeline finishes when all levels are completed.
     """
 
+    # When True, run() calls kill_switch_sc2() at start/end (wipes all SC2 on the machine).
+    # BuildPipelineManager sets False so build training can run beside universal/control agents.
+    global_sc2_kill_on_boundaries = True
+
     def __init__(self, config_dir=CONFIG_DIR, model_dir_base=MODEL_DIR_BASE, log_dir_base=LOG_DIR_BASE, 
                  sc2_process_cls=None, client_cls=None):
         self.config_dir = config_dir
@@ -638,8 +642,9 @@ class PipelineManager:
         """Executes the entire training pipeline."""
         logger.info(f"Starting training pipeline for levels: {self.pipeline_config['levels']}")
         
-        # Ensure clean state before starting
-        kill_switch_sc2()
+        # Ensure clean state before starting (opt-out via global_sc2_kill_on_boundaries)
+        if self.global_sc2_kill_on_boundaries:
+            kill_switch_sc2()
         cleanup_worker_logs()
         
         last_final_model_path = None
@@ -681,7 +686,8 @@ class PipelineManager:
             last_final_model_path = final_model_path
 
         logger.info("Training pipeline finished.")
-        kill_switch_sc2()
+        if self.global_sc2_kill_on_boundaries:
+            kill_switch_sc2()
 
 
 def train_pipeline():

@@ -384,10 +384,19 @@ def load_policy_weights_from_zip(
     ``exact_match`` failures leaving the learner on stale random weights.
     On tensor shape mismatch (e.g. include_race 138↔144), grafts compatible weights
     onto the target policy architecture before loading.
+
+    Checkpoint tensors are always deserialized on CPU, then copied into ``policy``
+    (whatever device it already lives on). ``device`` is kept for call-site
+    compatibility and is not used as ``map_location``.
     """
     from stable_baselines3.common.save_util import load_from_zip_file
 
-    _, params, _ = load_from_zip_file(zip_path, device=device, load_data=False)
+    # Always unzip onto CPU, then copy into ``policy`` (which may already be on
+    # CUDA). Loading the zip with map_location=cuda doubles peak VRAM for the
+    # duration of the load — fatal in SubprocVecEnv workers that already hold
+    # an opponent snapshot on the shared GPU.
+    _ = device  # API compat; destination is policy's existing device.
+    _, params, _ = load_from_zip_file(zip_path, device="cpu", load_data=False)
     p_sd = params.get("policy")
     if p_sd is None:
         return False, [], []

@@ -40,7 +40,7 @@ class BuildObservationBuilder:
         center = self._command_center(active_command, bot)
         local_map = self._build_local_map(bot, center, active_command)
         worker_features = self._build_worker_features(
-            bot, worker_registry, playable_size
+            bot, worker_registry, playable_size, active_command
         )
         macro_vector = self._build_macro_vector(bot)
         command_vec = self._build_command_vector(active_command, playable_size)
@@ -145,9 +145,31 @@ class BuildObservationBuilder:
         bot,
         registry: WorkerRegistry,
         playable_size: tuple[float, float],
+        active_command: Optional[Command] = None,
     ) -> np.ndarray:
         pw, ph = playable_size
         feats = np.zeros((MAX_BUILD_WORKERS, WORKER_FEAT_DIM), dtype=np.float32)
+        if active_command is not None and active_command.command_type == CommandType.INJECT:
+            actors = sorted(
+                [
+                    u
+                    for u in getattr(bot, "units", [])
+                    if getattr(u, "type_id", None) == UnitTypeId.QUEEN
+                ],
+                key=lambda u: u.tag,
+            )[:MAX_BUILD_WORKERS]
+            for i, queen in enumerate(actors):
+                feats[i, 0] = float(queen.position.x) / max(pw, 1.0)
+                feats[i, 1] = float(queen.position.y) / max(ph, 1.0)
+                feats[i, 2] = float(queen.health) / max(float(queen.health_max), 1.0)
+                feats[i, 3] = 1.0 if queen.is_idle else 0.0
+                energy = float(getattr(queen, "energy", 0.0) or 0.0)
+                feats[i, 4] = min(energy, 200.0) / 200.0
+                feats[i, 5] = 0.0
+                feats[i, 6] = 0.0
+                feats[i, 7] = 1.0  # inject-capable actor flag
+            return feats
+
         workers = sorted(
             [u for u in bot.workers],
             key=lambda u: u.tag,
@@ -186,14 +208,16 @@ class BuildObservationBuilder:
             return vec
         pw, ph = playable_size
         type_idx = list(CommandType).index(command.command_type)
+        n_types = max(len(CommandType) - 1, 1)
         if 0 <= type_idx < 8:
             vec[type_idx] = 1.0
+        # Full type encoding (covers INJECT and later types beyond the first 8).
+        vec[11] = float(type_idx) / float(n_types)
         if command.unit_type_id is not None:
             vec[8] = float(command.unit_type_id.value) / 2000.0
         if command.target_pos is not None:
             vec[9] = float(command.target_pos.x) / max(pw, 1.0)
             vec[10] = float(command.target_pos.y) / max(ph, 1.0)
-        # vec[11] reserved (formerly ``urgent``); kept zero for obs dim stability.
         return vec
 
     @staticmethod

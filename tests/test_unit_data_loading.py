@@ -18,6 +18,9 @@ def test_required_ctf_units_present():
     
     required_units = [
         "ZERGLING", "ROACH", "MARINE", "REAPER", "ZEALOT", "SWARMHOSTMP", "DISRUPTOR",
+        "WIDOWMINE",
+        "RAVEN",
+        "OVERSEER",
     ]
     for unit in required_units:
         assert unit in data, f"Unit {unit} missing from unit_data.json"
@@ -53,6 +56,20 @@ def test_disruptor_cost_matches_lotv():
     assert entry["weapons"] == []
 
 
+def test_widowmine_cost_matches_lotv():
+    with open("data/unit_data.json", "r") as f:
+        data = json.load(f)
+    entry = data["WIDOWMINE"]
+    cost = entry["cost"]
+    assert cost["minerals"] == 75
+    assert cost["vespene"] == 25
+    assert cost["supply"] == 2.0
+    assert entry["id"] == 498
+    assert entry["radius"] == 0.5
+    assert entry["sight"] == 7.0
+    assert entry["weapons"] == []
+
+
 def test_swarmhostmp_ctf_attributes_armored_biological():
     from train.envs.ctf.game_data import UNIT_DATA, uid
 
@@ -80,3 +97,13 @@ def test_unit_stats_integrity():
         # But unit_data.json might store it differently depending on how it was extracted
         # Let's see what's actually there
         assert zergling_cost["minerals"] in [25, 50]
+
+
+def test_baneling_weapon_range_is_melee():
+    """Baneling explode radius is splash-only; catalog DPS range is melee contact."""
+    with open("data/unit_data.json", "r") as f:
+        data = json.load(f)
+    weapons = data["BANELING"]["weapons"]
+    assert len(weapons) == 1
+    assert weapons[0]["range"] == 0.25
+    assert weapons[0]["damage"] == 20.0

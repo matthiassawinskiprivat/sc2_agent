@@ -1,6 +1,8 @@
+# level_build_zerg_0 — Zergling rush: pool, overlords, queen, inject, mass lings.
+
 training:
-  training_steps: 2_000_000
-  num_envs: 2
+  training_steps: 400_000
+  num_envs: 1
   n_steps: 2048
   batch_size: 512
   learning_rate: 0.0003
@@ -9,11 +11,10 @@ training:
 env:
   env_class: ZergBuildEnv
   maps_dir: train/maps/ladder/build_agent
-  use_computer: false
-  max_steps: 1200
+  max_steps: 3000
   headless: true
   # Soft in-process resets between episodes; hard SC2 remake every K (like unit-control).
-  every_k_episodes: 100
+  every_k_episodes: 20
   # Future learned-manager cadence (scripted curriculum uses emit-on-idle instead).
   macro_tick_interval: 8
   mining_controller: speed
@@ -24,6 +25,9 @@ env:
   build_commands:
     - spawningpool
     - zergling
+    - overlord
+    - queen
+    - inject
   spawn:
     drones: 8
     minerals: 0
@@ -36,11 +40,22 @@ env:
       unit_type: SPAWNINGPOOL
       target_pos: [-1, -1]
     - command_type: TRAIN
+      unit_type: OVERLORD
+      count: 1
+    - command_type: TRAIN
+      unit_type: QUEEN
+      count: 1
+    - command_type: INJECT
+      target_pos: [-1, -1]
+    - command_type: TRAIN
       unit_type: ZERGLING
-      count: 6
+      count: 12
+    - command_type: INJECT
+      target_pos: [-1, -1]
   rewards:
     success: 100.0
     command_complete: 15.0
+    inject_reward: 20.0
     step_penalty: -0.02
     invalid_build_penalty: -1.0
     distance_multiplier: 0.5

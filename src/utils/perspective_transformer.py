@@ -1,9 +1,13 @@
 import numpy as np
 
+from src.agent.squad_constants import SQUAD_SPATIAL_RESOLUTION
+
+
 class PerspectiveTransformer:
-    """
-    Utility for spatial transformations to support perspective flipping in self-play.
-    Rotates observations and actions by 180 degrees to maintain a canonical view.
+    """180° rotation helpers (legacy unit tests / optional tooling).
+
+    CTF/squad training uses owner-id perspective only: P1 and P2 see the same
+    world-coordinate maps, scalars, and spatial actions as old P1-only training.
     """
 
     @staticmethod
@@ -63,3 +67,14 @@ class PerspectiveTransformer:
             return np.concatenate([move_flipped, attack_flipped])
             
         return np.flip(mask) # Fallback
+
+    @staticmethod
+    def decode_world_spatial_idx(
+        head_name: str,
+        spatial_idx: int,
+        owner_id: int,
+        grid_size: int = SQUAD_SPATIAL_RESOLUTION,
+    ) -> int:
+        """Pass-through: no P2 spatial un-flip (world coords for all owners)."""
+        del head_name, owner_id, grid_size
+        return int(spatial_idx)

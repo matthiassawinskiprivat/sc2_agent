@@ -67,10 +67,15 @@ def _make_bot(kill_reward: float = 0.5, kill_penalty: float = -0.4) -> CaptureTh
     return bot
 
 
-def _wire(bot, own_units, enemy_units):
+def _wire(bot, own_units, enemy_units, *, trainee_pid: int = 1):
     bot.player_id = 1
-    bot.units = list(own_units)
-    bot.enemy_units = list(enemy_units)
+    enemy_pid = 2 if trainee_pid == 1 else 1
+    for u in own_units:
+        u.owner_id = trainee_pid
+    for u in enemy_units:
+        u.owner_id = enemy_pid
+    bot.units = list(own_units) + list(enemy_units)
+    bot.enemy_units = []
 
     def _struct_col():
         col = MagicMock()
@@ -87,31 +92,33 @@ def _wire(bot, own_units, enemy_units):
 # kill_reward — enemy dies
 # ---------------------------------------------------------------------------
 
-def test_kill_reward_fires_when_enemy_dies():
+@pytest.mark.parametrize("trainee_pid", [1, 2])
+def test_kill_reward_fires_when_enemy_dies(trainee_pid):
     bot = _make_bot(kill_reward=0.5, kill_penalty=0.0)
     enemy = _make_unit(tag=99)
     own = _make_unit(tag=1)
-    _wire(bot, own_units=[own], enemy_units=[enemy])
+    _wire(bot, own_units=[own], enemy_units=[enemy], trainee_pid=trainee_pid)
 
     # Seed: 1 enemy alive last step
-    bot.prev_enemy_unit_count[1] = 1
+    bot.prev_enemy_unit_count[trainee_pid] = 1
 
     # Now enemy is dead (empty list)
-    _wire(bot, own_units=[own], enemy_units=[])
-    reward = bot.calculate_reward(perspective_player_id=1)
+    _wire(bot, own_units=[own], enemy_units=[], trainee_pid=trainee_pid)
+    reward = bot.calculate_reward(perspective_player_id=trainee_pid)
 
     assert reward == pytest.approx(0.5), f"Expected +0.5 kill_reward, got {reward}"
 
 
-def test_kill_reward_scales_with_kills():
+@pytest.mark.parametrize("trainee_pid", [1, 2])
+def test_kill_reward_scales_with_kills(trainee_pid):
     """Two enemies die in one step → 2× kill_reward."""
     bot = _make_bot(kill_reward=0.5, kill_penalty=0.0)
     own = _make_unit(tag=1)
-    _wire(bot, own_units=[own], enemy_units=[])
+    _wire(bot, own_units=[own], enemy_units=[], trainee_pid=trainee_pid)
 
-    bot.prev_enemy_unit_count[1] = 2  # two enemies were alive
+    bot.prev_enemy_unit_count[trainee_pid] = 2  # two enemies were alive
 
-    reward = bot.calculate_reward(perspective_player_id=1)
+    reward = bot.calculate_reward(perspective_player_id=trainee_pid)
 
     assert reward == pytest.approx(1.0), f"Expected +1.0 for two kills, got {reward}"
 
@@ -176,25 +183,27 @@ def test_kill_reward_zero_when_config_omitted():
 # kill_penalty — own unit dies
 # ---------------------------------------------------------------------------
 
-def test_kill_penalty_fires_when_own_unit_dies():
+@pytest.mark.parametrize("trainee_pid", [1, 2])
+def test_kill_penalty_fires_when_own_unit_dies(trainee_pid):
     bot = _make_bot(kill_reward=0.0, kill_penalty=-0.4)
     own_survivor = _make_unit(tag=1)
-    _wire(bot, own_units=[own_survivor], enemy_units=[])
+    _wire(bot, own_units=[own_survivor], enemy_units=[], trainee_pid=trainee_pid)
 
-    bot.prev_own_unit_count[1] = 2  # had 2 units
+    bot.prev_own_unit_count[trainee_pid] = 2  # had 2 units
 
-    reward = bot.calculate_reward(perspective_player_id=1)
+    reward = bot.calculate_reward(perspective_player_id=trainee_pid)
 
     assert reward == pytest.approx(-0.4), f"Expected -0.4 kill_penalty, got {reward}"
 
 
-def test_kill_penalty_scales_with_losses():
+@pytest.mark.parametrize("trainee_pid", [1, 2])
+def test_kill_penalty_scales_with_losses(trainee_pid):
     bot = _make_bot(kill_reward=0.0, kill_penalty=-0.4)
-    _wire(bot, own_units=[], enemy_units=[])
+    _wire(bot, own_units=[], enemy_units=[], trainee_pid=trainee_pid)
 
-    bot.prev_own_unit_count[1] = 3  # lost all 3
+    bot.prev_own_unit_count[trainee_pid] = 3  # lost all 3
 
-    reward = bot.calculate_reward(perspective_player_id=1)
+    reward = bot.calculate_reward(perspective_player_id=trainee_pid)
 
     assert reward == pytest.approx(-1.2), f"Expected -1.2 for three losses, got {reward}"
 
@@ -373,3 +382,142 @@ def test_permanent_unit_death_still_triggers_kill_penalty_with_temps_present():
     reward = bot.calculate_reward(perspective_player_id=1)
     assert reward == pytest.approx(-0.4)
     assert bot.prev_own_unit_count[1] == 1
+
+
+# ---------------------------------------------------------------------------
+# Carrier Interceptors: ignore body HP churn, keep shot damage on permanents
+# ---------------------------------------------------------------------------
+
+def test_enemy_interceptor_despawn_does_not_trigger_damage_or_kill_reward():
+    """Interceptor recall/death must not look like army damage_reward."""
+    from sc2.ids.unit_typeid import UnitTypeId
+
+    bot = CaptureTheFlagBot(player_id=1, training_conf={
+        "agent_architecture": "universal",
+        "action_heads": ["move"],
+        "categorical_heads": [],
+        "rewards": {
+            "kill_reward": 0.5,
+            "kill_penalty": 0.0,
+            "pylon_damage_reward": 0.0,
+            "pylon_damage_penalty": 0.0,
+            "damage_reward": 0.2,
+            "damage_penalty": 0.0,
+            "distance_multiplier": 0.0,
+            "step_penalty": 0.0,
+            "defender_step_reward": 0.0,
+            "cooldown_retreat_scale": 0.0,
+        },
+    })
+    bot.unit_command_map = {}
+    bot.unit_target_map = {}
+    bot.active_unit_tag = 1
+    bot.prev_dist_per_squad = {}
+    bot.prev_pylon_health = {1: 20.0, 2: 20.0}
+    bot.prev_enemy_units_health = {1: 0.0, 2: 0.0}
+    bot.prev_own_units_health = {1: 0.0, 2: 0.0}
+    bot.prev_enemy_unit_count = {1: 0, 2: 0}
+    bot.prev_own_unit_count = {1: 0, 2: 0}
+    bot.enemy_pylon_pos = {1: None, 2: None}
+
+    own = _make_unit(tag=1, hp=100.0, type_id=UnitTypeId.CORRUPTOR)
+    carrier = _make_unit(tag=10, hp=300.0, type_id=UnitTypeId.CARRIER)
+    interceptor = _make_unit(tag=20, hp=40.0, shield=40.0, type_id=UnitTypeId.INTERCEPTOR)
+    _wire(bot, own_units=[own], enemy_units=[carrier, interceptor])
+    bot.calculate_reward(perspective_player_id=1)
+    assert bot.prev_enemy_units_health[1] == pytest.approx(300.0)
+    assert bot.prev_enemy_unit_count[1] == 1
+
+    # Interceptor recalled/despawned; Carrier unchanged.
+    _wire(bot, own_units=[own], enemy_units=[carrier])
+    reward = bot.calculate_reward(perspective_player_id=1)
+    assert reward == pytest.approx(0.0)
+    assert bot.prev_enemy_units_health[1] == pytest.approx(300.0)
+    assert bot.prev_enemy_unit_count[1] == 1
+
+
+def test_interceptor_shots_on_permanent_still_count_as_damage_penalty():
+    """Damage dealt *by* Interceptors still reduces permanent HP → damage_penalty."""
+    from sc2.ids.unit_typeid import UnitTypeId
+
+    bot = CaptureTheFlagBot(player_id=1, training_conf={
+        "agent_architecture": "universal",
+        "action_heads": ["move"],
+        "categorical_heads": [],
+        "rewards": {
+            "kill_reward": 0.0,
+            "kill_penalty": 0.0,
+            "pylon_damage_reward": 0.0,
+            "pylon_damage_penalty": 0.0,
+            "damage_reward": 0.0,
+            "damage_penalty": 0.2,
+            "distance_multiplier": 0.0,
+            "step_penalty": 0.0,
+            "defender_step_reward": 0.0,
+            "cooldown_retreat_scale": 0.0,
+        },
+    })
+    bot.unit_command_map = {}
+    bot.unit_target_map = {}
+    bot.active_unit_tag = 1
+    bot.prev_dist_per_squad = {}
+    bot.prev_pylon_health = {1: 20.0, 2: 20.0}
+    bot.prev_enemy_units_health = {1: 0.0, 2: 0.0}
+    bot.prev_own_units_health = {1: 0.0, 2: 0.0}
+    bot.prev_enemy_unit_count = {1: 0, 2: 0}
+    bot.prev_own_unit_count = {1: 0, 2: 0}
+    bot.enemy_pylon_pos = {1: None, 2: None}
+
+    own = _make_unit(tag=1, hp=100.0, type_id=UnitTypeId.CORRUPTOR)
+    carrier = _make_unit(tag=10, hp=300.0, type_id=UnitTypeId.CARRIER)
+    interceptor = _make_unit(tag=20, hp=40.0, shield=40.0, type_id=UnitTypeId.INTERCEPTOR)
+    _wire(bot, own_units=[own], enemy_units=[carrier, interceptor])
+    bot.calculate_reward(perspective_player_id=1)
+
+    own.health = 70.0  # Interceptor (or Carrier) shot the Corruptor
+    reward = bot.calculate_reward(perspective_player_id=1)
+    assert reward == pytest.approx(-30.0 * 0.2)
+
+
+def test_own_interceptor_damage_to_enemy_permanent_still_counts_as_damage_reward():
+    """Friendly Interceptor shots still credit damage_reward on enemy permanents."""
+    from sc2.ids.unit_typeid import UnitTypeId
+
+    bot = CaptureTheFlagBot(player_id=1, training_conf={
+        "agent_architecture": "universal",
+        "action_heads": ["move"],
+        "categorical_heads": [],
+        "rewards": {
+            "kill_reward": 0.0,
+            "kill_penalty": 0.0,
+            "pylon_damage_reward": 0.0,
+            "pylon_damage_penalty": 0.0,
+            "damage_reward": 0.2,
+            "damage_penalty": 0.0,
+            "distance_multiplier": 0.0,
+            "step_penalty": 0.0,
+            "defender_step_reward": 0.0,
+            "cooldown_retreat_scale": 0.0,
+        },
+    })
+    bot.unit_command_map = {}
+    bot.unit_target_map = {}
+    bot.active_unit_tag = 1
+    bot.prev_dist_per_squad = {}
+    bot.prev_pylon_health = {1: 20.0, 2: 20.0}
+    bot.prev_enemy_units_health = {1: 0.0, 2: 0.0}
+    bot.prev_own_units_health = {1: 0.0, 2: 0.0}
+    bot.prev_enemy_unit_count = {1: 0, 2: 0}
+    bot.prev_own_unit_count = {1: 0, 2: 0}
+    bot.enemy_pylon_pos = {1: None, 2: None}
+
+    carrier = _make_unit(tag=1, hp=300.0, type_id=UnitTypeId.CARRIER)
+    interceptor = _make_unit(tag=2, hp=40.0, shield=40.0, type_id=UnitTypeId.INTERCEPTOR)
+    enemy = _make_unit(tag=99, hp=200.0, type_id=UnitTypeId.CORRUPTOR)
+    _wire(bot, own_units=[carrier, interceptor], enemy_units=[enemy])
+    bot.calculate_reward(perspective_player_id=1)
+    assert bot.prev_enemy_units_health[1] == pytest.approx(200.0)
+
+    enemy.health = 150.0  # Own Interceptor damaged the Corruptor
+    reward = bot.calculate_reward(perspective_player_id=1)
+    assert reward == pytest.approx(50.0 * 0.2)

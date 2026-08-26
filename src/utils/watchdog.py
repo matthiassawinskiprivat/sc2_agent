@@ -50,10 +50,8 @@ class Watchdog:
             self.reset()
 
     def start(self):
-        """Starts the watchdog timer."""
+        """Starts the watchdog timer. Safe to call again; always rearms."""
         with self._lock:
-            if self._is_running:
-                return
             self._is_running = True
             self._monitored_thread = threading.current_thread()
         self.reset()

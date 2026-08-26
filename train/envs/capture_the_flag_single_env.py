@@ -17,7 +17,11 @@ from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM, universal
 from src.utils.layer_constants import LayerConstants
 from sc2.ids.unit_typeid import UnitTypeId
 from src.utils.spawning_utils import SpawningUtils
-from src.utils.unit_feature_helpers import issue_attack_at_point
+from src.utils.unit_feature_helpers import (
+    disable_cyclone_lock_on_autocast,
+    issue_aoe_at_point,
+    issue_attack_at_point,
+)
 from train.envs.ctf.region_loader import RegionLoader
 from train.envs.ctf.pool_assignment import (
     alternate_trainee_race_enabled,
@@ -25,11 +29,6 @@ from train.envs.ctf.pool_assignment import (
     is_pool_trainee,
     player_races_for_episode,
     pool_player_id,
-)
-from src.utils.combat_upgrades import (
-    buildings_needed_for_tracks,
-    sample_pool_upgrades,
-    upgrade_ids_for_tiers,
 )
 from src.agent.squad_constants import (
     MAX_SQUAD_UNITS,
@@ -249,6 +248,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._opponent_last_focus_tag: Optional[int] = None
         self._prepared_chunk: Optional[List[_ChunkEntry]] = None
         self._alternate_trainee_race = alternate_trainee_race_enabled(self.training_conf)
+        # debug_free is a toggle — track so soft resets do not flip it off.
+        self._ctf_resource_free_enabled: bool = False
+        # Upgrades mode: how many debug_upgrade calls applied in this SC2 session.
+        self._debug_upgrade_tier_applied: int = 0
 
     def _pool_player_id(self, pool: Dict) -> int:
         return pool_player_id(
@@ -266,8 +269,98 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             alternate=getattr(self, "_alternate_trainee_race", False),
         )
 
+    def _trainee_sc2_player_id(self) -> int:
+        """SC2 owner id of the pool the trainee policy controls this episode."""
+        for pool in self.unit_pools_config or []:
+            if self._is_pool_trainee(pool):
+                return int(self._pool_player_id(pool))
+        return 1
+
+    def _trainee_race_log_suffix(self) -> str:
+        """Compact trainee/opponent race + alive army counts for reset logs."""
+        from train.envs.ctf.pool_assignment import get_trainee_race, player_races_for_episode
+
+        ep = int(getattr(self, "episode_counter", 1) or 1)
+        alternate = bool(getattr(self, "_alternate_trainee_race", False))
+        pools = self.unit_pools_config or []
+        trainee = get_trainee_race(pools, ep, alternate=alternate)
+        p1, p2 = player_races_for_episode(pools, ep, alternate=alternate)
+        n1 = len(self.player_units.get(1, [])) if getattr(self, "player_units", None) else 0
+        n2 = len(self.player_units.get(2, [])) if getattr(self, "player_units", None) else 0
+        return (
+            f", trainee={trainee or 'static'}, P1={p1 or '?'}({n1}), P2={p2 or '?'}({n2})"
+        )
+
+    def _ctf_role_chat_lines(self) -> List[str]:
+        """Trainee vs opponent race/role/policy lines for the in-game chat."""
+        from train.envs.ctf.pool_assignment import get_trainee_race, player_races_for_episode
+        from train.envs.ctf.role_chat import format_ctf_role_chat_lines
+
+        ep = int(getattr(self, "episode_counter", 1) or 1)
+        alternate = bool(getattr(self, "_alternate_trainee_race", False))
+        pools = self.unit_pools_config or []
+        trainee_race = get_trainee_race(pools, ep, alternate=alternate)
+        p1, p2 = player_races_for_episode(pools, ep, alternate=alternate)
+        trainee_pid = self._trainee_sc2_player_id()
+        opponent_pid = 2 if trainee_pid == 1 else 1
+        if not trainee_race:
+            trainee_race = p1 if trainee_pid == 1 else p2
+        opponent_race = p2 if trainee_pid == 1 else p1
+
+        trainee_roles: List[str] = []
+        opponent_roles: List[str] = []
+        for pool in pools:
+            cmd = str(pool.get("high_level_command", "attack")).lower()
+            region = str(pool.get("region", "") or "").strip()
+            label = f"{region}:{cmd}" if region else cmd
+            if self._is_pool_trainee(pool):
+                trainee_roles.append(label)
+            else:
+                opponent_roles.append(label)
+
+        if self._preview_computer_opponent():
+            opponent_policy = "computer"
+        else:
+            _model, source = self._resolve_opponent_model()
+            opponent_policy = source or "none"
+
+        return format_ctf_role_chat_lines(
+            episode=ep,
+            trainee_race=trainee_race,
+            trainee_player_id=trainee_pid,
+            trainee_roles=trainee_roles,
+            opponent_race=opponent_race,
+            opponent_player_id=opponent_pid,
+            opponent_roles=opponent_roles,
+            opponent_policy=opponent_policy,
+        )
+
+    async def _send_ctf_role_chat(self) -> None:
+        """Post role lines after debug spawn so SC2 does not wipe them from chat."""
+        bot = self.bot
+        if bot is None:
+            return
+        send = getattr(bot, "chat_send", None)
+        if not callable(send):
+            client = getattr(bot, "client", None)
+            send = getattr(client, "chat_send", None) if client is not None else None
+        if not callable(send):
+            return
+        for line in self._ctf_role_chat_lines():
+            try:
+                await send(line, team_only=False)
+            except TypeError:
+                try:
+                    await send(line, False)
+                except Exception as exc:
+                    self._log(f"CTF role chat failed: {exc}")
+                    return
+            except Exception as nested_exc:
+                self._log(f"CTF role chat failed: {nested_exc}")
+                return
+
     def _all_trainee_pools_are_defenders(self) -> bool:
-        """True when every P1 pool has high_level_command='defend'.
+        """True when every trainee pool has high_level_command='defend'.
 
         In defender-only levels the learner trains only the defend role, so
         syncing the opponent from latest_learner_model.zip would overwrite the
@@ -299,9 +392,28 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """Pylon-loss termination only applies to players that own a defend-pool flag."""
         p1_flag_owner = self._player_owns_flag_pylon(1)
         p2_flag_owner = self._player_owns_flag_pylon(2)
-        p1_no_pylon = self.bot.structures(UnitTypeId.PYLON).amount == 0
-        p2_no_pylon = self.bot.enemy_structures(UnitTypeId.PYLON).amount == 0
-        return p1_flag_owner and p1_no_pylon, p2_flag_owner and p2_no_pylon
+        p1_count, p2_count = self._pylon_counts_by_owner()
+        return p1_flag_owner and p1_count == 0, p2_flag_owner and p2_count == 0
+
+    def _pylon_counts_by_owner(self) -> Tuple[int, int]:
+        """Alive pylons per SC2 owner. Owner-id first (god-mode); alliance fallback."""
+        from src.utils.unit_feature_helpers import allied_candidates_for_owner
+
+        def _count(owner_id: int) -> int:
+            n = 0
+            if self.bot is None:
+                return 0
+            for unit in allied_candidates_for_owner(self.bot, owner_id):
+                if getattr(unit, "type_id", None) == UnitTypeId.PYLON:
+                    n += 1
+            return n
+
+        c1, c2 = _count(1), _count(2)
+        if c1 or c2:
+            return c1, c2
+        p1 = int(self.bot.structures(UnitTypeId.PYLON).amount) if self.bot else 0
+        p2 = int(self.bot.enemy_structures(UnitTypeId.PYLON).amount) if self.bot else 0
+        return p1, p2
 
     def _resolve_cumulative_list(self, key: str, getter):
         """Use flattened training_conf list when the pipeline already computed it."""
@@ -367,6 +479,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         from train.envs.sc2_session_config import session_realtime
 
         self.bot = CaptureTheFlagBot(player_id=1, training_conf=self.training_conf)
+        # New SC2 game → progressive debug_upgrade counter starts at 0.
+        self._debug_upgrade_tier_applied = 0
         sim_realtime = session_realtime(self.training_conf)
         env_conf = self.training_conf.get("env", {})
         difficulty_name = self.training_conf.get("difficulty") or env_conf.get("difficulty", "Easy")
@@ -427,6 +541,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self._refresh_bot_state()
         await self._spawn_initial_units()
         await self._refresh_unit_lists()
+        if self.bot is not None:
+            self.bot.prime_combat_reward_baselines()
 
     async def _refresh_bot_state(self):
         from src.utils.sc2_observation_compat import game_state_from_response_observation
@@ -473,32 +589,27 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
     def _calculate_spawns_for_pool(self, pool: Dict) -> List[str]:
         """Budget-greedy spawn list from a single unit_pools entry."""
-        m = pool.get("mineral_budget", 0)
-        v = pool.get("vespene_budget", 0)
-        unit_pool = pool.get("unit_pool", [])
+        from train.envs.ctf.budgeted_spawns import calculate_budgeted_spawns
 
-        def can_afford(u):
-            if u not in self.unit_data:
-                logger.error(f"Unit {u} not found in unit_data.json. Skipping.")
-                return False
-            cost = self.unit_data[u]["cost"]
-            return cost["minerals"] <= m and cost["vespene"] <= v
-
-        spawns = []
-        affordable = [u for u in unit_pool if can_afford(u)]
-        while affordable:
-            u = random.choice(affordable)
-            spawns.append(u)
-            cost = self.unit_data[u]["cost"]
-            m -= cost["minerals"]
-            v -= cost["vespene"]
-            affordable = [u for u in unit_pool if can_afford(u)]
-        return spawns
+        return calculate_budgeted_spawns(
+            pool.get("unit_pool", []),
+            self.unit_data,
+            pool.get("mineral_budget", 0),
+            pool.get("vespene_budget", 0),
+        )
 
     @staticmethod
     def _is_squad_eligible_unit(unit) -> bool:
-        """Mobile units only; structures (pylon, battery, tumor, …) are not selectable."""
-        return not getattr(unit, "is_structure", False)
+        """Mobile units only; structures and Carrier Interceptors are not selectable.
+
+        Interceptors are Carrier-AI managed. Adopting them into the 24-slot squad
+        pointer crowds out real army tags and floods selection with noise.
+        """
+        from src.utils.unit_feature_helpers import is_carrier_interceptor
+
+        if getattr(unit, "is_structure", False):
+            return False
+        return not is_carrier_interceptor(unit)
 
     def _assign_unit_commands(
         self,
@@ -542,16 +653,115 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 self.bot.unit_target_map[unit.tag] = label_to_defender_pos[best_label]
             self.unit_pool_index[unit.tag] = best_pool_idx
 
+    def _cleanup_unit_tags(self, units) -> List[int]:
+        amount = getattr(units, "amount", None)
+        try:
+            n = int(amount)
+        except (TypeError, ValueError):
+            return []
+        if n <= 0:
+            return []
+        tags: List[int] = []
+        for unit in units:
+            tag = getattr(unit, "tag", None)
+            if tag is None:
+                continue
+            try:
+                tags.append(int(tag))
+            except (TypeError, ValueError):
+                continue
+            if len(tags) >= n:
+                break
+        return tags
+
+    async def _reveal_concealed_units_for_cleanup(self, killable) -> int:
+        """Uncloak/unburrow leftovers so debug_kill can remove them.
+
+        Reset-only: extra ``client.step`` frames are not training steps and do
+        not increment ``steps_count``.
+        """
+        from src.sc2_bot import unit_is_subject_to_map_cleanup
+        from train.envs.ctf.map_cleanup import queued_unit_command, reveal_ability_for_cleanup
+
+        pending = []
+        queued_via_do = 0
+        for unit in killable:
+            if not unit_is_subject_to_map_cleanup(unit):
+                continue
+            try:
+                ability = reveal_ability_for_cleanup(unit)
+                if ability is None:
+                    continue
+                result = unit(ability)
+            except (TypeError, ValueError, KeyError, AttributeError):
+                continue
+            cmd = queued_unit_command(result)
+            if cmd is not None:
+                pending.append(cmd)
+            elif result is True:
+                queued_via_do += 1
+        if pending:
+            await self.bot.client.actions(pending)
+        if queued_via_do:
+            await self._flush_bot_actions()
+        if not pending and not queued_via_do:
+            return 0
+        for _ in range(2):
+            await self.bot.client.step()
+            await self._refresh_bot_state()
+        return len(pending) + queued_via_do
+
+    async def _clear_ctf_map_units(self) -> None:
+        """Reveal concealed leftovers, then retry debug_kill until the map is empty.
+
+        Burrowed / cloaked units often survive a single kill pass and would leak
+        into the next episode (wrong-race obs) and grow SC2 DirectX VRAM.
+        Reveal + kill run during reset only — extra frames are not training steps.
+        """
+        from src.sc2_bot import MapCleanupFailedError, unit_is_subject_to_map_cleanup
+
+        if self.bot is None or getattr(self.bot, "client", None) is None:
+            return
+
+        max_attempts = 8
+        steps_after_kill = 2
+        leftover_n = 0
+        for attempt in range(max_attempts):
+            await self._refresh_bot_state()
+            all_units = getattr(self.bot, "all_units", None)
+            if all_units is None:
+                return
+            killable = all_units.filter(unit_is_subject_to_map_cleanup)
+            tags = self._cleanup_unit_tags(killable)
+            if not tags:
+                return
+            await self._reveal_concealed_units_for_cleanup(killable)
+            killable = self.bot.all_units.filter(unit_is_subject_to_map_cleanup)
+            tags = self._cleanup_unit_tags(killable)
+            if not tags:
+                return
+            await self.bot.client.debug_kill_unit(tags)
+            for _ in range(steps_after_kill):
+                await self.bot.client.step()
+                await self._refresh_bot_state()
+            leftover = self.bot.all_units.filter(unit_is_subject_to_map_cleanup)
+            leftover_tags = self._cleanup_unit_tags(leftover)
+            leftover_n = len(leftover_tags)
+            if leftover_n == 0:
+                return
+            self._log(
+                f"CTF map cleanup attempt {attempt + 1}/{max_attempts} "
+                f"left {leftover_n} killable unit(s)."
+            )
+        raise MapCleanupFailedError(leftover_n)
+
     async def _spawn_initial_units(self):
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
         import math
         
         # 1. Clear Map of all existing units and structures
-        if self.bot.all_units.exists:
-            await self.bot.client.debug_kill_unit(self.bot.all_units.tags)
-            await self.bot.client.step()
-            await self._refresh_bot_state()
+        await self._clear_ctf_map_units()
 
         grid = self.bot.game_info.pathing_grid
         
@@ -583,24 +793,32 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         pool_spawn_centers: List[Tuple] = []
         label_to_defender_pos: Dict = {}
+        deferred_battery_cmds: List = []
+        deferred_detector_cmds: List = []
 
         if self.unit_pools_config:
-            pool_spawn_centers, label_to_defender_pos = await self._spawn_from_unit_pools(
+            (
+                pool_spawn_centers,
+                label_to_defender_pos,
+                deferred_battery_cmds,
+                deferred_detector_cmds,
+            ) = await self._spawn_from_unit_pools(
                 get_valid_pos, get_offset_pos, to_id
             )
         else:
             await self._spawn_legacy(get_valid_pos, get_offset_pos, to_id)
 
-        # Advance physics to materialise all units
+        # Advance physics to materialise all units (and power pylons).
         for _ in range(3):
             await self.bot.client.step()
             await self._refresh_bot_state()
 
-        # Assign unit_command_map and unit_target_map by proximity to spawn centers
-        if pool_spawn_centers:
-            self.label_to_defender_pos = label_to_defender_pos
-            self._promoted_pool_index = None
-            self._assign_unit_commands(pool_spawn_centers, label_to_defender_pos)
+        # Protoss SHIELDBATTERY needs pylon power; create after pylons exist.
+        if deferred_battery_cmds:
+            await self._debug_create_units_by_player(deferred_battery_cmds)
+            for _ in range(2):
+                await self.bot.client.step()
+                await self._refresh_bot_state()
 
         # Set reduced HP (10 HP + 10 Shield) on all pylons
         all_pylons = self.bot.all_units(UnitTypeId.PYLON)
@@ -612,9 +830,25 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self._apply_cloak_env_mode_upgrades()
         await self._apply_drop_env_mode_upgrades()
         await self._apply_upgrades_env_mode()
+        await self._apply_spellcaster_env_mode_upgrades()
+        await self._apply_ctf_resources()
+
+        # Free detectors after army batch (mixed-race create lists can drop trailing cmds).
+        if deferred_detector_cmds:
+            await self._spawn_cloak_mode_detectors(deferred_detector_cmds)
+
+        # Assign commands after detectors exist so they join the nearest squad.
+        if pool_spawn_centers:
+            self.label_to_defender_pos = label_to_defender_pos
+            self._promoted_pool_index = None
+            self._assign_unit_commands(pool_spawn_centers, label_to_defender_pos)
 
         await self.bot.client.step()
         await self._refresh_bot_state()
+        await self._apply_spellcaster_energy()
+        await disable_cyclone_lock_on_autocast(self.bot)
+        # After every debug_* call this spawn: chat history keeps these lines.
+        await self._send_ctf_role_chat()
 
     async def _spawn_from_unit_pools(
         self, get_valid_pos, get_offset_pos, to_id
@@ -626,16 +860,21 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         different teams sharing the same label are placed in the same arena so
         attackers and defenders face each other.
 
-        Player assignment:
-          - pool with  agent: True  →  player 1 (trainee)
-          - pool without agent flag →  player 2 (opponent)
+        Player assignment (SC2 spawn owners, static across episodes):
+          - first-seen race → player 1; every other race → player 2
+          - without race labels: ``agent: True`` → player 1, else player 2
+          - ``alternate_trainee_race`` swaps which owner the *policy* controls,
+            not these spawn IDs
 
         For each pool:
           - high_level_command "attack" → spawn at {pair_index}_a center
           - high_level_command "defend" → spawn at {pair_index}_d center + place pylon there
 
-        Returns list of (player_id, high_level_command, spawn_center) tuples for
-        unit_command_map assignment after materialisation.
+        Returns:
+            pool_spawn_centers: (player_id, high_level_command, spawn_center, label)
+            label_to_defender_pos: arena label → defender center
+            deferred_battery_cmds: SHIELDBATTERY create cmds (after pylons power up)
+            deferred_detector_cmds: free cloak detectors (after army + upgrades)
         """
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
@@ -657,10 +896,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     label_to_defender_pos[label] = Point2((d_center.x, d_center.y))
 
         all_cmds: List = []
+        # Shield batteries need powered pylons; spawn after the first materialise step.
+        deferred_battery_cmds: List = []
+        # Free cloak detectors: separate create after army batch (+ upgrades for Overseer).
+        deferred_detector_cmds: List = []
         # (player_id, command, spawn_center, arena_label)
         pool_spawn_centers: List[Tuple] = []
+        # (kept for debug / future obs; progressive debug_upgrade no longer samples tiers)
         self._pool_upgrade_tiers = {}
-        # player_id → merged track tiers (max across that player's pools)
         self._player_upgrade_tiers: Dict[int, Dict[str, int]] = {}
 
         for pool_idx, pool in enumerate(self.unit_pools_config):
@@ -676,25 +919,30 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             pool_spawn_centers.append((player_id, command, spawn_center, label))
 
             spawn_pool = pool
-            if self._has_env_mode("upgrades"):
-                chosen, rem_m, rem_v = sample_pool_upgrades(
-                    pool.get("race", ""),
-                    int(pool.get("mineral_budget", 0)),
-                    int(pool.get("vespene_budget", 0)),
-                )
-                self._pool_upgrade_tiers[pool_idx] = chosen
-                merged = dict(self._player_upgrade_tiers.get(player_id, {}))
-                for k, tier in chosen.items():
-                    merged[k] = max(int(merged.get(k, 0)), int(tier))
-                self._player_upgrade_tiers[player_id] = merged
-                spawn_pool = dict(pool)
-                spawn_pool["mineral_budget"] = rem_m
-                spawn_pool["vespene_budget"] = rem_v
-
-            unit_names = self._calculate_spawns_for_pool(spawn_pool)
-            for i, name in enumerate(unit_names):
-                pos = get_offset_pos(spawn_center, i, len(unit_names))
+            unit_names = list(self._calculate_spawns_for_pool(spawn_pool))
+            # Heal curriculum: defending Protoss must get at least one battery when
+            # SHIELDBATTERY is listed in the pool (budget RNG can otherwise miss it).
+            pool_has_battery = any(
+                str(u).upper() == "SHIELDBATTERY" for u in pool.get("unit_pool", [])
+            )
+            if (
+                self._has_env_mode("heal")
+                and str(pool.get("race", "")).lower() == "protoss"
+                and command == "defend"
+                and pool_has_battery
+                and not any(str(n).upper() == "SHIELDBATTERY" for n in unit_names)
+            ):
+                unit_names.append("SHIELDBATTERY")
+            mobile_names = [n for n in unit_names if str(n).upper() != "SHIELDBATTERY"]
+            battery_count = sum(1 for n in unit_names if str(n).upper() == "SHIELDBATTERY")
+            for i, name in enumerate(mobile_names):
+                pos = get_offset_pos(spawn_center, i, max(len(mobile_names), 1))
                 all_cmds.append([to_id(name), 1, pos, player_id])
+            for i in range(battery_count):
+                pos = get_offset_pos(spawn_center, i, max(battery_count, 1))
+                deferred_battery_cmds.append(
+                    [UnitTypeId.SHIELDBATTERY, 1, pos, player_id]
+                )
 
             # Defender pools own the flag (pylon) at the region centre
             if side_char == "d":
@@ -711,16 +959,39 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     all_cmds.append([UnitTypeId.CREEPTUMOR, 1, d_tumor, player_id])
 
             # Cloak curriculum: free detector per squad (not from mineral budget).
+            # Deferred to a separate create after the army batch — large mixed-race
+            # debug_create_unit lists can silently drop trailing cmds (Raven/Overseer).
             if self._has_env_mode("cloak"):
                 detector = self._cloak_mode_detector_type(pool.get("race", ""))
                 if detector is not None:
-                    det_pos = get_offset_pos(spawn_center, max(len(unit_names), 1), max(len(unit_names), 1) + 1)
-                    all_cmds.append([detector, 1, det_pos, player_id])
+                    det_pos = get_offset_pos(
+                        spawn_center, max(len(mobile_names), 1), max(len(mobile_names), 1) + 1
+                    )
+                    deferred_detector_cmds.append([detector, 1, det_pos, player_id])
 
-        if all_cmds:
-            await self.bot.client.debug_create_unit(all_cmds)
+        # Issue creates per owner. A single mixed-owner list can silently drop the
+        # trailing player's units (same failure mode as deferred detectors) — with
+        # alternate_trainee_race that made one parity of episodes end on step 1.
+        await self._debug_create_units_by_player(all_cmds)
 
-        return pool_spawn_centers, label_to_defender_pos
+        return (
+            pool_spawn_centers,
+            label_to_defender_pos,
+            deferred_battery_cmds,
+            deferred_detector_cmds,
+        )
+
+    async def _debug_create_units_by_player(self, cmds: List) -> None:
+        """``debug_create_unit`` once per owner_id so later players are not dropped."""
+        if not cmds or self.bot is None:
+            return
+        by_player: Dict[int, List] = {}
+        for cmd in cmds:
+            # cmd = [type, count, pos, player_id]
+            pid = int(cmd[3]) if len(cmd) > 3 else 1
+            by_player.setdefault(pid, []).append(cmd)
+        for pid in sorted(by_player):
+            await self.bot.client.debug_create_unit(by_player[pid])
 
     def _parse_env_modes(self) -> frozenset:
         """Comma-separated env_mode string → frozenset of lowercase mode names."""
@@ -738,6 +1009,24 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """Backward-compatible alias for cloak membership in multi-mode env_mode."""
         return self._has_env_mode("cloak")
 
+    async def _apply_ctf_resources(self) -> None:
+        """Grant minerals/vespene to agent and opponent for all CTF races.
+
+        Player 1 gets a resource bank (morphs, SCV repair). Player 2 gets
+        ``debug_free`` because the API cannot set the opponent bank. See
+        ``train.envs.ctf.heal_resources``.
+        """
+        from train.envs.ctf.heal_resources import apply_ctf_resources
+
+        if self.bot is None:
+            return
+        prev_free = bool(getattr(self, "_ctf_resource_free_enabled", False))
+        self._ctf_resource_free_enabled = await apply_ctf_resources(
+            bot=self.bot,
+            free_enabled=prev_free,
+        )
+        await self._refresh_bot_state()
+
     @staticmethod
     def _cloak_mode_detector_type(race: str):
         from sc2.ids.unit_typeid import UnitTypeId
@@ -751,12 +1040,24 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return UnitTypeId.OVERSEER
         return None
 
+    async def _spawn_cloak_mode_detectors(self, detector_cmds: List) -> None:
+        """Create one free detector per cloak-mode squad (Raven/Observer/Overseer)."""
+        from train.envs.ctf.cloak_detectors import spawn_cloak_detectors
+
+        if not detector_cmds or self.bot is None:
+            return
+        await spawn_cloak_detectors(
+            bot=self.bot,
+            detector_cmds=detector_cmds,
+            refresh_state=self._refresh_bot_state,
+        )
+
     async def _apply_cloak_env_mode_upgrades(self) -> None:
         """Unlock burrow/claws/cloak/overlord-speed via repeated debug_upgrade tiers."""
         if not self._has_env_mode("cloak") or self.bot is None:
             return
-        # Upgrades curriculum uses selective combat research; blanket debug_upgrade
-        # would also pull in spell tech and invalidate budgeted combat tiers.
+        # Upgrades curriculum uses a progressive debug_upgrade schedule; do not
+        # burn the ladder here (would desync the 25%/50%/75% counters).
         if self._has_env_mode("upgrades"):
             return
         # debug_upgrade unlocks the next research tier each call; enough iterations
@@ -770,135 +1071,36 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """Ensure OVERLORDSPEED for drop curriculum (idempotent if cloak already upgraded)."""
         if not self._has_env_mode("drop") or self.bot is None:
             return
-        # Cloak mode already runs the full debug_upgrade ladder (includes Overlord Speed),
-        # except when upgrades mode disables that ladder — then research OVERLORDSPEED.
-        if self._has_env_mode("cloak") and not self._has_env_mode("upgrades"):
-            return
-        if self._has_env_mode("upgrades"):
-            await self._research_overlord_speed()
+        # Cloak mode already runs the full debug_upgrade ladder (includes Overlord Speed).
+        # Upgrades mode uses the progressive schedule instead.
+        if self._has_env_mode("cloak") or self._has_env_mode("upgrades"):
             return
         for _ in range(20):
             await self.bot.client.debug_upgrade()
             await self.bot.client.step()
             await self._refresh_bot_state()
 
-    async def _research_overlord_speed(self) -> None:
-        """Grant Pneumatized Carapace without the full debug_upgrade ladder."""
-        from sc2.ids.upgrade_id import UpgradeId
-        from sc2.ids.unit_typeid import UnitTypeId
-        from sc2.position import Point2
-
-        if self.bot is None:
-            return
-        # Spawn a hatchery-adjacent spire path is heavy; use debug_upgrade once is too
-        # broad. Prefer researching via a spawned Hatchery is not enough for overlord
-        # speed (needs Lair). Use tech_tree cheat + hatchery/lair + research.
-        try:
-            await self.bot.client.debug_tech_tree()
-            await self.bot.client.debug_fast_build()
-            await self.bot.client.debug_all_resources()
-        except Exception as exc:
-            logger.warning(f"OVERLORDSPEED prep cheats failed: {exc}")
-            return
-        # Place a Lair for each zerg player that has units (research owner).
-        zerg_players = set()
-        for pool in self.unit_pools_config or []:
-            if str(pool.get("race", "")).lower() == "zerg":
-                zerg_players.add(self._pool_player_id(pool))
-        cmds = []
-        for pid in zerg_players:
-            pos = Point2((5.0 + pid, 5.0))
-            cmds.append([UnitTypeId.LAIR, 1, pos, pid])
-        if cmds:
-            await self.bot.client.debug_create_unit(cmds)
-            await self.bot.client.step()
-            await self._refresh_bot_state()
-        # Research for bot player; opponent lair: issue research via do() if possible.
-        upg = UpgradeId.OVERLORDSPEED
-        if self.bot.player_id in zerg_players:
-            try:
-                self.bot.research(upg)
-            except Exception as exc:
-                logger.warning(f"OVERLORDSPEED research (P1) failed: {exc}")
-        for _ in range(30):
-            await self.bot.client.step()
-            await self._refresh_bot_state()
-            if upg in getattr(self.bot.state, "upgrades", set()):
-                break
-        # Cleanup research structures
-        lairs = self.bot.all_units(UnitTypeId.LAIR)
-        if lairs.exists:
-            await self.bot.client.debug_kill_unit(lairs.tags)
-            await self.bot.client.step()
-            await self._refresh_bot_state()
-
     async def _apply_upgrades_env_mode(self) -> None:
-        """Research sampled combat weapon/armor/shield upgrades per player."""
+        """Progressive ``debug_upgrade`` at 25% / 50% / 75% of every_k_episodes.
+
+        Applies to all players (game-state cheat). Soft resets keep upgrades;
+        hard reset starts a new game at tier 0.
+        """
         if not self._has_env_mode("upgrades") or self.bot is None:
             return
-        from sc2.position import Point2
-
-        player_tiers = getattr(self, "_player_upgrade_tiers", {}) or {}
-        if not player_tiers:
+        # Spellcaster already runs the full debug_upgrade ladder (Psi Storm, etc.).
+        if self._has_env_mode("spellcaster"):
             return
-        try:
-            await self.bot.client.debug_tech_tree()
-            await self.bot.client.debug_fast_build()
-            await self.bot.client.debug_all_resources()
-        except Exception as exc:
-            logger.warning(f"upgrades mode prep cheats failed: {exc}")
+        from train.envs.ctf.combat_upgrade_apply import apply_scheduled_debug_upgrades
 
-        research_tags: List[int] = []
-        for player_id, chosen in player_tiers.items():
-            ids = upgrade_ids_for_tiers(chosen)
-            if not ids:
-                continue
-            bnames = buildings_needed_for_tracks(chosen)
-            cmds = []
-            base = Point2((8.0 + float(player_id) * 3.0, 8.0))
-            for i, bname in enumerate(bnames):
-                tid = getattr(UnitTypeId, bname, None)
-                if tid is None:
-                    continue
-                cmds.append([tid, 1, Point2((base.x + i * 2.0, base.y)), player_id])
-            # Protoss research buildings need power
-            if any(str(pool.get("race", "")).lower() == "protoss"
-                   for pool in (self.unit_pools_config or [])
-                   if self._pool_player_id(pool) == player_id):
-                cmds.append([UnitTypeId.PYLON, 1, Point2((base.x, base.y + 3.0)), player_id])
-            if cmds:
-                await self.bot.client.debug_create_unit(cmds)
-                await self.bot.client.step()
-                await self._refresh_bot_state()
-                for u in self.bot.all_units:
-                    if u.owner_id == player_id and u.is_structure and u.type_id != UnitTypeId.PYLON:
-                        # Keep pylons for power until research done; track all new structs
-                        research_tags.append(int(u.tag))
-
-            for upg in ids:
-                if player_id == self.bot.player_id:
-                    try:
-                        self.bot.research(upg)
-                    except Exception as exc:
-                        logger.debug(f"research {upg} failed: {exc}")
-                else:
-                    # Opponent: try research via available abilities on their structures
-                    await self._research_upgrade_on_player_structures(player_id, upg)
-                for _ in range(40):
-                    await self.bot.client.step()
-                    await self._refresh_bot_state()
-                    if player_id == self.bot.player_id and upg in getattr(
-                        self.bot.state, "upgrades", set()
-                    ):
-                        break
-
-        # Kill research buildings (and temporary pylons far from arenas)
-        if research_tags:
-            existing = [t for t in research_tags if self.bot.all_units.find_by_tag(t)]
-            if existing:
-                await self.bot.client.debug_kill_unit(existing)
-                await self.bot.client.step()
-                await self._refresh_bot_state()
+        every_k = every_k_episodes(self.training_conf)
+        self._debug_upgrade_tier_applied = await apply_scheduled_debug_upgrades(
+            bot=self.bot,
+            episode_counter=int(getattr(self, "episode_counter", 0) or 0),
+            every_k=every_k,
+            already_applied=int(getattr(self, "_debug_upgrade_tier_applied", 0) or 0),
+            refresh_state=self._refresh_bot_state,
+        )
 
         if include_upgrades_enabled(self.training_conf):
             self._upgrade_cache = np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32)
@@ -906,27 +1108,27 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             if builder is not None and hasattr(builder, "reset_upgrade_cache"):
                 builder.reset_upgrade_cache()
 
-    async def _research_upgrade_on_player_structures(self, player_id: int, upg) -> None:
-        """Best-effort research for non-bot owners via structure abilities."""
-        try:
-            structures = [
-                u
-                for u in self.bot.all_units
-                if u.owner_id == player_id and u.is_structure
-            ]
-            if not structures:
-                return
-            abilities_map = await self.bot.get_available_abilities(structures)
-            for structure, abilities in zip(structures, abilities_map):
-                for ab in abilities or []:
-                    # Ability enums often share the upgrade name fragment
-                    aname = getattr(ab, "name", str(ab)).upper()
-                    uname = getattr(upg, "name", str(upg)).upper()
-                    if uname.replace("LEVEL", "")[:12] in aname.replace("LEVEL", ""):
-                        self.bot.do(structure(ab))
-                        return
-        except Exception as exc:
-            logger.debug(f"opponent research {upg} failed: {exc}")
+    async def _apply_spellcaster_env_mode_upgrades(self) -> None:
+        """Unlock spell techs (Psi Storm, …) via the debug_upgrade ladder."""
+        if not self._has_env_mode("spellcaster") or self.bot is None:
+            return
+        from train.envs.ctf.spellcaster import apply_spell_upgrades
+
+        # Cloak (without upgrades mode) already ran the same 20-call ladder.
+        already_full = self._has_env_mode("cloak") and not self._has_env_mode("upgrades")
+        await apply_spell_upgrades(
+            bot=self.bot,
+            already_full_ladder=already_full,
+            refresh_state=self._refresh_bot_state,
+        )
+
+    async def _apply_spellcaster_energy(self) -> None:
+        """Fill energy bars so Fungal / Storm / EMP / Bomb can be cast immediately."""
+        if not self._has_env_mode("spellcaster") or self.bot is None:
+            return
+        from train.envs.ctf.spellcaster import apply_max_energy
+
+        await apply_max_energy(self.bot)
 
     async def _spawn_legacy(self, get_valid_pos, get_offset_pos, to_id):
         """Fallback: random pylon positions when unit_pools_config is absent."""
@@ -957,25 +1159,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         )
 
     def _calculate_spawns(self, m, v):
-        spawns = []
-        
-        def can_afford(u):
-            if u not in self.unit_data:
-                logger.error(f"Unit {u} not found in unit_data.json. Skipping.")
-                return False
-            cost = self.unit_data[u]["cost"]
-            return cost["minerals"] <= m and cost["vespene"] <= v
+        from train.envs.ctf.budgeted_spawns import calculate_budgeted_spawns
 
-        affordable = [u for u in self.unit_pool if can_afford(u)]
-        while affordable:
-            u = random.choice(affordable)
-            spawns.append(u)
-            cost = self.unit_data[u]["cost"]
-            m -= cost["minerals"]
-            v -= cost["vespene"]
-            affordable = [u for u in self.unit_pool if can_afford(u)]
-        
-        return spawns
+        return calculate_budgeted_spawns(self.unit_pool, self.unit_data, m, v)
 
     async def _refresh_unit_lists(self):
         # Refresh all units from the bot's God-Mode perspective.
@@ -1032,14 +1218,15 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         )
 
     def _agent_attack_units_alive(self) -> int:
-        """Count alive agent (P1) units currently in the attack role."""
-        alive_p1 = set(self.player_units.get(1, []))
-        if not alive_p1:
+        """Count alive trainee units currently in the attack role."""
+        trainee_pid = self._trainee_sc2_player_id()
+        alive_trainee = set(self.player_units.get(trainee_pid, []))
+        if not alive_trainee:
             return 0
 
         if self.bot is not None and self.bot.unit_command_map:
             return sum(
-                1 for tag in alive_p1
+                1 for tag in alive_trainee
                 if self.bot.unit_command_map.get(tag, "attack") == "attack"
             )
 
@@ -1051,10 +1238,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 and pool.get("high_level_command", "attack") == "attack"
             )
 
-        return len(alive_p1)
+        return len(alive_trainee)
 
     def _p1_defended_on_timeout(self, r_conf: dict) -> bool:
-        """True when P1 is a pure-defender whose pylon survived to the step limit.
+        """True when the trainee is a pure-defender whose pylon survived to the step limit.
 
         Only active when ``rewards.defender_wins_on_timeout: true`` is set in the
         level config — this avoids changing timeout semantics for symmetric
@@ -1062,10 +1249,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """
         if not r_conf.get("defender_wins_on_timeout", False):
             return False
-        if not self._player_owns_flag_pylon(1):
+        trainee_pid = self._trainee_sc2_player_id()
+        if not self._player_owns_flag_pylon(trainee_pid):
             return False
-        p1_lost, _ = self._pylon_loss_flags()
-        return not p1_lost
+        p1_lost, p2_lost = self._pylon_loss_flags()
+        trainee_lost = p1_lost if trainee_pid == 1 else p2_lost
+        return not trainee_lost
 
     def _enemy_pylon_target_for_pool(self, promoted_pool_idx: int):
         """Return the enemy defender pylon position for a promoted attack squad."""
@@ -1187,7 +1376,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     def _is_agent_squad(self) -> bool:
         if self.unit_pools_config and self.squad_unit_tags:
             return self._is_pool_trainee(self._current_pool_config())
-        return self.active_player_id == 1
+        return self.active_player_id == self._trainee_sc2_player_id()
 
     def _uses_squad_pointer(self) -> bool:
         return getattr(self, "agent_architecture", None) == "squad"
@@ -1198,6 +1387,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if not self.unit_pools_config:
             return []
         return trainee_pool_indices(self.unit_pools_config, self._is_pool_trainee)
+
+    def _any_trainee_pool_alive(self) -> bool:
+        return any(self._pool_alive_tags(idx) for idx in self._trainee_pool_indices())
 
     def _paired_opponent_pool_index(self, trainee_pool_idx: int) -> Optional[int]:
         from train.envs.ctf.squad_pool_pairing import paired_opponent_pool_index
@@ -1408,7 +1600,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             is_agent = (
                 self._is_pool_trainee(pool_conf)
                 if pool_conf
-                else player_id == 1
+                else player_id == self._trainee_sc2_player_id()
             )
             entries.append(
                 _ChunkEntry(sq_idx, player_id, int(tags[unit_idx]), is_agent)
@@ -1498,17 +1690,20 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if tags:
             self.bot.active_unit_tag = tags[0]
             return
-        for tag in self.player_units.get(1, []):
-            pool_idx = self.unit_pool_index.get(tag)
-            if (
-                pool_idx is not None
-                and self.unit_pools_config
-                and self._is_pool_trainee(self.unit_pools_config[pool_idx])
-            ):
-                self.bot.active_unit_tag = tag
-                return
-        if self.player_units.get(1):
-            self.bot.active_unit_tag = self.player_units[1][0]
+        trainee_pid = self._trainee_sc2_player_id()
+        for pid in (trainee_pid, 1, 2):
+            for tag in self.player_units.get(pid, []):
+                pool_idx = self.unit_pool_index.get(tag)
+                if (
+                    pool_idx is not None
+                    and self.unit_pools_config
+                    and self._is_pool_trainee(self.unit_pools_config[pool_idx])
+                ):
+                    self.bot.active_unit_tag = tag
+                    return
+        trainee_units = self.player_units.get(trainee_pid) or self.player_units.get(1)
+        if trainee_units:
+            self.bot.active_unit_tag = trainee_units[0]
 
     async def _async_preview_tick(self):
         await self.bot.client.step()
@@ -1683,6 +1878,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 # One worker at a time: concurrent squad grafts OOM / poison CUDA.
                 with opponent_load_file_lock():
                     warmup_cuda_if_needed(device)
+                    old_model = getattr(self, "opponent_model", None)
                     new_model = load_opponent_inference_checkpoint(
                         model_path,
                         agent_architecture=self.agent_architecture,
@@ -1693,16 +1889,15 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                         rnn_type=rnn_type,
                         device=device,
                         grid_size=grid_size,
+                        existing=old_model,
                     )
-                    old_model = getattr(self, "opponent_model", None)
                     self.opponent_model = new_model
+                    # In-place reload reuses the same snapshot — do not dispose it.
+                    # empty_cache in a Subproc worker fragments WDDM dedicated memory
+                    # for sibling workers / collector / learner on the same GPU.
+                    if old_model is not None and old_model is not new_model:
+                        dispose_opponent_snapshot(old_model, empty_cache=False)
                     new_model = None
-                    if old_model is not None and old_model is not self.opponent_model:
-                        # empty_cache=True: return freed model blocks to CUDA immediately.
-                        # With alternate_trainee_race, syncs happen at every hard reset
-                        # (not just defender-only levels). Keeping freed blocks reserved
-                        # across many syncs causes the collector VRAM pool to grow.
-                        dispose_opponent_snapshot(old_model, empty_cache=True)
                 self._opponent_lstm_state = None
                 self._opponent_lstm_states = {}
                 self._opponent_last_focus_tag = None
@@ -1723,7 +1918,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 )
                 return True
             except Exception as e:
-                if new_model is not None:
+                if (
+                    new_model is not None
+                    and new_model is not getattr(self, "opponent_model", None)
+                ):
                     dispose_opponent_snapshot(new_model, empty_cache=False)
                 import traceback
                 errors.append(
@@ -1772,15 +1970,18 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             episode_start=np.array([episode_start], dtype=bool),
             deterministic=True,
         )
+        import torch as _torch
         try:
-            action, new_lstm = opp_model.predict(
-                obs, action_masks=mask, **predict_kwargs
-            )
+            with _torch.inference_mode():
+                action, new_lstm = opp_model.predict(
+                    obs, action_masks=mask, **predict_kwargs
+                )
         except TypeError:
             try:
-                action, new_lstm = opp_model.predict(
-                    obs, **predict_kwargs
-                )
+                with _torch.inference_mode():
+                    action, new_lstm = opp_model.predict(
+                        obs, **predict_kwargs
+                    )
             except Exception as exc:
                 return self._opponent_predict_fallback(default, exc)
         except Exception as exc:
@@ -1829,7 +2030,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self._logged_opponent_cuda_fallback = True
         return np.asarray(default, dtype=np.int64).reshape(-1)
 
-    async def _apply_squad_action_for_pool(self, pool_idx: int, action: np.ndarray) -> None:
+    async def _apply_squad_action_for_pool(
+        self, pool_idx: int, action: np.ndarray
+    ) -> List[int]:
+        """Apply squad pointer action; return tags that received a fresh order."""
         from src.agent.squad_selection import (
             decode_squad_action,
             selected_tags_from_indices,
@@ -1855,6 +2059,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             spatial_idx=spatial_idx,
             perspective_player_id=player_id,
         )
+        return list(selected)
 
     async def _predict_opponent_squad_batch(self, tags: List[int]) -> List[np.ndarray]:
         """Batched opponent inference for every unit in the acting squad."""
@@ -1911,12 +2116,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return
         if self.opponent_model is None:
             self._ensure_opponent_model_loaded()
-        tags = list(self.player_units.get(2, []))
+        trainee_pid = self._trainee_sc2_player_id()
+        opponent_pid = 2 if int(trainee_pid) == 1 else 1
+        tags = list(self.player_units.get(opponent_pid, []))
         if not tags:
             return
 
         prev_player = self.active_player_id
-        self.active_player_id = 2
+        self.active_player_id = opponent_pid
         try:
             actions = await self._predict_opponent_squad_batch(tags)
             for tag, action in zip(tags, actions):
@@ -2082,7 +2289,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     async def _reissue_non_squad_orders(
         self, acting_tag_set: set, skip_player_ids: Optional[set] = None
     ) -> None:
-        """Re-issue last known orders for alive units outside the acting set."""
+        """Re-issue last known orders for alive units outside the acting set.
+
+        Cloak/burrow categoricals are one-shot toggles — do not reissue them
+        (they store ``target=None`` and would otherwise become ``move(None)``).
+        """
         skip_player_ids = skip_player_ids or set()
         all_alive = self.player_units[1] + self.player_units[2]
         for tag in all_alive:
@@ -2095,8 +2306,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             if unit is None or unit.owner_id in skip_player_ids:
                 continue
             head_name, target = last_order
+            if head_name in ("cloak_burrow", "uncloak_unburrow"):
+                continue
             if "attack" in head_name:
                 issue_attack_at_point(self.bot, unit, target)
+            elif "aoe" in head_name:
+                issue_aoe_at_point(self.bot, unit, target)
+            elif target is None:
+                continue
             else:
                 self.bot.do(unit.move(target))
 
@@ -2160,7 +2377,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         agent_tags = [entry.tag for entry in chunk if entry.is_agent]
 
         await self._flush_bot_actions()
-        reissue_skip = {2} if self._uses_chunk_physics() else set()
+        if self._uses_chunk_physics():
+            trainee_pid = self._trainee_sc2_player_id()
+            reissue_skip = {2 if trainee_pid == 1 else 1}
+        else:
+            reissue_skip = set()
         await self._reissue_non_squad_orders(chunk_tag_set, skip_player_ids=reissue_skip)
         await self._flush_bot_actions()
 
@@ -2230,8 +2451,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         all_units_gone: bool,
         timeout: bool,
         r_conf: dict,
+        perspective_player_id: int = 1,
     ) -> float:
-        """P1 (agent) perspective terminal reward for any termination condition."""
+        """Trainee-perspective terminal reward (default P1 for legacy callers)."""
+        if int(perspective_player_id) == 2:
+            p1_lost, p2_lost = p2_lost, p1_lost
+            p1_army_lost, p2_army_lost = p2_army_lost, p1_army_lost
         win_reward = r_conf.get("win_reward", 100.0)
         loss_penalty = r_conf.get("loss_penalty", -100.0)
         draw_penalty = r_conf.get("draw_penalty", -10.0)
@@ -2264,14 +2489,15 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         Terminal reward correctness guarantee
         ────────────────────────────────────
         When the game ends during the *opponent's* physics step
-        (``acting_player_id != 1``) the training buffer has no open slot for
-        that step (``requires_policy_action`` returns ``False``).  To ensure the
-        terminal reward is captured from P1's perspective we defer it: we store
-        the P1-perspective terminal reward and the terminal observation, clear
-        the done/truncated flags in the returned tuple, and let
-        ``requires_policy_action`` return ``True`` on the next call so the
-        collector runs a phantom agent step whose *only* purpose is to flush the
-        stored reward into the training buffer.
+        (``acting_player_id`` is not the trainee's SC2 owner) the training
+        buffer has no open slot for that step (``requires_policy_action``
+        returns ``False``).  To ensure the terminal reward is captured from the
+        trainee's perspective we defer it: we store the trainee-perspective
+        terminal reward and the terminal observation, clear the done/truncated
+        flags in the returned tuple, and let ``requires_policy_action`` return
+        ``True`` on the next call so the collector runs a phantom agent step
+        whose *only* purpose is to flush the stored reward into the training
+        buffer.
         """
         self.steps_count += 1
         squad_tag_set = set(squad_tags)
@@ -2338,10 +2564,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         # Advance the squad index BEFORE generating the observation.
         # The observation returned from this step is what the collector uses as
         # input to compute the NEXT policy action.  If the next actor is P1
-        # squad B but we return P2 squad A's spatially-flipped view, the policy
-        # will navigate in completely the wrong direction.  By advancing first,
-        # _get_joint_observation always reflects the next acting squad's
-        # perspective.
+        # squad B but we return P2 squad A's view, the policy will navigate
+        # from the wrong army.  By advancing first, _get_joint_observation
+        # always reflects the next acting squad's perspective.
         # Guard: do NOT advance when the episode is ending — terminal obs stays
         # on the current (terminating) squad; reset() will supply a fresh start.
         if not done and not truncated:
@@ -2351,11 +2576,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         # When the episode ends during the opponent's physics step, the
         # training buffer has no slot for this step.  Defer the terminal state
-        # so the next phantom agent step carries the P1 reward into the buffer.
-        if (done or truncated) and acting_player_id != 1:
+        # so the next phantom agent step carries the trainee reward into the buffer.
+        trainee_pid = self._trainee_sc2_player_id()
+        if (done or truncated) and acting_player_id != trainee_pid:
             p1_terminal = self._compute_p1_terminal_reward(
                 p1_lost, p2_lost, p1_army_lost, p2_army_lost,
                 all_units_gone, timeout, r_conf,
+                perspective_player_id=trainee_pid,
             )
             self._deferred_done = done
             self._deferred_truncated = truncated
@@ -2365,17 +2592,24 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         return obs, reward, done, truncated, {"squad_physics_step": True}
 
-        return obs, reward, done, truncated, {"squad_physics_step": True}
-
     async def _finalize_squad_pointer_physics_step(
         self,
         trainee_tags: List[int],
         opponent_tags: List[int],
         trainee_player_id: int,
+        ordered_tags: Optional[set] = None,
     ):
-        """One physics step after paired trainee+opponent squad actions."""
+        """One physics step after paired trainee+opponent squad actions.
+
+        ``ordered_tags`` are units that already received a fresh order this step.
+        Unselected units in the acting pools must NOT be in that set so their last
+        known orders are re-issued (otherwise pointer-deselected attackers idle).
+        """
         self.steps_count += 1
-        acting_set = set(trainee_tags) | set(opponent_tags)
+        # Default: treat whole pools as ordered (legacy callers / tests).
+        acting_set = set(ordered_tags) if ordered_tags is not None else (
+            set(trainee_tags) | set(opponent_tags)
+        )
 
         await self._flush_bot_actions()
         await self._reissue_non_squad_orders(acting_set)
@@ -2443,27 +2677,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         obs = await self._get_joint_observation()
 
-        if (done or truncated) and trainee_player_id != 1:
-            p1_terminal = self._compute_p1_terminal_reward(
-                p1_lost,
-                p2_lost,
-                p1_army_lost,
-                p2_army_lost,
-                all_units_gone,
-                timeout,
-                r_conf,
-            )
-            self._deferred_done = done
-            self._deferred_truncated = truncated
-            self._deferred_p1_terminal_reward = p1_terminal
-            self._deferred_terminal_obs = obs
-            self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
-            return obs, 0.0, False, False, {
-                "squad_physics_step": True,
-                "squad_pointer": True,
-                "deferred_terminal": True,
-            }
-
+        # Squad-pointer steps always record a trainee action, even when the
+        # trainee's SC2 owner is player 2. Deferring here would drop the real
+        # trainee-perspective reward.
         self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
         return obs, reward, done, truncated, {"squad_physics_step": True, "squad_pointer": True}
 
@@ -2473,14 +2689,39 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             trainee_idx = self.current_trainee_pool_index
             trainee_tags = self._pool_alive_tags(trainee_idx)
             if not trainee_tags:
+                trainee_player_id = self._trainee_sc2_player_id()
+                if (
+                    not self._any_trainee_pool_alive()
+                    or self.steps_count + 1 >= self.max_steps
+                ):
+                    opponent_idx = self._paired_opponent_pool_index(trainee_idx)
+                    opponent_tags = (
+                        self._pool_alive_tags(opponent_idx)
+                        if opponent_idx is not None
+                        else []
+                    )
+                    return await self._finalize_squad_pointer_physics_step(
+                        [],
+                        opponent_tags,
+                        trainee_player_id,
+                        ordered_tags=set(),
+                    )
                 await self._advance_trainee_pool_index()
+                self.steps_count += 1
                 obs = await self._get_joint_observation()
-                return obs, 0.0, False, False, {"squad_physics_step": False, "squad_pointer": True}
+                return obs, 0.0, False, False, {
+                    "squad_physics_step": False,
+                    "squad_pointer": True,
+                }
 
             trainee_player_id = self._pool_player_id(self.unit_pools_config[trainee_idx])
             self.active_player_id = trainee_player_id
 
-            await self._apply_squad_action_for_pool(trainee_idx, np.asarray(action_p_active))
+            ordered_tags: set = set(
+                await self._apply_squad_action_for_pool(
+                    trainee_idx, np.asarray(action_p_active)
+                )
+            )
 
             opponent_idx = self._paired_opponent_pool_index(trainee_idx)
             opponent_tags: List[int] = []
@@ -2488,10 +2729,15 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 opponent_tags = self._pool_alive_tags(opponent_idx)
                 if opponent_tags and not self._preview_computer_opponent():
                     opp_action = await self._predict_opponent_squad_pointer(opponent_idx)
-                    await self._apply_squad_action_for_pool(opponent_idx, opp_action)
+                    ordered_tags.update(
+                        await self._apply_squad_action_for_pool(opponent_idx, opp_action)
+                    )
 
             return await self._finalize_squad_pointer_physics_step(
-                trainee_tags, opponent_tags, trainee_player_id
+                trainee_tags,
+                opponent_tags,
+                trainee_player_id,
+                ordered_tags=ordered_tags,
             )
         finally:
             self._end_squad_obs_cache()
@@ -2505,7 +2751,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return obs, 0.0, False, False, {"squad_physics_step": False}
 
         agent_entries = [e for e in chunk if e.is_agent]
-        acting_player_id = 1 if agent_entries else chunk[0].player_id
+        acting_player_id = (
+            agent_entries[0].player_id if agent_entries else chunk[0].player_id
+        )
 
         batch_actions = getattr(self, "_squad_batch_actions", None)
         if batch_actions is not None:
@@ -2582,7 +2830,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     if self._uses_squad_pointer():
                         self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
                     self.game_ended = False
-                    self._log(f"Soft reset complete (episode {self.episode_counter}).")
+                    self._log(
+                        f"Soft reset complete (episode {self.episode_counter}"
+                        f"{self._trainee_race_log_suffix()})."
+                    )
                     if self.episode_counter % 10 == 0:
                         import torch as _torch
                         if _torch.cuda.is_available():
@@ -2611,6 +2862,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             # fall through to hard reset
         else:
             # --- Hard reset: full teardown + relaunch (map rotation + opponent sync) ---
+            # New SC2 session clears debug cheats; re-arm resource free costs on next spawn.
+            self._ctf_resource_free_enabled = False
             if session_alive:
                 resets_done = self.episode_counter // every_k
                 map_idx = (self.worker_index + resets_done * self.num_workers) % len(self.map_list)
@@ -2650,6 +2903,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             builder.reset_upgrade_cache()
         await self._spawn_initial_units()
         await self._refresh_unit_lists()
+        if self.bot is not None:
+            self.bot.prime_combat_reward_baselines()
 
     def _has_combat_units(self, owner_id: int) -> bool:
         """
@@ -2665,7 +2920,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             UnitTypeId.PROBE, 
             UnitTypeId.SCV, 
             UnitTypeId.DRONE,
-            UnitTypeId.PYLON
+            UnitTypeId.PYLON,
+            # Leftover Interceptors after the Carrier dies must not keep the army "alive".
+            UnitTypeId.INTERCEPTOR,
         }
         
         # In SingleClientEnv (God Mode), self.bot.all_units contains ALL units on the map

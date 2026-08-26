@@ -524,6 +524,83 @@ def test_tactical_preserves_config_order():
     assert result[1].sum() > 0
 
 
+def test_tactical_enemy_unit_mechanical_paints_and_slices():
+    """Enemy mechanical units stamp enemy_unit_mechanical on the tactical crop."""
+    assert LayerConstants.ENEMY_UNIT_MECHANICAL in LayerConstants.TACTICAL_LAYERS
+    assert (
+        LayerConstants.TACTICAL_LAYERS[LayerConstants.ENEMY_UNIT_MECHANICAL]
+        != LayerConstants.TACTICAL_LAYERS[LayerConstants.ALLIED_UNIT_MECHANICAL]
+    )
+    layers = [
+        LayerConstants.ALLIED_UNIT_MECHANICAL,
+        LayerConstants.ENEMY_UNIT_MECHANICAL,
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": layers,
+            "active_tactical_layers": layers,
+        },
+    )
+    focal = create_mock_unit(
+        UnitTypeId.ROACH,
+        Point2((64.0, 64.0)),
+        is_biological=True,
+        is_mechanical=False,
+        radius=0.5,
+    )
+    allied_tank = create_mock_unit(
+        UnitTypeId.SIEGETANK,
+        Point2((62.0, 64.0)),
+        is_mechanical=True,
+        is_biological=False,
+        radius=0.875,
+    )
+    enemy_tank = create_mock_unit(
+        UnitTypeId.SIEGETANK,
+        Point2((66.0, 64.0)),
+        is_mechanical=True,
+        is_biological=False,
+        radius=0.875,
+    )
+    enemy_ling = create_mock_unit(
+        UnitTypeId.ZERGLING,
+        Point2((64.0, 66.0)),
+        is_biological=True,
+        is_mechanical=False,
+        radius=0.375,
+    )
+    raw_obs = {
+        "units": [focal, allied_tank],
+        "structures": [],
+        "enemy_units": [enemy_tank, enemy_ling],
+        "enemy_structures": [],
+        "effects": [],
+        "game_info": _make_game_info(128, 128, with_grids=True),
+        "game_data": MagicMock(),
+        "selected_units": [focal],
+    }
+    tactical = transformer.transform_tactical(raw_obs, focal)
+    assert tactical.shape == (2, 32, 32)
+    allied_mech = tactical[0]
+    enemy_mech = tactical[1]
+    assert allied_mech.sum() > 0
+    assert enemy_mech.sum() > 0
+    # Allied and enemy mechanical stamps occupy different cells.
+    assert not np.array_equal(allied_mech > 0, enemy_mech > 0)
+
+    bio_only = transformer.transform_tactical(
+        {
+            **raw_obs,
+            "units": [focal],
+            "enemy_units": [enemy_ling],
+        },
+        focal,
+    )
+    assert bio_only[0].sum() == 0.0
+    assert bio_only[1].sum() == 0.0
+
+
 def test_tactical_dps_from_off_fovea_unit_with_typed_layer_only():
     """Off-fovea threat rings must draw on typed DPS layers when _dps_base is inactive."""
     transformer = ObservationTransformer(
@@ -858,6 +935,21 @@ def test_dps_weapon_game_radius_hydralisk_grooved_spines_upgrade():
     assert ra == pytest.approx(6.0 + ur)
 
 
+def test_dps_weapon_game_radius_p2_is_mine_false_still_uses_state_upgrades():
+    """God-mode P2 units have is_mine=False; debug_upgrade is still global."""
+    t = ObservationTransformer(map_size=(32, 32))
+    u = create_mock_unit(
+        UnitTypeId.HYDRALISK, Point2((0.0, 0.0)), ground_range=5.0, is_mine=False
+    )
+    u.air_range = 5.0
+    u._bot_object = MagicMock()
+    u._bot_object.state.upgrades = {UpgradeId.EVOLVEGROOVEDSPINES}
+    rg, ra = t._dps_weapon_game_radius(u, 5.0)
+    ur = t._unit_game_radius(u)
+    assert rg == pytest.approx(6.0 + ur)
+    assert ra == pytest.approx(6.0 + ur)
+
+
 def test_dps_weapon_game_radius_phoenix_anion_pulse_crystals_upgrade():
     """Anion Pulse-Crystals (+2 air) expands air DPS ring only; ground ring unchanged."""
     t = ObservationTransformer(map_size=(32, 32))
@@ -1134,6 +1226,54 @@ def test_tactical_ground_unit_stamps_unpathable_terrain():
     unpathable = terrain <= 0.0
     assert np.count_nonzero(unit_mask) >= 1
     assert np.array_equal(unit_mask, unpathable)
+
+
+def test_tactical_burrowed_unit_does_not_block_pathable_terrain():
+    """Burrowed units do not block ground pathing — terrain under them stays pathable."""
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf=_universal_training_conf(),
+    )
+    gi = _large_map_game_info()
+    gi.pathing_grid.data_numpy = np.ones((512, 512), dtype=np.uint8)
+    gi.terrain_height.data_numpy = np.full((512, 512), 128, dtype=np.uint8)
+
+    # Flying focal so only burrowed ground units are candidates for terrain stamps.
+    focal = create_mock_unit(
+        UnitTypeId.MUTALISK,
+        Point2((256.0, 256.0)),
+        radius=0.5,
+        is_flying=True,
+    )
+    burrowed = create_mock_unit(
+        UnitTypeId.LURKERMPBURROWED,
+        Point2((256.0, 256.0)),
+        radius=0.75,
+        is_burrowed=True,
+    )
+    # Morphs that only expose BURROWED via type id must also stay pathable.
+    burrowed_by_type = create_mock_unit(
+        UnitTypeId.ZERGLINGBURROWED,
+        Point2((258.0, 256.0)),
+        radius=0.375,
+        is_burrowed=False,
+    )
+    raw_obs = {
+        "units": [focal, burrowed, burrowed_by_type],
+        "structures": [],
+        "enemy_units": [],
+        "enemy_structures": [],
+        "effects": [],
+        "game_info": gi,
+        "game_data": MagicMock(),
+        "selected_units": [focal],
+    }
+    tactical = transformer.transform_tactical(raw_obs, focal)
+    density = tactical[0]
+    terrain = tactical[1]
+    assert np.count_nonzero(density > 0) >= 1
+    assert float(terrain.min()) > 0.0
+    assert not np.any(terrain <= 0.0)
 
 
 def test_thor_larger_than_scv_on_128_map():
@@ -1617,6 +1757,365 @@ def test_nuke_effect_uses_live_effect_id():
     a_idx = LayerConstants.LAYERS[LayerConstants.ENEMY_A_DPS_BASE]
     assert float(map_data[g_idx].max()) > 0.0
     assert float(map_data[a_idx].max()) > 0.0
+    assert float(map_data[LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]].max()) == 0.0
+    assert float(map_data[LayerConstants.LAYERS[LayerConstants.ALLIED_A_DPS_BASE]].max()) == 0.0
+
+
+def test_corrosive_bile_unowned_paints_enemy_ground_and_air():
+    """Enemy/unowned bile stamps enemy_g_dps_base and enemy_a_dps_base, not allied."""
+    from sc2.ids.effect_id import EffectId
+
+    transformer = ObservationTransformer(map_size=(128, 128))
+    gi = _make_game_info(128, 128, with_grids=True)
+
+    class _BileEffect:
+        def __init__(self):
+            self.id = EffectId.RAVAGERCORROSIVEBILECP
+            self.positions = [Point2((64.0, 64.0))]
+
+    raw_obs = {
+        "units": [],
+        "structures": [],
+        "enemy_units": [],
+        "enemy_structures": [],
+        "effects": [_BileEffect()],
+        "game_info": gi,
+        "game_data": MagicMock(),
+    }
+    map_data = transformer.transform(raw_obs)["map"]
+    assert float(map_data[LayerConstants.LAYERS[LayerConstants.ENEMY_G_DPS_BASE]].max()) > 0.0
+    assert float(map_data[LayerConstants.LAYERS[LayerConstants.ENEMY_A_DPS_BASE]].max()) > 0.0
+    assert float(map_data[LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]].max()) == 0.0
+    assert float(map_data[LayerConstants.LAYERS[LayerConstants.ALLIED_A_DPS_BASE]].max()) == 0.0
+
+
+def test_corrosive_bile_allied_paints_allied_ground_and_air_global_and_tactical():
+    """Own bile (friendly fire) must stamp allied ground+air DPS on global and tactical maps."""
+    from sc2.ids.effect_id import EffectId
+
+    dps_layers = [
+        "allied_g_dps_base",
+        "enemy_g_dps_base",
+        "allied_a_dps_base",
+        "enemy_a_dps_base",
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": dps_layers,
+            "active_tactical_layers": dps_layers,
+        },
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+
+    class _BileEffect:
+        def __init__(self):
+            self.id = EffectId.RAVAGERCORROSIVEBILECP
+            self.positions = [Point2((50.0, 50.0))]
+            self.is_mine = True
+
+    ravager = create_mock_unit(
+        UnitTypeId.RAVAGER,
+        Point2((62.0, 50.0)),
+        radius=0.75,
+        ground_range=6.0,
+        air_range=0.0,
+    )
+    raw_obs = {
+        "units": [ravager],
+        "structures": [],
+        "enemy_units": [],
+        "enemy_structures": [],
+        "effects": [_BileEffect()],
+        "game_info": gi,
+        "game_data": MagicMock(),
+    }
+    global_map = transformer.transform(raw_obs)["map"]
+    assert float(global_map[0].max()) > 0.0  # allied_g_dps_base
+    assert float(global_map[2].max()) > 0.0  # allied_a_dps_base
+    assert float(global_map[1].max()) == 0.0  # enemy_g_dps_base
+    assert float(global_map[3].max()) == 0.0  # enemy_a_dps_base
+
+    focal = create_mock_unit(UnitTypeId.MARINE, Point2((50.0, 50.0)), radius=0.375)
+    raw_obs["units"] = [ravager, focal]
+    tactical = transformer.transform_tactical(raw_obs, focal)
+    assert float(tactical[0].max()) > 0.0
+    assert float(tactical[2].max()) > 0.0
+    assert float(tactical[1].max()) == 0.0
+    assert float(tactical[3].max()) == 0.0
+
+
+def test_corrosive_bile_enemy_ravager_stays_on_enemy_dps():
+    """Bile near an enemy Ravager stays on enemy ground+air DPS."""
+    from sc2.ids.effect_id import EffectId
+
+    dps_layers = [
+        "allied_g_dps_base",
+        "enemy_g_dps_base",
+        "allied_a_dps_base",
+        "enemy_a_dps_base",
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": dps_layers,
+            "active_tactical_layers": dps_layers,
+        },
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+
+    class _BileEffect:
+        def __init__(self):
+            self.id = EffectId.RAVAGERCORROSIVEBILECP
+            self.positions = [Point2((50.0, 50.0))]
+
+    ravager = create_mock_unit(
+        UnitTypeId.RAVAGER,
+        Point2((62.0, 50.0)),
+        radius=0.75,
+        ground_range=6.0,
+        air_range=0.0,
+    )
+    raw_obs = {
+        "units": [],
+        "structures": [],
+        "enemy_units": [ravager],
+        "enemy_structures": [],
+        "effects": [_BileEffect()],
+        "game_info": gi,
+        "game_data": MagicMock(),
+    }
+    global_map = transformer.transform(raw_obs)["map"]
+    assert float(global_map[1].max()) > 0.0  # enemy_g_dps_base
+    assert float(global_map[3].max()) > 0.0  # enemy_a_dps_base
+    assert float(global_map[0].max()) == 0.0
+    assert float(global_map[2].max()) == 0.0
+
+
+def test_storm_allied_paints_allied_ground_dps_global_and_tactical():
+    """Own Psi Storm (friendly fire) stamps allied_g_dps_base, not air, on global and tactical."""
+    from sc2.ids.effect_id import EffectId
+
+    dps_layers = [
+        "allied_g_dps_base",
+        "enemy_g_dps_base",
+        "allied_a_dps_base",
+        "enemy_a_dps_base",
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": dps_layers,
+            "active_tactical_layers": dps_layers,
+        },
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+
+    class _StormEffect:
+        def __init__(self):
+            self.id = EffectId.PSISTORMPERSISTENT
+            self.positions = [Point2((50.0, 50.0))]
+            self.is_mine = True
+
+    ht = create_mock_unit(
+        UnitTypeId.HIGHTEMPLAR,
+        Point2((62.0, 50.0)),
+        radius=0.375,
+        ground_range=6.0,
+        air_range=0.0,
+    )
+    raw_obs = {
+        "units": [ht],
+        "structures": [],
+        "enemy_units": [],
+        "enemy_structures": [],
+        "effects": [_StormEffect()],
+        "game_info": gi,
+        "game_data": MagicMock(),
+    }
+    global_map = transformer.transform(raw_obs)["map"]
+    assert float(global_map[0].max()) > 0.0  # allied_g_dps_base
+    assert float(global_map[1].max()) == 0.0  # enemy_g_dps_base
+    assert float(global_map[2].max()) == 0.0  # allied_a_dps_base
+    assert float(global_map[3].max()) == 0.0  # enemy_a_dps_base
+
+    focal = create_mock_unit(UnitTypeId.MARINE, Point2((50.0, 50.0)), radius=0.375)
+    tactical = transformer.transform_tactical(raw_obs, focal)
+    assert float(tactical[0].max()) > 0.0
+    assert float(tactical[1].max()) == 0.0
+    assert float(tactical[3].max()) == 0.0
+
+
+def test_leftover_storm_without_caster_does_not_paint_allied_from_proto():
+    """God-mode proto is_mine is P1-client; unmatched leftover storm must not look allied."""
+    from sc2.ids.effect_id import EffectId
+
+    dps_layers = [
+        "allied_g_dps_base",
+        "enemy_g_dps_base",
+        "allied_a_dps_base",
+        "enemy_a_dps_base",
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": dps_layers,
+            "active_tactical_layers": dps_layers,
+        },
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+
+    class _StormEffect:
+        def __init__(self):
+            self.id = EffectId.PSISTORMPERSISTENT
+            self.positions = [Point2((50.0, 50.0))]
+            self.is_mine = True
+
+    raw_obs = {
+        "units": [],
+        "structures": [],
+        "enemy_units": [],
+        "enemy_structures": [],
+        "effects": [_StormEffect()],
+        "game_info": gi,
+        "game_data": MagicMock(),
+    }
+    global_map = transformer.transform(raw_obs)["map"]
+    assert float(global_map[0].max()) == 0.0  # allied_g_dps_base
+    assert float(global_map[1].max()) > 0.0  # enemy_g_dps_base
+
+
+def test_nuke_allied_paints_allied_ground_and_air_global_and_tactical():
+    """Own nuke (friendly fire) stamps allied ground+air DPS on global and tactical maps."""
+    from sc2.ids.effect_id import EffectId
+
+    dps_layers = [
+        "allied_g_dps_base",
+        "enemy_g_dps_base",
+        "allied_a_dps_base",
+        "enemy_a_dps_base",
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": dps_layers,
+            "active_tactical_layers": dps_layers,
+        },
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+
+    class _NukeEffect:
+        def __init__(self):
+            self.id = EffectId.NUKEPERSISTENT
+            self.positions = [Point2((50.0, 50.0))]
+            self.is_mine = True
+
+    ghost = create_mock_unit(
+        UnitTypeId.GHOST,
+        Point2((62.0, 50.0)),
+        radius=0.375,
+        ground_range=6.0,
+        air_range=0.0,
+    )
+    raw_obs = {
+        "units": [ghost],
+        "structures": [],
+        "enemy_units": [],
+        "enemy_structures": [],
+        "effects": [_NukeEffect()],
+        "game_info": gi,
+        "game_data": MagicMock(),
+    }
+    global_map = transformer.transform(raw_obs)["map"]
+    assert float(global_map[0].max()) > 0.0  # allied_g_dps_base
+    assert float(global_map[2].max()) > 0.0  # allied_a_dps_base
+    assert float(global_map[1].max()) == 0.0  # enemy_g_dps_base
+    assert float(global_map[3].max()) == 0.0  # enemy_a_dps_base
+
+    focal = create_mock_unit(UnitTypeId.MARINE, Point2((50.0, 50.0)), radius=0.375)
+    tactical = transformer.transform_tactical(raw_obs, focal)
+    assert float(tactical[0].max()) > 0.0
+    assert float(tactical[2].max()) > 0.0
+    assert float(tactical[1].max()) == 0.0
+    assert float(tactical[3].max()) == 0.0
+
+
+def test_parasitic_bomb_paints_enemy_air_dps_and_splash_global_and_tactical():
+    """python-sc2 fake effect PARASITICBOMB is air-only on enemy DPS + enemy splash."""
+    layers = [
+        "enemy_g_dps_base",
+        "allied_g_dps_base",
+        "enemy_a_dps_base",
+        "allied_a_dps_base",
+        "enemy_splash",
+        "allied_splash",
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": layers,
+            "active_tactical_layers": layers,
+        },
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+
+    class _BombEffect:
+        def __init__(self):
+            self.id = "PARASITICBOMB"
+            self.fake = True
+            self.positions = [Point2((50.0, 50.0))]
+            self.radius = 3.0
+
+    raw_obs = {
+        "units": [],
+        "structures": [],
+        "enemy_units": [],
+        "enemy_structures": [],
+        "effects": [_BombEffect()],
+        "game_info": gi,
+        "game_data": MagicMock(),
+    }
+    global_map = transformer.transform(raw_obs)["map"]
+    assert float(global_map[2].max()) > 0.0  # enemy_a_dps_base
+    assert float(global_map[4].max()) > 0.0  # enemy_splash
+    assert float(global_map[0].max()) == 0.0  # enemy_g_dps_base (air-only)
+    assert float(global_map[1].max()) == 0.0  # allied_g_dps_base
+    assert float(global_map[3].max()) == 0.0  # allied_a_dps_base
+    assert float(global_map[5].max()) == 0.0  # allied_splash
+
+    focal = create_mock_unit(UnitTypeId.MUTALISK, Point2((50.0, 50.0)), radius=0.5, is_flying=True)
+    tactical = transformer.transform_tactical(raw_obs, focal)
+    assert float(tactical[2].max()) > 0.0
+    assert float(tactical[4].max()) > 0.0
+    assert float(tactical[0].max()) == 0.0
+    assert float(tactical[1].max()) == 0.0
+    assert float(tactical[3].max()) == 0.0
+    assert float(tactical[5].max()) == 0.0
+
+
+def test_viper_hull_does_not_paint_splash():
+    """Parasitic Bomb splash is the dummy/effect cloud, not a circle around the Viper."""
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": ["allied_splash", "enemy_splash"],
+            "active_tactical_layers": ["allied_splash", "enemy_splash"],
+        },
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+    viper = create_mock_unit(UnitTypeId.VIPER, Point2((50.0, 50.0)), radius=0.75, is_flying=True)
+    raw_obs = {
+        "units": [viper],
+        "structures": [],
+        "enemy_units": [],
+        "enemy_structures": [],
+        "effects": [],
+        "game_info": gi,
+        "game_data": MagicMock(),
+    }
+    global_map = transformer.transform(raw_obs)["map"]
+    assert float(global_map[0].max()) == 0.0
+    assert float(global_map[1].max()) == 0.0
 
 
 def test_sensor_blip_renders_density_not_attributes():
@@ -3235,6 +3734,77 @@ def test_skip_undetected_cloaked_enemy_without_is_detected():
     burrowed = SimpleNamespace(is_cloaked=False, is_burrowed=True, is_detected=False, is_snapshot=False)
     assert ObservationTransformer._skip_undetected_cloaked_enemy(burrowed, True)
 
+    assert not ObservationTransformer._skip_undetected_cloaked_enemy(
+        cloaked, True, allied_detector_covers=True
+    )
+
+
+def test_p2_allied_observer_reveals_p1_cloaked_enemy_despite_proto_undetected():
+    """P1-client is_detected=False on a P1 cloaked unit; P2 Observer still paints it."""
+    transformer = ObservationTransformer(
+        map_size=(64, 64),
+        training_conf={
+            "agent_architecture": "universal",
+            "active_layers": [
+                LayerConstants.ALLIED_UNIT_DENSITY,
+                LayerConstants.ENEMY_UNIT_DENSITY,
+            ],
+        },
+    )
+    gi = _make_game_info(64, 64, with_grids=True)
+    observer = create_mock_unit(
+        UnitTypeId.OBSERVER, Point2((20.0, 20.0)), detect_range=11.0
+    )
+    cloaked = create_mock_unit(
+        UnitTypeId.DARKTEMPLAR,
+        Point2((24.0, 20.0)),
+        is_cloaked=True,
+        is_detected=False,
+        is_snapshot=False,
+    )
+    raw_obs = {
+        "units": [observer],
+        "enemy_units": [cloaked],
+        "effects": [],
+        "game_info": gi,
+        "game_data": None,
+    }
+    result = transformer.transform(raw_obs)
+    enemy_density = result["map"][1]
+    assert float(enemy_density.sum()) > 0.0
+
+
+def test_undetected_cloaked_enemy_still_skipped_without_allied_detector():
+    transformer = ObservationTransformer(
+        map_size=(64, 64),
+        training_conf={
+            "agent_architecture": "universal",
+            "active_layers": [
+                LayerConstants.ALLIED_UNIT_DENSITY,
+                LayerConstants.ENEMY_UNIT_DENSITY,
+            ],
+        },
+    )
+    gi = _make_game_info(64, 64, with_grids=True)
+    marine = create_mock_unit(UnitTypeId.MARINE, Point2((10.0, 10.0)))
+    cloaked = create_mock_unit(
+        UnitTypeId.DARKTEMPLAR,
+        Point2((50.0, 50.0)),
+        is_cloaked=True,
+        is_detected=False,
+        is_snapshot=False,
+    )
+    raw_obs = {
+        "units": [marine],
+        "enemy_units": [cloaked],
+        "effects": [],
+        "game_info": gi,
+        "game_data": None,
+    }
+    result = transformer.transform(raw_obs)
+    enemy_density = result["map"][1]
+    assert float(enemy_density.sum()) == 0.0
+
 
 def test_burrowed_unit_renders_on_cloak_layer():
     """Burrowed zerg units stamp allied_unit_cloak / enemy_unit_cloak."""
@@ -3506,4 +4076,92 @@ def test_tactical_air_dps_layer_renders_when_configured():
     tactical = transformer.transform_tactical(raw_obs, focal)
     assert float(tactical[0].max()) > 0.0
     assert int(np.count_nonzero(tactical[0] > 0.01)) > 0
+
+
+def _dps_draw_transformer(active_layers):
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": active_layers,
+            "active_tactical_layers": active_layers,
+        },
+    )
+    transformer.current_layer_map = LayerConstants.LAYERS
+    transformer.is_tactical_mode = False
+    transformer._update_active_indices()
+    transformer.scale = transformer.scale_x = transformer.scale_y = 1.0
+    transformer.offset_x = transformer.offset_y = 0.0
+    transformer.crop_x = transformer.crop_y = 0.0
+    transformer._obs_span_w = transformer._obs_span_h = 128.0
+    transformer._grid_x = np.arange(128).reshape(1, -1)
+    transformer._grid_y = np.arange(128).reshape(-1, 1)
+    return transformer
+
+
+def test_corruptor_paints_a_dps_massive_bonus_when_air_base_active():
+    """Corruptor +6 vs Massive must land on a_dps_massive (bonus-only with a_dps_base)."""
+    layers_cfg = [
+        LayerConstants.ALLIED_A_DPS_BASE,
+        LayerConstants.ALLIED_A_DPS_MASSIVE,
+    ]
+    transformer = _dps_draw_transformer(layers_cfg)
+    layers = np.zeros((LayerConstants.get_num_layers(), 128, 128), dtype=np.float32)
+    corruptor = create_mock_unit(
+        UnitTypeId.CORRUPTOR,
+        Point2((64.0, 64.0)),
+        is_flying=True,
+        air_range=6.0,
+        ground_range=0.0,
+        radius=0.625,
+    )
+    transformer._draw_unit_dps(corruptor, layers, False, 64, 63, MagicMock())
+    period = 1.89990234375
+    base_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_A_DPS_BASE]
+    mass_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_A_DPS_MASSIVE]
+    assert layers[base_idx].max() == pytest.approx(14.0 / period, rel=1e-5)
+    assert layers[mass_idx].max() == pytest.approx(6.0 / period, rel=1e-5)
+
+
+def test_corruptor_a_dps_massive_is_base_plus_bonus_without_air_base():
+    """Cross-axis g_dps_base fallback must not strip base from a_dps_massive."""
+    layers_cfg = [
+        LayerConstants.ALLIED_G_DPS_BASE,
+        LayerConstants.ALLIED_A_DPS_MASSIVE,
+    ]
+    transformer = _dps_draw_transformer(layers_cfg)
+    layers = np.zeros((LayerConstants.get_num_layers(), 128, 128), dtype=np.float32)
+    corruptor = create_mock_unit(
+        UnitTypeId.CORRUPTOR,
+        Point2((64.0, 64.0)),
+        is_flying=True,
+        air_range=6.0,
+        ground_range=0.0,
+        radius=0.625,
+    )
+    transformer._draw_unit_dps(corruptor, layers, False, 64, 63, MagicMock())
+    period = 1.89990234375
+    mass_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_A_DPS_MASSIVE]
+    assert layers[mass_idx].max() == pytest.approx((14.0 + 6.0) / period, rel=1e-5)
+
+
+def test_phoenix_air_light_bonus_multiplies_attacks():
+    """Dual-attack air weapons must apply damage_bonus per attack hit."""
+    layers_cfg = [
+        LayerConstants.ALLIED_A_DPS_BASE,
+        LayerConstants.ALLIED_A_DPS_LIGHT,
+    ]
+    transformer = _dps_draw_transformer(layers_cfg)
+    layers = np.zeros((LayerConstants.get_num_layers(), 128, 128), dtype=np.float32)
+    phoenix = create_mock_unit(
+        UnitTypeId.PHOENIX,
+        Point2((64.0, 64.0)),
+        is_flying=True,
+        air_range=5.0,
+        ground_range=0.0,
+        radius=0.6,
+    )
+    transformer._draw_unit_dps(phoenix, layers, False, 64, 63, MagicMock())
+    period = 1.10009765625
+    light_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_A_DPS_LIGHT]
+    assert layers[light_idx].max() == pytest.approx((5.0 * 2) / period, rel=1e-5)
 

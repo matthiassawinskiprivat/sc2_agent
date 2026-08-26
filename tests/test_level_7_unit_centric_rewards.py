@@ -19,6 +19,8 @@ def _bare_bot(training_conf: dict) -> Level7Bot:
     bot.previous_danger_counts = {}
     bot.last_attack_target_tag_by_unit = {}
     bot.last_action_was_attack_by_unit = {}
+    bot.last_action_was_move_by_unit = {}
+    bot.last_move_head_by_unit = {}
     bot._allied_took_damage_this_step = {}
     bot._kiting_simple_prev_dist = {}
     bot._prev_enemy_in_attack_range = {}
@@ -227,9 +229,11 @@ def test_apply_action_attack_records_nearest_enemy_tag_for_attribution():
     bot.last_attack_target_tag_by_unit = {}
     bot._attack_order_weapon_cd_before = {}
     bot.do = MagicMock()
+    bot.enemy_structures = []
 
     unit = MagicMock()
     unit.tag = 101
+    unit.type_id = UnitTypeId.MARINE
     bot.units = MagicMock()
     bot.units.find_by_tag.return_value = unit
 
@@ -246,4 +250,46 @@ def test_apply_action_attack_records_nearest_enemy_tag_for_attribution():
 
     asyncio.run(bot.apply_action(101, [1, 0]))
     assert bot.last_attack_target_tag_by_unit[101] == 201
-    unit.attack.assert_called_once()
+    unit.attack.assert_called_once_with(Point2((10.0, 10.0)))
+
+
+def test_apply_action_attack_hard_targets_enemy_in_clicked_cell():
+    bot = _bare_bot(
+        {
+            "agent_architecture": "universal",
+            "action_heads": ["move_local", "attack_local"],
+        }
+    )
+    bot.action_heads = ["move_local", "attack_local"]
+    bot.agent_system = MagicMock()
+    bot.agent_system.unit_agents = {"agent_0": MagicMock()}
+    bot.agent_system.unit_agents["agent_0"].convert_spatial_action_to_world.return_value = (
+        10.0,
+        10.0,
+    )
+    bot.last_action_was_move_by_unit = {}
+    bot.last_action_was_attack_by_unit = {}
+    bot.last_attack_target_tag_by_unit = {}
+    bot._attack_order_weapon_cd_before = {}
+    bot.do = MagicMock()
+
+    unit = MagicMock()
+    unit.tag = 101
+    unit.type_id = UnitTypeId.BANELING
+    bot.units = MagicMock()
+    bot.units.find_by_tag.return_value = unit
+
+    in_cell = MagicMock()
+    in_cell.tag = 303
+    in_cell.position = Point2((10.2, 10.1))
+    in_cell.is_alive = True
+    elsewhere = MagicMock()
+    elsewhere.tag = 304
+    elsewhere.position = Point2((40.0, 40.0))
+    elsewhere.is_alive = True
+    bot.enemy_units = [in_cell, elsewhere]
+    bot.enemy_structures = []
+
+    asyncio.run(bot.apply_action(101, [1, 0]))
+    assert bot.last_attack_target_tag_by_unit[101] == 303
+    unit.attack.assert_called_once_with(in_cell)

@@ -1,13 +1,13 @@
 training:
   training_steps: 250_000
-  num_envs: 1
+  num_envs: 6
   n_steps: 1024
-  batch_size: 128
+  batch_size: 256
   learning_rate: 0.0003
   render_beacon: false
   watchdog_timeout: 3600
   target_kl: null
-  rollout_buffer: ram
+  rollout_buffer: disk
 env:
   env_class: CaptureTheFlagEnv
   max_steps: 200
@@ -16,13 +16,13 @@ env:
   alternate_trainee_race: true
   include_race: true
   include_upgrades: true
-  env_mode: heal,cloak,drop,upgrades
+  env_mode: heal,cloak,upgrades
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack
     race: protoss
-    mineral_budget: 2800
-    vespene_budget: 2000
+    mineral_budget: 3800
+    vespene_budget: 3000
     unit_pool:
     - ZEALOT
     - STALKER
@@ -41,8 +41,8 @@ env:
     region: A
   - high_level_command: defend
     race: terran
-    mineral_budget: 2100
-    vespene_budget: 1500
+    mineral_budget: 3100
+    vespene_budget: 2500
     unit_pool:
     - MARINE
     - MARAUDER
@@ -61,8 +61,8 @@ env:
     region: A
   - high_level_command: defend
     race: protoss
-    mineral_budget: 2100
-    vespene_budget: 1500
+    mineral_budget: 3100
+    vespene_budget: 2500
     unit_pool:
     - ZEALOT
     - STALKER
@@ -82,8 +82,8 @@ env:
     region: B
   - high_level_command: attack
     race: terran
-    mineral_budget: 2800
-    vespene_budget: 2000
+    mineral_budget: 3800
+    vespene_budget: 3000
     unit_pool:
     - MARINE
     - MARAUDER
@@ -100,22 +100,6 @@ env:
     - MEDIVAC
     - WIDOWMINE
     region: B
-  action_heads:
-  - load_local
-  - unload_local
-  active_layers:
-  - transport_slots
-  - passenger_density
-  active_tactical_layers:
-  - transport_slots
-  - passenger_density
-  active_unit_scalars:
-  - is_transport
-  - cargo_used_norm
-  - cargo_free_norm
-  - cargo_size_norm
-  - can_load
-  - can_unload
   rewards:
     pylon_damage_reward: 1.0
     pylon_damage_penalty: 0.5
@@ -148,7 +132,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.99
   ent_coef: 0.01
   n_epochs: 2
 agent_architecture: squad

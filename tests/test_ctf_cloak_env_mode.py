@@ -38,6 +38,27 @@ def _make_env(unit_pools, env_mode=None):
     return env
 
 
+def _all_create_cmds(env):
+    """Flatten all ``debug_create_unit`` batches (now split per player)."""
+    out = []
+    for call in env.bot.client.debug_create_unit.await_args_list:
+        out.extend(call.args[0])
+    return out
+
+
+def _spawn(env):
+    def get_valid_pos(p):
+        return p
+
+    def get_offset_pos(base, index, total):
+        return Point2((base.x + float(index), base.y))
+
+    def to_id(name):
+        return getattr(UnitTypeId, name)
+
+    return asyncio.run(env._spawn_from_unit_pools(get_valid_pos, get_offset_pos, to_id))
+
+
 def test_is_cloak_env_mode():
     env = _make_env([], env_mode="cloak")
     assert env._is_cloak_env_mode() is True
@@ -79,17 +100,8 @@ def test_heal_mode_spawns_creep_tumors_for_zerg():
         )
     )
 
-    def get_valid_pos(p):
-        return p
-
-    def get_offset_pos(base, index, total):
-        return Point2((base.x + float(index), base.y))
-
-    def to_id(name):
-        return getattr(UnitTypeId, name)
-
-    asyncio.run(env._spawn_from_unit_pools(get_valid_pos, get_offset_pos, to_id))
-    cmds = env.bot.client.debug_create_unit.await_args.args[0]
+    _spawn(env)
+    cmds = _all_create_cmds(env)
     types = [c[0] for c in cmds]
     assert UnitTypeId.CREEPTUMOR in types
 
@@ -121,17 +133,9 @@ def test_without_heal_mode_no_creep_tumors():
         )
     )
 
-    def get_valid_pos(p):
-        return p
-
-    def get_offset_pos(base, index, total):
-        return Point2((base.x + 1.0, base.y + 1.0))
-
-    def to_id(name):
-        return getattr(UnitTypeId, name)
-
-    asyncio.run(env._spawn_from_unit_pools(get_valid_pos, get_offset_pos, to_id))
-    cmds = env.bot.client.debug_create_unit.await_args.args[0]
+    _spawn(env)
+    # Army batch only (detectors are deferred).
+    cmds = _all_create_cmds(env)
     types = [c[0] for c in cmds]
     assert UnitTypeId.CREEPTUMOR not in types
 
@@ -158,7 +162,7 @@ def test_cloak_mode_detector_types():
     assert CaptureTheFlagSingleEnv._cloak_mode_detector_type("unknown") is None
 
 
-def test_cloak_mode_spawns_detectors_per_pool():
+def test_cloak_mode_defers_detectors_per_pool_all_races():
     pools = [
         {
             "high_level_command": "attack",
@@ -177,28 +181,53 @@ def test_cloak_mode_spawns_detectors_per_pool():
             "mineral_budget": 500,
             "vespene_budget": 0,
         },
+        {
+            "high_level_command": "defend",
+            "race": "zerg",
+            "region": "A",
+            "unit_pool": ["ZERGLING"],
+            "mineral_budget": 500,
+            "vespene_budget": 0,
+        },
     ]
     env = _make_env(pools, env_mode="cloak")
     env._calculate_spawns_for_pool = MagicMock(
-        side_effect=lambda pool: (
-            ["ZEALOT"] if pool["race"] == "protoss" else ["MARINE"]
-        )
+        side_effect=lambda pool: {
+            "protoss": ["ZEALOT"],
+            "terran": ["MARINE"],
+            "zerg": ["ZERGLING"],
+        }[pool["race"]]
     )
 
-    def get_valid_pos(p):
-        return p
+    _, _, _, deferred_detectors = _spawn(env)
+    types = [c[0] for c in deferred_detectors]
+    assert types.count(UnitTypeId.OBSERVER) == 1
+    assert types.count(UnitTypeId.RAVEN) == 1
+    assert types.count(UnitTypeId.OVERSEER) == 1
 
-    def get_offset_pos(base, index, total):
-        return Point2((base.x + float(index), base.y))
+    # Detectors must not be in the army create batch.
+    army_cmds = _all_create_cmds(env)
+    army_types = [c[0] for c in army_cmds]
+    assert UnitTypeId.OBSERVER not in army_types
+    assert UnitTypeId.RAVEN not in army_types
+    assert UnitTypeId.OVERSEER not in army_types
 
-    def to_id(name):
-        return getattr(UnitTypeId, name)
 
-    asyncio.run(env._spawn_from_unit_pools(get_valid_pos, get_offset_pos, to_id))
-    cmds = env.bot.client.debug_create_unit.await_args.args[0]
-    types = [c[0] for c in cmds]
+def test_spawn_cloak_mode_detectors_creates_all_races_directly():
+    env = _make_env([], env_mode="cloak")
+    cmds = [
+        [UnitTypeId.OBSERVER, 1, Point2((1.0, 1.0)), 1],
+        [UnitTypeId.RAVEN, 1, Point2((2.0, 2.0)), 2],
+        [UnitTypeId.OVERSEER, 1, Point2((3.0, 3.0)), 1],
+    ]
+    asyncio.run(env._spawn_cloak_mode_detectors(cmds))
+    assert env.bot.client.debug_create_unit.await_count == 2
+    created = _all_create_cmds(env)
+    types = [c[0] for c in created]
     assert UnitTypeId.OBSERVER in types
     assert UnitTypeId.RAVEN in types
+    assert UnitTypeId.OVERSEER in types
+    assert UnitTypeId.OVERLORD not in types
 
 
 def test_non_cloak_mode_does_not_spawn_detectors():
@@ -228,17 +257,9 @@ def test_non_cloak_mode_does_not_spawn_detectors():
         )
     )
 
-    def get_valid_pos(p):
-        return p
-
-    def get_offset_pos(base, index, total):
-        return Point2((base.x + 1.0, base.y + 1.0))
-
-    def to_id(name):
-        return getattr(UnitTypeId, name)
-
-    asyncio.run(env._spawn_from_unit_pools(get_valid_pos, get_offset_pos, to_id))
-    cmds = env.bot.client.debug_create_unit.await_args.args[0]
+    _, _, _, deferred_detectors = _spawn(env)
+    assert deferred_detectors == []
+    cmds = _all_create_cmds(env)
     types = [c[0] for c in cmds]
     assert UnitTypeId.OVERSEER not in types
     assert UnitTypeId.RAVEN not in types
@@ -248,6 +269,40 @@ def test_apply_cloak_env_mode_upgrades_calls_debug_upgrade():
     env = _make_env([], env_mode="cloak")
     asyncio.run(env._apply_cloak_env_mode_upgrades())
     assert env.bot.client.debug_upgrade.await_count == 20
+
+
+def test_debug_create_units_by_player_splits_batches():
+    """Mixed-owner create lists are split so trailing player cmds are not dropped."""
+    env = _make_env([], env_mode=None)
+    cmds = [
+        [UnitTypeId.DARKTEMPLAR, 1, Point2((1.0, 1.0)), 1],
+        [UnitTypeId.DARKTEMPLAR, 1, Point2((1.5, 1.0)), 1],
+        [UnitTypeId.MARAUDER, 1, Point2((2.0, 2.0)), 2],
+        [UnitTypeId.MARAUDER, 1, Point2((2.5, 2.0)), 2],
+    ]
+    asyncio.run(env._debug_create_units_by_player(cmds))
+    assert env.bot.client.debug_create_unit.await_count == 2
+    first = env.bot.client.debug_create_unit.await_args_list[0].args[0]
+    second = env.bot.client.debug_create_unit.await_args_list[1].args[0]
+    assert all(c[3] == 1 for c in first)
+    assert all(c[3] == 2 for c in second)
+    assert [c[0] for c in first] == [UnitTypeId.DARKTEMPLAR, UnitTypeId.DARKTEMPLAR]
+    assert [c[0] for c in second] == [UnitTypeId.MARAUDER, UnitTypeId.MARAUDER]
+
+
+def test_trainee_race_log_suffix_includes_assignment():
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env.episode_counter = 2
+    env._alternate_trainee_race = True
+    env.unit_pools_config = [
+        {"race": "protoss", "high_level_command": "attack"},
+        {"race": "terran", "high_level_command": "defend"},
+    ]
+    env.player_units = {1: [1, 2, 3], 2: [4, 5]}
+    suffix = env._trainee_race_log_suffix()
+    assert "trainee=terran" in suffix
+    assert "P1=protoss(3)" in suffix
+    assert "P2=terran(2)" in suffix
 
 
 def test_apply_cloak_env_mode_upgrades_noop_without_mode():

@@ -30,6 +30,9 @@ BUILD_ENV_REGISTRY = {
 
 
 class BuildPipelineManager(PipelineManager):
+    # Never wipe machine-wide SC2 — build must coexist with universal/control training.
+    global_sc2_kill_on_boundaries = False
+
     def __init__(
         self,
         config_dir: str = "config_build_zerg",
@@ -70,9 +73,44 @@ class BuildPipelineManager(PipelineManager):
         os.makedirs(model_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
 
+        # Match universal pipeline: on CONTINUE_TRAINING, drop TB/CSV metrics past
+        # the resume checkpoint so curves do not double-stack after restart.
+        if model_path_to_load and not reset_timesteps:
+            try:
+                from train.async_train_universal import free_port
+                from train.training_log_utils import truncate_logs_for_checkpoint_resume
+
+                tb_port = int(os.environ.get("SC2_TENSORBOARD_PORT", "6006"))
+                free_port(tb_port)
+                truncate_logs_for_checkpoint_resume(log_dir, model_path_to_load)
+            except Exception as exc:
+                logger.warning(
+                    f"Could not truncate resume logs in {log_dir} "
+                    f"(checkpoint={model_path_to_load!r}): {exc}"
+                )
+
         num_envs = training_params["num_envs"]
         headless = env_params.get("headless", True)
         env_class_name = env_params.get("env_class", "ZergBuildEnv")
+        # Alternating curriculum: manager levels use the manager trainer.
+        if "Manager" in str(env_class_name):
+            from train.train_manager import ManagerPipelineManager
+
+            mgr = ManagerPipelineManager(
+                config_dir=self.config_dir,
+                model_dir_base=self.model_dir_base,
+                log_dir_base=self.log_dir_base,
+            )
+            mgr.pipeline_config = self.pipeline_config
+            mgr.sc2_process_cls = self.sc2_process_cls
+            mgr.client_cls = self.client_cls
+            return mgr._train_level(
+                level_name,
+                model_path_to_load=None,  # fresh manager Adam
+                reset_timesteps=True,
+                merged_config=level_config,
+            )
+
         EnvClass = BUILD_ENV_REGISTRY.get(env_class_name)
         if EnvClass is None:
             raise ValueError(f"Unknown build env class: {env_class_name}")

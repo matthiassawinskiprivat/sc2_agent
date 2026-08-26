@@ -157,3 +157,35 @@ def test_load_opponent_inference_checkpoint_strict_path(tmp_path):
     mock_load.assert_called_once()
     assert isinstance(snap, OpponentInferenceModel)
     assert getattr(snap.policy, "optimizer", None) is None
+
+
+def test_load_opponent_inference_checkpoint_reuses_existing_policy():
+    from src.agent.models.squad_policy import SquadRecurrentPolicy
+    from src.agent.squad_constants import squad_action_space_nvec
+
+    obs = _squad_obs_space()
+    act = spaces.MultiDiscrete(squad_action_space_nvec())
+    existing_policy = MagicMock()
+    existing = OpponentInferenceModel(policy=existing_policy)
+
+    with patch(
+        "src.utils.opponent_inference._fill_opponent_policy",
+    ) as mock_fill, patch(
+        "src.utils.opponent_inference.build_opponent_policy",
+    ) as mock_build:
+        snap = load_opponent_inference_checkpoint(
+            "ckpt.zip",
+            agent_architecture="squad",
+            observation_space=obs,
+            action_space=act,
+            policy_class=SquadRecurrentPolicy,
+            policy_kwargs={},
+            rnn_type="gru",
+            device=torch.device("cpu"),
+            existing=existing,
+        )
+
+    assert snap is existing
+    mock_build.assert_not_called()
+    mock_fill.assert_called_once()
+    assert mock_fill.call_args[0][0] is existing_policy

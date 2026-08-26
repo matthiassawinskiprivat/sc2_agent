@@ -28,6 +28,77 @@ def count_sc2_processes() -> int:
     return count
 
 
+def unregister_sc2_process(process) -> bool:
+    """
+    Remove ``process`` from burnysc2's ``kill_switch`` list.
+
+    ``SC2Process.__aexit__`` calls ``kill_switch.kill_all()``, which tears down
+    every registered instance (including other trainers). Unregister before
+    local cleanup so concurrent SC2 sessions survive.
+    """
+    if process is None:
+        return False
+    try:
+        from sc2.sc2process import kill_switch
+    except Exception:
+        return False
+    to_kill = getattr(kill_switch, "_to_kill", None)
+    if not isinstance(to_kill, list):
+        return False
+    removed = False
+    while process in to_kill:
+        try:
+            to_kill.remove(process)
+            removed = True
+        except ValueError:
+            break
+    return removed
+
+
+def sc2_process_pid(process) -> Optional[int]:
+    """Best-effort PID for a burnysc2 ``SC2Process`` (or compatible mock)."""
+    if process is None:
+        return None
+    inner = getattr(process, "_process", None)
+    if inner is not None and hasattr(inner, "pid"):
+        try:
+            return int(inner.pid)
+        except (TypeError, ValueError):
+            pass
+    if hasattr(process, "pid"):
+        try:
+            return int(process.pid)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+async def close_sc2_process_local(process, *, wait_sec: float = 3.0) -> None:
+    """
+    Tear down one SC2 process without ``kill_switch.kill_all()``.
+
+    Safe for concurrent build + universal training: only this instance (and its
+    process tree) is killed.
+    """
+    if process is None:
+        return
+    unregister_sc2_process(process)
+    pid = sc2_process_pid(process)
+    try:
+        close_conn = getattr(process, "_close_connection", None)
+        if callable(close_conn):
+            await close_conn()
+    except Exception as exc:
+        logger.debug(f"close_sc2_process_local: connection close failed: {exc}")
+    try:
+        clean = getattr(process, "_clean", None)
+        if callable(clean):
+            clean()
+    except Exception as exc:
+        logger.debug(f"close_sc2_process_local: _clean failed: {exc}")
+    kill_sc2_process_tree(pid, wait_sec=wait_sec)
+
+
 def kill_sc2_process_tree(pid: Optional[int], *, wait_sec: float = 3.0) -> bool:
     """
     Kill one SC2 process and its children, then wait until it is gone.

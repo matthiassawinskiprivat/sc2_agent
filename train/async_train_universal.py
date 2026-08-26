@@ -27,6 +27,73 @@ from gymnasium import spaces
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(_PROJECT_ROOT)
 
+COLLECTOR_ROLLOUT_HEARTBEAT_SEC = 30.0
+LEARNER_BUFFER_WAIT_HEARTBEAT_SEC = 60.0
+
+
+def heartbeat_due(last_ts: float, now: float, interval_sec: float) -> bool:
+    """True when ``interval_sec`` has elapsed since ``last_ts``."""
+    return (now - last_ts) >= float(interval_sec)
+
+
+def collector_fill_stalled(last_progress_ts: float, now: float, timeout_sec: float) -> bool:
+    """True when no rollout rows have been written for ``timeout_sec``."""
+    return heartbeat_due(last_progress_ts, now, timeout_sec)
+
+
+def cuda_empty_cache_requested(env_value: Optional[str], yaml_flag: bool) -> bool:
+    """Opt-in only. Never implied by squad/CTF architecture (WDDM + live SC2)."""
+    raw = (env_value or "").strip()
+    return bool(yaml_flag) or raw in ("1", "true", "True")
+
+
+DEFAULT_COLLECTOR_STEP_TIMEOUT_SEC = 120.0
+COLLECTOR_VEC_PIPE_ERRORS = (
+    EOFError,
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    ConnectionError,
+    OSError,
+)
+
+
+def resolve_collector_step_timeout(training_params: dict) -> float:
+    """Seconds without env progress before the collector kills hung SC2 workers."""
+    raw = training_params.get("collector_step_timeout")
+    if raw is None:
+        return DEFAULT_COLLECTOR_STEP_TIMEOUT_SEC
+    return max(30.0, float(raw))
+
+
+def unblock_stuck_collector_vec_env(vec_env) -> int:
+    """
+    Unblock a hung ``vec_env.step()`` / ``env_method`` by killing SC2 and Subproc workers.
+
+    The collector thread is blocked in a pipe recv; only terminating the other end
+    (or SC2, for in-process SyncVecEnv) makes that recv raise so recovery can run.
+    """
+    logger.error(
+        "Collector: unblocking hung vec_env (kill SC2 + terminate Subproc workers)"
+    )
+    force_kill_sc2()
+    terminated = 0
+    raw_processes = getattr(vec_env, "processes", None)
+    processes = list(raw_processes) if isinstance(raw_processes, (list, tuple)) else []
+    for process in processes:
+        try:
+            if process.is_alive():
+                process.terminate()
+                terminated += 1
+        except Exception as exc:
+            logger.debug(f"Collector: worker terminate failed: {exc}")
+        try:
+            if process.is_alive():
+                process.kill()
+        except Exception as exc:
+            logger.debug(f"Collector: worker kill failed: {exc}")
+    return terminated
+
 from train.train_universal import UniversalPipelineManager, BOT_REGISTRY
 from src.sc2_bot_universal import SC2BotUniversal
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
@@ -193,6 +260,38 @@ def build_tensorboard_logdir_spec(
         active_path = os.path.join(log_dir, active_level)
         return f"active:{active_path},all:{log_dir}"
     return log_dir
+
+
+def build_viewer_tensorboard_logdir_spec(
+    repo_root: str | None = None,
+    *,
+    universal_base: str = "logs_universal",
+    build_base: str = "logs_build_zerg",
+) -> str:
+    """Combined ``--logdir_spec`` for unit-control + build agent logs.
+
+    Used by ``view_tensorboard.bat`` so both curricula appear in one TB session.
+    """
+    root = os.path.abspath(repo_root or ".")
+    parts: list[str] = []
+
+    def _abs(base: str) -> str:
+        return base if os.path.isabs(base) else os.path.join(root, base)
+
+    def _append_tree(label: str, base: str) -> None:
+        path = os.path.abspath(_abs(base))
+        if not os.path.isdir(path):
+            # Still register so TB watches the path once training creates it.
+            parts.append(f"{label}:{path}")
+            return
+        active = detect_active_log_level(path)
+        if active:
+            parts.append(f"{label}_active:{os.path.join(path, active)}")
+        parts.append(f"{label}:{path}")
+
+    _append_tree("control", universal_base)
+    _append_tree("build", build_base)
+    return ",".join(parts)
 
 
 def _tensorboard_port_open(port: int) -> bool:
@@ -371,6 +470,7 @@ def recover_collector_vec_env(vec_env, model, env_fns, num_envs, is_recurrent):
         "Collector: SubprocVecEnv worker died — rebuilding all SC2 environments "
         "and continuing rollout collection."
     )
+    unblock_stuck_collector_vec_env(vec_env)
     try:
         vec_env.close()
     except Exception as exc:
@@ -992,6 +1092,22 @@ class AsyncCollector(mp.Process):
         )
         is_squad_pointer_rollout = isinstance(squad_batch_helper, SquadPointerRolloutHelper)
 
+        from src.utils.watchdog import Watchdog
+        step_timeout = resolve_collector_step_timeout(training_params)
+
+        stall_watchdog = Watchdog(timeout=step_timeout, recurring=True)
+
+        def _on_collector_step_stall():
+            logger.error(
+                f"Collector: no rollout rows for {step_timeout:.0f}s "
+                "(hung Subproc worker / SC2, or opponent-only steps that never fill). "
+                "Killing SC2 and workers so vec_env.step can raise and recover."
+            )
+            stall_watchdog.dump_stack_trace()
+            unblock_stuck_collector_vec_env(vec_env_ref)
+
+        stall_watchdog.callback = _on_collector_step_stall
+
         def _recover_vec_env(vec_env, model):
             nonlocal vec_env_ref
             new_vec, new_obs, new_helper, new_dones, new_focus = recover_collector_vec_env(
@@ -1054,138 +1170,179 @@ class AsyncCollector(mp.Process):
             model.policy.set_training_mode(False)
             filled = 0
             n_rollout_steps = training_params["n_steps"]
-            while filled < n_rollout_steps:
-                requires_policy = vec_env_requires_policy_action(vec_env, num_envs)
+            last_rollout_hb = t_rollout_start
+            last_fill_progress_ts = t_rollout_start
+            last_unblock_ts = 0.0
+            stall_watchdog.start()
+            try:
+                while filled < n_rollout_steps:
+                    now_fill = time.perf_counter()
+                    if heartbeat_due(
+                        last_rollout_hb, now_fill, COLLECTOR_ROLLOUT_HEARTBEAT_SEC
+                    ):
+                        logger.info(
+                            f"Collector: filling buffer={buffer_idx} "
+                            f"{filled}/{n_rollout_steps} "
+                            f"({now_fill - t_rollout_start:.0f}s elapsed)"
+                        )
+                        last_rollout_hb = now_fill
+                    if (
+                        collector_fill_stalled(
+                            last_fill_progress_ts, now_fill, step_timeout
+                        )
+                        and (now_fill - last_unblock_ts) >= 5.0
+                    ):
+                        logger.error(
+                            f"Collector: buffer fill stalled at "
+                            f"{filled}/{n_rollout_steps} for "
+                            f"{now_fill - last_fill_progress_ts:.0f}s "
+                            "(no rollout rows). Killing SC2 and workers."
+                        )
+                        stall_watchdog.dump_stack_trace()
+                        unblock_stuck_collector_vec_env(vec_env_ref)
+                        last_unblock_ts = now_fill
+                    try:
+                        requires_policy = vec_env_requires_policy_action(vec_env, num_envs)
 
-                try:
-                    if not requires_policy.any():
-                        new_obs, rewards, dones, infos = vec_env.step(dummy_actions)
-                        # Opponent-squad steps are skipped for the training buffer
-                        # (requires_policy=False).  Their rewards are P2-perspective
-                        # values that would contaminate the P1-only rew_mean metric.
-                        # Do NOT add them to episode_rewards — only count the length.
-                        episode_lengths += 1
-                        for i, done in enumerate(dones):
-                            if done:
-                                squad_batch_helper.clear_env(i)
-                                recent_ep_rewards.append(episode_rewards[i])
-                                recent_ep_lengths.append(episode_lengths[i])
-                                episode_rewards[i] = 0
-                                episode_lengths[i] = 0
-                                if len(recent_ep_rewards) > 100:
-                                    recent_ep_rewards.pop(0)
-                                    recent_ep_lengths.pop(0)
-                        obs = new_obs
-                        self.last_dones = dones
+                        if not requires_policy.any():
+                            new_obs, rewards, dones, infos = vec_env.step(dummy_actions)
+                            # Non-trainee squad steps (legacy cycling / chunk) are
+                            # skipped for the training buffer (requires_policy=False).
+                            # Their rewards are the acting owner's perspective and
+                            # must not enter rollout/ep_rew_mean. Squad-pointer CTF
+                            # never takes this branch: trainee+opponent share one step.
+                            # Do NOT add them to episode_rewards — only count the length.
+                            episode_lengths += 1
+                            for i, done in enumerate(dones):
+                                if done:
+                                    squad_batch_helper.clear_env(i)
+                                    recent_ep_rewards.append(episode_rewards[i])
+                                    recent_ep_lengths.append(episode_lengths[i])
+                                    episode_rewards[i] = 0
+                                    episode_lengths[i] = 0
+                                    if len(recent_ep_rewards) > 100:
+                                        recent_ep_rewards.pop(0)
+                                        recent_ep_lengths.pop(0)
+                            obs = new_obs
+                            self.last_dones = dones
+                            continue
+
+                        if not hasattr(self, "last_dones"):
+                            self.last_dones = np.ones(num_envs, dtype=bool)
+
+                        pre_step_obs = obs
+                        with torch.no_grad():
+                            resolution = squad_batch_helper.resolve_rollout(
+                                vec_env=vec_env,
+                                num_envs=num_envs,
+                                obs=obs,
+                                requires_policy=requires_policy,
+                                model=model,
+                                is_recurrent=is_recurrent,
+                                last_dones=self.last_dones,
+                                prev_focus_tags=self._prev_obs_focus_tags,
+                                lstm_states=model._last_lstm_states if is_recurrent else None,
+                                device=model.device,
+                            )
+
+                        for env_idx, batch in resolution.squad_batch_actions.items():
+                            vec_env.env_method(
+                                "set_squad_batch_actions", batch, indices=[env_idx]
+                            )
+
+                        new_obs, rewards, dones, infos = vec_env.step(resolution.step_actions)
+                    except COLLECTOR_VEC_PIPE_ERRORS as pipe_exc:
+                        logger.error(
+                            f"Collector: vec_env worker pipe error during rollout "
+                            f"({type(pipe_exc).__name__}: {pipe_exc}). Recovering..."
+                        )
+                        vec_env, obs, squad_batch_helper = _recover_vec_env(vec_env, model)
+                        stall_watchdog.reset()
+                        last_fill_progress_ts = time.perf_counter()
+                        last_unblock_ts = last_fill_progress_ts
                         continue
 
-                    if not hasattr(self, "last_dones"):
-                        self.last_dones = np.ones(num_envs, dtype=bool)
+                    episode_rewards += rewards
+                    episode_lengths += 1
 
-                    pre_step_obs = obs
-                    with torch.no_grad():
-                        resolution = squad_batch_helper.resolve_rollout(
-                            vec_env=vec_env,
-                            num_envs=num_envs,
-                            obs=obs,
-                            requires_policy=requires_policy,
-                            model=model,
-                            is_recurrent=is_recurrent,
-                            last_dones=self.last_dones,
-                            prev_focus_tags=self._prev_obs_focus_tags,
-                            lstm_states=model._last_lstm_states if is_recurrent else None,
-                            device=model.device,
-                        )
+                    if not hasattr(self, 'custom_metrics'):
+                        self.custom_metrics = {}
 
-                    for env_idx, batch in resolution.squad_batch_actions.items():
-                        vec_env.env_method(
-                            "set_squad_batch_actions", batch, indices=[env_idx]
-                        )
+                    for i, done in enumerate(dones):
+                        info = infos[i]
+                        for key, val in info.items():
+                            if isinstance(val, (int, float, np.number)):
+                                if key not in self.custom_metrics:
+                                    self.custom_metrics[key] = deque(maxlen=100)
+                                self.custom_metrics[key].append(val)
 
-                    new_obs, rewards, dones, infos = vec_env.step(resolution.step_actions)
-                except (EOFError, BrokenPipeError) as pipe_exc:
-                    logger.error(
-                        f"Collector: vec_env worker pipe error during rollout "
-                        f"({type(pipe_exc).__name__}: {pipe_exc}). Recovering..."
+                        if done:
+                            recent_ep_rewards.append(episode_rewards[i])
+                            recent_ep_lengths.append(episode_lengths[i])
+                            episode_rewards[i] = 0
+                            episode_lengths[i] = 0
+                            if len(recent_ep_rewards) > 100:
+                                recent_ep_rewards.pop(0)
+                                recent_ep_lengths.pop(0)
+
+                    rows_written = write_rollout_rows_to_buffer(
+                        buffer=current_buffer,
+                        resolution=resolution,
+                        pre_step_obs=pre_step_obs,
+                        rewards=rewards,
+                        num_envs=num_envs,
+                        is_recurrent=is_recurrent,
+                        fallback_lstm=model._last_lstm_states if is_recurrent else None,
+                        last_dones=self.last_dones,
+                        max_rows=n_rollout_steps - filled,
                     )
-                    vec_env, obs, squad_batch_helper = _recover_vec_env(vec_env, model)
-                    continue
 
-                episode_rewards += rewards
-                episode_lengths += 1
+                    obs = new_obs
+                    self.last_dones = dones
+                    if is_recurrent:
+                        model._last_lstm_states = resolution.updated_lstm
+                        self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
+                    filled += rows_written
+                    if rows_written > 0:
+                        stall_watchdog.reset()
+                        last_fill_progress_ts = time.perf_counter()
 
-                if not hasattr(self, 'custom_metrics'):
-                    self.custom_metrics = {}
+                # CRITICAL: Compute GAE (Advantages & Returns) before sending to Learner
+                # We need the value of the LAST observation to bootstrap
+                with torch.no_grad():
+                    try:
+                        masks = np.array(vec_env.env_method("action_masks"))
+                    except COLLECTOR_VEC_PIPE_ERRORS as pipe_exc:
+                        logger.error(
+                            f"Collector: vec_env worker pipe error before GAE "
+                            f"({type(pipe_exc).__name__}: {pipe_exc}). Recovering..."
+                        )
+                        vec_env, obs, squad_batch_helper = _recover_vec_env(vec_env, model)
+                        stall_watchdog.reset()
+                        masks = np.array(vec_env.env_method("action_masks"))
+                    obs_tensor = model.policy.obs_to_tensor(obs)[0]
+                    masks_tensor = torch.as_tensor(masks).to(model.device)
 
-                for i, done in enumerate(dones):
-                    info = infos[i]
-                    for key, val in info.items():
-                        if isinstance(val, (int, float, np.number)):
-                            if key not in self.custom_metrics:
-                                self.custom_metrics[key] = deque(maxlen=100)
-                            self.custom_metrics[key].append(val)
-
-                    if done:
-                        recent_ep_rewards.append(episode_rewards[i])
-                        recent_ep_lengths.append(episode_lengths[i])
-                        episode_rewards[i] = 0
-                        episode_lengths[i] = 0
-                        if len(recent_ep_rewards) > 100:
-                            recent_ep_rewards.pop(0)
-                            recent_ep_lengths.pop(0)
-
-                rows_written = write_rollout_rows_to_buffer(
-                    buffer=current_buffer,
-                    resolution=resolution,
-                    pre_step_obs=pre_step_obs,
-                    rewards=rewards,
-                    num_envs=num_envs,
-                    is_recurrent=is_recurrent,
-                    fallback_lstm=model._last_lstm_states if is_recurrent else None,
-                    last_dones=self.last_dones,
-                    max_rows=n_rollout_steps - filled,
-                )
-
-                obs = new_obs
-                self.last_dones = dones
-                if is_recurrent:
-                    model._last_lstm_states = resolution.updated_lstm
-                    self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
-                filled += rows_written
-
-            # CRITICAL: Compute GAE (Advantages & Returns) before sending to Learner
-            # We need the value of the LAST observation to bootstrap
-            with torch.no_grad():
-                try:
-                    masks = np.array(vec_env.env_method("action_masks"))
-                except (EOFError, BrokenPipeError) as pipe_exc:
-                    logger.error(
-                        f"Collector: vec_env worker pipe error before GAE "
-                        f"({type(pipe_exc).__name__}: {pipe_exc}). Recovering..."
-                    )
-                    vec_env, obs, squad_batch_helper = _recover_vec_env(vec_env, model)
-                    masks = np.array(vec_env.env_method("action_masks"))
-                obs_tensor = model.policy.obs_to_tensor(obs)[0]
-                masks_tensor = torch.as_tensor(masks).to(model.device)
-                
-                # We only need the value
-                if is_recurrent:
-                    if is_squad_pointer_rollout:
-                        lstm_starts_last = dones.astype(np.float32)
+                    # We only need the value
+                    if is_recurrent:
+                        if is_squad_pointer_rollout:
+                            lstm_starts_last = dones.astype(np.float32)
+                        else:
+                            focus_last = vec_env_obs_focus_tags(vec_env, num_envs)
+                            lstm_starts_last = np.logical_or(
+                                dones,
+                                focus_last != self._prev_obs_focus_tags,
+                            ).astype(np.float32)
+                            self._prev_obs_focus_tags = focus_last.copy()
+                        starts_tensor = torch.as_tensor(lstm_starts_last).to(model.device)
+                        last_values = model.policy.predict_values(obs_tensor, model._last_lstm_states.vf, starts_tensor)
                     else:
-                        focus_last = vec_env_obs_focus_tags(vec_env, num_envs)
-                        lstm_starts_last = np.logical_or(
-                            dones,
-                            focus_last != self._prev_obs_focus_tags,
-                        ).astype(np.float32)
-                        self._prev_obs_focus_tags = focus_last.copy()
-                    starts_tensor = torch.as_tensor(lstm_starts_last).to(model.device)
-                    last_values = model.policy.predict_values(obs_tensor, model._last_lstm_states.vf, starts_tensor)
-                else:
-                    last_values = model.policy.predict_values(obs_tensor)
-                fe = getattr(model.policy, "features_extractor", None)
-                if fe is not None and hasattr(fe, "clear_forward_cache"):
-                    fe.clear_forward_cache()
+                        last_values = model.policy.predict_values(obs_tensor)
+                    fe = getattr(model.policy, "features_extractor", None)
+                    if fe is not None and hasattr(fe, "clear_forward_cache"):
+                        fe.clear_forward_cache()
+            finally:
+                stall_watchdog.stop()
             
             current_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
 
@@ -1234,18 +1391,12 @@ class AsyncCollector(mp.Process):
                 _vram_log(f"COLLECTOR rollout-end buffer={buffer_idx}")
                 log_cuda_memory(train_device, f"Collector rollout-end (buffer={buffer_idx})")
 
-            # Release cached-but-freed CUDA allocator blocks.
-            # This is safe here: signal_ready() was just called, no inference is in
-            # flight, and the env is idle waiting for the learner. The previous concern
-            # about "unspecified launch failure" only applied to calling empty_cache()
-            # *during* active opponent inference (which is not the case at this point).
-            # Squad levels must clear unconditionally: with multi-epoch training and
-            # frequent opponent syncs (alternate_trainee_race), the reserved pool
-            # grows across rollouts and fills VRAM without this call.
-            _collector_clear = (
-                is_squad_pointer_rollout
-                or os.environ.get("SC2_CUDA_EMPTY_CACHE", "").strip() in ("1", "true", "True")
-                or training_params.get("learner_empty_cache", False)
+            # Opt-in only. Squad used to empty_cache after every rollout; on Windows
+            # that returns the CUDA pool to WDDM while SC2 and sibling workers still
+            # hold the GPU, then the next forward can hang with no log.
+            _collector_clear = cuda_empty_cache_requested(
+                os.environ.get("SC2_CUDA_EMPTY_CACHE"),
+                bool(training_params.get("learner_empty_cache", False)),
             )
             if _collector_clear and torch.cuda.is_available():
                 import gc as _gc
@@ -1500,6 +1651,8 @@ class AsyncLearner:
 
         logger.info("Learner waiting for first buffer...")
         start_time = time.time()
+        last_buffer_wait_log = start_time
+        buffer_wait_started = start_time
         
         while True:
             # Poll all possible buffer directories for a 'ready' signal
@@ -1677,14 +1830,12 @@ class AsyncLearner:
                         log_cuda_memory(train_device, "Learner post-train")
                     # empty_cache() forces a device sync and allocator churn; it can *lower* throughput
                     # and make GPU util look low while the CPU waits.
-                    # Squad/CTF levels run multi-epoch updates over large map observations — PyTorch's
-                    # allocator accumulates reserved-but-freed activation blocks across rollouts and
-                    # eventually saturates dedicated VRAM, stalling collector inference. Always clear
-                    # after training for squad arch. Non-squad levels keep the opt-in env-var behaviour.
-                    _force_clear = (
-                        is_squad_arch
-                        or os.environ.get("SC2_CUDA_EMPTY_CACHE", "").strip() in ("1", "true", "True")
-                        or training_params.get("learner_empty_cache", False)
+                    # Do not clear after squad/CTF train: collector workers + SC2 still hold the GPU.
+                    # Returning the CUDA pool to WDDM lets those processes expand, then the next
+                    # update reallocates into dedicated+shared memory. Opt-in via env/YAML.
+                    _force_clear = cuda_empty_cache_requested(
+                        os.environ.get("SC2_CUDA_EMPTY_CACHE"),
+                        bool(training_params.get("learner_empty_cache", False)),
                     )
                     if _force_clear and torch.cuda.is_available():
                         torch.cuda.synchronize()
@@ -1788,10 +1939,23 @@ class AsyncLearner:
                             "(non-finite weights); collector keeps the previous checkpoint."
                         )
                     found_buffer = True
+                    last_buffer_wait_log = time.time()
+                    buffer_wait_started = last_buffer_wait_log
                     break
             
             if not found_buffer:
                 self._check_collector_alive()
+                now_wait = time.time()
+                if heartbeat_due(
+                    last_buffer_wait_log, now_wait, LEARNER_BUFFER_WAIT_HEARTBEAT_SEC
+                ):
+                    waited = now_wait - buffer_wait_started
+                    logger.info(
+                        "Learner: still waiting for next collector buffer "
+                        f"({waited:.0f}s). A couple of minutes is a normal CTF rollout; "
+                        "longer usually means a Subproc worker is stuck in vec_env.step."
+                    )
+                    last_buffer_wait_log = now_wait
                 time.sleep(1)
 
 

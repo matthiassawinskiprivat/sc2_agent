@@ -251,20 +251,43 @@ def upgrade_ids_for_tiers(chosen: Mapping[str, int]) -> List:
 
 
 def buildings_needed_for_tracks(chosen: Mapping[str, int]) -> List[str]:
-    """Unique research building type names required for non-zero tiers."""
+    """Unique research + prerequisite building type names for non-zero tiers.
+
+    Includes L2/L3 ``required_building`` entries from python-sc2 RESEARCH_INFO
+    (Twilight Council, Armory, Lair/Hive, Fleet Beacon, …).
+    """
     by_name = {t.name: t for t in _COMBAT_TRACKS}
     needed: List[str] = []
     seen: set[str] = set()
+
+    def _add(bname: str) -> None:
+        if bname and bname not in seen:
+            seen.add(bname)
+            needed.append(bname)
+
     for track_name, tier in chosen.items():
         if int(tier) <= 0:
             continue
         track = by_name.get(track_name)
         if track is None:
             continue
-        bname = track.building_names[0]
-        if bname not in seen:
-            seen.add(bname)
-            needed.append(bname)
+        _add(track.building_names[0])
+
+    if _SC2:
+        try:
+            from sc2.dicts.unit_research_abilities import RESEARCH_INFO
+            from sc2.dicts.upgrade_researched_from import UPGRADE_RESEARCHED_FROM
+
+            for upg in upgrade_ids_for_tiers(chosen):
+                structure_type = UPGRADE_RESEARCHED_FROM.get(upg)
+                if structure_type is None:
+                    continue
+                meta = RESEARCH_INFO.get(structure_type, {}).get(upg, {})
+                req = meta.get("required_building")
+                if req is not None:
+                    _add(getattr(req, "name", str(req)))
+        except Exception:
+            pass
     return needed
 
 

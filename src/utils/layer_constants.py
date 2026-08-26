@@ -225,6 +225,9 @@ class LayerConstants:
         ENEMY_UNIT_CLOAK: 42,
         TRANSPORT_SLOTS: 43,
         PASSENGER_DENSITY: 44,
+        # Spell energy (AoE curriculum tactical channels)
+        ALLIED_ENERGY: 45,
+        ENEMY_ENERGY: 46,
     }
 
     @classmethod
@@ -233,4 +236,4 @@ class LayerConstants:
 
     @classmethod
     def get_num_tactical_layers(cls) -> int:
-        return 45
+        return 47

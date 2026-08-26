@@ -290,7 +290,8 @@ def test_friendly_fire_for_sieged_tank_and_ravager(training_conf):
     builder = SquadObservationBuilder(training_conf)
     tank = _make_unit(type_id=UnitTypeId.SIEGETANKSIEGED)
     ravager = _make_unit(type_id=UnitTypeId.RAVAGER)
-    for unit in (tank, ravager):
+    templar = _make_unit(type_id=UnitTypeId.HIGHTEMPLAR)
+    for unit in (tank, ravager, templar):
         feats = builder._unit_scalars(
             unit, "attack", playable_w=128.0, playable_h=128.0,
             upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
@@ -435,3 +436,28 @@ def test_zero_observation_respects_active_subset(training_conf):
     builder = SquadObservationBuilder(training_conf)
     obs = builder.zero_observation()
     assert obs["unit_scalars"].shape == (MAX_SQUAD_UNITS, 2)
+
+
+def test_can_aoe_ghost_only_vs_protoss(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    ghost = _make_unit(type_id=UnitTypeId.GHOST, energy=200.0)
+    feats_p = builder._unit_scalars(
+        ghost, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+        enemy_race="protoss",
+    )
+    feats_z = builder._unit_scalars(
+        ghost, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+        enemy_race="zerg",
+    )
+    assert feats_p[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(1.0)
+    assert feats_z[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(0.0)
+
+    templar = _make_unit(type_id=UnitTypeId.HIGHTEMPLAR, energy=200.0)
+    feats_ht = builder._unit_scalars(
+        templar, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+        enemy_race="terran",
+    )
+    assert feats_ht[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(1.0)

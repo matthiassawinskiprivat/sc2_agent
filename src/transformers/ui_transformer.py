@@ -3,6 +3,7 @@ UI Transformer for rendering observation layers to display
 Supports the 46-Layer Architecture with Orthogonal Attributes
 """
 
+import re
 import numpy as np
 import cv2
 from typing import List, Tuple
@@ -14,6 +15,12 @@ _PROTOCOL_OVERLAY_LAYERS = frozenset({
     LayerConstants.COMMAND_ASSIGNMENT,
     LayerConstants.COMMAND_OBJECTIVE,
 })
+
+# Typed DPS channels store bonus-only when the matching *_dps_base is present.
+# For debug display, reconstruct total vs-attribute threat (base + bonus).
+_TYPED_DPS_LAYER_RE = re.compile(
+    r"^(allied|enemy)_(g|a)_dps_(light|armor|massive)$"
+)
 
 
 class RealTimeUITransformer:
@@ -54,7 +61,7 @@ class RealTimeUITransformer:
             LayerConstants.ALLIED_A_DPS_BASE:       [0.5, 0.0, 1.0],
             LayerConstants.ALLIED_A_DPS_LIGHT:      [0.7, 0.3, 1.0],
             LayerConstants.ALLIED_A_DPS_ARMOR:      [0.3, 0.0, 0.7],
-            LayerConstants.ALLIED_A_DPS_MASSIVE:    [0.2, 0.0, 0.4],
+            LayerConstants.ALLIED_A_DPS_MASSIVE:    [1.0, 0.35, 1.0],  # Bright magenta-pink
 
             # --- GROUP 5: ENEMY THREAT (Red/Orange Themes) ---
             LayerConstants.ENEMY_G_DPS_BASE:        [1.0, 0.0, 0.0],
@@ -65,7 +72,7 @@ class RealTimeUITransformer:
             LayerConstants.ENEMY_A_DPS_BASE:        [1.0, 0.0, 1.0],
             LayerConstants.ENEMY_A_DPS_LIGHT:       [1.0, 0.5, 0.5],
             LayerConstants.ENEMY_A_DPS_ARMOR:       [0.8, 0.0, 0.0],
-            LayerConstants.ENEMY_A_DPS_MASSIVE:     [0.5, 0.0, 0.2],
+            LayerConstants.ENEMY_A_DPS_MASSIVE:     [1.0, 0.2, 0.55],  # Hot pink-red
 
             # --- UTILITY ---
             LayerConstants.ALLIED_HPS_FIELD:        [0.5, 1.0, 0.0],
@@ -111,6 +118,14 @@ class RealTimeUITransformer:
                 continue
 
             layer_data = observation[layer_idx]
+
+            # Typed DPS tensors are bonus-only when base is present; show total threat in UI.
+            typed = _TYPED_DPS_LAYER_RE.match(layer_name)
+            if typed is not None:
+                base_name = f"{typed.group(1)}_{typed.group(2)}_dps_base"
+                base_idx = layer_map.get(base_name)
+                if base_idx is not None and base_idx < num_layers:
+                    layer_data = layer_data + observation[base_idx]
 
             if layer_data.max() == 0:
                 continue

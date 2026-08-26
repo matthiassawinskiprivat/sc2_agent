@@ -40,6 +40,11 @@ def _make_env():
     env.training_conf["training"] = {"device": "auto"}
     env.episode_counter = 1
     env._log = MagicMock()
+    env.unit_pools_config = []
+    env.level_name = "ctf_test"
+    env.num_workers = 1
+    env.worker_index = 0
+    env.player_units = {1: [], 2: []}
     return env
 
 
@@ -242,6 +247,47 @@ def test_sync_opponent_model_disposes_previous_snapshot(monkeypatch, tmp_path):
     assert env._sync_opponent_model() is True
     assert env.opponent_model is new_model
     assert disposed == [old_model]
+
+
+def test_sync_opponent_model_inplace_skips_dispose(monkeypatch, tmp_path):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    ckpt = tmp_path / "ckpt.zip"
+    ckpt.write_bytes(b"PK")
+
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env.agent_architecture = "squad"
+    env.training_conf = {"training": {"device": "auto"}}
+    env.observation_space = MagicMock()
+    env.action_space = MagicMock()
+    env.episode_counter = 1
+    env._log = MagicMock()
+    env._opponent_checkpoint_candidates = MagicMock(return_value=[str(ckpt)])
+    env._resolve_opponent_algo_bundle = MagicMock(
+        return_value=(MagicMock(), MagicMock(), {}, "gru")
+    )
+    env._opponent_graft_grid_size = MagicMock(return_value=32)
+
+    existing = MagicMock()
+    env.opponent_model = existing
+
+    monkeypatch.setattr(
+        "src.utils.training_device.warmup_cuda_if_needed",
+        lambda _d: None,
+    )
+    monkeypatch.setattr(
+        "src.utils.opponent_inference.load_opponent_inference_checkpoint",
+        lambda *_a, **_k: existing,
+    )
+    disposed = []
+    monkeypatch.setattr(
+        "src.utils.cuda_memory.dispose_opponent_snapshot",
+        lambda m, **kw: disposed.append(m),
+    )
+
+    assert env._sync_opponent_model() is True
+    assert env.opponent_model is existing
+    assert disposed == []
 
 
 def test_push_opponent_checkpoint_to_envs_calls_env_method():

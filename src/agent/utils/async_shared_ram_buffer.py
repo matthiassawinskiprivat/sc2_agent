@@ -6,9 +6,11 @@ named shared segments. Only small arrays + signals use disk (payload.npz + JSON)
 """
 from __future__ import annotations
 
+import ctypes
 import math
+import os
 from multiprocessing.shared_memory import SharedMemory
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from loguru import logger
@@ -21,10 +23,101 @@ def _shared_observation_keys(observation_space) -> List[str]:
     return [key for key in observation_space.spaces if is_disk_offloaded_obs_key(key)]
 
 
+class _WinApiMappedSegment:
+    """Open an existing Windows named mapping (never CreateFileMapping).
+
+    ``mmap.mmap(-1, size, tagname=...)`` can create a **new empty** segment when
+    the collector name is not found, so the learner trains on zeros (explained
+    variance collapses). ``OpenFileMapping`` + ``MapViewOfFile`` can only attach.
+    """
+
+    def __init__(self, name: str, h_map: int, ptr: int, nbytes: int):
+        self.name = name
+        self._h_map = h_map
+        self._ptr = ptr
+        self._size = int(nbytes)
+        self._ctypes_buf = (ctypes.c_byte * self._size).from_address(int(ptr))
+        self._buf: Optional[memoryview] = memoryview(self._ctypes_buf)
+
+    @property
+    def buf(self):
+        return self._buf
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    def close(self) -> None:
+        import _winapi
+
+        if self._buf is not None:
+            try:
+                self._buf.release()
+            except Exception:
+                pass
+            self._buf = None
+        self._ctypes_buf = None
+        if self._ptr:
+            try:
+                _winapi.UnmapViewOfFile(self._ptr)
+            except Exception:
+                pass
+            self._ptr = None
+        if self._h_map:
+            try:
+                _winapi.CloseHandle(self._h_map)
+            except Exception:
+                pass
+            self._h_map = None
+
+    def unlink(self) -> None:
+        return
+
+
+def _attach_shm_windows(name: str, nbytes: int) -> _WinApiMappedSegment:
+    import _winapi
+
+    nbytes = int(nbytes)
+    h_map = None
+    access = _winapi.FILE_MAP_WRITE
+    try:
+        h_map = _winapi.OpenFileMapping(access, False, name)
+    except OSError as exc:
+        try:
+            h_map = _winapi.OpenFileMapping(_winapi.FILE_MAP_READ, False, name)
+            access = _winapi.FILE_MAP_READ
+        except OSError as exc2:
+            raise FileNotFoundError(name) from exc2
+    if not h_map:
+        raise FileNotFoundError(name)
+    try:
+        ptr = _winapi.MapViewOfFile(h_map, access, 0, 0, nbytes)
+    except OSError:
+        _winapi.CloseHandle(h_map)
+        raise
+    if not ptr:
+        _winapi.CloseHandle(h_map)
+        raise OSError(f"MapViewOfFile failed for {name!r} ({nbytes} bytes)")
+    return _WinApiMappedSegment(name, h_map, ptr, nbytes)
+
+
+def _attach_shm_segment(name: str, nbytes: int) -> Any:
+    """Open an existing named segment without CPython's Windows double-map."""
+    nbytes = int(nbytes)
+    if nbytes <= 0:
+        raise ValueError(f"Shared memory size must be positive for segment {name!r}")
+    if os.name == "nt":
+        return _attach_shm_windows(name, nbytes)
+    return SharedMemory(name=name, create=False)
+
+
 def _unlink_shm_by_name(name: str) -> None:
     try:
         existing = SharedMemory(name=name, create=False)
     except FileNotFoundError:
+        return
+    except OSError:
+        # Huge leftover segments: Windows attach can raise WinError 1450.
         return
     try:
         existing.close()
@@ -39,6 +132,14 @@ def observation_buffer_nbytes(shape) -> int:
     if nbytes <= 0:
         raise ValueError(f"Shared memory size must be positive for shape {shape}")
     return int(nbytes)
+
+
+def _obs_sample_mean(arr: np.ndarray) -> float:
+    """Cheap fingerprint: mean of first timestep, first env."""
+    if arr.size == 0:
+        return 0.0
+    head = arr[0, 0] if arr.ndim >= 2 else arr
+    return float(np.mean(head))
 
 
 def _create_shm_segment(name: str, nbytes: int) -> SharedMemory:
@@ -100,29 +201,50 @@ class AsyncSharedRamBuffer(AsyncDiskBuffer):
             shm = _create_shm_segment(name, nbytes)
             self._shm_handles[key] = shm
             self.observations[key] = np.ndarray(shape, dtype=np.float32, buffer=shm.buf)
-        logger.debug(
+        total = sum(h.size if hasattr(h, "size") else len(h.buf) for h in self._shm_handles.values())
+        logger.info(
             f"Shared RAM obs bound for {self.instance_id}: "
-            f"{list(self._shm_handles.keys())}"
+            f"{list(self._shm_handles.keys())} ({total / 1e9:.2f} GB)"
         )
 
     @staticmethod
     def attach_shared_observations(buffer: "AsyncSharedRamBuffer", meta: Dict[str, Any]) -> None:
         """Learner: map existing collector segments by name from signal metadata."""
         shared_obs = meta.get("shared_obs") or {}
-        handles: Dict[str, SharedMemory] = getattr(buffer, "_shm_handles", {})
+        handles: Dict[str, Any] = getattr(buffer, "_shm_handles", {})
         for key, info in shared_obs.items():
             name = info["name"]
             shape = tuple(info["shape"])
+            nbytes = int(info.get("nbytes") or observation_buffer_nbytes(shape))
             if key in handles:
                 try:
                     handles[key].close()
                 except Exception:
                     pass
-            shm = SharedMemory(name=name, create=False)
+            try:
+                shm = _attach_shm_segment(name, nbytes)
+            except OSError as exc:
+                gb = nbytes / 1e9
+                logger.error(
+                    f"Failed to attach shared obs {key!r} ({name}, {nbytes} bytes, "
+                    f"{gb:.2f} GB). WinError 1450 means Windows could not map the "
+                    f"CTF RAM buffer; try rollout_buffer: disk or lower n_steps/"
+                    f"num_envs. Original: {exc}"
+                )
+                raise
             handles[key] = shm
-            buffer.observations[key] = np.ndarray(
-                shape, dtype=np.float32, buffer=shm.buf
-            )
+            mapped = np.ndarray(shape, dtype=np.float32, buffer=shm.buf)
+            expected = info.get("sample_mean")
+            if expected is not None:
+                got = _obs_sample_mean(mapped)
+                tol = max(1e-4, 1e-3 * abs(float(expected)))
+                if not np.isfinite(got) or abs(got - float(expected)) > tol:
+                    raise RuntimeError(
+                        f"Shared obs {key!r} attach mismatch: collector "
+                        f"sample_mean={expected} learner={got}. Mapped a different "
+                        f"(likely empty) segment — PPO would train on zeros."
+                    )
+            buffer.observations[key] = mapped
         buffer._shm_handles = handles
 
     def close_shared_memory(self, *, unlink: bool = False) -> None:
@@ -178,6 +300,8 @@ class AsyncSharedRamBuffer(AsyncDiskBuffer):
             key: {
                 "name": self.shm_segment_name(key),
                 "shape": list(self.observations[key].shape),
+                "nbytes": observation_buffer_nbytes(self.observations[key].shape),
+                "sample_mean": _obs_sample_mean(self.observations[key]),
             }
             for key in self.shared_observation_keys()
         }

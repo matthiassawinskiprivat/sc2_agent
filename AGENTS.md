@@ -2,7 +2,7 @@
 
 This file contains internal wiring rules, contracts, and conventions for the SC2 Unit Control Agent codebase. It is intended for AI coding assistants (Cursor, Copilot, etc.) working on this project.
 
-For a human-oriented overview, see [README.md](README.md).
+For a human-oriented overview, see [README.md](README.md). When talking to a human, spell out and briefly explain every reinforcement-learning term and formula; do not use unexplained acronyms. This is a general communication rule, not a list of specific terms.
 
 **Important:** The `original` architecture (`agent_architecture: "original"`, `config/`, `train/train_pipeline.py`, `SC2Bot`) is **deprecated** and will be removed. All new development targets the **`universal`** architecture (`agent_architecture: "universal"`, `config_universal/`, `train/async_train_universal.py`, `SC2BotUniversal`). When making changes, focus exclusively on the universal path unless explicitly asked to modify legacy code.
 
@@ -21,6 +21,66 @@ All policy **training and inference** must run on **CUDA**. This applies to the 
 | **Allowed host copies** | `.cpu().numpy()` when writing rollout buffers, IPC payloads, or loading checkpoint bytes is fine — that is storage marshalling, not running the policy on CPU. |
 
 If VRAM is tight, tune `num_envs`, `n_steps`, `batch_size`, or model size — do not move the policy to CPU.
+
+---
+
+## PPO training metrics (read this before interpreting TensorBoard)
+
+Async CTF/scenario training uses **PPO** (Proximal Policy Optimization) in `MaskableRecurrentPPO`. Two networks share a body:
+
+| Name | What it outputs | Role |
+|------|-----------------|------|
+| **Policy** (actor) | A distribution over actions (command + spatial cell, plus squad pointer bits) | Chooses what to do |
+| **Value function** (**VF**, critic) | A scalar \(V(s)\): expected remaining discounted return from observation \(s\) | Baseline for credit assignment; not the thing that “plays” |
+
+**Return** \(G_t\) is the discounted sum of future rewards from time \(t\): \(G_t = r_t + \gamma r_{t+1} + \gamma^2 r_{t+2} + \cdots\) with \(\gamma\) from YAML (`model.gamma`, often `0.995`). The VF is trained to predict \(G_t\). This repo uses **GAE** (Generalized Advantage Estimation) to form **advantages** \(A_t \approx G_t - V(s_t)\) (how much better/worse the step was than the VF expected). PPO then increases the probability of actions with \(A_t > 0\) and decreases the others, but only inside a **clip range** (usually \(0.2\)) so one update cannot swing the policy too far.
+
+**How `train/explained_variance` is computed here** (`src/agent/maskable_recurrent_ppo.py`): after the PPO update, the logger compares the **rollout-time** VF predictions stored in the buffer (`values`) to the GAE **returns**, on steps where `policy_active` is true:
+
+\[
+\text{explained variance} = 1 - \frac{\mathrm{Var}(G - V)}{\mathrm{Var}(G)}
+\]
+
+| Value | Meaning |
+|-------|---------|
+| **1.0** | \(V\) matches returns perfectly |
+| **0.0** | \(V\) is no better than predicting the mean return |
+| **negative** | \(V\) is worse than the mean (anti-correlated or huge residuals) |
+
+This metric is **not** “quality of the last gradient step.” It asks: *did yesterday’s VF predict this rollout’s returns?* A ceiling around **0.5–0.7** is normal for CTF self-play. Do not chase 0.9.
+
+**Why CTF explained variance tops out and can fall**
+
+- **Self-play.** The opponent is a copy of the same policy (`_sync_opponent_model`). Every hot-swap moves the return distribution; the VF is always a step behind.
+- **Two MDPs in one buffer.** `env.alternate_trainee_race: true` mixes e.g. Thor-as-trainee and Void Ray-as-trainee. One VF cannot fit both return scales perfectly.
+- **HP shaping dominates.** Attack-role reward credits **any** drop in enemy army HP (`calculate_squad_step_reward`): \(\Delta\mathrm{HP}_\text{enemy} \times\) `damage_reward` (often `0.2`). Win/loss (`win_reward` ~7.5, `loss_penalty` ~−5) is small next to hundreds of HP. The VF can learn “big HP swings” and still miss who won.
+- **Long noisy fights.** \(\gamma = 0.995\) over ~100–160 steps: small fight-order differences explode into return variance.
+- **Few PPO epochs.** Typical `n_epochs: 2` underfits each buffer on purpose (better for the policy, worse for this metric).
+
+Typical curve: EV **rises** while outcomes are stereotyped (weak/idle opponent), then **sags** as both sides actually fight. That sag is expected, not a broken learner.
+
+**God-mode attack targeting (P1 client, P2 army)**
+
+All orders go out as player 1. After `debug_control_enemy`, a P2 unit that hard-targets `bot.enemy_units` is targeting **its own army**. The engine may **accept** that (P2 looks like an enemy to P1) → opponent friendly-fire. Attack-role reward still pays `damage_reward` on that HP loss, so `rollout/ep_rew_mean` is inflated (on the order of \(0.2 \times\) self-damage HP, often ~100 points) and EV looks better because self-damage is easy to predict. Hostiles for `issue_attack_at_point` must be filtered by **`owner_id != caster.owner_id`**, not by `units` vs `enemy_units` alliance buckets (`src/utils/unit_feature_helpers.py`). Empty-cell P2 still **attack-moves** (most clicks miss a unit center; `move` made P2 walk through fights and collapsed returns).
+
+**TensorBoard tags (async universal/squad)**
+
+| Tag | What it is | Healthy | Alarm |
+|-----|------------|---------|--------|
+| `rollout/ep_rew_mean` | Mean **episode** return (sum of per-step rewards until `done`), last ~100 episodes | Slow drift OK; a one-time drop after a reward/MDP fix can be the fake HP coming out | Collapse with `rollout_log_prob_abs_err` ≫ 0 |
+| `train/explained_variance` | Formula above | Oscillates ~0.1–0.8; mean ~0.5–0.7 | Stuck **negative** for many rollouts, or a crash to ~−1 with a log-prob mismatch |
+| `train/approx_kl` | Mean KL (Kullback–Leibler) from the **old** policy to the **new** one this update: how far the policy moved | ~0.001–0.02 after a run has settled | Persistent ≫ 0.1, or ~1–7 with `rollout_log_prob_abs_err` large (learner saw different obs than the collector) |
+| `train/clip_fraction` | Fraction of PPO ratio clips (policy wanted to move more than `clip_range`) | A few percent once settled; a spike on the first update after resume/MDP change is OK | Stuck near 0.5+ |
+| `train/rollout_log_prob_abs_err` | \(\lvert \log\pi_{\text{learner}}(a \mid s) - \log\pi_{\text{collector}}(a \mid s) \rvert\) | ~1e-4 | ≫ 1e-2 → shared-memory/obs disconnect (VF/policy training on zeros or a different tensor) |
+| `train/rollout_policy_load_ok` | Learner loaded `rollout_policy.zip` for this buffer | 1 | 0 |
+| `train/value_loss` | Mean squared error of the VF vs GAE returns (scale follows return magnitude; hundreds–thousands is normal when episode returns are ~200) | Tracks \(\mathrm{Var}(G)\), not “accuracy” | NaN / inf |
+| `train/entropy_loss` | PPO logs **negative** entropy. More negative ⇒ **higher** entropy (more random actions). Squad action spaces are large, so ~−9 to −11 is typical, not a bug | Slow rise toward 0 = policy getting more peaked | Sudden jump with KL explosion |
+| `time/fps` | `total_timesteps / wall_time` **of this learner process** | Ignore after resume: loading a 200k checkpoint into a new process yields a fake thousands-of-FPS spike that then decays | Not a throughput meter |
+| `metrics/collector/instant_fps` | Env-steps in this rollout / rollout wall seconds (`n_steps * num_envs / sec`) | Compare like-for-like `num_envs` | — |
+
+**Resume / two `tfevents` files.** A restart writes a **new** `events.out.tfevents.*` in the same log dir. TensorBoard overlays both: a discontinuity at the resume step is normal. `train/n_updates` resets with the new PPO object. Optimizer restore follows `resume_timesteps_from_save` (pipeline `CONTINUE_TRAINING`).
+
+**Async IPC.** Collector and learner are separate processes. Large maps/tactical tensors live in named shared memory (`rollout_buffer: ram`, `AsyncSharedRamBuffer`). On Windows, attaching must **open** the collector’s mapping (`OpenFileMapping` + `MapViewOfFile`) with the byte size from metadata — not `mmap.mmap(-1, size, tagname=...)`, which can create a **new empty** segment (learner trains on zeros → KL/EV explode). After attach, `sample_mean` of the first timestep/env must match the collector fingerprint.
 
 ---
 
@@ -268,10 +328,13 @@ CTF levels override the pipeline default (`universal`) with **`agent_architectur
 | **Checkpoint graft** | CTF starts from the **last attack level** checkpoint (e.g. `models_universal/level_attack_5/final_model.zip`), **not** legacy CTF zips. Use `load_squad_checkpoint` / `graft_squad_policy_from_universal`. Fresh Adam on architecture switch. Squad `query_linear` must be **64+64+10** (global GAP + tactical GAP + command) so universal fusion weights remap. From **`ctf_level_12`**, `env.include_race: true` appends a 6-dim own/enemy race one-hot after command (`query_linear` in = **144**); levels ≤11 omit it so the universal→squad graft stays 138-wide. |
 | **Race obs (`include_race`)** | Optional Dict key `race` shape `(6,)` = `[own_T, own_Z, own_P, enemy_T, enemy_Z, enemy_P]` (perspective-relative). Not part of `command`. Boolean is per-level YAML (not ConfigManager-accumulated). |
 | **Opponent** | Same `SquadRecurrentPolicy`; synced via `_sync_opponent_model` with squad graft path |
+| **Trainee vs spawn owners** | With `alternate_trainee_race`, SC2 spawn owners are **static** (first-seen race → player 1, every other race → player 2). The policy controls the pool whose `race` matches `get_trainee_race` for the episode — that pool may be player 2. Do **not** swap `debug_create_unit` owners across episodes (DirectX VRAM leak). `is_pool_trainee` is independent of `pool_player_id`. |
+| **P2 observation frame** | Spawn owners stay frozen, so the trainee may be SC2 player 2. Allied vs enemy is still ownership (`perspective_unit_groups`). Maps, `x_norm`/`y_norm`, and spatial actions stay in **world coordinates** — the same frame as pre-leak-fix P1 of that race. CTF spawn is **region + attack/defend side**, not ladder home corners; a 180° rotate would move a P2 trainee off the cells the old P1 policy trained on. **Do not** rotate `anchor_tactical` (local crop is already world-egocentric). `PerspectiveTransformer.decode_world_spatial_idx` is a pass-through. |
+| **Soft-reset cleanup** | Before `debug_kill`, uncloak/unburrow leftovers and **STOP** Mothership/Oracle cloaking fields (`train/envs/ctf/map_cleanup.py`). Extra `client.step` frames during reset are **not** training steps (`steps_count` unchanged). Prevents cloaked/burrowed units leaking into the next episode (wrong-race obs + DirectX VRAM). |
 
 **Key files:** `src/agent/squad_constants.py`, `src/agent/squad_selection.py`, `src/transformers/squad_observation_builder.py`, `src/agent/models/squad_network.py`, `src/agent/models/squad_policy.py`, `train/envs/capture_the_flag_single_env.py` (`_async_step_squad_pointer`), `train/squad_pointer_rollout.py`.
 
-**Tests:** `tests/test_squad_selection.py`, `tests/test_squad_observation_builder.py`, `tests/test_graft_squad_policy.py`, `tests/test_squad_action_masks.py`, `tests/test_squad_pool_pairing.py`, `tests/test_ctf_squad_step.py`.
+**Tests:** `tests/test_squad_selection.py`, `tests/test_squad_observation_builder.py`, `tests/test_graft_squad_policy.py`, `tests/test_squad_action_masks.py`, `tests/test_squad_pool_pairing.py`, `tests/test_ctf_squad_step.py`, `tests/test_ctf_map_cleanup.py`, `tests/test_ctf_opponent_spatial_flip.py`, `tests/test_squad_command_objective_roles.py`, `tests/test_ctf_perspective_obs_identity.py`.
 
 ---
 
@@ -281,7 +344,7 @@ CTF levels override the pipeline default (`universal`) with **`agent_architectur
 
 **Do not** (for `agent_architecture: "universal"`, in `apply_action` / actuation paths):
 
-- Remap `attack` to a different target than the decoded world point (e.g. force `unit.attack(enemy_unit)` when the policy chose a coordinate, pick “nearest enemy to click,” or override with Hungarian / sticky combat assignment).
+- Remap `attack` to a **different** target than the decoded world point (e.g. pick “nearest enemy to click,” or override with Hungarian / sticky combat assignment). Cell-local hard-target is allowed: if an enemy unit/building **center** lies in the clicked spatial cell, issue `unit.attack(that_unit)`; otherwise keep `unit.attack(Point2)` (same cell rule as heal/load).
 - Similarly override `move` (or other spatial heads) to a manager-chosen position while still consuming the policy’s action as if it were honored.
 - Add new “convenience” actuation that **replaces** the policy’s spatial choice with heuristics (assignment, closest unit, centroid, etc.) **without** the same choice being explicit in the observation and action space.
 

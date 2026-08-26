@@ -34,8 +34,25 @@ def test_catalog_includes_core_splash_units():
         "WIDOWMINEBURROWED",
         "COLOSSUS",
         "ULTRALISK",
+        "LURKERMPBURROWED",
+        "LURKERBURROWED",
+        "LIBERATOR",
+        "THOR",
     ):
         assert name in SPLASH_BY_UNIT
+    # Morphs without splash weapons must not paint splash / HAS_SPLASH.
+    assert "LURKERMP" not in SPLASH_BY_UNIT
+    assert "WIDOWMINE" not in SPLASH_BY_UNIT
+    assert "THORAP" not in SPLASH_BY_UNIT
+    assert "LIBERATORAG" not in SPLASH_BY_UNIT
+    assert unit_has_splash(_unit(UnitTypeId.LURKERMP)) is False
+    assert unit_has_splash(_unit(UnitTypeId.LURKERMPBURROWED)) is True
+    assert unit_has_splash(_unit(UnitTypeId.WIDOWMINE)) is False
+    assert unit_has_splash(_unit(UnitTypeId.WIDOWMINEBURROWED)) is True
+    assert unit_has_splash(_unit(UnitTypeId.LIBERATOR)) is True
+    assert unit_has_splash(_unit(UnitTypeId.LIBERATORAG)) is False
+    assert unit_has_splash(_unit(UnitTypeId.THOR)) is True
+    assert unit_has_splash(_unit(UnitTypeId.THORAP)) is False
 
 
 def test_baneling_and_nova_are_onetime():
@@ -60,6 +77,33 @@ def test_sieged_tank_has_min_range_donut():
     assert damage == 40.0
 
 
+def test_liberator_fighter_splash_sieged_ag_is_not_splash():
+    from src.utils.splash_data import (
+        LIBERATOR_FIGHTER_SPLASH_DAMAGE,
+        LIBERATOR_FIGHTER_SPLASH_RADIUS_GU,
+    )
+
+    r_f, min_f, dmg_f = splash_spec(_unit(UnitTypeId.LIBERATOR))
+    assert r_f == LIBERATOR_FIGHTER_SPLASH_RADIUS_GU
+    assert min_f == 0.0
+    assert dmg_f == LIBERATOR_FIGHTER_SPLASH_DAMAGE
+    assert splash_spec(_unit(UnitTypeId.LIBERATORAG)) is None
+    assert unit_has_friendly_fire(_unit(UnitTypeId.LIBERATORAG)) is False
+
+
+def test_thor_explosive_payload_splash_not_high_impact():
+    from src.utils.splash_data import (
+        THOR_JAVELIN_SPLASH_DAMAGE,
+        THOR_JAVELIN_SPLASH_RADIUS_GU,
+    )
+
+    radius, min_range, damage = splash_spec(_unit(UnitTypeId.THOR))
+    assert radius == THOR_JAVELIN_SPLASH_RADIUS_GU
+    assert min_range == 0.0
+    assert damage == THOR_JAVELIN_SPLASH_DAMAGE
+    assert splash_spec(_unit(UnitTypeId.THORAP)) is None
+
+
 def test_marine_has_no_splash():
     marine = _unit(UnitTypeId.MARINE)
     assert unit_has_splash(marine) is False
@@ -69,12 +113,19 @@ def test_marine_has_no_splash():
 
 def test_friendly_fire_catalog():
     assert FRIENDLY_FIRE_UNIT_TYPES == frozenset(
-        {"SIEGETANKSIEGED", "WIDOWMINEBURROWED", "DISRUPTORPHASED", "RAVAGER"}
+        {
+            "SIEGETANKSIEGED",
+            "WIDOWMINEBURROWED",
+            "DISRUPTORPHASED",
+            "RAVAGER",
+            "HIGHTEMPLAR",
+        }
     )
     assert unit_has_friendly_fire(_unit(UnitTypeId.SIEGETANKSIEGED)) is True
     assert unit_has_friendly_fire(_unit(UnitTypeId.WIDOWMINEBURROWED)) is True
     assert unit_has_friendly_fire(_unit(UnitTypeId.DISRUPTORPHASED)) is True
     assert unit_has_friendly_fire(_unit(UnitTypeId.RAVAGER)) is True
+    assert unit_has_friendly_fire(_unit(UnitTypeId.HIGHTEMPLAR)) is True
     assert unit_has_friendly_fire(_unit(UnitTypeId.BANELING)) is False
     assert unit_has_friendly_fire(_unit(UnitTypeId.ARCHON)) is False
     assert unit_has_friendly_fire(_unit(UnitTypeId.DISRUPTOR)) is False

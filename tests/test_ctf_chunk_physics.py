@@ -158,7 +158,30 @@ def test_opponent_only_chunk_no_policy():
     assert env.bot.client.step.await_args.kwargs.get("step_size") == 4
 
 
-def test_chunk_physics_refreshes_all_opponents():
+def test_fresh_opponent_actions_use_non_trainee_owner_when_trainee_is_p2():
+    """Chunk path must not hardcode P2 as the opponent (trainee may be P2)."""
+    env = _make_env(agent_tags=[10], opponent_tags=[20, 21], chunk_size=4)
+    env._alternate_trainee_race = True
+    env.episode_counter = 2
+    env.unit_pools_config = [
+        {"race": "terran", "high_level_command": "attack", "agent": True},
+        {"race": "zerg", "high_level_command": "defend", "agent": False},
+    ]
+    env.player_units = {1: [20, 21], 2: [10]}
+    captured = {}
+
+    async def fake_predict(tags):
+        captured["tags"] = list(tags)
+        captured["active_player_id"] = env.active_player_id
+        return [np.array([0, 0]), np.array([1, 1])]
+
+    env._predict_opponent_squad_batch = fake_predict
+    asyncio.run(env._apply_fresh_opponent_actions())
+
+    assert captured["tags"] == [20, 21]
+    assert captured["active_player_id"] == 1
+    assert env.bot.apply_action.await_count == 2
+
     env = _make_env(chunk_size=4)
     env.set_squad_batch_actions(
         np.array([[0, 0], [1, 1], [2, 2]], dtype=np.int64)
@@ -183,6 +206,40 @@ def test_reissue_skips_opponent_units_in_chunk_mode():
     env.bot.do.assert_called_once()
 
 
+def test_reissue_skips_cloak_burrow_orders():
+    """Cloak/burrow are one-shot; reissuing them as move(None) floods warnings."""
+    env = _make_env(chunk_size=4)
+    env.player_units = {1: [20, 21], 2: []}
+    env.bot._unit_last_order = {
+        20: ("cloak_burrow", None),
+        21: ("uncloak_unburrow", None),
+    }
+    unit = MagicMock(owner_id=1)
+    env.bot.all_units.find_by_tag = MagicMock(return_value=unit)
+
+    asyncio.run(env._reissue_non_squad_orders({10}))
+    env.bot.do.assert_not_called()
+    unit.move.assert_not_called()
+
+
+def test_reissue_aoe_recasts_spell():
+    from sc2.position import Point2
+
+    env = _make_env(chunk_size=4)
+    env.player_units = {1: [20], 2: []}
+    target = Point2((12.0, 34.0))
+    env.bot._unit_last_order = {20: ("aoe_local", target)}
+    unit = MagicMock(owner_id=1)
+    env.bot.all_units.find_by_tag = MagicMock(return_value=unit)
+
+    with patch(
+        "train.envs.capture_the_flag_single_env.issue_aoe_at_point"
+    ) as mock_aoe:
+        asyncio.run(env._reissue_non_squad_orders({10}))
+        mock_aoe.assert_called_once_with(env.bot, unit, target)
+    unit.move.assert_not_called()
+
+
 def test_opponent_predict_falls_back_to_collector_model():
     import asyncio
     from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
@@ -194,11 +251,13 @@ def test_opponent_predict_falls_back_to_collector_model():
         env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
 
     env.active_player_id = 2
+    env.training_conf = {}
     env.action_space = spaces.MultiDiscrete([4, 16])
     env.opponent_model = None
     env.model = MagicMock()
     env.model.policy = MagicMock()
     env.model.policy.set_training_mode = MagicMock()
+    env._ensure_opponent_model_loaded = lambda: False
     env.bot = MagicMock()
     env.bot.get_observation = MagicMock(
         return_value={"map": np.zeros((1, 4, 4), dtype=np.float32)}

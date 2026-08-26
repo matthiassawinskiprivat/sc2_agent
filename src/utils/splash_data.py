@@ -1,6 +1,9 @@
 """Splash-damage catalog for observation layers and unit scalars.
 
-Geometry is approximate: circle (or donut via min_range) centered on the unit.
+Geometry is approximate: circle (or donut via min_range) centered on the unit,
+except Parasitic Bomb whose cloud is the python-sc2 fake effect ``PARASITICBOMB``.
+Sieged Liberator (LIBERATORAG) Concord Cannon is single-target — its liberation
+zone is a DPS threat disc, not splash. Fighter LIBERATOR AA splash is hull-centered.
 Intensity is catalog splash damage. Idle DISRUPTOR is not splash / not onetime;
 only DISRUPTORPHASED (Purification Nova ball) is among Disruptor forms.
 
@@ -14,6 +17,22 @@ from typing import TYPE_CHECKING, Dict, FrozenSet, Optional, Tuple
 if TYPE_CHECKING:
     from sc2.unit import Unit
 
+# Liberation zone is effect-centered DPS (single-target Concord Cannon), not splash.
+LIBERATOR_ZONE_RADIUS_GU = 5.0
+LIBERATOR_ZONE_DAMAGE = 85.0
+# Fighter-mode Lexington Rockets (LotV): splash radius around the target; obs paints caster-centered.
+LIBERATOR_FIGHTER_SPLASH_RADIUS_GU = 1.5
+LIBERATOR_FIGHTER_SPLASH_DAMAGE = 5.0
+# Thor Explosive Payload Javelin missiles (not High Impact / THORAP): target splash r=0.5.
+# Obs uses AA weapon range so the ring is not eclipsed by the Thor's large hull.
+THOR_JAVELIN_SPLASH_RADIUS_GU = 10.0
+THOR_JAVELIN_SPLASH_DAMAGE = 6.0
+
+# Parasitic Bomb dummy is converted to a fake effect (id "PARASITICBOMB"); cloud follows the target.
+PARASITIC_BOMB_RADIUS_GU = 3.0
+PARASITIC_BOMB_DAMAGE = 120.0
+PARASITIC_BOMB_DPS = PARASITIC_BOMB_DAMAGE / 7.0
+
 # type name -> (radius_gu, min_range_gu, splash_damage)
 SPLASH_BY_UNIT: Dict[str, Tuple[float, float, float]] = {
     "BANELING": (2.2, 0.0, 20.0),
@@ -22,11 +41,21 @@ SPLASH_BY_UNIT: Dict[str, Tuple[float, float, float]] = {
     "ARCHON": (3.0, 0.0, 25.0),
     "HELLION": (5.0, 0.0, 8.0),
     "HELLIONTANK": (2.0, 0.0, 18.0),
+    # Widow Mine / Lurker only deal splash while burrowed (type morph).
     "WIDOWMINEBURROWED": (5.0, 0.0, 40.0),
     "COLOSSUS": (7.0, 0.0, 10.0),
     "ULTRALISK": (2.0, 0.0, 12.0),
-    "LURKERMP": (8.0, 0.0, 20.0),
+    "LURKERMPBURROWED": (8.0, 0.0, 20.0),
+    "LURKERBURROWED": (8.0, 0.0, 20.0),
     "PLANETARYFORTRESS": (7.0, 0.0, 40.0),
+    # Fighter Liberator AA splash only. Sieged AG is single-target (zone → DPS layers).
+    "LIBERATOR": (
+        LIBERATOR_FIGHTER_SPLASH_RADIUS_GU,
+        0.0,
+        LIBERATOR_FIGHTER_SPLASH_DAMAGE,
+    ),
+    # Explosive Payload only (Javelin AA splash). THORAP High Impact is single-target.
+    "THOR": (THOR_JAVELIN_SPLASH_RADIUS_GU, 0.0, THOR_JAVELIN_SPLASH_DAMAGE),
 }
 
 # Single-blast / suicide entities (not general timed summons).
@@ -39,6 +68,7 @@ FRIENDLY_FIRE_UNIT_TYPES: FrozenSet[str] = frozenset(
         "WIDOWMINEBURROWED",
         "DISRUPTORPHASED",
         "RAVAGER",
+        "HIGHTEMPLAR",
     }
 )
 

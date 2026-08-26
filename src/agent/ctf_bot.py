@@ -11,13 +11,20 @@ from loguru import logger
 
 from src.hierarchical_agent import HierarchicalAgentSystem
 from src.utils.layer_constants import LayerConstants
-from src.utils.perspective_transformer import PerspectiveTransformer
 from src.utils.unit_feature_helpers import (
+    _hostile_candidates,
+    allied_candidates_for_owner,
+    alliance_perspective_groups,
+    counts_for_combat_hp_reward,
+    first_unit,
+    first_unit_of_type,
     is_force_melee_unit,
-    is_temporary_attrition_unit,
+    issue_aoe_at_point,
     issue_attack_at_point,
+    perspective_unit_groups,
 )
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+
 
 class CaptureTheFlagBot(BotAI):
     """
@@ -51,6 +58,11 @@ class CaptureTheFlagBot(BotAI):
         self.prev_own_units_health = {1: 0.0, 2: 0.0}
         self.prev_enemy_unit_count: Dict[int, int] = {1: 0, 2: 0}
         self.prev_own_unit_count: Dict[int, int] = {1: 0, 2: 0}
+        # tag → (hp+shield, last position) for defender-zone combat credit
+        self.prev_enemy_combat_snapshot: Dict[int, Dict[int, Tuple[float, Optional[Point2]]]] = {
+            1: {},
+            2: {},
+        }
         self.prev_dist_to_pylon = {1: None, 2: None}
         self.prev_dist_per_unit: Dict[int, Optional[float]] = {}
         # Squad CoM distance tracking: (player_id, role) → float distance
@@ -98,6 +110,7 @@ class CaptureTheFlagBot(BotAI):
         self.prev_own_units_health = {1: 0.0, 2: 0.0}
         self.prev_enemy_unit_count: Dict[int, int] = {1: 0, 2: 0}
         self.prev_own_unit_count: Dict[int, int] = {1: 0, 2: 0}
+        self.prev_enemy_combat_snapshot = {1: {}, 2: {}}
         self.prev_dist_to_pylon = {1: None, 2: None}
         self.prev_dist_per_unit = {}
         self.unit_command_map = {}
@@ -110,6 +123,53 @@ class CaptureTheFlagBot(BotAI):
         self.last_action_was_move_by_unit = {}
         self.cached_observation = None
         self.frame_count = 0
+
+    def prime_combat_reward_baselines(self) -> None:
+        """Snapshot army/pylon HP after spawn so the first physics step is not a fake heal."""
+        for p_id in (1, 2):
+            own_units, enemy_units, own_structs, enemy_structs = self._perspective_unit_groups(
+                p_id
+            )
+            self.prev_own_units_health[p_id] = self._mobile_combat_hp_sum(
+                own_units, include_filter=counts_for_combat_hp_reward
+            )
+            self.prev_enemy_units_health[p_id] = self._mobile_combat_hp_sum(
+                enemy_units, include_filter=counts_for_combat_hp_reward
+            )
+            self.prev_own_unit_count[p_id] = self._mobile_combat_count(
+                own_units, include_filter=counts_for_combat_hp_reward
+            )
+            self.prev_enemy_unit_count[p_id] = self._mobile_combat_count(
+                enemy_units, include_filter=counts_for_combat_hp_reward
+            )
+            self.prev_enemy_combat_snapshot[p_id] = self._combat_snapshot(
+                enemy_units, include_filter=counts_for_combat_hp_reward
+            )
+
+            own_pylon = self._first_pylon(own_structs)
+            enemy_pylon = self._first_pylon(enemy_structs)
+            if own_pylon is None or enemy_pylon is None:
+                _, _, bucket_own, bucket_en = self._alliance_perspective_groups(p_id)
+                if own_pylon is None:
+                    own_pylon = self._first_pylon(bucket_own)
+                if enemy_pylon is None:
+                    enemy_pylon = self._first_pylon(bucket_en)
+            own_hp = 0.0
+            enemy_hp = 0.0
+            if own_pylon is not None:
+                own_hp = float(own_pylon.health) + float(getattr(own_pylon, "shield", 0.0) or 0.0)
+            if enemy_pylon is not None:
+                enemy_hp = float(enemy_pylon.health) + float(
+                    getattr(enemy_pylon, "shield", 0.0) or 0.0
+                )
+            if p_id == 1:
+                self.prev_pylon_health[1] = own_hp
+                if enemy_pylon is not None:
+                    self.prev_pylon_health[2] = enemy_hp
+            else:
+                self.prev_pylon_health[2] = own_hp
+                if enemy_pylon is not None:
+                    self.prev_pylon_health[1] = enemy_hp
 
     def _get_zero_observation(self) -> Any:
         """Shape-correct empty observation (dict for universal, array for original)."""
@@ -155,21 +215,13 @@ class CaptureTheFlagBot(BotAI):
              logger.warning(f"Bot {self.player_id}: game_info is missing. Returning zero observation.")
              return self._get_zero_observation()
 
-        # Flip units based on perspective
-        if p_id == self.player_id:
-            units = self.units
-            enemy_units = self.enemy_units
-            structures = self.structures
-            enemy_structures = self.enemy_structures
-        else:
-            # God-Mode: Flip perspectives
-            units = self.enemy_units
-            enemy_units = self.units
-            structures = self.enemy_structures
-            enemy_structures = self.structures
+        # Owner-id first (god-mode mixes alliance buckets). Trainee may be P2.
+        units, enemy_units, structures, enemy_structures = self._perspective_unit_groups(
+            p_id
+        )
 
-        enemy_pylon = enemy_structures(UnitTypeId.PYLON).first if enemy_structures(UnitTypeId.PYLON).exists else None
-        
+        enemy_pylon = self._first_pylon(enemy_structures)
+
         # Persistent enemy-pylon position tracking (fog-of-war fallback)
         if enemy_pylon:
             self.enemy_pylon_pos[p_id] = enemy_pylon.position
@@ -183,10 +235,11 @@ class CaptureTheFlagBot(BotAI):
                     selected_units = [active_unit]
             except Exception:
                 pass
-        if active_unit is None and units.exists:
-            active_unit = units.first
-            selected_units = [active_unit]
-            self.active_unit_tag = active_unit.tag
+        if active_unit is None:
+            active_unit = first_unit(units)
+            if active_unit is not None:
+                selected_units = [active_unit]
+                self.active_unit_tag = active_unit.tag
 
         # command_target: use per-unit spawn-time objective when available.
         # For attackers this is the enemy defender's pylon in their arena;
@@ -197,7 +250,7 @@ class CaptureTheFlagBot(BotAI):
         else:
             unit_role = self.unit_command_map.get(self.active_unit_tag) if self.active_unit_tag else None
             if unit_role == "defend":
-                own_pylon = structures(UnitTypeId.PYLON).first if structures(UnitTypeId.PYLON).exists else None
+                own_pylon = self._first_pylon(structures)
                 target_pos = own_pylon.position if own_pylon else None
             else:
                 target_pos = self.enemy_pylon_pos[p_id]
@@ -232,18 +285,8 @@ class CaptureTheFlagBot(BotAI):
                 raw_obs, player_id=p_id, active_unit=active_unit
             )
             obs = processed["active_agent"]
-
-            # Spatial perspective flip for player 2.
-            # Universal obs is a dict {map, command, tactical}; original is a plain array.
-            if p_id == 2:
-                if isinstance(obs, dict):
-                    obs = {
-                        k: PerspectiveTransformer.flip_observation(v) if v.ndim >= 2 else v
-                        for k, v in obs.items()
-                    }
-                else:
-                    obs = PerspectiveTransformer.flip_observation(obs)
-
+            # Perspective is ownership only (allied vs enemy). Maps stay in
+            # world coordinates so a P2 trainee matches the pre-leak-fix P1 seat.
             self.cached_observation = obs
         except Exception as e:
             if self.cached_observation is not None:
@@ -322,11 +365,10 @@ class CaptureTheFlagBot(BotAI):
                 # makes MaskableCategorical fall back to uniform 50/50 sampling.
                 mask[i * 2] = True
                 mask[i * 2 + 1] = False
-        n_configured = min(
-            FIXED_UNIVERSAL_COMMAND_DIM,
-            len(self.training_conf.get("action_heads") or [])
-            + len(self.training_conf.get("categorical_heads") or []),
-        )
+        action_heads = list(self.training_conf.get("action_heads") or [])
+        categorical_heads = list(self.training_conf.get("categorical_heads") or [])
+        configured = action_heads + categorical_heads
+        n_configured = min(FIXED_UNIVERSAL_COMMAND_DIM, len(configured))
         cmd_start = MAX_SQUAD_UNITS * 2
         mask[cmd_start : cmd_start + FIXED_UNIVERSAL_COMMAND_DIM] = False
         mask[cmd_start : cmd_start + n_configured] = True
@@ -341,7 +383,12 @@ class CaptureTheFlagBot(BotAI):
         spatial_idx: int,
         perspective_player_id: int,
     ) -> None:
-        """Apply one squad group order to selected units (shared world target)."""
+        """Apply one squad group order to selected units (shared world target).
+
+        ``perspective_player_id`` is the env's SC2 owner for this order (trainee
+        or opponent). Spatial cells are world-frame for every owner: no 180°
+        un-rotation. Targeting uses each caster's ``owner_id``.
+        """
         if not self.agent_system or "active_agent" not in self.agent_system.unit_agents:
             return
 
@@ -387,17 +434,13 @@ class CaptureTheFlagBot(BotAI):
         if is_categorical:
             return  # Unknown categorical head — no-op
 
-        is_opponent = perspective_player_id != self.player_id
-        if is_opponent:
-            _gs = 32
-            row, col = divmod(int(spatial_idx), _gs)
-            spatial_idx = ((_gs - 1 - row) * _gs) + (_gs - 1 - col)
-
         decode_unit = anchor
         world_x, world_y = agent.convert_spatial_action_to_world(
             head_name, int(spatial_idx), active_unit=decode_unit
         )
         target = Point2((float(world_x), float(world_y)))
+        if selected_tags and hasattr(agent, "record_debug_click"):
+            agent.record_debug_click(target, decode_unit)
 
         for unit_tag in selected_tags:
             unit = self.all_units.find_by_tag(unit_tag)
@@ -408,6 +451,10 @@ class CaptureTheFlagBot(BotAI):
                 continue
             if "heal" in head_name:
                 self._issue_heal_at_point(unit, target)
+                self._unit_last_order[int(unit_tag)] = (head_name, target)
+                self.last_action_was_move_by_unit[int(unit_tag)] = False
+            elif "aoe" in head_name:
+                issue_aoe_at_point(self, unit, target)
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
                 self.last_action_was_move_by_unit[int(unit_tag)] = False
             elif "unload" in head_name:
@@ -429,9 +476,7 @@ class CaptureTheFlagBot(BotAI):
 
     def _allied_units_for_owner(self, owner_id: int) -> List[Unit]:
         """Allied units visible from God-Mode for a given owner."""
-        if owner_id == self.player_id:
-            return list(self.units)
-        return list(self.enemy_units)
+        return allied_candidates_for_owner(self, int(owner_id))
 
     @staticmethod
     def _unit_in_spatial_cell(unit: Unit, target: Point2, cell_half: float = 0.5) -> bool:
@@ -615,12 +660,6 @@ class CaptureTheFlagBot(BotAI):
 
         arch = self.training_conf.get("agent_architecture", "original")
 
-        # The observation for the opponent (player 2) is perspective-flipped 180°
-        # before being presented to the policy.  The policy therefore generates a
-        # spatial action index that is in *flipped* coordinates.  We must un-flip
-        # it back to real-world coordinates before issuing the SC2 order.
-        is_opponent_unit = unit.owner_id != self.player_id
-
         agent = self.agent_system.unit_agents["active_agent"]
         # Spatial decode reads last_game_info; ensure it is set even if obs processing
         # failed earlier this step (otherwise every order targets world 0,0 → map corner).
@@ -653,12 +692,6 @@ class CaptureTheFlagBot(BotAI):
 
             head_name = action_heads[head_idx]
 
-            if is_opponent_unit:
-                # Un-flip: (row, col) → (31-row, 31-col) in a 32×32 grid
-                _gs = 32
-                _row, _col = divmod(spatial_idx, _gs)
-                spatial_idx = ((_gs - 1 - _row) * _gs) + (_gs - 1 - _col)
-
             world_x, world_y = agent.convert_spatial_action_to_world(
                 head_name, spatial_idx, active_unit=unit
             )
@@ -666,6 +699,10 @@ class CaptureTheFlagBot(BotAI):
 
             if "heal" in head_name:
                 self._issue_heal_at_point(unit, target)
+                self._unit_last_order[unit_tag] = (head_name, target)
+                self.last_action_was_move_by_unit[unit_tag] = False
+            elif "aoe" in head_name:
+                issue_aoe_at_point(self, unit, target)
                 self._unit_last_order[unit_tag] = (head_name, target)
                 self.last_action_was_move_by_unit[unit_tag] = False
             elif "unload" in head_name:
@@ -686,9 +723,6 @@ class CaptureTheFlagBot(BotAI):
                 self.last_action_was_move_by_unit[unit_tag] = True
         else:
             # Original: flat integer action on grid_size×grid_size grid
-            if is_opponent_unit:
-                action = PerspectiveTransformer.flip_action_idx(action, self.grid_size)
-
             grid_area = self.grid_size * self.grid_size
             is_attack = False
             spatial_idx = action
@@ -710,11 +744,7 @@ class CaptureTheFlagBot(BotAI):
 
     def _enemies_for_unit(self, unit: Unit) -> List[Unit]:
         """Return hostile mobile units for ``unit`` in God-Mode (bot.player_id is always P1)."""
-        if unit.owner_id == self.player_id:
-            candidates = self.enemy_units
-        else:
-            candidates = self.units
-        return [u for u in candidates if not u.is_structure]
+        return [u for u in _hostile_candidates(self, unit) if not u.is_structure]
 
     def _is_enemy_in_tactical_fovea(self, focal: Unit, enemy: Unit) -> bool:
         """True if ``enemy`` lies inside the 32×32 tactical crop centered on ``focal``."""
@@ -810,11 +840,16 @@ class CaptureTheFlagBot(BotAI):
             return self.unit_target_map[unit.tag]
         if fallback_pylon_pos is not None:
             return fallback_pylon_pos
+        owner = int(getattr(unit, "owner_id", 0) or 0)
+        if owner in (1, 2):
+            allies = allied_candidates_for_owner(self, owner)
+            pylon = first_unit_of_type(allies, UnitTypeId.PYLON)
+            return pylon.position if pylon is not None else None
         if unit.owner_id == self.player_id:
             structs = self.structures
         else:
             structs = self.enemy_structures
-        pylon = structs(UnitTypeId.PYLON).first if structs(UnitTypeId.PYLON).exists else None
+        pylon = first_unit_of_type(structs, UnitTypeId.PYLON)
         return pylon.position if pylon is not None else None
 
     def record_pre_action_retreat_state(self, unit_tag: int) -> None:
@@ -1000,6 +1035,107 @@ class CaptureTheFlagBot(BotAI):
             )
         return total
 
+    @classmethod
+    def _combat_snapshot(
+        cls, units: Iterable, *, include_filter=None
+    ) -> Dict[int, Tuple[float, Optional[Point2]]]:
+        """Per-tag HP and world position, using the transport position for cargo."""
+        snap: Dict[int, Tuple[float, Optional[Point2]]] = {}
+        seen = set()
+        for u in units or []:
+            if u is None:
+                continue
+            if include_filter is not None:
+                if not include_filter(u):
+                    continue
+            elif getattr(u, "is_structure", False):
+                continue
+            carrier_pos = getattr(u, "position", None)
+            tag = getattr(u, "tag", None)
+            if tag is not None and tag not in seen:
+                seen.add(tag)
+                hp = float(getattr(u, "health", 0.0) or 0.0) + float(
+                    getattr(u, "shield", 0.0) or 0.0
+                )
+                snap[tag] = (hp, carrier_pos)
+            for p in getattr(u, "passengers", None) or []:
+                if p is None:
+                    continue
+                if include_filter is not None and not include_filter(p):
+                    continue
+                ptag = getattr(p, "tag", None)
+                if ptag is not None and ptag not in seen:
+                    seen.add(ptag)
+                    php = float(getattr(p, "health", 0.0) or 0.0) + float(
+                        getattr(p, "shield", 0.0) or 0.0
+                    )
+                    snap[ptag] = (php, carrier_pos)
+        return snap
+
+    @staticmethod
+    def _is_in_defender_zone(
+        pos: Optional[Point2], pylon_pos: Optional[Point2], zone_radius: float
+    ) -> bool:
+        if pos is None or pylon_pos is None:
+            return False
+        return math.hypot(
+            float(pos.x) - float(pylon_pos.x),
+            float(pos.y) - float(pylon_pos.y),
+        ) <= zone_radius + 1e-3
+
+    def _defender_zone_anchor(
+        self, squad_tags: List[int], fallback_pylon_pos: Optional[Point2]
+    ) -> Optional[Point2]:
+        for tag in squad_tags:
+            if tag in self.unit_target_map:
+                return self.unit_target_map[tag]
+        return fallback_pylon_pos
+
+    def _defender_zone_credited_enemy_combat(
+        self,
+        p_id: int,
+        curr_snap: Dict[int, Tuple[float, Optional[Point2]]],
+        pylon_pos: Optional[Point2],
+        zone_radius: float,
+    ) -> Tuple[float, int]:
+        """HP lost and kills among enemies last seen inside the defender zone."""
+        prev_snap = self.prev_enemy_combat_snapshot.get(p_id) or {}
+        hp_delta = 0.0
+        kills = 0
+        for tag, (prev_hp, prev_pos) in prev_snap.items():
+            if tag in curr_snap:
+                curr_hp, curr_pos = curr_snap[tag]
+                lost = prev_hp - curr_hp
+                if lost <= 0:
+                    continue
+                pos = curr_pos if curr_pos is not None else prev_pos
+                if self._is_in_defender_zone(pos, pylon_pos, zone_radius):
+                    hp_delta += lost
+            elif self._is_in_defender_zone(prev_pos, pylon_pos, zone_radius):
+                if prev_hp > 0:
+                    hp_delta += prev_hp
+                kills += 1
+        return hp_delta, kills
+
+    @staticmethod
+    def _squad_is_defend(squad_tags: List[int], unit_command_map: Dict[int, str]) -> bool:
+        return bool(squad_tags) and all(
+            unit_command_map.get(tag, "attack") == "defend" for tag in squad_tags
+        )
+
+    def _alliance_perspective_groups(self, p_id: int) -> Tuple[Any, Any, Any, Any]:
+        """``(own_units, enemy_units, own_structs, enemy_structs)`` from alliance buckets."""
+        return alliance_perspective_groups(self, p_id)
+
+    def _perspective_unit_groups(self, p_id: int) -> Tuple[Any, Any, Any, Any]:
+        """Own/enemy mobiles and structures for *p_id* (owner-id, then alliance)."""
+        return perspective_unit_groups(self, p_id)
+
+    @staticmethod
+    def _first_pylon(structs: Any) -> Optional[Any]:
+        """First pylon in a Units collection, list, or owner-filtered group."""
+        return first_unit_of_type(structs, UnitTypeId.PYLON)
+
     def calculate_squad_step_reward(
         self,
         squad_tags: List[int],
@@ -1011,34 +1147,32 @@ class CaptureTheFlagBot(BotAI):
         Global signals (pylon/army HP, attacker CoM) are applied once.
         Per-unit shaping (cooldown retreat, defender zone, step penalty) is summed
         over ``squad_tags``.
+
+        Defend-role squads only receive ``damage_reward`` / ``kill_reward`` for
+        enemies inside ``defender_zone_radius``. Own ``damage_penalty`` /
+        ``kill_penalty`` still apply when defenders are outside the zone.
         """
         p_id = perspective_player_id if perspective_player_id is not None else self.player_id
 
         reward = 0.0
         r_conf = self.training_conf.get("rewards", {})
-        
-        # Determine Perspective-Correct unit/structure groups
-        if p_id == self.player_id:
-            own_structs = self.structures
-            enemy_structs = self.enemy_structures
-            own_units = self.units
-            enemy_units = self.enemy_units
-        else:
-            # God-Mode Perspective Flip
-            own_structs = self.enemy_structures
-            enemy_structs = self.structures
-            own_units = self.enemy_units
-            enemy_units = self.units
 
-        pylon_type = UnitTypeId.PYLON
-        
-        # Resolve Enemy Pylon State
-        enemy_pylon = enemy_structs(pylon_type).first if enemy_structs(pylon_type).exists else None
-        
+        own_units, enemy_units, own_structs, enemy_structs = self._perspective_unit_groups(
+            p_id
+        )
+        own_pylon = self._first_pylon(own_structs)
+        enemy_pylon = self._first_pylon(enemy_structs)
+        if own_pylon is None or enemy_pylon is None:
+            _, _, bucket_own_s, bucket_en_s = self._alliance_perspective_groups(p_id)
+            if own_pylon is None:
+                own_pylon = self._first_pylon(bucket_own_s)
+            if enemy_pylon is None:
+                enemy_pylon = self._first_pylon(bucket_en_s)
+
         # Update persistent position if currently visible
         if enemy_pylon:
             self.enemy_pylon_pos[p_id] = enemy_pylon.position
-            
+
         target_pos = self.enemy_pylon_pos.get(p_id)
 
         # 1. Pylon Damage Rewards (Terminal/Heavy signal)
@@ -1059,7 +1193,7 @@ class CaptureTheFlagBot(BotAI):
             if not pylon_unit: return 0.0
             return pylon_unit.health + pylon_unit.shield
 
-        own_pylon = own_structs(pylon_type).first if own_structs(pylon_type).exists else None
+        own_pylon_pos = own_pylon.position if own_pylon is not None else None
         
         own_pylon_hp = get_own_hp(own_pylon)
         
@@ -1095,35 +1229,68 @@ class CaptureTheFlagBot(BotAI):
             r_conf, squad_is_melee=squad_is_melee
         )
 
-        # Own attrition ignores timed summons (broodlings, locusts, …): they expire
-        # on their own and must not inflate damage_penalty / kill_penalty.
-        def _counts_for_own_attrition(u) -> bool:
-            return (not u.is_structure) and (not is_temporary_attrition_unit(u))
+        # Permanent-army HP only (skip timed summons' bodies). Shots from
+        # Interceptors still count: they change permanent units' HP, which is
+        # what this ledger tracks. We only ignore Interceptor launch/recall/
+        # despawn as fake damage_reward / kill_reward.
+        curr_enemy_hp = self._mobile_combat_hp_sum(
+            enemy_units, include_filter=counts_for_combat_hp_reward
+        )
+        curr_enemy_count = self._mobile_combat_count(
+            enemy_units, include_filter=counts_for_combat_hp_reward
+        )
+        curr_enemy_snap = self._combat_snapshot(
+            enemy_units, include_filter=counts_for_combat_hp_reward
+        )
+        kill_reward_val = float(r_conf.get("kill_reward", 0.0))
+        kill_penalty_val = float(r_conf.get("kill_penalty", 0.0))
+        squad_is_defend = self._squad_is_defend(squad_tags, self.unit_command_map)
 
-        curr_enemy_hp = self._mobile_combat_hp_sum(enemy_units)
-        if curr_enemy_hp < self.prev_enemy_units_health[p_id]:
-            reward += (self.prev_enemy_units_health[p_id] - curr_enemy_hp) * damage_reward_coeff
+        # Defend role: only credit enemy damage/kills inside defender_zone_radius.
+        # Attack role keeps the global HP/count delta. Own attrition is never gated.
+        if squad_is_defend:
+            zone_radius = float(r_conf.get("defender_zone_radius", 10.0))
+            zone_anchor = self._defender_zone_anchor(squad_tags, own_pylon_pos)
+            zoned_hp_delta, zoned_kills = self._defender_zone_credited_enemy_combat(
+                p_id, curr_enemy_snap, zone_anchor, zone_radius
+            )
+            if zoned_hp_delta > 0:
+                reward += zoned_hp_delta * damage_reward_coeff
+            if kill_reward_val != 0.0 and zoned_kills > 0:
+                reward += kill_reward_val * zoned_kills
+        else:
+            if curr_enemy_hp < self.prev_enemy_units_health[p_id]:
+                reward += (self.prev_enemy_units_health[p_id] - curr_enemy_hp) * damage_reward_coeff
+            if kill_reward_val != 0.0 and curr_enemy_count < self.prev_enemy_unit_count[p_id]:
+                reward += kill_reward_val * (self.prev_enemy_unit_count[p_id] - curr_enemy_count)
+
         self.prev_enemy_units_health[p_id] = curr_enemy_hp
+        self.prev_enemy_unit_count[p_id] = curr_enemy_count
+        self.prev_enemy_combat_snapshot[p_id] = curr_enemy_snap
 
-        curr_own_hp = self._mobile_combat_hp_sum(own_units, include_filter=_counts_for_own_attrition)
+        curr_own_hp = self._mobile_combat_hp_sum(
+            own_units, include_filter=counts_for_combat_hp_reward
+        )
         prev_own_hp = self.prev_own_units_health[p_id]
         heal_coeff = float(r_conf.get("heal_reward", 0.0))
-        if heal_coeff != 0.0 and curr_own_hp > prev_own_hp:
+        # prev_own == 0 after reset_episode_state is "no baseline yet", not an
+        # empty army. Crediting that delta as heal pays ~0.1 × full army HP on
+        # the first step of every episode and blows up return scale / EV.
+        own_baseline_ready = (
+            float(self.prev_own_unit_count.get(p_id, 0) or 0) > 0 or prev_own_hp > 0.0
+        )
+        if heal_coeff != 0.0 and own_baseline_ready and curr_own_hp > prev_own_hp:
             reward += (curr_own_hp - prev_own_hp) * heal_coeff
-        if curr_own_hp < prev_own_hp:
+        if own_baseline_ready and curr_own_hp < prev_own_hp:
             reward -= (prev_own_hp - curr_own_hp) * damage_penalty_coeff
         self.prev_own_units_health[p_id] = curr_own_hp
 
         # Kill bonuses: flat per-unit reward/penalty on top of continuous HP shaping.
         # Counts include embarked passengers so transport deaths credit cargo and
         # load/unload alone does not look like a kill.
-        kill_reward_val = float(r_conf.get("kill_reward", 0.0))
-        kill_penalty_val = float(r_conf.get("kill_penalty", 0.0))
-        curr_enemy_count = self._mobile_combat_count(enemy_units)
-        if kill_reward_val != 0.0 and curr_enemy_count < self.prev_enemy_unit_count[p_id]:
-            reward += kill_reward_val * (self.prev_enemy_unit_count[p_id] - curr_enemy_count)
-        self.prev_enemy_unit_count[p_id] = curr_enemy_count
-        curr_own_count = self._mobile_combat_count(own_units, include_filter=_counts_for_own_attrition)
+        curr_own_count = self._mobile_combat_count(
+            own_units, include_filter=counts_for_combat_hp_reward
+        )
         if kill_penalty_val != 0.0 and curr_own_count < self.prev_own_unit_count[p_id]:
             reward += kill_penalty_val * (self.prev_own_unit_count[p_id] - curr_own_count)
         self.prev_own_unit_count[p_id] = curr_own_count
@@ -1159,7 +1326,6 @@ class CaptureTheFlagBot(BotAI):
             self.prev_dist_per_squad.pop((p_id, "defend"), None)
 
         # 3b–4. Per-unit cooldown/zone shaping; step penalty once per physics step.
-        own_pylon_pos = own_pylon.position if own_pylon is not None else None
         mobile_enemies = mobile_enemies_for_melee
         saved_active = self.active_unit_tag
         squad_is_attack = (

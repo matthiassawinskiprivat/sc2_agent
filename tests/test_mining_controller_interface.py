@@ -10,10 +10,17 @@ from src.runtime.mining_controller import (
 from sc2.position import Point2
 
 
-def test_noop_mining_controller():
-    bot = MagicMock()
-    ctrl = NoOpMiningController()
-    asyncio.run(ctrl.step(bot, {1, 2, 3}))
+def test_order_target_tag_ignores_point2():
+    from sc2.position import Point2
+    from src.runtime.mining_controller import _order_target_tag
+
+    w = MagicMock()
+    w.order_target = Point2((1.0, 2.0))
+    assert _order_target_tag(w) is None
+    w.order_target = 55
+    assert _order_target_tag(w) == 55
+    w.order_target = None
+    assert _order_target_tag(w) is None
 
 
 def test_scripted_mining_controller_uses_bot_do():
@@ -130,3 +137,85 @@ def test_scripted_mining_skips_raw_geyser_without_extractor():
 
     worker.gather.assert_called_once_with(mineral)
     bot.do.assert_called_once_with("g")
+
+
+def test_scripted_mining_assigns_idle_workers_to_ready_extractor():
+    bot = MagicMock()
+    bot._gas_worker_quota = 3
+    worker = MagicMock()
+    worker.tag = 1
+    worker.is_idle = True
+    worker.is_gathering = False
+    worker.is_carrying_minerals = False
+    worker.is_carrying_vespene = False
+    worker.orders = []
+    worker.order_target = None
+    worker.distance_to = lambda p: 1.0
+    worker.gather = MagicMock(return_value="gas")
+
+    mineral = MagicMock()
+    mineral.tag = 99
+    mineral.distance_to = lambda p: 1.0
+    extractor = MagicMock()
+    extractor.tag = 55
+    extractor.distance_to = lambda p: 1.0
+
+    bot.workers = [worker]
+    bot.mineral_field = [mineral]
+    bot.vespene_geyser = []
+    bot.townhalls = MagicMock()
+    bot.townhalls.exists = False
+    bot._spawn_hatchery_pos = Point2((0.0, 0.0))
+    bot.do = MagicMock()
+
+    ready = MagicMock()
+    ready.exists = True
+    ready.__iter__ = lambda self: iter([extractor])
+    structures = MagicMock()
+    structures.ready = ready
+    bot.structures = MagicMock(return_value=structures)
+
+    ctrl = ScriptedMiningController()
+    asyncio.run(ctrl.step(bot, {1}))
+    worker.gather.assert_called_once_with(extractor)
+    bot.do.assert_called_once_with("gas")
+
+
+def test_scripted_mining_skips_extractor_without_gas_quota():
+    bot = MagicMock()
+    bot._gas_worker_quota = 0
+    worker = MagicMock()
+    worker.tag = 1
+    worker.is_idle = True
+    worker.is_gathering = False
+    worker.is_carrying_minerals = False
+    worker.is_carrying_vespene = False
+    worker.orders = []
+    worker.order_target = None
+    worker.distance_to = lambda p: 1.0
+    worker.gather = MagicMock(return_value="g")
+
+    mineral = MagicMock()
+    mineral.tag = 99
+    mineral.distance_to = lambda p: 1.0
+    extractor = MagicMock()
+    extractor.tag = 55
+
+    bot.workers = [worker]
+    bot.mineral_field = [mineral]
+    bot.vespene_geyser = []
+    bot.townhalls = MagicMock()
+    bot.townhalls.exists = False
+    bot._spawn_hatchery_pos = Point2((0.0, 0.0))
+    bot.do = MagicMock()
+
+    ready = MagicMock()
+    ready.exists = True
+    ready.__iter__ = lambda self: iter([extractor])
+    structures = MagicMock()
+    structures.ready = ready
+    bot.structures = MagicMock(return_value=structures)
+
+    ctrl = ScriptedMiningController()
+    asyncio.run(ctrl.step(bot, {1}))
+    worker.gather.assert_called_once_with(mineral)
