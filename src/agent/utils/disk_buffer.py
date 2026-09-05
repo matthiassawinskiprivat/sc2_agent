@@ -18,47 +18,77 @@ def is_disk_offloaded_obs_key(key: str) -> bool:
     return "map" in key or "tactical" in key or key == "local_map"
 
 
+DEFAULT_RNN_MAX_SEQ_LEN = 32
+
+
+def canonical_recurrent_n_seq(
+    batch_size: Optional[int],
+    max_seq_len: int = DEFAULT_RNN_MAX_SEQ_LEN,
+) -> Optional[int]:
+    """How many RNN sequences fit in ``batch_size`` after padding each to ``max_seq_len``.
+
+    ``None`` when ``batch_size`` is unset (one unpadded super-batch).
+    """
+    if not batch_size:
+        return None
+    return max(1, int(batch_size) // int(max_seq_len))
+
+
+def canonical_recurrent_batch_shape(
+    batch_size: Optional[int],
+    max_seq_len: int = DEFAULT_RNN_MAX_SEQ_LEN,
+) -> Tuple[int, int]:
+    """Fixed ``(n_seq, seq_len)`` GPU layout for a recurrent PPO minibatch."""
+    n_seq = canonical_recurrent_n_seq(batch_size, max_seq_len)
+    return (n_seq if n_seq is not None else 1, int(max_seq_len))
+
+
 def pack_recurrent_sequence_batches(
     sequence_spans: list[tuple[int, int, int]],
     batch_size: Optional[int],
+    max_seq_len: int = DEFAULT_RNN_MAX_SEQ_LEN,
 ) -> list[list[tuple[int, int, int]]]:
     """
-    Group RNN spans into minibatches whose *padded* timestep count fits ``batch_size``.
+    Group RNN spans into minibatches of at most ``batch_size // max_seq_len`` sequences.
 
-    ``_get_samples_by_sequences`` pads every span to the longest span in the batch, so
-    GPU tensors are ``n_seq * max_len`` — not the sum of unpadded lengths. Packing by
-    unpadded sum mixed one long span with many short ones (episode / ``policy_active``
-    cuts) and uploaded thousands of 128×128 maps on the first PPO update.
+    GPU tensors are always padded to ``(n_seq_pad, max_seq_len)`` (see
+    ``_get_samples_by_sequences``), so packing by the *in-batch* max length would
+    still produce a new CUDA allocation size whenever episode cuts change. A
+    fixed sequence cap keeps every minibatch on the same block size.
+
+    A single span longer than ``batch_size`` is still kept (one sequence of
+    ``max_seq_len``), matching the previous "do not drop the long span" rule.
     """
     if not sequence_spans:
         return []
     if not batch_size:
         return [list(sequence_spans)]
 
-    limit = int(batch_size)
+    cap = canonical_recurrent_n_seq(batch_size, max_seq_len)
+    assert cap is not None
     batches: list[list[tuple[int, int, int]]] = []
     current: list[tuple[int, int, int]] = []
-    current_max_len = 0
     for span in sequence_spans:
         span_len = int(span[2])
         if span_len <= 0:
             continue
-        if current and (len(current) + 1) * max(current_max_len, span_len) > limit:
+        if current and len(current) >= cap:
             batches.append(current)
             current = []
-            current_max_len = 0
         current.append(span)
-        current_max_len = max(current_max_len, span_len)
     if current:
         batches.append(current)
     return batches
 
 
-def padded_sequence_batch_timesteps(batch_spans: list[tuple[int, int, int]]) -> int:
-    """Timesteps after pad-to-max-len (matches ``_get_samples_by_sequences``)."""
+def padded_sequence_batch_timesteps(
+    batch_spans: list[tuple[int, int, int]],
+    max_seq_len: int = DEFAULT_RNN_MAX_SEQ_LEN,
+) -> int:
+    """Timesteps after pad-to-``max_seq_len`` (matches ``_get_samples_by_sequences``)."""
     if not batch_spans:
         return 0
-    return len(batch_spans) * max(int(span[2]) for span in batch_spans)
+    return len(batch_spans) * int(max_seq_len)
 
 
 def build_recurrent_sequence_spans(
@@ -360,7 +390,7 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
 
         assert self.full, "Buffer must be full"
 
-        max_seq_len = 32
+        max_seq_len = DEFAULT_RNN_MAX_SEQ_LEN
         filled_steps = int(self.pos) if self.pos > 0 else self.buffer_size
         sequence_spans = build_recurrent_sequence_spans(
             self.n_envs,
@@ -374,10 +404,17 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
         if not sequence_spans:
             return
 
-        batches = pack_recurrent_sequence_batches(sequence_spans, batch_size)
+        batches = pack_recurrent_sequence_batches(
+            sequence_spans, batch_size, max_seq_len=max_seq_len
+        )
+        pad_n_seq = canonical_recurrent_n_seq(batch_size, max_seq_len)
 
         for batch_spans in batches:
-            yield self._get_samples_by_sequences(batch_spans)
+            yield self._get_samples_by_sequences(
+                batch_spans,
+                pad_seq_len=max_seq_len,
+                pad_n_seq=pad_n_seq,
+            )
 
     def _active_flat_indices(self, filled: int) -> np.ndarray:
         pa = getattr(self, "policy_active", None)
@@ -426,10 +463,17 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
             )
 
     def _get_samples_by_sequences(
-        self, batch_spans: list[tuple[int, int, int]]
+        self,
+        batch_spans: list[tuple[int, int, int]],
+        pad_seq_len: int = DEFAULT_RNN_MAX_SEQ_LEN,
+        pad_n_seq: Optional[int] = None,
     ) -> MaskableRecurrentRolloutBufferSamples:
-        """Collect and pad a batch of variable-length RNN sequences."""
-        seq_len = max(length for _, _, length in batch_spans)
+        """Collect RNN sequences and pad to a canonical ``(n_seq, seq_len)``.
+
+        Dummy sequences (mask all-zero) fill ``pad_n_seq`` so every minibatch
+        uploads the same GPU tensor shapes. Loss already ignores ``mask==0``.
+        """
+        seq_len = int(pad_seq_len)
 
         obs_batch = {k: [] for k in self.observation_space.keys()}
         act_batch, val_batch, logp_batch, adv_batch, ret_batch, start_batch, mask_batch = [], [], [], [], [], [], []
@@ -471,6 +515,32 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
             pa = get_and_pad(self.policy_active)
             mask_batch.append(m * pa)
 
+        if pad_n_seq is not None and len(act_batch) < pad_n_seq:
+            n_pad = int(pad_n_seq) - len(act_batch)
+            n_layers = int(self.hidden_states_pi.shape[1])
+            h_zeros = np.zeros((n_layers, self.hidden_size), dtype=np.float32)
+            for _ in range(n_pad):
+                for k, space in self.observation_space.spaces.items():
+                    obs_batch[k].append(
+                        np.zeros((seq_len, *space.shape), dtype=np.float32)
+                    )
+                act_batch.append(
+                    np.zeros((seq_len, *self.actions.shape[2:]), dtype=self.actions.dtype)
+                )
+                val_batch.append(np.zeros(seq_len, dtype=np.float32))
+                logp_batch.append(np.zeros(seq_len, dtype=np.float32))
+                adv_batch.append(np.zeros(seq_len, dtype=np.float32))
+                ret_batch.append(np.zeros(seq_len, dtype=np.float32))
+                starts = np.zeros(seq_len, dtype=np.float32)
+                starts[0] = 1.0
+                start_batch.append(starts)
+                mask_batch.append(np.zeros(seq_len, dtype=np.float32))
+                h_pi_starts.append(h_zeros)
+                h_vf_starts.append(h_zeros)
+                if self.rnn_type == "lstm":
+                    c_pi_starts.append(h_zeros)
+                    c_vf_starts.append(h_zeros)
+
         def _np_stack_to_device(arr_list, flatten=True, *, key=None):
             # Spatial keys are huge (map is C×128×128). Stack/copy in small groups so
             # a CPU np.stack of the full minibatch does not coexist with the GPU copy.
@@ -511,6 +581,9 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
                 pad = np.ones((seq_len - actual_len, chunk.shape[-1]), dtype=bool)
                 chunk = np.concatenate([chunk, pad])
             m_list.append(chunk)
+        mask_width = int(self.action_masks.shape[-1])
+        while len(m_list) < len(act_batch):
+            m_list.append(np.ones((seq_len, mask_width), dtype=bool))
         batch_action_masks = to_t(m_list)
 
         return MaskableRecurrentRolloutBufferSamples(

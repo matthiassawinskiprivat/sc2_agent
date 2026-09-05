@@ -72,9 +72,22 @@ def test_heal_reward_credits_own_hp_gain(trainee_pid):
     bot = _make_bot(_HEAL_ZERO, trainee_pid=trainee_pid)
     unit = _make_unit(1, health=100.0, owner_id=trainee_pid)  # was 80 → +20 HP
     _wire(bot, [unit])
+    bot._heal_cast_tags.add(1)
 
     reward = bot.calculate_squad_step_reward([1], perspective_player_id=trainee_pid)
     assert abs(reward - 2.0) < 1e-6  # 20 * 0.1
+    assert bot._heal_cast_tags == set()
+
+
+@pytest.mark.parametrize("trainee_pid", [1, 2])
+def test_heal_reward_ignores_hp_gain_without_cast(trainee_pid):
+    """Battery ticks, Heal autocast, or Medivac attack-move HP are not heal_local."""
+    bot = _make_bot(_HEAL_ZERO, trainee_pid=trainee_pid)
+    unit = _make_unit(1, health=100.0, owner_id=trainee_pid)
+    _wire(bot, [unit])
+
+    reward = bot.calculate_squad_step_reward([1], perspective_player_id=trainee_pid)
+    assert abs(reward) < 1e-6
 
 
 @pytest.mark.parametrize("trainee_pid", [1, 2])
@@ -102,3 +115,62 @@ def test_heal_reward_absent_does_not_count(trainee_pid):
 
     reward = bot.calculate_squad_step_reward([1], perspective_player_id=trainee_pid)
     assert reward == 0.0
+
+
+def test_count_heal_casts_for_tags_only_selected():
+    bot = _make_bot(_HEAL_ZERO)
+    bot._heal_cast_tags = {1, 99}
+    bot._heal_attempt_tags = {1, 2, 99}
+    assert bot.count_heal_casts_for_tags([1, 2]) == 1
+    assert bot.count_heal_casts_for_tags([2]) == 0
+    assert bot.count_heal_casts_for_tags([]) == 0
+    assert bot.count_heal_attempts_for_tags([1, 2]) == 2
+    assert bot.count_heal_attempts_for_tags([3]) == 0
+
+
+def test_heal_cast_reward_pays_without_hp_gain():
+    """Incoming damage can wipe Transfuse HP; the cast itself must still credit."""
+    rewards = dict(_HEAL_ZERO)
+    rewards["heal_cast_reward"] = 2.0
+    bot = _make_bot(rewards)
+    unit = _make_unit(1, health=80.0)  # same as prev_own 80
+    _wire(bot, [unit])
+    bot._heal_cast_tags.add(1)
+
+    reward = bot.calculate_squad_step_reward([1], perspective_player_id=1)
+    assert abs(reward - 2.0) < 1e-6
+    assert bot._heal_cast_tags == set()
+    assert bot._heal_attempt_tags == set()
+
+
+def test_heal_cast_info_accumulates_episode_and_emits_on_done():
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env._episode_heal_casts = 0
+    env._episode_heal_attempts = 0
+    env.bot = _make_bot(_HEAL_ZERO)
+    env.bot._heal_cast_tags = {1, 2}
+    env.bot._heal_attempt_tags = {1, 2, 3}
+
+    casts, attempts = env._record_heal_metrics([1, 3])
+    assert casts == 1
+    assert attempts == 2
+    assert env._episode_heal_casts == 1
+    assert env._episode_heal_attempts == 2
+    mid = env._heal_cast_info(casts, done=False, truncated=False, step_attempts=attempts)
+    assert mid == {"heal_casts": 1, "heal_attempts": 2}
+    env.bot._heal_cast_tags = {3}
+    env.bot._heal_attempt_tags = {3}
+    casts2, attempts2 = env._record_heal_metrics([3])
+    assert env._episode_heal_casts == 2
+    assert env._episode_heal_attempts == 3
+    terminal = env._heal_cast_info(
+        casts2, done=True, truncated=False, step_attempts=attempts2
+    )
+    assert terminal == {
+        "heal_casts": 1,
+        "heal_attempts": 1,
+        "heal_casts_episode": 2,
+        "heal_attempts_episode": 3,
+    }

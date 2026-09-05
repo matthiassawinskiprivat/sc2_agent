@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Any, Tuple, List, Iterable
+from typing import Dict, Optional, Any, Tuple, List, Iterable, Set
 import math
 import numpy as np
 from sc2.bot_ai import BotAI
@@ -18,12 +18,27 @@ from src.utils.unit_feature_helpers import (
     counts_for_combat_hp_reward,
     first_unit,
     first_unit_of_type,
+    heal_click_cell_half,
+    heal_click_hits_unit,
+    HEAL_CAST_RANGE,
     is_force_melee_unit,
     issue_aoe_at_point,
     issue_attack_at_point,
     perspective_unit_groups,
 )
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+
+
+def _missing_health(unit: Any) -> float:
+    """HP missing from *unit*; mocks without numeric bars count as wounded."""
+    try:
+        health = float(getattr(unit, "health", 0.0) or 0.0)
+        health_max = float(getattr(unit, "health_max", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 1.0
+    if health_max <= 0.0:
+        return 1.0
+    return max(0.0, health_max - health)
 
 
 class CaptureTheFlagBot(BotAI):
@@ -35,6 +50,22 @@ class CaptureTheFlagBot(BotAI):
     _TACTICAL_FOVEA_MAX_DELTA: float = 17.0
     # Weapon range at or below this is treated as melee (no cooldown-kite shaping).
     _RANGED_WEAPON_RANGE_MIN: float = 1.5
+    # python-sc2 BotAI.time: Faster speed is 22.4 game loops per second.
+    _HEAL_GAME_LOOPS_PER_SECOND: float = 22.4
+    # Queen Transfuse cast is 1s (cooldown 1s / 0.71s Faster UI). Heal/Repair
+    # lock-on is the same budget; do not hold the whole channel until idle.
+    _HEAL_CAST_ANIMATION_SECONDS: Dict[UnitTypeId, float] = {
+        UnitTypeId.QUEEN: 1.0,
+        UnitTypeId.MEDIVAC: 1.0,
+        UnitTypeId.SCV: 1.0,
+    }
+    _DEFAULT_HEAL_CAST_ANIMATION_SECONDS: float = 1.0
+    _DEFAULT_HEALER_MOVE_SPEED: Dict[UnitTypeId, float] = {
+        UnitTypeId.QUEEN: 1.31,
+        UnitTypeId.MEDIVAC: 3.5,
+        UnitTypeId.SCV: 3.94,
+    }
+
     def __init__(self, player_id: int, training_conf: Optional[Dict] = None):
         super().__init__()
         self.player_id = player_id
@@ -91,6 +122,19 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_dist_to_enemy_com: Dict[int, float] = {}
         self._pre_action_dist_to_defend_pylon: Dict[int, float] = {}
         self.last_action_was_move_by_unit: Dict[int, bool] = {}
+        # Healer tags that successfully issued repair/heal/transfuse this step.
+        # heal_reward only pays when a selected tag is in this set (not battery
+        # ticks, Heal autocast, or Medivac attack-move). Cleared after reward.
+        self._heal_cast_tags: Set[int] = set()
+        # Selected tags that received a heal_* command this step (hit or miss).
+        self._heal_attempt_tags: Set[int] = set()
+        # healer_tag → (patient_tag, expiry_game_loop) while walk-in + cast
+        # animation must not be overwritten by attack/move.
+        self._heal_lock: Dict[int, Tuple[int, int]] = {}
+        # healer_tag → game_loop when Transfuse/Heal cooldown ends (P2 fallback).
+        self._heal_ability_ready_after_loop: Dict[int, int] = {}
+        # tag → set(AbilityId) from the latest SC2 ability query.
+        self._available_abilities_by_tag: Dict[int, Any] = {}
         
         self.frame_count = 0
         self.cached_observation: Optional[Any] = None
@@ -100,6 +144,30 @@ class CaptureTheFlagBot(BotAI):
         
         # Satisfaction for BotAI initialization
         self._initialize_variables()
+
+    def count_heal_casts_for_tags(self, squad_tags: Iterable) -> int:
+        """How many selected units issued Repair / Heal / Transfuse this step."""
+        return self._count_heal_tags(getattr(self, "_heal_cast_tags", None), squad_tags)
+
+    def count_heal_attempts_for_tags(self, squad_tags: Iterable) -> int:
+        """How many selected units were given a heal_* command this step."""
+        return self._count_heal_tags(getattr(self, "_heal_attempt_tags", None), squad_tags)
+
+    @staticmethod
+    def _count_heal_tags(tag_set: Any, squad_tags: Iterable) -> int:
+        if not isinstance(tag_set, set) or not squad_tags:
+            return 0
+        return sum(1 for tag in squad_tags if int(tag) in tag_set)
+
+    def _mark_heal_command_attempt(self, unit: Unit) -> None:
+        tag = int(getattr(unit, "tag", 0) or 0)
+        if tag <= 0:
+            return
+        attempts = getattr(self, "_heal_attempt_tags", None)
+        if not isinstance(attempts, set):
+            self._heal_attempt_tags = set()
+            attempts = self._heal_attempt_tags
+        attempts.add(tag)
 
     def reset_episode_state(self):
         """Reset all per-episode tracking so reward baselines don't bleed across episodes."""
@@ -121,6 +189,11 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_dist_to_enemy_com = {}
         self._pre_action_dist_to_defend_pylon = {}
         self.last_action_was_move_by_unit = {}
+        self._heal_cast_tags = set()
+        self._heal_attempt_tags = set()
+        self._heal_lock = {}
+        self._heal_ability_ready_after_loop = {}
+        self._available_abilities_by_tag = {}
         self.cached_observation = None
         self.frame_count = 0
 
@@ -450,9 +523,15 @@ class CaptureTheFlagBot(BotAI):
                 # Auto-heals; never issue move/attack/heal orders.
                 continue
             if "heal" in head_name:
+                self._mark_heal_command_attempt(unit)
                 self._issue_heal_at_point(unit, target)
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
+                # Misses are no-ops, not moves: cooldown-retreat must not treat
+                # a failed Transfuse as a kite.
                 self.last_action_was_move_by_unit[int(unit_tag)] = False
+            elif self._refresh_heal_lock(unit):
+                # Walk-in + Transfuse/Heal start still inside the lock window.
+                continue
             elif "aoe" in head_name:
                 issue_aoe_at_point(self, unit, target)
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
@@ -487,18 +566,132 @@ class CaptureTheFlagBot(BotAI):
         )
 
     def _resolve_heal_target_in_cell(self, healer: Unit, target: Point2) -> Optional[Unit]:
-        """Allied non-structure unit in the clicked spatial cell (not nearest-damaged)."""
+        """Wounded allied non-structure under the click.
+
+        Same identity rule as attack: the click picks the unit. The engine walks
+        into Transfuse / Heal / Repair range. Do not require the ally to already
+        be in cast range (the tactical crop is 17, Queen Transfuse is 7 — that
+        gate turned correct clicks into moves). Do not search for an ally near
+        the click. Prefers the ally missing the most HP. A click hits the
+        configured square (``env.heal_click_cells``; omit for 1×1) or the unit body.
+        """
+        best: Optional[Unit] = None
+        best_missing = 0.0
+        cell_half = heal_click_cell_half(self.training_conf)
         for ally in self._allied_units_for_owner(int(healer.owner_id)):
             if ally is None or getattr(ally, "tag", None) == healer.tag:
                 continue
             if getattr(ally, "is_structure", False):
                 continue
-            if self._unit_in_spatial_cell(ally, target):
-                return ally
-        return None
+            if not heal_click_hits_unit(ally, target, cell_half=cell_half):
+                continue
+            missing = _missing_health(ally)
+            if missing <= 0.0:
+                continue
+            if missing > best_missing:
+                best_missing = missing
+                best = ally
+        return best
 
-    def _issue_heal_at_point(self, unit: Unit, target: Point2) -> None:
-        """Issue race-specific heal/repair/transfusion at the cell-local ally."""
+    def _game_loop(self) -> int:
+        """Current SC2 game loop, or 0 when the mock has no numeric clock."""
+        state = getattr(self, "state", None)
+        raw = getattr(state, "game_loop", None) if state is not None else None
+        if raw is None:
+            raw = getattr(self, "frame_count", 0)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _healer_move_speed(unit: Unit) -> float:
+        for attr in ("real_speed", "movement_speed"):
+            try:
+                speed = float(getattr(unit, attr, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                speed = 0.0
+            if speed > 1e-6:
+                return speed
+        defaults = CaptureTheFlagBot._DEFAULT_HEALER_MOVE_SPEED
+        return float(defaults.get(getattr(unit, "type_id", None), 1.31))
+
+    def _heal_lock_until_loop(self, healer: Unit, patient: Unit) -> int:
+        """Game loop when walk-in + Transfuse/Heal start animation should finish.
+
+        Queen Transfuse is a 1s cast, not a channel (the 7s HoT is on the
+        patient). Medivac Heal / SCV Repair *are* channels; lock only the
+        start window so combat is not frozen for the whole beam.
+        """
+        now = CaptureTheFlagBot._game_loop(self)
+        type_id = getattr(healer, "type_id", None)
+        anim = float(
+            CaptureTheFlagBot._HEAL_CAST_ANIMATION_SECONDS.get(
+                type_id, CaptureTheFlagBot._DEFAULT_HEAL_CAST_ANIMATION_SECONDS
+            )
+        )
+        try:
+            cast_range = float(HEAL_CAST_RANGE.get(type_id, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            cast_range = 0.0
+        extra = 0.0
+        try:
+            dist = float(healer.position.distance_to(patient.position))
+            extra = max(0.0, dist - cast_range)
+        except (TypeError, ValueError, AttributeError):
+            extra = 0.0
+        speed = CaptureTheFlagBot._healer_move_speed(healer)
+        walk = extra / max(speed, 1e-6)
+        loops = int(
+            math.ceil((walk + anim) * CaptureTheFlagBot._HEAL_GAME_LOOPS_PER_SECOND)
+        )
+        return now + max(loops, 1)
+
+    def _refresh_heal_lock(self, unit: Unit) -> bool:
+        """True while walk-in + cast animation must not be overwritten.
+
+        Queens often spend several physics steps walking into range 7. Issuing
+        attack or move on the next squad step cancels that. Lock until the
+        computed window elapses, the caster goes idle, or the patient dies.
+        ``heal_local`` is still allowed (retarget).
+        """
+        tag = int(getattr(unit, "tag", 0) or 0)
+        lock = getattr(self, "_heal_lock", None)
+        if tag <= 0 or not isinstance(lock, dict) or tag not in lock:
+            return False
+        entry = lock[tag]
+        try:
+            patient_tag = int(entry[0])
+            until_loop = int(entry[1])
+        except (TypeError, ValueError, IndexError):
+            lock.pop(tag, None)
+            return False
+        now = CaptureTheFlagBot._game_loop(self)
+        if now >= until_loop:
+            lock.pop(tag, None)
+            return False
+        if bool(getattr(unit, "is_idle", False)):
+            lock.pop(tag, None)
+            return False
+        patient = self.all_units.find_by_tag(patient_tag)
+        if patient is None:
+            lock.pop(tag, None)
+            return False
+        return True
+
+    def _issue_heal_at_point(self, unit: Unit, target: Point2) -> Optional[str]:
+        """Heal the cell-local wounded ally, or no-op on a miss.
+
+        Empty ground and full-HP allies issue no order. Attack still
+        attack-moves on an empty cell; a missed heal is not rewritten as a
+        walk, so cooldown-retreat and attacker center-of-mass distance do not
+        credit ``heal_local`` as kiting or approaching. Out-of-range wounded
+        allies still get the ability so the engine walks in. The click picks
+        the patient; do not retarget to another selected unit.
+
+        Returns ``\"cast\"`` when a heal/repair/transfuse was issued, or
+        ``None`` for a miss or non-healer.
+        """
         ability = None
         if unit.type_id == UnitTypeId.MEDIVAC:
             ability = AbilityId.MEDIVACHEAL_HEAL
@@ -507,12 +700,33 @@ class CaptureTheFlagBot(BotAI):
         elif unit.type_id == UnitTypeId.QUEEN:
             ability = AbilityId.TRANSFUSION_TRANSFUSION
         else:
-            return  # non-healers: no-op (do not convert to move)
+            return None
 
         heal_target = self._resolve_heal_target_in_cell(unit, target)
         if heal_target is None:
-            return
+            return None
         self.do(unit(ability, heal_target))
+        tag = int(getattr(unit, "tag", 0) or 0)
+        if tag:
+            from src.utils.unit_feature_helpers import mark_heal_ability_cooldown
+
+            mark_heal_ability_cooldown(self, unit)
+            cast_tags = getattr(self, "_heal_cast_tags", None)
+            if not isinstance(cast_tags, set):
+                self._heal_cast_tags = set()
+                cast_tags = self._heal_cast_tags
+            cast_tags.add(tag)
+            lock = getattr(self, "_heal_lock", None)
+            if not isinstance(lock, dict):
+                self._heal_lock = {}
+                lock = self._heal_lock
+            patient_tag = int(getattr(heal_target, "tag", 0) or 0)
+            if patient_tag:
+                lock[tag] = (
+                    patient_tag,
+                    CaptureTheFlagBot._heal_lock_until_loop(self, unit, heal_target),
+                )
+        return "cast"
 
     _TRANSPORT_LOAD_ABILITY = {
         UnitTypeId.MEDIVAC: AbilityId.LOAD_MEDIVAC,
@@ -698,9 +912,12 @@ class CaptureTheFlagBot(BotAI):
             target = Point2((world_x, world_y))
 
             if "heal" in head_name:
+                self._mark_heal_command_attempt(unit)
                 self._issue_heal_at_point(unit, target)
                 self._unit_last_order[unit_tag] = (head_name, target)
                 self.last_action_was_move_by_unit[unit_tag] = False
+            elif self._refresh_heal_lock(unit):
+                return
             elif "aoe" in head_name:
                 issue_aoe_at_point(self, unit, target)
                 self._unit_last_order[unit_tag] = (head_name, target)
@@ -1279,8 +1496,27 @@ class CaptureTheFlagBot(BotAI):
         own_baseline_ready = (
             float(self.prev_own_unit_count.get(p_id, 0) or 0) > 0 or prev_own_hp > 0.0
         )
-        if heal_coeff != 0.0 and own_baseline_ready and curr_own_hp > prev_own_hp:
+        issued_heal = False
+        n_issued = 0
+        cast_tags = getattr(self, "_heal_cast_tags", None)
+        if isinstance(cast_tags, set) and squad_tags:
+            n_issued = sum(1 for tag in squad_tags if int(tag) in cast_tags)
+            issued_heal = n_issued > 0
+        cast_bonus = float(r_conf.get("heal_cast_reward", 0.0))
+        if issued_heal and cast_bonus != 0.0:
+            reward += cast_bonus * n_issued
+        if (
+            heal_coeff != 0.0
+            and issued_heal
+            and own_baseline_ready
+            and curr_own_hp > prev_own_hp
+        ):
             reward += (curr_own_hp - prev_own_hp) * heal_coeff
+        if isinstance(cast_tags, set):
+            cast_tags.clear()
+        attempt_tags = getattr(self, "_heal_attempt_tags", None)
+        if isinstance(attempt_tags, set):
+            attempt_tags.clear()
         if own_baseline_ready and curr_own_hp < prev_own_hp:
             reward -= (prev_own_hp - curr_own_hp) * damage_penalty_coeff
         self.prev_own_units_health[p_id] = curr_own_hp

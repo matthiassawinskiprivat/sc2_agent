@@ -73,7 +73,8 @@ def test_is_cloak_env_mode():
     assert env2._has_env_mode("heal") is False
 
 
-def test_heal_mode_spawns_creep_tumors_for_zerg():
+def test_heal_army_spawn_does_not_mix_in_creep_tumors():
+    """Army create lists stay tumor-free; heal creep is a separate grid call."""
     pools = [
         {
             "high_level_command": "attack",
@@ -103,7 +104,8 @@ def test_heal_mode_spawns_creep_tumors_for_zerg():
     _spawn(env)
     cmds = _all_create_cmds(env)
     types = [c[0] for c in cmds]
-    assert UnitTypeId.CREEPTUMOR in types
+    assert UnitTypeId.CREEPTUMOR not in types
+    assert UnitTypeId.CREEPTUMORBURROWED not in types
 
 
 def test_without_heal_mode_no_creep_tumors():

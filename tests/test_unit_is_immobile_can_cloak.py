@@ -87,3 +87,76 @@ def test_can_heal_medivac_queen_battery():
     assert unit_can_heal(_unit(UnitTypeId.SHIELDBATTERY, energy=10.0)) is True
     assert unit_can_heal(_unit(UnitTypeId.SHIELDBATTERY, energy=1.0)) is False
     assert unit_can_heal(_unit(UnitTypeId.SCV)) is False
+
+
+def test_can_heal_uses_sc2_ability_cache_and_cooldown():
+    from sc2.ids.ability_id import AbilityId
+    from src.utils.unit_feature_helpers import unit_can_heal
+
+    queen = _unit(UnitTypeId.QUEEN, energy=200.0)
+    queen.tag = 7
+    queen.is_using_ability = lambda abilities: False
+    bot = MagicMock()
+    bot.player_id = 1
+    bot.state = MagicMock()
+    bot.state.game_loop = 100
+    bot._available_abilities_by_tag = {7: {AbilityId.TRANSFUSION_TRANSFUSION}}
+    bot._heal_ability_ready_after_loop = {7: 150}
+
+    assert unit_can_heal(queen, bot) is False
+
+    bot.state.game_loop = 150
+    assert unit_can_heal(queen, bot) is True
+
+    bot._available_abilities_by_tag = {7: set()}
+    assert unit_can_heal(queen, bot) is False
+
+
+def test_can_heal_false_while_channeling():
+    from sc2.ids.ability_id import AbilityId
+    from src.utils.unit_feature_helpers import unit_can_heal
+
+    queen = _unit(UnitTypeId.QUEEN, energy=200.0)
+    queen.tag = 8
+    queen.is_using_ability = (
+        lambda abilities: AbilityId.TRANSFUSION_TRANSFUSION in abilities
+    )
+    bot = MagicMock()
+    bot._available_abilities_by_tag = {8: {AbilityId.TRANSFUSION_TRANSFUSION}}
+
+    assert unit_can_heal(queen, bot) is False
+
+
+def test_can_repair_requires_minerals_without_ability_cache():
+    from src.utils.unit_feature_helpers import unit_can_repair
+
+    scv = _unit(UnitTypeId.SCV)
+    scv.tag = 3
+    scv.owner_id = 1
+    scv.is_using_ability = lambda abilities: False
+    bot = MagicMock()
+    bot.player_id = 1
+    bot.minerals = 0
+    bot._available_abilities_by_tag = {}
+
+    assert unit_can_repair(scv, bot) is False
+
+    bot.minerals = 50
+    assert unit_can_repair(scv, bot) is True
+
+
+def test_can_repair_prefers_sc2_ability_cache():
+    from sc2.ids.ability_id import AbilityId
+    from src.utils.unit_feature_helpers import unit_can_repair
+
+    scv = _unit(UnitTypeId.SCV)
+    scv.tag = 4
+    scv.owner_id = 1
+    bot = MagicMock()
+    bot.player_id = 1
+    bot.minerals = 0
+    bot._available_abilities_by_tag = {4: {AbilityId.EFFECT_REPAIR_SCV}}
+
+    assert unit_can_repair(scv, bot) is True
+    bot._available_abilities_by_tag = {4: set()}
+    assert unit_can_repair(scv, bot) is False

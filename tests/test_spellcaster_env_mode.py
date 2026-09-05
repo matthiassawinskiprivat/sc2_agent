@@ -103,8 +103,18 @@ def test_upgrades_mode_skipped_when_spellcaster_present():
     env.bot.client.debug_upgrade.assert_not_called()
 
 
-def test_without_spellcaster_energy_and_upgrades_not_applied():
-    env = _make_env("heal,cloak,upgrades")
+def test_heal_mode_applies_max_energy_without_spell_upgrades():
+    """Queens spawn at 25 energy; Transfuse costs 50, so heal fills bars."""
+    env = _make_env("heal")
+    env.bot.all_units = [_unit(11, 200.0)]
+    asyncio.run(env._apply_spellcaster_env_mode_upgrades())
+    asyncio.run(env._apply_spellcaster_energy())
+    env.bot.client.debug_upgrade.assert_not_called()
+    env.bot.client.debug_set_unit_value.assert_awaited()
+
+
+def test_cloak_upgrades_without_heal_or_spellcaster_skips_energy():
+    env = _make_env("cloak,upgrades")
     env.bot.all_units = [_unit(11, 200.0)]
     asyncio.run(env._apply_spellcaster_env_mode_upgrades())
     asyncio.run(env._apply_spellcaster_energy())

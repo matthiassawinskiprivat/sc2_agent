@@ -32,7 +32,7 @@ _CTF_BOOTSTRAP_LEVELS = frozenset({"ctf_level_01", "ctf_level_01_zergling_vs_mar
 _RACE_UNITS = {
     "terran": {
         "MARINE", "MARAUDER", "GHOST", "HELLION", "HELLIONTANK", "SIEGETANK", "VIKINGFIGHTER", "BANSHEE", "THOR",
-        "CYCLONE", "REAPER", "BATTLECRUISER",
+        "THORAP", "CYCLONE", "REAPER", "BATTLECRUISER",
     },
     "zerg": {
         "ZERGLING", "ROACH", "HYDRALISK", "MUTALISK", "ULTRALISK", "RAVAGER", "BANELING",
@@ -172,6 +172,17 @@ def test_ctf_level_01_reaper_attack_vs_zergling_defend():
     assert pools[0]["region"] == pools[1]["region"] == "A"
 
 
+def test_thor_pools_include_both_payload_modes():
+    """Explosive Payload (THOR, Javelin splash) and High Impact (THORAP) stay paired."""
+    for path in sorted(_CONFIG_DIR.glob("*.yaml")):
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for i, pool in enumerate((data.get("env") or {}).get("unit_pools") or []):
+            units = set(pool.get("unit_pool") or [])
+            assert ("THOR" in units) == ("THORAP" in units), (
+                f"{path.name} pool {i} must list both THOR and THORAP"
+            )
+
+
 def test_ctf_unit_pools_match_declared_race():
     cm = ConfigManager(str(_CONFIG_DIR))
     ctf_levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_level_")]
@@ -279,8 +290,11 @@ def test_ctf_pipeline_inserts_mirror_matchups_after_level_17():
     idx_t = cm.levels.index("ctf_level_17_mirror_terran")
     idx_z = cm.levels.index("ctf_level_17_mirror_zerg")
     idx_p = cm.levels.index("ctf_level_17_mirror_protoss")
+    idx_heal = cm.levels.index("ctf_heal_queen_vs_queen")
+    idx_thor = cm.levels.index("ctf_heal_thor_scv_vs_thor_scv")
+    idx_qvbc = cm.levels.index("ctf_heal_queen_vs_battlecruiser_scv")
     idx_18 = cm.levels.index("ctf_level_18")
-    assert idx_17 < idx_t < idx_z < idx_p < idx_18
+    assert idx_17 < idx_t < idx_z < idx_p < idx_heal < idx_thor < idx_qvbc < idx_18
 
 
 def test_ctf_level_17_mirror_matchups_reuse_level_17_config_and_prior_pools():

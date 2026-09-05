@@ -42,6 +42,12 @@ def test_ctf_level_25_26_inherit_drop_config():
 
 def test_env_modes_heal_cloak_drop_retrofit():
     cm = ConfigManager("config_universal")
+    assert cm.get_level_config("ctf_heal_queen_vs_queen")["env"]["env_mode"] == "heal"
+    assert cm.get_level_config("ctf_heal_thor_scv_vs_thor_scv")["env"]["env_mode"] == "heal"
+    assert (
+        cm.get_level_config("ctf_heal_queen_vs_battlecruiser_scv")["env"]["env_mode"]
+        == "heal"
+    )
     assert cm.get_level_config("ctf_level_18")["env"]["env_mode"] == "heal"
     assert cm.get_level_config("ctf_level_21")["env"]["env_mode"] == "heal,cloak"
     assert cm.get_level_config("ctf_level_24")["env"]["env_mode"] == "heal,cloak,drop"

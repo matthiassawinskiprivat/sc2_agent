@@ -5,6 +5,7 @@ without importing the full transformer.
 """
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any, FrozenSet, List, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -81,6 +82,44 @@ _LOCK_ON_UNIT_TYPES: FrozenSet = (
     frozenset({UnitTypeId.CYCLONE}) if _SC2_AVAILABLE else frozenset()
 )
 _LOCK_ON_ABILITY = AbilityId.LOCKON_LOCKON if _SC2_AVAILABLE else None
+
+# heal_local click box. Omit ``env.heal_click_cells`` → 1 cell (±0.5), same as
+# load/attack. Set it only when the curriculum uses a coarser square.
+HEAL_CELL_HALF = 0.5
+DEFAULT_HEAL_CLICK_CELLS = 1.0
+MIN_HEAL_CLICK_CELLS = 1.0
+MAX_HEAL_CLICK_CELLS = 5.0
+
+
+def heal_click_cells_from_conf(training_conf: dict | None) -> float:
+    """Heal click square width in spatial cells. Default 1 (1×1 pointer)."""
+    conf = training_conf or {}
+    env = conf.get("env") if isinstance(conf.get("env"), dict) else {}
+    raw = conf.get("heal_click_cells", env.get("heal_click_cells", DEFAULT_HEAL_CLICK_CELLS))
+    try:
+        cells = float(raw)
+    except (TypeError, ValueError):
+        cells = DEFAULT_HEAL_CLICK_CELLS
+    if cells != cells:  # NaN
+        cells = DEFAULT_HEAL_CLICK_CELLS
+    return min(max(cells, MIN_HEAL_CLICK_CELLS), MAX_HEAL_CLICK_CELLS)
+
+
+def heal_click_cell_half(training_conf: dict | None) -> float:
+    """Half-width of the heal click square in game units."""
+    return heal_click_cells_from_conf(training_conf) / 2.0
+
+# Same radii as ObservationTransformer._draw_unit_healing (HPS field).
+# Ability radii for the HPS observation field (not an actuation range gate).
+HEAL_CAST_RANGE: dict = (
+    {
+        UnitTypeId.MEDIVAC: 4.0,
+        UnitTypeId.QUEEN: 7.0,
+        UnitTypeId.SCV: 1.0,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
 
 # Policy ``aoe_local``: point-targeted splash casts (agent-faithful Point2).
 _AOE_POINT_ABILITIES: dict = (
@@ -249,20 +288,19 @@ def _finite_unit_list(group: Any) -> List[Any]:
     return out
 
 
-async def disable_cyclone_lock_on_autocast(bot: Any) -> int:
-    """Turn Lock On autocast off for cyclones not yet processed.
-
-    Ladder Cyclones spawn with Lock On autocast enabled, so the engine assigns
-    a target without a policy hard-target. Toggle once per unit tag.
-
-    Returns how many cyclones were toggled this call.
-    """
-    if not _SC2_AVAILABLE or bot is None or _LOCK_ON_ABILITY is None:
+async def _disable_autocast_for_unit_types(
+    bot: Any,
+    unit_types: FrozenSet,
+    ability: Any,
+    seen_attr: str,
+) -> int:
+    """Toggle *ability* autocast off once per matching unit tag."""
+    if not _SC2_AVAILABLE or bot is None or ability is None:
         return 0
-    seen = getattr(bot, "_cyclone_lockon_autocast_off_tags", None)
+    seen = getattr(bot, seen_attr, None)
     if not isinstance(seen, set):
         seen = set()
-        bot._cyclone_lockon_autocast_off_tags = seen
+        setattr(bot, seen_attr, seen)
     group = _finite_unit_list(getattr(bot, "all_units", None))
     if not group:
         group = _finite_unit_list(getattr(bot, "units", None)) + _finite_unit_list(
@@ -270,7 +308,7 @@ async def disable_cyclone_lock_on_autocast(bot: Any) -> int:
         )
     new_units: List[Any] = []
     for unit in group:
-        if getattr(unit, "type_id", None) not in _LOCK_ON_UNIT_TYPES:
+        if getattr(unit, "type_id", None) not in unit_types:
             continue
         tag = getattr(unit, "tag", None)
         if tag is None or tag in seen:
@@ -283,10 +321,26 @@ async def disable_cyclone_lock_on_autocast(bot: Any) -> int:
     toggle = getattr(client, "toggle_autocast", None) if client is not None else None
     if toggle is None:
         return 0
-    result = toggle(new_units, _LOCK_ON_ABILITY)
+    result = toggle(new_units, ability)
     if hasattr(result, "__await__"):
         await result
     return len(new_units)
+
+
+async def disable_cyclone_lock_on_autocast(bot: Any) -> int:
+    """Turn Lock On autocast off for cyclones not yet processed.
+
+    Ladder Cyclones spawn with Lock On autocast enabled, so the engine assigns
+    a target without a policy hard-target. Toggle once per unit tag.
+
+    Returns how many cyclones were toggled this call.
+    """
+    return await _disable_autocast_for_unit_types(
+        bot,
+        _LOCK_ON_UNIT_TYPES,
+        _LOCK_ON_ABILITY,
+        "_cyclone_lockon_autocast_off_tags",
+    )
 
 
 def uses_aoe_spell(unit: "Unit") -> bool:
@@ -436,7 +490,7 @@ def unit_center_in_spatial_cell(
 ) -> bool:
     """True when *unit*'s center lies in the world cell around *target*.
 
-    Same contract as CTF heal/load cell resolve (``cell_half`` game units).
+    Same contract as CTF load/attack cell resolve (``cell_half`` game units).
     """
     pos = getattr(unit, "position", None)
     if pos is None or target is None:
@@ -445,6 +499,40 @@ def unit_center_in_spatial_cell(
         abs(float(pos.x) - float(target.x)) < cell_half
         and abs(float(pos.y) - float(target.y)) < cell_half
     )
+
+
+def unit_click_radius(unit: Any) -> float:
+    """Collision / selection radius for click-picking (0 if unknown)."""
+    try:
+        radius = float(getattr(unit, "radius", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return radius if radius > 0.0 else 0.0
+
+
+def heal_click_hits_unit(
+    unit: Any,
+    target: "Point2",
+    cell_half: float = HEAL_CELL_HALF,
+) -> bool:
+    """True when the heal click is on the unit body or its center is in the cell.
+
+    Matches the client idea that a Thor is easier to click than a Cyclone.
+    ``cell_half`` is half the configured square (1 cell → 0.5). Attack / load
+    still use ``unit_center_in_spatial_cell`` at one cell only.
+    """
+    if unit_center_in_spatial_cell(unit, target, cell_half=cell_half):
+        return True
+    radius = unit_click_radius(unit)
+    if radius <= 0.0 or target is None:
+        return False
+    pos = getattr(unit, "position", None)
+    if pos is None:
+        return False
+    try:
+        return float(pos.distance_to(target)) <= radius
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 # 2×2 buildings (Pylon, Supply Depot, …). Used when the unit has no catalog radius.
@@ -903,6 +991,207 @@ _CLOAK_ACTIVATION_ENERGY = 25.0
 # Mothership cloak-field energy gate (approximation).
 _MOTHERSHIP_CLOAK_ENERGY = 50.0
 
+# Heal / repair readiness (``can_heal`` / ``can_repair`` scalars).
+GAME_LOOPS_PER_SECOND = 22.4
+HEAL_ABILITY_COOLDOWN_SECONDS: dict = (
+    {
+        UnitTypeId.QUEEN: 1.0,
+        UnitTypeId.MEDIVAC: 1.0,
+        UnitTypeId.SHIELDBATTERY: 1.0,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+_HEAL_ENERGY_MIN: dict = (
+    {
+        UnitTypeId.MEDIVAC: 5.0,
+        UnitTypeId.QUEEN: 50.0,
+        UnitTypeId.SHIELDBATTERY: 3.0,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+_HEAL_ABILITIES_BY_TYPE: dict = (
+    {
+        UnitTypeId.QUEEN: frozenset({AbilityId.TRANSFUSION_TRANSFUSION}),
+        UnitTypeId.MEDIVAC: frozenset({AbilityId.MEDIVACHEAL_HEAL}),
+        UnitTypeId.SHIELDBATTERY: frozenset(
+            {
+                AbilityId.SHIELDBATTERYRECHARGEEX5_SHIELDBATTERYRECHARGE,
+            }
+        ),
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+_REPAIR_ABILITIES: FrozenSet = (
+    frozenset({AbilityId.EFFECT_REPAIR_SCV, AbilityId.EFFECT_REPAIR})
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+_HEAL_CHANNEL_ABILITIES: FrozenSet = (
+    frozenset(
+        {
+            AbilityId.MEDIVACHEAL_HEAL,
+            AbilityId.TRANSFUSION_TRANSFUSION,
+            AbilityId.SHIELDBATTERYRECHARGEEX5_SHIELDBATTERYRECHARGE,
+        }
+    )
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+_REPAIR_CHANNEL_ABILITIES: FrozenSet = (
+    frozenset(
+        {
+            AbilityId.EFFECT_REPAIR_SCV,
+            AbilityId.EFFECT_REPAIR,
+            AbilityId.EFFECT_REPAIR_MULE,
+        }
+    )
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+_SCV_REPAIR_MIN_MINERALS = 1
+
+
+def _unit_game_loop(bot: Any, unit: "Unit") -> int:
+    state = getattr(bot, "state", None) if bot is not None else None
+    raw = getattr(state, "game_loop", None) if state is not None else None
+    if raw is None:
+        raw = getattr(unit, "game_loop", 0)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _available_abilities_for_unit(unit: "Unit", bot: Any) -> Optional[FrozenSet]:
+    if bot is None or unit is None:
+        return None
+    tag = int(getattr(unit, "tag", 0) or 0)
+    if tag <= 0:
+        return None
+    cache = getattr(bot, "_available_abilities_by_tag", None)
+    if not isinstance(cache, dict) or tag not in cache:
+        return None
+    raw = cache.get(tag)
+    if raw is None:
+        return frozenset()
+    try:
+        return frozenset(raw)
+    except TypeError:
+        return frozenset()
+
+
+def _heal_energy_sufficient(unit: "Unit") -> bool:
+    tid = getattr(unit, "type_id", None)
+    if tid not in _HEAL_ENERGY_MIN:
+        return False
+    try:
+        energy = float(getattr(unit, "energy", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    minimum = float(_HEAL_ENERGY_MIN[tid])
+    if tid == UnitTypeId.MEDIVAC:
+        return energy > minimum
+    if tid == UnitTypeId.SHIELDBATTERY:
+        return energy > minimum
+    return energy >= minimum
+
+
+def _unit_is_using_any_ability(unit: "Unit", abilities: FrozenSet) -> bool:
+    if not abilities or unit is None:
+        return False
+    checker = getattr(unit, "is_using_ability", None)
+    if not callable(checker):
+        return False
+    try:
+        return checker(abilities) is True
+    except Exception:
+        return False
+
+
+def _heal_ability_on_cooldown(unit: "Unit", bot: Any) -> bool:
+    if bot is None or unit is None:
+        return False
+    tag = int(getattr(unit, "tag", 0) or 0)
+    if tag <= 0:
+        return False
+    ready_after = getattr(bot, "_heal_ability_ready_after_loop", None)
+    if not isinstance(ready_after, dict):
+        return False
+    try:
+        until = int(ready_after.get(tag, 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if until <= 0:
+        return False
+    return _unit_game_loop(bot, unit) < until
+
+
+def mark_heal_ability_cooldown(bot: Any, unit: "Unit") -> None:
+    """Best-effort Transfuse/Heal cooldown stamp when SC2 ability query is unavailable."""
+    if not _SC2_AVAILABLE or bot is None or unit is None:
+        return
+    tid = getattr(unit, "type_id", None)
+    if tid not in HEAL_ABILITY_COOLDOWN_SECONDS:
+        return
+    tag = int(getattr(unit, "tag", 0) or 0)
+    if tag <= 0:
+        return
+    secs = float(HEAL_ABILITY_COOLDOWN_SECONDS.get(tid, 1.0))
+    loops = int(math.ceil(secs * GAME_LOOPS_PER_SECOND))
+    ready = _unit_game_loop(bot, unit) + max(loops, 1)
+    store = getattr(bot, "_heal_ability_ready_after_loop", None)
+    if not isinstance(store, dict):
+        bot._heal_ability_ready_after_loop = {}
+        store = bot._heal_ability_ready_after_loop
+    store[tag] = ready
+
+
+def _owner_can_afford_repair(bot: Any, unit: "Unit") -> bool:
+    if bot is None:
+        return True
+    try:
+        owner_id = int(getattr(unit, "owner_id", 0) or 0)
+    except (TypeError, ValueError):
+        return True
+    client_pid = int(getattr(bot, "player_id", 1) or 1)
+    if owner_id == client_pid:
+        try:
+            return int(getattr(bot, "minerals", 0) or 0) >= _SCV_REPAIR_MIN_MINERALS
+        except (TypeError, ValueError):
+            return False
+    # CTF heal mode grants P2 ``debug_free``; no per-owner mineral obs on the bot.
+    return True
+
+
+async def refresh_healer_ability_cache(bot: Any) -> None:
+    """Refresh ``bot._available_abilities_by_tag`` for healers / SCVs.
+
+    Uses SC2 ``query_available_abilities`` (energy, cooldown, minerals when
+    ``ignore_resource_requirements=False``). Falls back to per-step heuristics
+    when a unit tag is missing from the query result.
+    """
+    if bot is None or not _SC2_AVAILABLE:
+        return
+    client = getattr(bot, "client", None)
+    query = getattr(client, "query_available_abilities_with_tag", None)
+    if client is None or not callable(query):
+        return
+    units = []
+    for unit in getattr(bot, "all_units", []) or []:
+        tid = getattr(unit, "type_id", None)
+        if tid in _HEAL_ABILITIES_BY_TYPE or tid == UnitTypeId.SCV:
+            units.append(unit)
+    if not units:
+        bot._available_abilities_by_tag = {}
+        return
+    try:
+        bot._available_abilities_by_tag = await query(units, ignore_resource_requirements=False)
+    except Exception:
+        return
+
 
 def unit_is_immobile(unit: "Unit", upgrades: frozenset | None = None) -> bool:
     """True when the unit cannot move in its current morph/burrow state."""
@@ -943,29 +1232,48 @@ def unit_can_cloak(unit: "Unit") -> bool:
     return False
 
 
-def unit_can_repair(unit: "Unit") -> bool:
-    """True for SCVs (mechanical repair); False for all other types."""
+def unit_can_repair(unit: "Unit", bot: Any = None) -> bool:
+    """True when an SCV can start or continue Repair (minerals + not on CD).
+
+    Prefer SC2 ``query_available_abilities`` cached on ``bot`` (includes mineral
+    cost and cooldown). Falls back to owner minerals and channel state.
+    """
     if not _SC2_AVAILABLE or unit is None:
         return False
-    return getattr(unit, "type_id", None) == UnitTypeId.SCV
+    if getattr(unit, "type_id", None) != UnitTypeId.SCV:
+        return False
+    abilities = _available_abilities_for_unit(unit, bot)
+    if abilities is not None:
+        return bool(_REPAIR_ABILITIES & abilities)
+    if not _owner_can_afford_repair(bot, unit):
+        return False
+    return not _unit_is_using_any_ability(unit, _REPAIR_CHANNEL_ABILITIES)
 
 
-def unit_can_heal(unit: "Unit") -> bool:
-    """True when a non-SCV healer can cast heal this step (energy-gated).
+def unit_can_heal(unit: "Unit", bot: Any = None) -> bool:
+    """True when a non-SCV healer can cast heal this step.
 
     Medivac / Queen / Shield Battery. SCV uses ``unit_can_repair`` instead.
+    Requires sufficient energy, Transfuse/Heal off cooldown, and not already
+    channeling the heal ability. Uses ``bot._available_abilities_by_tag`` when
+    present (SC2 query includes energy + cooldown).
     """
     if not _SC2_AVAILABLE or unit is None:
         return False
     tid = getattr(unit, "type_id", None)
-    energy = float(getattr(unit, "energy", 0.0) or 0.0)
-    if tid == UnitTypeId.MEDIVAC:
-        return energy > 5.0
-    if tid == UnitTypeId.QUEEN:
-        return energy >= 50.0
-    if tid == UnitTypeId.SHIELDBATTERY:
-        return energy > 3.0
-    return False
+    required = _HEAL_ABILITIES_BY_TYPE.get(tid)
+    if not required:
+        return False
+    if not _heal_energy_sufficient(unit):
+        return False
+    if _heal_ability_on_cooldown(unit, bot):
+        return False
+    if _unit_is_using_any_ability(unit, _HEAL_CHANNEL_ABILITIES):
+        return False
+    abilities = _available_abilities_for_unit(unit, bot)
+    if abilities is not None:
+        return bool(required & abilities)
+    return True
 
 
 _CARGO_SIZE_NORM_DIVISOR = 8.0

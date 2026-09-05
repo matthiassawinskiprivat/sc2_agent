@@ -203,6 +203,14 @@ class UniversalPipelineManager(PipelineManager):
             else:
                 model = AlgoClass(**model_kwargs)
 
+            from src.utils.model_utils import maybe_apply_loud_command_head_init
+
+            maybe_apply_loud_command_head_init(
+                model,
+                level_config,
+                resume=bool(model_path_to_load and not reset_timesteps),
+            )
+
             model.learner_profile = training_params.get("learner_profile", True)
 
             # 4. Train

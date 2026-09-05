@@ -114,20 +114,29 @@ class SquadNetwork(BaseFeaturesExtractor):
         self._spatial_fused = None
 
     def _cnn_forward(self, cnn: nn.Module, x: torch.Tensor) -> torch.Tensor:
-        """Run a CNN in sample chunks; checkpoint in train to cap activation VRAM."""
+        """Run a CNN in sample chunks; checkpoint in train to cap activation VRAM.
+
+        Pad the sample dim to a multiple of ``chunk`` so leftover sizes (1–15)
+        do not each become a distinct CUDA caching-allocator block.
+        """
         n = int(x.shape[0])
         chunk = self._cnn_chunk_size
         if n <= chunk:
             return cnn(x)
+        pad = (chunk - (n % chunk)) % chunk
+        if pad:
+            x = torch.cat([x, x.new_zeros((pad, *x.shape[1:]))], dim=0)
         parts = []
         use_ckpt = bool(self.training and torch.is_grad_enabled())
-        for start in range(0, n, chunk):
+        n_pad = int(x.shape[0])
+        for start in range(0, n_pad, chunk):
             sl = x[start : start + chunk]
             if use_ckpt:
                 parts.append(torch_checkpoint(cnn, sl, use_reentrant=False))
             else:
                 parts.append(cnn(sl))
-        return torch.cat(parts, dim=0)
+        out = torch.cat(parts, dim=0)
+        return out[:n] if pad else out
 
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
         map_obs = observations["map"]

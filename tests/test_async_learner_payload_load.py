@@ -30,3 +30,41 @@ def test_custom_metrics_deque_bounded():
         custom_metrics[key].append(float(i))
     assert len(custom_metrics["k"]) == 100
     assert float(np.mean(custom_metrics["k"])) > 0.0
+
+
+def test_heal_casts_published_as_rollout_sum_not_short_window_mean():
+    """A rare heal is invisible as mean(last 100 steps) but visible as a rollout sum."""
+    from train.collector_custom_metrics import (
+        publish_custom_metrics,
+        record_info_scalars,
+    )
+
+    custom_metrics: dict = {}
+    rollout_sums: dict = {}
+    for _ in range(99):
+        record_info_scalars(
+            custom_metrics,
+            rollout_sums,
+            {
+                "heal_casts": 0,
+                "heal_attempts": 1,
+                "heal_casts_episode": 0,
+                "squad_physics_step": True,
+            },
+        )
+    record_info_scalars(
+        custom_metrics,
+        rollout_sums,
+        {
+            "heal_casts": 1,
+            "heal_attempts": 1,
+            "heal_casts_episode": 1,
+            "squad_physics_step": True,
+        },
+    )
+    signal: dict = {}
+    publish_custom_metrics(signal, custom_metrics, rollout_sums)
+    assert signal["env/heal_casts"] == 1.0
+    assert signal["env/heal_attempts"] == 100.0
+    assert signal["env/heal_casts_episode"] == 0.01
+    assert "env/squad_physics_step" not in signal

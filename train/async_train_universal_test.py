@@ -2,7 +2,6 @@ import errno
 import os
 import sys
 import time
-from collections import deque
 import torch
 import numpy as np
 import yaml
@@ -24,6 +23,7 @@ from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
 from src.agent.models.universal_policy import UniversalActorCriticPolicy
 from src.agent.models.unit_control_network import UnitControlNetwork
 from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
+from train.collector_custom_metrics import publish_custom_metrics, record_info_scalars
 
 import shutil
 import psutil
@@ -316,6 +316,7 @@ class AsyncCollector(mp.Process):
 
             # FILL BUFFER
             current_buffer.reset()
+            rollout_info_sums: dict = {}
             # Use class-based detection instead of attribute presence:
             # some model objects may carry compatibility attributes even when
             # running non-recurrent PPO.
@@ -368,13 +369,10 @@ class AsyncCollector(mp.Process):
                     self.custom_metrics = {}
 
                 for i, done in enumerate(dones):
-                    # Capture metrics from the info dict (e.g., success, etc.)
                     info = infos[i]
-                    for key, val in info.items():
-                        if isinstance(val, (int, float, np.number)):
-                            if key not in self.custom_metrics:
-                                self.custom_metrics[key] = deque(maxlen=100)
-                            self.custom_metrics[key].append(val)
+                    record_info_scalars(
+                        self.custom_metrics, rollout_info_sums, info
+                    )
 
                     if done:
                         recent_ep_rewards.append(episode_rewards[i])
@@ -446,14 +444,11 @@ class AsyncCollector(mp.Process):
                 signal_meta["rollout/ep_rew_mean"] = np.mean(recent_ep_rewards)
                 signal_meta["rollout/ep_len_mean"] = np.mean(recent_ep_lengths)
             
-            # Add all other captured metrics
-            if hasattr(self, 'custom_metrics'):
-                for key, vals in self.custom_metrics.items():
-                    if vals:
-                        # SB3 standard is to put environment metrics in 'rollout/'
-                        # but we'll preserve the original key names or prefix them
-                        prefix = "" if "/" in key else "env/"
-                        signal_meta[f"{prefix}{key}"] = np.mean(vals)
+            publish_custom_metrics(
+                signal_meta,
+                getattr(self, "custom_metrics", {}),
+                rollout_info_sums,
+            )
 
             current_buffer.signal_ready(signal_meta)
             buffer_idx += 1

@@ -239,6 +239,7 @@ class SquadObservationBuilder:
             unit_scalars[slot] = self._unit_scalars(
                 unit,
                 pool_high_level_command,
+                bot=bot,
                 playable_w=pw,
                 playable_h=ph,
                 upgrades=upgrades,
@@ -360,6 +361,7 @@ class SquadObservationBuilder:
         unit: Unit,
         pool_command: str,
         *,
+        bot,
         playable_w: float,
         playable_h: float,
         upgrades: frozenset,
@@ -447,8 +449,8 @@ class SquadObservationBuilder:
         catalog[_F[USC.CAN_CLOAK]] = float(unit_can_cloak(unit))
 
         # --- Group J: Heal / repair readiness ---
-        catalog[_F[USC.CAN_HEAL]] = float(unit_can_heal(unit))
-        catalog[_F[USC.CAN_REPAIR]] = float(unit_can_repair(unit))
+        catalog[_F[USC.CAN_HEAL]] = float(unit_can_heal(unit, bot))
+        catalog[_F[USC.CAN_REPAIR]] = float(unit_can_repair(unit, bot))
 
         # --- Group L: AoE spell readiness ---
         catalog[_F[USC.CAN_AOE]] = float(unit_can_aoe(unit, enemy_race=enemy_race))

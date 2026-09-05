@@ -47,6 +47,7 @@ env:
     - CYCLONE
     - SIEGETANK
     - THOR
+    - THORAP
     - BANSHEE
     - VIKINGFIGHTER
     - BATTLECRUISER
@@ -81,6 +82,7 @@ env:
     - CYCLONE
     - SIEGETANK
     - THOR
+    - THORAP
     - BANSHEE
     - VIKINGFIGHTER
     - BATTLECRUISER

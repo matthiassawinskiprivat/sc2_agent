@@ -6,6 +6,7 @@ from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 
 from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+from train.envs.ctf.heal_spawn import guaranteed_healer_name
 
 
 def _make_env(unit_pools, env_mode="heal"):
@@ -57,7 +58,8 @@ def _spawn(env):
     return asyncio.run(env._spawn_from_unit_pools(get_valid_pos, get_offset_pos, to_id))
 
 
-def test_zerg_attack_spawns_tumor_on_attack_and_defend_positions():
+def test_heal_army_spawn_does_not_plant_tumors():
+    """Creep coverage is a separate playable-area grid, not 1–2 tumors at spawn."""
     pools = [
         {
             "high_level_command": "attack",
@@ -81,45 +83,12 @@ def test_zerg_attack_spawns_tumor_on_attack_and_defend_positions():
     _spawn(env)
 
     cmds = _all_create_cmds(env)
-    tumor_cmds = [c for c in cmds if c[0] == UnitTypeId.CREEPTUMOR]
-    assert len(tumor_cmds) == 2  # attack region + defender _d
-    positions = {(c[2].x, c[2].y) for c in tumor_cmds}
-    assert (11.0, 11.0) in positions  # offset from attack center
-    assert (21.0, 21.0) in positions  # offset from defend center
-
-
-def test_zerg_defend_spawns_tumor_on_defend_only():
-    pools = [
-        {
-            "high_level_command": "defend",
-            "race": "zerg",
-            "region": "A",
-            "agent": True,
-            "unit_pool": ["ZERGLING", "QUEEN"],
-            "mineral_budget": 500,
-            "vespene_budget": 0,
-        },
-        {
-            "high_level_command": "attack",
-            "race": "terran",
-            "region": "A",
-            "unit_pool": ["MARINE"],
-            "mineral_budget": 500,
-            "vespene_budget": 0,
-        },
-    ]
-    env = _make_env(pools)
-    env._calculate_spawns_for_pool = MagicMock(
-        side_effect=lambda pool: (
-            ["ZERGLING"] if pool["race"] == "zerg" else ["MARINE"]
-        )
-    )
-    _spawn(env)
-
-    cmds = _all_create_cmds(env)
-    tumor_cmds = [c for c in cmds if c[0] == UnitTypeId.CREEPTUMOR]
-    assert len(tumor_cmds) == 1
-    assert tumor_cmds[0][2] == Point2((21.0, 21.0))  # defend spawn offset
+    tumor_types = {
+        UnitTypeId.CREEPTUMOR,
+        UnitTypeId.CREEPTUMORBURROWED,
+        UnitTypeId.CREEPTUMORQUEEN,
+    }
+    assert not any(c[0] in tumor_types for c in cmds)
 
 
 def test_protoss_defend_defers_budget_batteries():
@@ -225,3 +194,244 @@ def test_without_heal_mode_no_battery_guarantee():
     # Cloak mode still defers race detectors even when battery guarantee is off.
     assert any(c[0] == UnitTypeId.OBSERVER for c in detectors)
     assert any(c[0] == UnitTypeId.RAVEN for c in detectors)
+
+
+def test_guaranteed_healer_name_prefers_medivac_over_scv():
+    assert guaranteed_healer_name(["MARINE", "SCV", "MEDIVAC"], ["MARINE"]) == "MEDIVAC"
+
+
+def test_guaranteed_healer_name_prefers_queen():
+    assert guaranteed_healer_name(["ZERGLING", "QUEEN"], ["ZERGLING"]) == "QUEEN"
+
+
+def test_guaranteed_healer_name_none_when_already_present():
+    assert guaranteed_healer_name(["SCV", "MEDIVAC"], ["SCV"]) is None
+
+
+def test_guaranteed_healer_name_none_when_pool_has_none():
+    assert guaranteed_healer_name(["ZEALOT", "STALKER"], ["ZEALOT"]) is None
+
+
+def test_heal_mode_guarantees_healer_when_rng_misses():
+    pools = [
+        {
+            "high_level_command": "attack",
+            "race": "terran",
+            "region": "A",
+            "agent": True,
+            "unit_pool": ["MARINE", "SCV", "MEDIVAC"],
+            "mineral_budget": 500,
+            "vespene_budget": 0,
+        },
+        {
+            "high_level_command": "defend",
+            "race": "zerg",
+            "region": "A",
+            "unit_pool": ["ZERGLING"],
+            "mineral_budget": 500,
+            "vespene_budget": 0,
+        },
+    ]
+    env = _make_env(pools, env_mode="heal")
+    env._calculate_spawns_for_pool = MagicMock(
+        side_effect=lambda pool: (
+            ["MARINE"] if pool["race"] == "terran" else ["ZERGLING"]
+        )
+    )
+    _spawn(env)
+    cmds = _all_create_cmds(env)
+    assert any(c[0] == UnitTypeId.MEDIVAC for c in cmds)
+    assert any(c[0] == UnitTypeId.MARINE for c in cmds)
+
+
+def test_heal_mode_keeps_budget_healer_without_extra():
+    pools = [
+        {
+            "high_level_command": "attack",
+            "race": "terran",
+            "region": "A",
+            "agent": True,
+            "unit_pool": ["MARINE", "SCV", "MEDIVAC"],
+            "mineral_budget": 500,
+            "vespene_budget": 0,
+        },
+        {
+            "high_level_command": "defend",
+            "race": "zerg",
+            "region": "A",
+            "unit_pool": ["ZERGLING"],
+            "mineral_budget": 500,
+            "vespene_budget": 0,
+        },
+    ]
+    env = _make_env(pools, env_mode="heal")
+    env._calculate_spawns_for_pool = MagicMock(
+        side_effect=lambda pool: (
+            ["MARINE", "SCV"] if pool["race"] == "terran" else ["ZERGLING"]
+        )
+    )
+    _spawn(env)
+    cmds = _all_create_cmds(env)
+    medivacs = [c for c in cmds if c[0] == UnitTypeId.MEDIVAC]
+    scvs = [c for c in cmds if c[0] == UnitTypeId.SCV]
+    assert len(scvs) == 1
+    assert medivacs == []
+
+
+def test_without_heal_mode_no_healer_guarantee():
+    pools = [
+        {
+            "high_level_command": "attack",
+            "race": "terran",
+            "region": "A",
+            "agent": True,
+            "unit_pool": ["MARINE", "SCV", "MEDIVAC"],
+            "mineral_budget": 500,
+            "vespene_budget": 0,
+        },
+        {
+            "high_level_command": "defend",
+            "race": "zerg",
+            "region": "A",
+            "unit_pool": ["ZERGLING"],
+            "mineral_budget": 500,
+            "vespene_budget": 0,
+        },
+    ]
+    env = _make_env(pools, env_mode="cloak")
+    env._calculate_spawns_for_pool = MagicMock(
+        side_effect=lambda pool: (
+            ["MARINE"] if pool["race"] == "terran" else ["ZERGLING"]
+        )
+    )
+    _spawn(env)
+    cmds = _all_create_cmds(env)
+    assert not any(c[0] == UnitTypeId.MEDIVAC for c in cmds)
+    assert not any(c[0] == UnitTypeId.SCV for c in cmds)
+
+
+def test_damaged_units_enabled_defaults_false():
+    from train.envs.ctf.heal_spawn import damaged_units_enabled
+
+    assert damaged_units_enabled({}) is False
+    assert damaged_units_enabled({"env": {}}) is False
+    assert damaged_units_enabled({"env": {"damaged_units": False}}) is False
+    assert damaged_units_enabled({"env": {"damaged_units": True}}) is True
+    assert damaged_units_enabled({"damaged_units": True}) is True
+
+
+def test_damaged_unit_targets_includes_thor_and_scv():
+    from train.envs.ctf.heal_spawn import damaged_unit_targets
+
+    thor = MagicMock()
+    thor.tag = 1
+    thor.type_id = UnitTypeId.THOR
+    thor.is_structure = False
+    thor.health_max = 400.0
+    thor.shield_max = 0.0
+    scv = MagicMock()
+    scv.tag = 2
+    scv.type_id = UnitTypeId.SCV
+    scv.is_structure = False
+    scv.health_max = 45.0
+    scv.shield_max = 0.0
+    bot = MagicMock()
+    bot.all_units = [thor, scv]
+
+    health_groups, shield_groups = damaged_unit_targets(bot, fraction=0.5)
+    assert health_groups == {200.0: [1], 22.5: [2]}
+    assert shield_groups == {}
+
+
+def test_apply_damaged_units_halves_mobile_hp_skips_pylon():
+    from train.envs.ctf.heal_spawn import apply_damaged_units
+
+    bc = MagicMock()
+    bc.tag = 1
+    bc.type_id = UnitTypeId.BATTLECRUISER
+    bc.is_structure = False
+    bc.health_max = 550.0
+    bc.shield_max = 0.0
+    pylon = MagicMock()
+    pylon.tag = 2
+    pylon.type_id = UnitTypeId.PYLON
+    pylon.is_structure = True
+    pylon.health_max = 200.0
+    pylon.shield_max = 200.0
+    bot = MagicMock()
+    bot.all_units = [bc, pylon]
+    bot.client.debug_set_unit_value = AsyncMock()
+
+    n = asyncio.run(apply_damaged_units(bot))
+    assert n == 1
+    bot.client.debug_set_unit_value.assert_awaited_once()
+    tags, unit_value, value = bot.client.debug_set_unit_value.await_args.args
+    assert tags == [1]
+    assert unit_value == 2
+    assert value == 275.0
+
+
+def test_apply_damaged_units_skipped_when_flag_off():
+    env = _make_env(
+        [
+            {
+                "high_level_command": "attack",
+                "race": "zerg",
+                "region": "A",
+                "agent": True,
+                "unit_pool": ["QUEEN"],
+                "mineral_budget": 500,
+                "vespene_budget": 0,
+            },
+            {
+                "high_level_command": "defend",
+                "race": "terran",
+                "region": "A",
+                "unit_pool": ["BATTLECRUISER"],
+                "mineral_budget": 500,
+                "vespene_budget": 0,
+            },
+        ],
+        env_mode="heal",
+    )
+    env.bot.client.debug_set_unit_value = AsyncMock()
+    asyncio.run(env._apply_damaged_units())
+    env.bot.client.debug_set_unit_value.assert_not_called()
+
+
+def test_apply_damaged_units_runs_when_flag_on():
+    env = _make_env(
+        [
+            {
+                "high_level_command": "attack",
+                "race": "zerg",
+                "region": "A",
+                "agent": True,
+                "unit_pool": ["QUEEN"],
+                "mineral_budget": 500,
+                "vespene_budget": 0,
+            },
+            {
+                "high_level_command": "defend",
+                "race": "terran",
+                "region": "A",
+                "unit_pool": ["BATTLECRUISER"],
+                "mineral_budget": 500,
+                "vespene_budget": 0,
+            },
+        ],
+        env_mode="heal",
+    )
+    env.training_conf["env"]["damaged_units"] = True
+    queen = MagicMock()
+    queen.tag = 11
+    queen.type_id = UnitTypeId.QUEEN
+    queen.is_structure = False
+    queen.health_max = 175.0
+    queen.shield_max = 0.0
+    env.bot.all_units = [queen]
+    env.bot.client.debug_set_unit_value = AsyncMock()
+    asyncio.run(env._apply_damaged_units())
+    env.bot.client.debug_set_unit_value.assert_awaited()
+    env.bot.client.step.assert_awaited_once()
+    env._refresh_bot_state.assert_awaited()

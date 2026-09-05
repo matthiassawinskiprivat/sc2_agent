@@ -11,7 +11,7 @@ from typing import FrozenSet
 
 # Upgrade bonus table also acts as an inclusion allowlist for armed units.
 WEAPON_UPGRADE_BONUS_DB = {
-    "MARINE": 1, "MARAUDER": 1, "SIEGETANK": 3, "SIEGETANKSIEGED": 3, "THOR": 3,
+    "MARINE": 1, "MARAUDER": 1, "SIEGETANK": 3, "SIEGETANKSIEGED": 3, "THOR": 3, "THORAP": 3,
     "VIKINGFIGHTER": 1, "VIKINGASSAULT": 1, "BANSHEE": 1, "BATTLECRUISER": 1,
     "HELLION": 1, "HELLIONTANK": 2, "CYCLONE": 1, "LIBERATOR": 5, "LIBERATORAG": 5,
     "GHOST": 1, "REAPER": 1, "AUTOTURRET": 0,

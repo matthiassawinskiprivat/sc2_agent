@@ -85,6 +85,9 @@ levels:
   - "scenario_ling_bain_vs_marine"
   - "scenario_thor_vs_voidray"
   # healing
+  - "ctf_heal_queen_vs_queen"
+  - "ctf_heal_thor_scv_vs_thor_scv"
+  - "ctf_heal_queen_vs_battlecruiser_scv"
   - "ctf_level_18"
   - "ctf_level_19"
   - "ctf_level_20"
@@ -97,7 +100,7 @@ levels:
   - "ctf_level_27"
   - "ctf_level_28"
   - "ctf_level_29"
-  - "scenario_lurker_vs_thor"
+  - "scenario_lurker_vs_thor" # TODO: gamma too high
   - "scenario_dt_vs_marauder"
   - "scenario_widowmine_vs_zergling"
   - "scenario_ghost_marauder_vs_lurker_roach"

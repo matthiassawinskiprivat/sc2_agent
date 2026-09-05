@@ -78,6 +78,7 @@ _UNIT_LIST: list[UnitInfo] = [
     UnitInfo(uid("CYCLONE"),     "Cyclone",     150, 100, frozenset({"mechanical", "armored"}),          1.0),
     UnitInfo(uid("WIDOWMINE"),   "Widow Mine",  75,  25, frozenset({"mechanical", "light"}),             0.5),
     UnitInfo(uid("THOR"),        "Thor",        300, 200, frozenset({"mechanical", "armored", "massive"}), 1.75),
+    UnitInfo(uid("THORAP"),      "Thor AP",     300, 200, frozenset({"mechanical", "armored", "massive"}), 1.75),
     UnitInfo(uid("VIKINGFIGHTER"), "Viking",    150, 75, frozenset({"mechanical", "armored"}),           1.0),
     UnitInfo(uid("MEDIVAC"),     "Medivac",     100, 100, frozenset({"mechanical", "armored"}),          1.0),
     UnitInfo(uid("BANSHEE"),     "Banshee",     150, 100, frozenset({"mechanical", "light"}),            1.0),

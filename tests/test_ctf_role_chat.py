@@ -45,13 +45,27 @@ def test_send_ctf_role_chat_uses_bot_chat_send():
 
     env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
     env._log = MagicMock()
-    env._ctf_role_chat_lines = MagicMock(
-        return_value=["Ep1 TRAINEE: Zerg attack (P1)", "Ep1 OPPONENT: Terran defend (P2, frozen)"]
-    )
+    lines = ["Ep1 TRAINEE: Zerg attack (P1)", "Ep1 OPPONENT: Terran defend (P2, frozen)"]
+    env._ctf_role_chat_lines = MagicMock(return_value=lines)
     env.bot = SimpleNamespace(chat_send=AsyncMock())
     asyncio.run(env._send_ctf_role_chat())
     assert env.bot.chat_send.await_count == 2
     env.bot.chat_send.assert_any_await("Ep1 TRAINEE: Zerg attack (P1)", team_only=False)
+    env._log.assert_any_call(lines[0])
+    env._log.assert_any_call(lines[1])
+
+
+def test_send_ctf_role_chat_prints_even_without_chat_send():
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env._log = MagicMock()
+    env._ctf_role_chat_lines = MagicMock(
+        return_value=["Ep1 TRAINEE: Zerg A:attack (P1)"]
+    )
+    env.bot = SimpleNamespace()
+    asyncio.run(env._send_ctf_role_chat())
+    env._log.assert_any_call("Ep1 TRAINEE: Zerg A:attack (P1)")
 
 
 def test_spawn_sends_role_chat_after_debug_helpers():
@@ -89,6 +103,7 @@ def test_spawn_sends_role_chat_after_debug_helpers():
     env._apply_upgrades_env_mode = AsyncMock(side_effect=lambda: order.append("debug"))
     env._apply_spellcaster_env_mode_upgrades = AsyncMock()
     env._apply_ctf_resources = AsyncMock(side_effect=lambda: order.append("debug"))
+    env._apply_heal_map_creep = AsyncMock(side_effect=lambda *_a, **_k: order.append("debug"))
     env._apply_spellcaster_energy = AsyncMock(side_effect=lambda: order.append("debug"))
     env._send_ctf_role_chat = AsyncMock(side_effect=lambda: order.append("chat"))
 

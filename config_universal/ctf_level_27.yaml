@@ -52,6 +52,7 @@ env:
     - CYCLONE
     - SIEGETANK
     - THOR
+    - THORAP
     - BANSHEE
     - VIKINGFIGHTER
     - BATTLECRUISER
@@ -93,6 +94,7 @@ env:
     - CYCLONE
     - SIEGETANK
     - THOR
+    - THORAP
     - BANSHEE
     - VIKINGFIGHTER
     - BATTLECRUISER
@@ -105,7 +107,7 @@ env:
     pylon_damage_penalty: 0.5
     damage_reward: 0.2
     damage_penalty: 0.1
-    heal_reward: 0.1
+    heal_reward: 0.2
     melee_multiplier: 0.5
     kill_reward: 0.25
     kill_penalty: -0.25
@@ -132,7 +134,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.99
+  gamma: 0.98
   ent_coef: 0.01
   n_epochs: 2
 agent_architecture: squad

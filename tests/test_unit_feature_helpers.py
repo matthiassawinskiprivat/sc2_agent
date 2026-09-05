@@ -20,7 +20,11 @@ from src.utils.unit_feature_helpers import (
     issue_attack_at_point,
     resolve_corruptor_target_at_point,
     resolve_enemy_at_point,
+    heal_click_cell_half,
+    heal_click_cells_from_conf,
+    heal_click_hits_unit,
     unit_center_in_spatial_cell,
+    unit_click_radius,
     uses_aoe_spell,
     unit_can_aoe,
     uses_caustic_spray_on_structures,
@@ -217,6 +221,35 @@ def test_unit_center_in_spatial_cell_half_gu():
     assert unit_center_in_spatial_cell(unit, Point2((10.0, 10.0))) is True
     unit.position = Point2((10.6, 10.0))
     assert unit_center_in_spatial_cell(unit, Point2((10.0, 10.0))) is False
+
+
+def test_heal_click_hits_unit_uses_body_radius():
+    from sc2.position import Point2
+
+    thor = MagicMock()
+    thor.position = Point2((12.0, 10.0))
+    thor.radius = 1.875
+    click = Point2((10.5, 10.0))
+    assert unit_center_in_spatial_cell(thor, click) is False
+    assert heal_click_hits_unit(thor, click) is True
+    assert unit_click_radius(thor) == pytest.approx(1.875)
+
+    cyclone = MagicMock()
+    cyclone.position = Point2((12.0, 10.0))
+    cyclone.radius = 0.75
+    assert heal_click_hits_unit(cyclone, click) is False
+
+
+def test_heal_click_cells_from_conf_defaults_and_clamps():
+    assert heal_click_cells_from_conf({}) == 1.0
+    assert heal_click_cells_from_conf({"env": {}}) == 1.0
+    assert heal_click_cell_half({}) == pytest.approx(0.5)
+    assert heal_click_cells_from_conf({"env": {"heal_click_cells": 3}}) == 3.0
+    assert heal_click_cell_half({"heal_click_cells": 3}) == pytest.approx(1.5)
+    assert heal_click_cells_from_conf({"env": {"heal_click_cells": 5}}) == 5.0
+    assert heal_click_cells_from_conf({"env": {"heal_click_cells": 0}}) == 1.0
+    assert heal_click_cells_from_conf({"env": {"heal_click_cells": 9}}) == 5.0
+    assert heal_click_cells_from_conf({"env": {"heal_click_cells": "nope"}}) == 1.0
 
 
 def test_resolve_enemy_at_point_picks_closer_in_cell():

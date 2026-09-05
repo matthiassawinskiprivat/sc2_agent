@@ -28,6 +28,8 @@ def test_structures_not_squad_eligible():
     assert not CaptureTheFlagSingleEnv._is_squad_eligible_unit(pylon)
     tumor = _unit(4, UnitTypeId.CREEPTUMOR, 1, 0, 0, is_structure=True)
     assert not CaptureTheFlagSingleEnv._is_squad_eligible_unit(tumor)
+    burrowed = _unit(5, UnitTypeId.CREEPTUMORBURROWED, 1, 0, 0, is_structure=False)
+    assert not CaptureTheFlagSingleEnv._is_squad_eligible_unit(burrowed)
 
 
 def test_assign_unit_commands_excludes_battery_pylon_tumor():

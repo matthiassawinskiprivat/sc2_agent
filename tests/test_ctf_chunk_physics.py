@@ -240,6 +240,21 @@ def test_reissue_aoe_recasts_spell():
     unit.move.assert_not_called()
 
 
+def test_reissue_skips_heal_orders():
+    """Unselected healers must not get move(click); that cancels Transfuse walk-in."""
+    from sc2.position import Point2
+
+    env = _make_env(chunk_size=4)
+    env.player_units = {1: [20], 2: []}
+    env.bot._unit_last_order = {20: ("heal_local", Point2((12.0, 34.0)))}
+    unit = MagicMock(owner_id=1)
+    env.bot.all_units.find_by_tag = MagicMock(return_value=unit)
+
+    asyncio.run(env._reissue_non_squad_orders({10}))
+    env.bot.do.assert_not_called()
+    unit.move.assert_not_called()
+
+
 def test_opponent_predict_falls_back_to_collector_model():
     import asyncio
     from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv

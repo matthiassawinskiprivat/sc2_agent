@@ -23,6 +23,7 @@ _GROUND_AA_UNITS = {
     "STALKER",
     "QUEEN",
     "THOR",
+    "THORAP",
 }
 _AIR_UNITS = {
     "TEMPEST",

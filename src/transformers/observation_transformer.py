@@ -2767,6 +2767,8 @@ class ObservationTransformer:
         idx = self.current_layer_map.get(f"{prefix}_hps_field")
         if idx is None: return
         hps, rng = 0.0, 0.0
+        # Radii match HEAL_CAST_RANGE (observation only; heal_local does not
+        # require the ally to already sit inside this circle).
         if unit.type_id == UnitTypeId.MEDIVAC and unit.energy > 5: hps, rng = 12.6, 4.0
         elif unit.type_id == UnitTypeId.SHIELDBATTERY and unit.energy > 3: hps, rng = 50.4, 6.0
         elif unit.type_id == UnitTypeId.QUEEN and unit.energy >= 50: hps, rng = 125.0, 7.0

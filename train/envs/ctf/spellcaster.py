@@ -1,4 +1,8 @@
-"""CTF ``env_mode: spellcaster`` — max energy and spell-tech research."""
+"""CTF ``env_mode: spellcaster`` / heal — max energy and spell-tech research.
+
+``apply_max_energy`` is also used by heal mode so Queens spawn with enough
+energy to Transfuse (50) instead of the default 25.
+"""
 
 from __future__ import annotations
 

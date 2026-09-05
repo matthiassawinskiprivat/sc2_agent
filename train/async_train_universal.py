@@ -3,7 +3,6 @@ import os
 import subprocess
 import sys
 import time
-from collections import deque
 
 # Must be set before the CUDA allocator first initialises (i.e. before any tensor.cuda() call).
 # max_split_size_mb: prevents the allocator from splitting large blocks into small fragments
@@ -112,6 +111,7 @@ from src.utils.async_buffer_setup import (
 from src.utils.async_buffer_paths import ensure_async_buffer_dir_env, resolve_async_buffer_dir
 from src.agent.utils.async_shared_ram_buffer import AsyncSharedRamBuffer
 from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
+from train.collector_custom_metrics import publish_custom_metrics, record_info_scalars
 
 import shutil
 
@@ -1028,6 +1028,17 @@ class AsyncCollector(mp.Process):
             else:
                 model.num_timesteps = 0
 
+        # One-time heal_local (etc.) prior at curriculum graft. Skip CONTINUE
+        # so a mid-level resume does not double-boost. Applied before
+        # initial_model.zip so the learner and opponent load the same logits.
+        from src.utils.model_utils import maybe_apply_loud_command_head_init
+
+        maybe_apply_loud_command_head_init(
+            model,
+            self.config,
+            resume=bool(self.resume_timesteps_from_save),
+        )
+
         fe = model.policy.features_extractor
         if hasattr(fe, "global_cnn"):
             c0 = fe.global_cnn[0]
@@ -1170,6 +1181,7 @@ class AsyncCollector(mp.Process):
             model.policy.set_training_mode(False)
             filled = 0
             n_rollout_steps = training_params["n_steps"]
+            rollout_info_sums: dict = {}
             last_rollout_hb = t_rollout_start
             last_fill_progress_ts = t_rollout_start
             last_unblock_ts = 0.0
@@ -1270,11 +1282,9 @@ class AsyncCollector(mp.Process):
 
                     for i, done in enumerate(dones):
                         info = infos[i]
-                        for key, val in info.items():
-                            if isinstance(val, (int, float, np.number)):
-                                if key not in self.custom_metrics:
-                                    self.custom_metrics[key] = deque(maxlen=100)
-                                self.custom_metrics[key].append(val)
+                        record_info_scalars(
+                            self.custom_metrics, rollout_info_sums, info
+                        )
 
                         if done:
                             recent_ep_rewards.append(episode_rewards[i])
@@ -1375,14 +1385,13 @@ class AsyncCollector(mp.Process):
                 signal_meta["rollout/ep_rew_mean"] = np.mean(recent_ep_rewards)
                 signal_meta["rollout/ep_len_mean"] = np.mean(recent_ep_lengths)
             
-            # Add all other captured metrics
-            if hasattr(self, 'custom_metrics'):
-                for key, vals in self.custom_metrics.items():
-                    if vals:
-                        # SB3 standard is to put environment metrics in 'rollout/'
-                        # but we'll preserve the original key names or prefix them
-                        prefix = "" if "/" in key else "env/"
-                        signal_meta[f"{prefix}{key}"] = np.mean(vals)
+            # Env info scalars: rolling means, plus rare-event rollout sums
+            # (heal_casts). Mean of the last 100 steps hides one-in-a-hundred casts.
+            publish_custom_metrics(
+                signal_meta,
+                getattr(self, "custom_metrics", {}),
+                rollout_info_sums,
+            )
 
             current_buffer.signal_ready(signal_meta)
 

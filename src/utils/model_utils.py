@@ -5,7 +5,7 @@ import math
 import os
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from typing import Dict, Any, Optional, Tuple, List, Union
+from typing import Dict, Any, Optional, Tuple, List, Union, Sequence
 from loguru import logger
 
 def interpolate_spatial_weights(weights: torch.Tensor, old_size: int, new_size: int) -> torch.Tensor:
@@ -721,6 +721,183 @@ def load_squad_checkpoint(
             logger.warning(f"Squad graft optimizer restore skipped ({opt_reason})")
     apply_checkpoint_timesteps(model, model_path)
     return model
+
+
+# Blend toward the template command row (1 = full copy). Extra nats are added
+# after the blend. Full copy + 1.0 made heal the default combat action.
+DEFAULT_LOUD_COMMAND_MIX = 0.5
+DEFAULT_LOUD_COMMAND_BIAS = 0.0
+_LOUD_COMMAND_TEMPLATE = "attack_local"
+
+
+def loud_command_heads_from_conf(training_conf: Optional[dict]) -> List[str]:
+    """Command names to boost at curriculum graft (root or env)."""
+    conf = training_conf or {}
+    env = conf.get("env") if isinstance(conf.get("env"), dict) else {}
+    raw = conf.get("loud_command_heads", env.get("loud_command_heads", []))
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        name = raw.strip().lower()
+        return [name] if name else []
+    return [str(x).strip().lower() for x in raw if str(x).strip()]
+
+
+def loud_command_bias_from_conf(training_conf: Optional[dict]) -> float:
+    """Extra bias (nats) after mixing toward the template. Default 0.0."""
+    conf = training_conf or {}
+    env = conf.get("env") if isinstance(conf.get("env"), dict) else {}
+    raw = conf.get("loud_command_bias", env.get("loud_command_bias", None))
+    if raw is None or raw == "":
+        return DEFAULT_LOUD_COMMAND_BIAS
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_LOUD_COMMAND_BIAS
+
+
+def loud_command_mix_from_conf(training_conf: Optional[dict]) -> float:
+    """How far to blend the loud slot toward the template row in [0, 1]."""
+    conf = training_conf or {}
+    env = conf.get("env") if isinstance(conf.get("env"), dict) else {}
+    raw = conf.get("loud_command_mix", env.get("loud_command_mix", None))
+    if raw is None or raw == "":
+        return DEFAULT_LOUD_COMMAND_MIX
+    try:
+        mix = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_LOUD_COMMAND_MIX
+    if mix != mix:  # NaN
+        return DEFAULT_LOUD_COMMAND_MIX
+    return min(max(mix, 0.0), 1.0)
+
+
+def configured_command_names(training_conf: Optional[dict]) -> List[str]:
+    """Cumulative action_heads + categorical_heads (root preferred over env)."""
+    conf = training_conf or {}
+    env = conf.get("env") if isinstance(conf.get("env"), dict) else {}
+    heads = list(conf.get("action_heads") or env.get("action_heads") or [])
+    cats = list(conf.get("categorical_heads") or env.get("categorical_heads") or [])
+    return [str(h).lower() for h in heads] + [str(c).lower() for c in cats]
+
+
+def _resolve_command_head(policy_or_model: Any) -> Optional[Any]:
+    obj = policy_or_model
+    head = getattr(obj, "command_head", None)
+    if head is None:
+        inner = getattr(obj, "policy", None)
+        head = getattr(inner, "command_head", None) if inner is not None else None
+    if head is None or getattr(head, "weight", None) is None:
+        return None
+    if getattr(head, "bias", None) is None:
+        return None
+    return head
+
+
+def _template_command_index(names: Sequence[str], loud_set: set) -> Optional[int]:
+    lowered = [str(n).lower() for n in names]
+    preferred = _LOUD_COMMAND_TEMPLATE
+    if preferred in lowered:
+        idx = lowered.index(preferred)
+        if lowered[idx] not in loud_set:
+            return idx
+    for i, name in enumerate(lowered):
+        if name not in loud_set:
+            return i
+    return None
+
+
+def apply_loud_command_head_init(
+    policy_or_model: Any,
+    command_names: Sequence[str],
+    loud_names: Sequence[str],
+    extra_bias: float,
+    mix: float = DEFAULT_LOUD_COMMAND_MIX,
+) -> List[int]:
+    """Blend each loud slot toward a template command row, then add extra_bias.
+
+    Unused padded rows start near zero, so a bias bump alone cannot beat a
+    peaked attack logit. Mixing toward ``attack_local`` (else the first
+    non-loud configured head) gives the new slot a combat-sized direction
+    without replacing attack. ``mix=1`` is a full copy; ``mix=0.5`` is a
+    halfway blend. Idempotent only for ``mix=1``. Returns boosted indices.
+    """
+    loud = [str(n).strip().lower() for n in loud_names if str(n).strip()]
+    if not loud:
+        return []
+    head = _resolve_command_head(policy_or_model)
+    if head is None:
+        logger.warning("Loud command init skipped: policy has no command_head")
+        return []
+    try:
+        mix_f = float(mix)
+    except (TypeError, ValueError):
+        mix_f = DEFAULT_LOUD_COMMAND_MIX
+    if mix_f != mix_f:
+        mix_f = DEFAULT_LOUD_COMMAND_MIX
+    mix_f = min(max(mix_f, 0.0), 1.0)
+    extra_f = float(extra_bias)
+    names = [str(n).lower() for n in command_names]
+    name_to_idx = {n: i for i, n in enumerate(names)}
+    loud_set = set(loud)
+    template_idx = _template_command_index(names, loud_set)
+    boosted: List[int] = []
+    n_out = int(head.weight.shape[0])
+    with torch.no_grad():
+        for name in loud:
+            idx = name_to_idx.get(name)
+            if idx is None:
+                logger.warning(
+                    f"Loud command init: {name!r} not in configured command names"
+                )
+                continue
+            if idx >= n_out or idx >= int(head.bias.numel()):
+                logger.warning(
+                    f"Loud command init: {name!r} index {idx} out of command_head range {n_out}"
+                )
+                continue
+            if template_idx is not None and template_idx != idx:
+                w_new = (1.0 - mix_f) * head.weight[idx] + mix_f * head.weight[template_idx]
+                b_new = (
+                    (1.0 - mix_f) * head.bias[idx]
+                    + mix_f * head.bias[template_idx]
+                    + extra_f
+                )
+                head.weight[idx].copy_(w_new)
+                head.bias[idx].copy_(b_new)
+            else:
+                head.bias[idx].copy_(head.bias[idx] + extra_f)
+            boosted.append(idx)
+    return boosted
+
+
+def maybe_apply_loud_command_head_init(
+    policy_or_model: Any,
+    training_conf: Optional[dict],
+    *,
+    resume: bool,
+    command_names: Optional[Sequence[str]] = None,
+) -> List[int]:
+    """Curriculum-graft hook. No-op on same-level CONTINUE_TRAINING (resume)."""
+    if resume:
+        return []
+    loud = loud_command_heads_from_conf(training_conf)
+    if not loud:
+        return []
+    names = list(command_names) if command_names is not None else configured_command_names(
+        training_conf
+    )
+    extra = loud_command_bias_from_conf(training_conf)
+    mix = loud_command_mix_from_conf(training_conf)
+    boosted = apply_loud_command_head_init(
+        policy_or_model, names, loud, extra, mix=mix
+    )
+    if boosted:
+        logger.info(
+            f"Loud command init: {loud} mix={mix} extra_bias={extra} "
+            f"slots={boosted} template={_LOUD_COMMAND_TEMPLATE}"
+        )
+    return boosted
 
 
 def calculate_distance_matrix(points_a: np.ndarray, points_b: np.ndarray) -> np.ndarray:

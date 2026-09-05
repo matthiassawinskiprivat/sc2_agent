@@ -97,6 +97,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.grid_size = grid_size
         self.max_steps = max_steps
         self.steps_count = 0
+        self._episode_heal_casts = 0
+        self._episode_heal_attempts = 0
         self.client_count = 1 # God-Mode uses only 1 connection
         
         # Use the config directory from training_conf (universal pipeline passes "config_universal").
@@ -336,7 +338,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         )
 
     async def _send_ctf_role_chat(self) -> None:
-        """Post role lines after debug spawn so SC2 does not wipe them from chat."""
+        """Print and post role lines after debug spawn so SC2 does not wipe them.
+
+        Training stdout/worker logs always get the trainee/opponent lines.
+        In-game chat is best-effort after the last ``debug_*`` cheat this spawn.
+        """
+        lines = self._ctf_role_chat_lines()
+        for line in lines:
+            self._log(line)
         bot = self.bot
         if bot is None:
             return
@@ -346,7 +355,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             send = getattr(client, "chat_send", None) if client is not None else None
         if not callable(send):
             return
-        for line in self._ctf_role_chat_lines():
+        for line in lines:
             try:
                 await send(line, team_only=False)
             except TypeError:
@@ -546,9 +555,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
     async def _refresh_bot_state(self):
         from src.utils.sc2_observation_compat import game_state_from_response_observation
+        from src.utils.unit_feature_helpers import refresh_healer_ability_cache
+
         obs = await self.bot.client.observation()
         state = game_state_from_response_observation(obs.observation)
         self.bot._prepare_step(state, self.bot._proto_game_info)
+        await refresh_healer_ability_cache(self.bot)
 
     # ------------------------------------------------------------------
     # Region helpers (mirrors CaptureTheFlagEnv)
@@ -604,9 +616,19 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         Interceptors are Carrier-AI managed. Adopting them into the 24-slot squad
         pointer crowds out real army tags and floods selection with noise.
+        Heal-mode creep tumors are structures; exclude the type as well in case
+        the API omits the Structure attribute on the burrowed form.
         """
         from src.utils.unit_feature_helpers import is_carrier_interceptor
+        from sc2.ids.unit_typeid import UnitTypeId
 
+        tid = getattr(unit, "type_id", None)
+        if tid in (
+            UnitTypeId.CREEPTUMOR,
+            UnitTypeId.CREEPTUMORBURROWED,
+            UnitTypeId.CREEPTUMORQUEEN,
+        ):
+            return False
         if getattr(unit, "is_structure", False):
             return False
         return not is_carrier_interceptor(unit)
@@ -808,6 +830,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         else:
             await self._spawn_legacy(get_valid_pos, get_offset_pos, to_id)
 
+        # Heal: a few burrowed tumors on the Zerg attack/defend corridor.
+        await self._apply_heal_map_creep(pool_spawn_centers)
+
         # Advance physics to materialise all units (and power pylons).
         for _ in range(3):
             await self.bot.client.step()
@@ -847,6 +872,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self._refresh_bot_state()
         await self._apply_spellcaster_energy()
         await disable_cyclone_lock_on_autocast(self.bot)
+        await self._apply_damaged_units()
         # After every debug_* call this spawn: chat history keeps these lines.
         await self._send_ctf_role_chat()
 
@@ -878,6 +904,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
+        from train.envs.ctf.heal_spawn import guaranteed_healer_name
 
         map_path = str(self._resolve_map(self.map_name).path)
         pairs = self._load_region_pairs(map_path)
@@ -933,6 +960,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 and not any(str(n).upper() == "SHIELDBATTERY" for n in unit_names)
             ):
                 unit_names.append("SHIELDBATTERY")
+            # Active healer (Queen / Medivac / SCV) when listed but budget RNG missed.
+            if self._has_env_mode("heal"):
+                extra_healer = guaranteed_healer_name(
+                    pool.get("unit_pool", []), unit_names
+                )
+                if extra_healer is not None:
+                    unit_names.append(extra_healer)
             mobile_names = [n for n in unit_names if str(n).upper() != "SHIELDBATTERY"]
             battery_count = sum(1 for n in unit_names if str(n).upper() == "SHIELDBATTERY")
             for i, name in enumerate(mobile_names):
@@ -948,15 +982,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             if side_char == "d":
                 pylon_pos = get_valid_pos(spawn_center)
                 all_cmds.append([UnitTypeId.PYLON, 1, pylon_pos, player_id])
-
-            # Heal curriculum: Zerg creep tumors (not squad-selectable).
-            if self._has_env_mode("heal") and str(pool.get("race", "")).lower() == "zerg":
-                tumor_pos = get_offset_pos(spawn_center, 0, 1)
-                all_cmds.append([UnitTypeId.CREEPTUMOR, 1, tumor_pos, player_id])
-                if command == "attack" and label in label_to_defender_pos:
-                    d_center = label_to_defender_pos[label]
-                    d_tumor = get_offset_pos(d_center, 0, 1)
-                    all_cmds.append([UnitTypeId.CREEPTUMOR, 1, d_tumor, player_id])
 
             # Cloak curriculum: free detector per squad (not from mineral budget).
             # Deferred to a separate create after the army batch — large mixed-race
@@ -1122,13 +1147,59 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             refresh_state=self._refresh_bot_state,
         )
 
+    async def _apply_heal_map_creep(self, pool_spawn_centers=None) -> None:
+        """Plant a few burrowed tumors so Queens can Transfuse on the fight path.
+
+        Defend: spawn cluster + midpoint. Attack: both spawn clusters + midpoint.
+        Spawn clusters (center + 8-point ring) fill creep near the army quickly
+        without a map-wide grid.
+        """
+        if not self._has_env_mode("heal") or self.bot is None:
+            return
+        zerg_player_id = None
+        for pool in self.unit_pools_config or []:
+            if str(pool.get("race", "")).lower() == "zerg":
+                zerg_player_id = self._pool_player_id(pool)
+                break
+        if zerg_player_id is None:
+            return
+        from train.envs.ctf.heal_creep import apply_heal_map_creep, zerg_arena_tumor_positions
+
+        await apply_heal_map_creep(
+            bot=self.bot,
+            player_id=zerg_player_id,
+            positions=zerg_arena_tumor_positions(
+                pool_spawn_centers or [],
+                self.unit_pools_config,
+            ),
+        )
+
     async def _apply_spellcaster_energy(self) -> None:
-        """Fill energy bars so Fungal / Storm / EMP / Bomb can be cast immediately."""
-        if not self._has_env_mode("spellcaster") or self.bot is None:
+        """Fill energy bars so Transfuse / Heal / Fungal / Storm / EMP can be cast immediately.
+
+        Queens spawn at 25 energy; Transfuse costs 50. Heal mode therefore uses
+        the same max-energy cheat as spellcaster (Medivacs benefit as well).
+        """
+        if self.bot is None:
+            return
+        if not (self._has_env_mode("spellcaster") or self._has_env_mode("heal")):
             return
         from train.envs.ctf.spellcaster import apply_max_energy
 
         await apply_max_energy(self.bot)
+
+    async def _apply_damaged_units(self) -> None:
+        """Cut army HP to half when ``env.damaged_units`` is true (heal intro)."""
+        from train.envs.ctf.heal_spawn import apply_damaged_units, damaged_units_enabled
+
+        if self.bot is None or not damaged_units_enabled(self.training_conf):
+            return
+        touched = await apply_damaged_units(self.bot)
+        # debug_set_unit_value is queued until the next game step (observation alone
+        # does not apply it — same pattern as pylon HP reduction earlier in spawn).
+        if touched > 0:
+            await self.bot.client.step()
+        await self._refresh_bot_state()
 
     async def _spawn_legacy(self, get_valid_pos, get_offset_pos, to_id):
         """Fallback: random pylon positions when unit_pools_config is absent."""
@@ -2308,6 +2379,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             head_name, target = last_order
             if head_name in ("cloak_burrow", "uncloak_unburrow"):
                 continue
+            if "heal" in head_name:
+                # Same Transfuse/Heal/Repair is still walking in; move() would cancel it.
+                continue
             if "attack" in head_name:
                 issue_attack_at_point(self.bot, unit, target)
             elif "aoe" in head_name:
@@ -2481,6 +2555,49 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return draw_penalty
         return 0.0
 
+    def _record_heal_metrics(self, trainee_tags) -> tuple[int, int]:
+        """Count trainee heal commands and successful casts; add to episode totals.
+
+        Must run before ``calculate_squad_step_reward``, which clears the tag sets.
+        """
+        bot = getattr(self, "bot", None)
+
+        def _count(attr: str) -> int:
+            fn = getattr(bot, attr, None) if bot is not None else None
+            if not callable(fn):
+                return 0
+            try:
+                return int(fn(trainee_tags) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        casts = _count("count_heal_casts_for_tags")
+        attempts = _count("count_heal_attempts_for_tags")
+        self._episode_heal_casts = int(getattr(self, "_episode_heal_casts", 0)) + casts
+        self._episode_heal_attempts = (
+            int(getattr(self, "_episode_heal_attempts", 0)) + attempts
+        )
+        return casts, attempts
+
+    def _heal_cast_info(
+        self,
+        step_casts: int,
+        done: bool,
+        truncated: bool,
+        step_attempts: int = 0,
+    ) -> dict:
+        """TensorBoard: rollout sums for casts/attempts; episode means on done."""
+        info = {
+            "heal_casts": int(step_casts),
+            "heal_attempts": int(step_attempts),
+        }
+        if done or truncated:
+            info["heal_casts_episode"] = int(getattr(self, "_episode_heal_casts", 0))
+            info["heal_attempts_episode"] = int(
+                getattr(self, "_episode_heal_attempts", 0)
+            )
+        return info
+
     async def _finalize_squad_physics_step(
         self, squad_tags: List[int], acting_player_id: int
     ):
@@ -2510,6 +2627,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await self._refresh_bot_state()
 
         self._maybe_promote_defender_to_attack()
+
+        trainee_pid = self._trainee_sc2_player_id()
+        tags_for_heal = squad_tags if acting_player_id == trainee_pid else []
+        heal_casts, heal_attempts = self._record_heal_metrics(tags_for_heal)
 
         reward = self.bot.calculate_squad_step_reward(
             squad_tags, perspective_player_id=acting_player_id
@@ -2588,9 +2709,19 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self._deferred_truncated = truncated
             self._deferred_p1_terminal_reward = p1_terminal
             self._deferred_terminal_obs = obs
-            return obs, 0.0, False, False, {"squad_physics_step": True, "deferred_terminal": True}
+            return obs, 0.0, False, False, {
+                "squad_physics_step": True,
+                "deferred_terminal": True,
+                "heal_casts": heal_casts,
+                "heal_attempts": heal_attempts,
+            }
 
-        return obs, reward, done, truncated, {"squad_physics_step": True}
+        return obs, reward, done, truncated, {
+            "squad_physics_step": True,
+            **self._heal_cast_info(
+                heal_casts, done, truncated, step_attempts=heal_attempts
+            ),
+        }
 
     async def _finalize_squad_pointer_physics_step(
         self,
@@ -2622,6 +2753,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         self._maybe_promote_defender_to_attack()
 
+        heal_casts, heal_attempts = self._record_heal_metrics(trainee_tags)
         reward = self.bot.calculate_squad_step_reward(
             trainee_tags, perspective_player_id=trainee_player_id
         )
@@ -2681,7 +2813,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         # trainee's SC2 owner is player 2. Deferring here would drop the real
         # trainee-perspective reward.
         self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
-        return obs, reward, done, truncated, {"squad_physics_step": True, "squad_pointer": True}
+        return obs, reward, done, truncated, {
+            "squad_physics_step": True,
+            "squad_pointer": True,
+            **self._heal_cast_info(
+                heal_casts, done, truncated, step_attempts=heal_attempts
+            ),
+        }
 
     async def _async_step_squad_pointer(self, action_p_active):
         self._begin_squad_obs_cache()
@@ -2790,6 +2928,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     def reset(self, seed=None, options=None):
         self.episode_counter += 1
         self.steps_count = 0
+        self._episode_heal_casts = 0
+        self._episode_heal_attempts = 0
         self._invalidate_squad_action_mask_cache()
         self.current_unit_index = 0
         self.current_squad_index = 0
@@ -2941,7 +3081,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self._deferred_truncated = False
             self._deferred_p1_terminal_reward = 0.0
             self._deferred_terminal_obs = None
-            return obs, reward, done, truncated, {"squad_physics_step": True, "phantom_terminal": True}
+            return obs, reward, done, truncated, {
+                "squad_physics_step": True,
+                "phantom_terminal": True,
+                **self._heal_cast_info(0, done, truncated, step_attempts=0),
+            }
 
         if self._uses_squad_pointer():
             return await self._async_step_squad_pointer(action_p_active)
