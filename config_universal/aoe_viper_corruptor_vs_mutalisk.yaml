@@ -85,7 +85,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.994
+  gamma: 0.98
   ent_coef: 0.01
   n_epochs: 2
 agent_architecture: squad

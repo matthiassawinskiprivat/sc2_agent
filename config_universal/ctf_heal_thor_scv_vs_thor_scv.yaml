@@ -71,7 +71,7 @@ env:
     damage_reward: 0.2
     damage_penalty: 0.1
     heal_reward: 0.4
-    heal_cast_reward: 0.05
+    heal_cast_reward: 2.5
     melee_multiplier: 0.5
     kill_reward: 0.25
     kill_penalty: -0.25

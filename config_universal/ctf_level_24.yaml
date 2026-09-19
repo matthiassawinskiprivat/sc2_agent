@@ -1,5 +1,5 @@
 training:
-  training_steps: 250_000
+  training_steps: 500_000
   num_envs: 6
   n_steps: 1024
   batch_size: 256
@@ -21,7 +21,7 @@ env:
   unit_pools:
   - high_level_command: attack
     race: protoss
-    mineral_budget: 2800
+    mineral_budget: 2500
     vespene_budget: 2000
     unit_pool:
     - ZEALOT
@@ -41,7 +41,7 @@ env:
     region: A
   - high_level_command: defend
     race: terran
-    mineral_budget: 2100
+    mineral_budget: 1900
     vespene_budget: 1500
     unit_pool:
     - MARINE
@@ -62,7 +62,7 @@ env:
     region: A
   - high_level_command: defend
     race: protoss
-    mineral_budget: 2100
+    mineral_budget: 1900
     vespene_budget: 1500
     unit_pool:
     - ZEALOT
@@ -83,7 +83,7 @@ env:
     region: B
   - high_level_command: attack
     race: terran
-    mineral_budget: 2800
+    mineral_budget: 2500
     vespene_budget: 2000
     unit_pool:
     - MARINE
@@ -123,13 +123,13 @@ env:
     pylon_damage_penalty: 0.5
     damage_reward: 0.2
     damage_penalty: 0.1
-    heal_reward: 0.2
+    heal_reward: 0.4
     melee_multiplier: 0.5
     kill_reward: 0.25
     kill_penalty: -0.25
     distance_multiplier: 1.0
     defender_zone_radius: 10.0
-    cooldown_retreat_scale: 1.1
+    cooldown_retreat_scale: 1.5
     win_reward: 7.5
     loss_penalty: -5.0
     draw_penalty: -3.5
@@ -150,7 +150,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.98
+  gamma: 0.994
   ent_coef: 0.01
   n_epochs: 2
 agent_architecture: squad

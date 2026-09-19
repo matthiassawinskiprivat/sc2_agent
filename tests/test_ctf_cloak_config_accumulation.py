@@ -20,6 +20,11 @@ def test_ctf_level_21_adds_cloak_heads_layers_scalars():
     assert "is_immobile" in scalars
     assert "can_cloak" in scalars
 
+    env = cm.get_level_config("ctf_level_21")["env"]
+    assert env.get("loud_command_heads") == ["cloak_burrow", "uncloak_unburrow"]
+    assert env.get("loud_command_mix") == 0.5
+    assert env.get("loud_command_bias") == 0.5
+
 
 def test_ctf_level_22_23_inherit_cloak_config():
     cm = ConfigManager("config_universal")
@@ -32,6 +37,8 @@ def test_ctf_level_22_23_inherit_cloak_config():
         scalars = cm.get_cumulative_active_unit_scalars(level)
         assert "is_immobile" in scalars
         assert "can_cloak" in scalars
+        # Loud prior is graft-only on the intro level, not inherited.
+        assert not (cm.get_level_config(level)["env"] or {}).get("loud_command_heads")
 
 
 def test_cloak_level_pools_exclude_oracle_and_infestor():

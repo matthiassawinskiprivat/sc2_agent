@@ -9,7 +9,17 @@ CUSTOM_METRIC_WINDOW = 100
 
 # Rare per-step counts: a mean of the last 100 infos is almost always 0
 # (one heal in a 200-step episode is ~0.005/step; TensorBoard rounds that to 0).
-ROLLOUT_SUM_INFO_KEYS: FrozenSet[str] = frozenset({"heal_casts", "heal_attempts"})
+ROLLOUT_SUM_INFO_KEYS: FrozenSet[str] = frozenset(
+    {
+        "heal_casts",
+        "heal_attempts",
+        "move_commands",
+        "attack_commands",
+        "cloak_commands",
+        "uncloak_commands",
+        "cooldown_retreat",
+    }
+)
 
 
 def record_info_scalars(

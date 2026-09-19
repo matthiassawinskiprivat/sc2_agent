@@ -72,11 +72,14 @@ def test_heal_reward_credits_own_hp_gain(trainee_pid):
     bot = _make_bot(_HEAL_ZERO, trainee_pid=trainee_pid)
     unit = _make_unit(1, health=100.0, owner_id=trainee_pid)  # was 80 → +20 HP
     _wire(bot, [unit])
+    # A fresh cast populates both sets (see _issue_heal_at_point).
     bot._heal_cast_tags.add(1)
+    bot._heal_order_tags.add(1)
 
     reward = bot.calculate_squad_step_reward([1], perspective_player_id=trainee_pid)
     assert abs(reward - 2.0) < 1e-6  # 20 * 0.1
     assert bot._heal_cast_tags == set()
+    assert bot._heal_order_tags == set()
 
 
 @pytest.mark.parametrize("trainee_pid", [1, 2])
@@ -88,6 +91,26 @@ def test_heal_reward_ignores_hp_gain_without_cast(trainee_pid):
 
     reward = bot.calculate_squad_step_reward([1], perspective_player_id=trainee_pid)
     assert abs(reward) < 1e-6
+
+
+@pytest.mark.parametrize("trainee_pid", [1, 2])
+def test_heal_reward_credits_hp_gain_on_continuing_step_not_just_fresh_cast(trainee_pid):
+    """A Medivac beam / SCV repair ticks HP over many steps after the *one*
+    step that starts the walk-in/lock. heal_cast_reward is fresh-cast-only
+    (``_heal_cast_tags``), but heal_reward's per-HP shaping must key off the
+    broader ``_heal_order_tags`` (fresh OR continuing) or a channeled heal
+    would earn HP credit on essentially none of its steps."""
+    bot = _make_bot(_HEAL_ZERO, trainee_pid=trainee_pid)
+    unit = _make_unit(1, health=100.0, owner_id=trainee_pid)  # was 80 → +20 HP
+    _wire(bot, [unit])
+    # Continuing step: NOT in _heal_cast_tags (no fresh-cast bonus), but the
+    # healer did issue a real order this step, so it is in _heal_order_tags.
+    assert 1 not in bot._heal_cast_tags
+    bot._heal_order_tags.add(1)
+
+    reward = bot.calculate_squad_step_reward([1], perspective_player_id=trainee_pid)
+    assert abs(reward - 2.0) < 1e-6  # 20 * 0.1
+    assert bot._heal_order_tags == set()
 
 
 @pytest.mark.parametrize("trainee_pid", [1, 2])
@@ -149,6 +172,11 @@ def test_heal_cast_info_accumulates_episode_and_emits_on_done():
     env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
     env._episode_heal_casts = 0
     env._episode_heal_attempts = 0
+    env._episode_move_commands = 0
+    env._episode_attack_commands = 0
+    env._episode_cloak_commands = 0
+    env._episode_uncloak_commands = 0
+    env._episode_cooldown_retreat = 0.0
     env.bot = _make_bot(_HEAL_ZERO)
     env.bot._heal_cast_tags = {1, 2}
     env.bot._heal_attempt_tags = {1, 2, 3}
@@ -159,7 +187,15 @@ def test_heal_cast_info_accumulates_episode_and_emits_on_done():
     assert env._episode_heal_casts == 1
     assert env._episode_heal_attempts == 2
     mid = env._heal_cast_info(casts, done=False, truncated=False, step_attempts=attempts)
-    assert mid == {"heal_casts": 1, "heal_attempts": 2}
+    assert mid == {
+        "heal_casts": 1,
+        "heal_attempts": 2,
+        "move_commands": 0,
+        "attack_commands": 0,
+        "cloak_commands": 0,
+        "uncloak_commands": 0,
+        "cooldown_retreat": 0.0,
+    }
     env.bot._heal_cast_tags = {3}
     env.bot._heal_attempt_tags = {3}
     casts2, attempts2 = env._record_heal_metrics([3])
@@ -171,6 +207,92 @@ def test_heal_cast_info_accumulates_episode_and_emits_on_done():
     assert terminal == {
         "heal_casts": 1,
         "heal_attempts": 1,
+        "move_commands": 0,
+        "attack_commands": 0,
+        "cloak_commands": 0,
+        "uncloak_commands": 0,
+        "cooldown_retreat": 0.0,
         "heal_casts_episode": 2,
         "heal_attempts_episode": 3,
+        "move_commands_episode": 0,
+        "attack_commands_episode": 0,
+        "cloak_commands_episode": 0,
+        "uncloak_commands_episode": 0,
+        "cooldown_retreat_episode": 0.0,
     }
+
+
+def test_command_metric_info_accumulates_episode_and_emits_on_done():
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env._episode_heal_casts = 0
+    env._episode_heal_attempts = 0
+    env._episode_move_commands = 0
+    env._episode_attack_commands = 0
+    env._episode_cloak_commands = 0
+    env._episode_uncloak_commands = 0
+    env._episode_cooldown_retreat = 0.0
+    env.bot = _make_bot(_HEAL_ZERO)
+    env.bot._command_attempt_tags = {
+        "move": {1, 99},
+        "attack": {2},
+        "cloak": {1, 2},
+        "uncloak": {3},
+    }
+
+    step = env._record_command_metrics([1, 2, 3])
+    assert step == {"move": 1, "attack": 1, "cloak": 2, "uncloak": 1}
+    assert env._episode_move_commands == 1
+    assert env._episode_attack_commands == 1
+    assert env._episode_cloak_commands == 2
+    assert env._episode_uncloak_commands == 1
+    mid = env._heal_cast_info(0, done=False, truncated=False, step_commands=step)
+    assert mid["move_commands"] == 1
+    assert mid["attack_commands"] == 1
+    assert mid["cloak_commands"] == 2
+    assert mid["uncloak_commands"] == 1
+    assert "move_commands_episode" not in mid
+
+    env.bot._command_attempt_tags = {
+        "move": {2},
+        "attack": set(),
+        "cloak": set(),
+        "uncloak": {2},
+    }
+    step2 = env._record_command_metrics([2])
+    terminal = env._heal_cast_info(
+        0, done=True, truncated=False, step_commands=step2
+    )
+    assert terminal["move_commands"] == 1
+    assert terminal["uncloak_commands"] == 1
+    assert terminal["move_commands_episode"] == 2
+    assert terminal["attack_commands_episode"] == 1
+    assert terminal["cloak_commands_episode"] == 2
+    assert terminal["uncloak_commands_episode"] == 2
+
+
+def test_count_command_attempts_for_tags_only_selected():
+    bot = _make_bot(_HEAL_ZERO)
+    bot._command_attempt_tags = {
+        "move": {1, 99},
+        "attack": {2},
+        "cloak": {1},
+        "uncloak": set(),
+    }
+    assert bot.count_command_attempts_for_tags("move", [1, 2]) == 1
+    assert bot.count_command_attempts_for_tags("attack", [1, 2]) == 1
+    assert bot.count_command_attempts_for_tags("cloak", [2]) == 0
+    assert bot.count_command_attempts_for_tags("uncloak", [1]) == 0
+    assert bot.count_command_attempts_for_tags("move", []) == 0
+
+
+def test_command_attempt_tags_cleared_with_heal_tags():
+    bot = _make_bot(_HEAL_ZERO)
+    unit = _make_unit(1, health=80.0)
+    _wire(bot, [unit])
+    bot._command_attempt_tags["move"].add(1)
+    bot._command_attempt_tags["attack"].add(1)
+    bot.calculate_squad_step_reward([1], perspective_player_id=1)
+    assert bot._command_attempt_tags["move"] == set()
+    assert bot._command_attempt_tags["attack"] == set()

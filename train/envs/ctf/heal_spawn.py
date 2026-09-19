@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, List
 
 logger = logging.getLogger(__name__)
 
-# Prefer the longer-range caster when the pool lists more than one.
+# Active-healer types the curriculum guarantees per pool. MEDIVAC's Heal and
+# SCV's Repair target *disjoint* unit categories in real SC2 (Heal is
+# Biological-only, Repair is Mechanical/structure-only) — a mixed terran pool
+# missing one of the two leaves that whole category of the army permanently
+# unhealable for the episode, not just harder to click. Each listed type is
+# therefore guaranteed independently (see ``guaranteed_healer_names``), not
+# "at least one of any type."
 HEALER_PREFERENCE = ("QUEEN", "MEDIVAC", "SCV")
 
 # debug_set_unit_value unit_value: 2 = current HP, 3 = current shields.
@@ -25,24 +31,27 @@ _SKIP_TYPE_NAMES = frozenset(
 )
 
 
-def guaranteed_healer_name(
+def guaranteed_healer_names(
     unit_pool: Iterable[str] | None,
     spawned_names: Iterable[str] | None,
-) -> Optional[str]:
-    """Healer type to append when the pool lists one but the budget roll missed.
+) -> List[str]:
+    """Healer type(s) to append when the pool lists one but the budget roll missed.
 
-    Preference is Queen, then Medivac, then SCV among types present in
-    ``unit_pool``. Returns ``None`` when the pool has no active healer, or
-    when the roll already includes one.
+    Returns every type in ``HEALER_PREFERENCE`` that is both listed in
+    ``unit_pool`` and absent from ``spawned_names`` — independently, not
+    "stop at the first covered type". A terran pool listing both MEDIVAC and
+    SCV needs *both* guaranteed when the roll misses one of them: Heal only
+    targets Biological units, Repair only targets Mechanical units/structures,
+    so having only one of the two still leaves the other unit category
+    permanently unhealable this episode, not merely a rarer click.
     """
     pool_upper = {str(name).upper() for name in (unit_pool or [])}
     spawned_upper = {str(name).upper() for name in (spawned_names or [])}
-    available = [name for name in HEALER_PREFERENCE if name in pool_upper]
-    if not available:
-        return None
-    if any(name in spawned_upper for name in HEALER_PREFERENCE):
-        return None
-    return available[0]
+    return [
+        name
+        for name in HEALER_PREFERENCE
+        if name in pool_upper and name not in spawned_upper
+    ]
 
 
 def damaged_units_enabled(training_conf: dict | None) -> bool:

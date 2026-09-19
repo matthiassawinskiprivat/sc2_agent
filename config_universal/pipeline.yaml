@@ -100,10 +100,10 @@ levels:
   - "ctf_level_27"
   - "ctf_level_28"
   - "ctf_level_29"
-  - "scenario_lurker_vs_thor" # TODO: gamma too high
+  - "scenario_lurker_vs_thor"
   - "scenario_dt_vs_marauder"
-  - "scenario_widowmine_vs_zergling"
-  - "scenario_ghost_marauder_vs_lurker_roach"
+  - "scenario_widowmine_vs_zergling" #todo gamma
+  #- "scenario_ghost_marauder_vs_lurker_roach"
   - "scenario_queen_vs_banshee"
   - "scenario_banshee_viking_vs_voidray_carrier"
   - "scenario_battlecruiser_viking_vs_corruptor_mutalisk"

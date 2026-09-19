@@ -49,6 +49,16 @@ def test_heal_casts_published_as_rollout_sum_not_short_window_mean():
                 "heal_casts": 0,
                 "heal_attempts": 1,
                 "heal_casts_episode": 0,
+                "move_commands": 0,
+                "attack_commands": 1,
+                "cloak_commands": 0,
+                "uncloak_commands": 0,
+                "move_commands_episode": 0,
+                "attack_commands_episode": 0,
+                "cloak_commands_episode": 0,
+                "uncloak_commands_episode": 0,
+                "cooldown_retreat": 0.0,
+                "cooldown_retreat_episode": 0.0,
                 "squad_physics_step": True,
             },
         )
@@ -59,6 +69,16 @@ def test_heal_casts_published_as_rollout_sum_not_short_window_mean():
             "heal_casts": 1,
             "heal_attempts": 1,
             "heal_casts_episode": 1,
+            "move_commands": 2,
+            "attack_commands": 0,
+            "cloak_commands": 1,
+            "uncloak_commands": 1,
+            "move_commands_episode": 2,
+            "attack_commands_episode": 99,
+            "cloak_commands_episode": 1,
+            "uncloak_commands_episode": 1,
+            "cooldown_retreat": 0.5,
+            "cooldown_retreat_episode": 1.25,
             "squad_physics_step": True,
         },
     )
@@ -67,4 +87,12 @@ def test_heal_casts_published_as_rollout_sum_not_short_window_mean():
     assert signal["env/heal_casts"] == 1.0
     assert signal["env/heal_attempts"] == 100.0
     assert signal["env/heal_casts_episode"] == 0.01
+    assert signal["env/move_commands"] == 2.0
+    assert signal["env/attack_commands"] == 99.0
+    assert signal["env/cloak_commands"] == 1.0
+    assert signal["env/uncloak_commands"] == 1.0
+    assert signal["env/move_commands_episode"] == 0.02
+    assert signal["env/attack_commands_episode"] == 0.99
+    assert signal["env/cooldown_retreat"] == 0.5
+    assert signal["env/cooldown_retreat_episode"] == 0.0125
     assert "env/squad_physics_step" not in signal

@@ -17,6 +17,7 @@ env:
   include_race: true
   include_upgrades: true
   env_mode: heal,cloak,upgrades
+  heal_click_cells: 1.25
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack
@@ -40,28 +41,29 @@ env:
     vespene_budget: 500
     unit_pool:
     - ZERGLING
-    - LURKERMP
+    - BANELING
     region: B
   - high_level_command: attack
     race: terran
     mineral_budget: 800
     vespene_budget: 200
     unit_pool:
-    - WIDOWMINE
+    - MARINE
+    - MARAUDER
     - CYCLONE
     region: B
   rewards:
     pylon_damage_reward: 1.0
     pylon_damage_penalty: 0.5
     damage_reward: 0.2
-    damage_penalty: 0.1
+    damage_penalty: 0.05
     heal_reward: 0.4
     melee_multiplier: 0.5
     kill_reward: 0.25
-    kill_penalty: -0.25
+    kill_penalty: -0.1
     distance_multiplier: 1.0
     defender_zone_radius: 10.0
-    cooldown_retreat_scale: 1.1
+    cooldown_retreat_scale: 1.5
     win_reward: 7.5
     loss_penalty: -5.0
     draw_penalty: -3.5
@@ -82,7 +84,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.994
   ent_coef: 0.01
   n_epochs: 2
 agent_architecture: squad

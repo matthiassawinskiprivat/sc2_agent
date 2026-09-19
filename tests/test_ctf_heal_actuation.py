@@ -12,7 +12,16 @@ from src.utils.unit_feature_helpers import HEAL_CELL_HALF
 
 
 def _make_unit(
-    tag, type_id, x, y, owner_id=1, health=50.0, health_max=100.0, radius=0.375
+    tag,
+    type_id,
+    x,
+    y,
+    owner_id=1,
+    health=50.0,
+    health_max=100.0,
+    radius=0.375,
+    is_biological=None,
+    is_mechanical=None,
 ):
     u = MagicMock()
     u.tag = tag
@@ -24,6 +33,12 @@ def _make_unit(
     u.radius = radius
     u.is_structure = type_id == UnitTypeId.SHIELDBATTERY
     u.is_idle = False
+    # Left unset (auto-mock truthy) unless a test cares about eligibility —
+    # most tests here exercise click geometry / cast plumbing, not biology.
+    if is_biological is not None:
+        u.is_biological = is_biological
+    if is_mechanical is not None:
+        u.is_mechanical = is_mechanical
     cast_cmd = object()
     u.return_value = cast_cmd
     return u
@@ -42,6 +57,7 @@ def _bot_with_healers(healer, *allies, click=None):
     bot._unit_last_order = {}
     bot.last_action_was_move_by_unit = {}
     bot._heal_cast_tags = set()
+    bot._heal_order_tags = set()
     bot._heal_attempt_tags = set()
     bot._heal_lock = {}
     bot.game_info = None
@@ -71,6 +87,7 @@ def _bot_with_healers(healer, *allies, click=None):
             bot, unit, target
         )
     )
+    bot._heal_target_is_eligible = CaptureTheFlagBot._heal_target_is_eligible
     bot._allied_units_for_owner = (
         lambda owner_id: CaptureTheFlagBot._allied_units_for_owner(bot, owner_id)
     )
@@ -196,6 +213,72 @@ def test_squad_heal_prefers_wounded_ally_in_cell():
     healer.assert_called_once_with(AbilityId.MEDIVACHEAL_HEAL, hurt)
 
 
+def test_squad_heal_medivac_cannot_heal_mechanical_ally():
+    """Heal only affects Biological units in real SC2; a wounded Mechanical
+    ally under the click must not resolve as a target — the order would
+    silently do nothing in-game even though our code would otherwise credit
+    heal_cast_reward and set the walk-in lock for a "cast" that never heals."""
+    healer = _make_unit(1, UnitTypeId.MEDIVAC, 50.0, 50.0)
+    thor = _make_unit(
+        2, UnitTypeId.THOR, 52.0, 50.0, is_biological=False, is_mechanical=True
+    )
+    bot = _bot_with_healers(healer, thor)
+
+    _apply_squad_heal(bot, 1)
+
+    healer.assert_not_called()
+    bot.do.assert_not_called()
+    assert 1 not in bot._heal_cast_tags
+
+
+def test_squad_heal_scv_cannot_repair_biological_ally():
+    """Repair only affects Mechanical units/structures; a wounded Biological
+    ally under the click must not resolve as a target for an SCV."""
+    healer = _make_unit(1, UnitTypeId.SCV, 50.0, 50.0)
+    marine = _make_unit(
+        2, UnitTypeId.MARINE, 50.4, 50.0, is_biological=True, is_mechanical=False
+    )
+    bot = _bot_with_healers(healer, marine)
+
+    _apply_squad_heal(bot, 1)
+
+    healer.assert_not_called()
+    bot.do.assert_not_called()
+    assert 1 not in bot._heal_cast_tags
+
+
+def test_squad_heal_medivac_skips_ineligible_ally_for_eligible_one_in_same_cell():
+    """Eligibility filtering happens before the "most wounded" tie-break: a
+    badly wounded Mechanical ally must not shadow a lightly wounded
+    Biological ally that the Medivac can actually heal."""
+    healer = _make_unit(1, UnitTypeId.MEDIVAC, 50.0, 50.0)
+    thor = _make_unit(
+        2,
+        UnitTypeId.THOR,
+        50.2,
+        50.0,
+        health=50.0,
+        health_max=400.0,
+        is_biological=False,
+        is_mechanical=True,
+    )
+    marine = _make_unit(
+        3,
+        UnitTypeId.MARINE,
+        50.3,
+        50.0,
+        health=90.0,
+        health_max=100.0,
+        is_biological=True,
+        is_mechanical=False,
+    )
+    bot = _bot_with_healers(healer, thor, marine)
+
+    _apply_squad_heal(bot, 1)
+
+    healer.assert_called_once_with(AbilityId.MEDIVACHEAL_HEAL, marine)
+
+
 def test_squad_heal_full_hp_in_cell_is_noop():
     healer = _make_unit(1, UnitTypeId.MEDIVAC, 50.0, 50.0)
     ally = _make_unit(2, UnitTypeId.MARINE, 52.0, 50.0, health=100.0, health_max=100.0)
@@ -278,6 +361,81 @@ def test_squad_heal_busy_still_allows_new_heal():
 
     healer.assert_called_once_with(AbilityId.TRANSFUSION_TRANSFUSION, ally)
     assert bot._heal_lock[1][0] == 2
+
+
+def test_squad_heal_reissue_on_same_patient_does_not_recredit_cast():
+    """Holding heal_local on a still-wounded ally must not pay heal_cast_reward
+    every squad step; only a fresh engagement (new patient or lapsed lock) is
+    reward-eligible. Otherwise camping heal out-earns combat by just parking."""
+    healer = _make_unit(1, UnitTypeId.QUEEN, 50.0, 50.0)
+    ally = _make_unit(2, UnitTypeId.QUEEN, 52.0, 50.0)
+    bot = _bot_with_healers(healer, ally)
+
+    _apply_squad_heal(bot, 1)
+    assert 1 in bot._heal_cast_tags
+    bot._heal_cast_tags.clear()  # simulate the reward step consuming + clearing it
+
+    _apply_squad_heal(bot, 1)  # still locked onto the same patient, loop unchanged
+    assert 1 not in bot._heal_cast_tags
+    assert bot._heal_lock[1][0] == 2
+
+
+def test_squad_heal_reissue_on_same_patient_still_populates_order_tags():
+    """heal_cast_reward must not re-fire while camping the same patient (above),
+    but heal_reward's per-HP shaping must still see this step as "actively
+    healing" — a Medivac beam / SCV repair only ticks HP on *continuing*
+    steps, not the one that started the walk-in/lock, so gating heal_reward
+    on the same fresh-cast-only set as heal_cast_reward would zero out nearly
+    all HP credit for a multi-step channel."""
+    healer = _make_unit(1, UnitTypeId.QUEEN, 50.0, 50.0)
+    ally = _make_unit(2, UnitTypeId.QUEEN, 52.0, 50.0)
+    bot = _bot_with_healers(healer, ally)
+
+    _apply_squad_heal(bot, 1)
+    assert 1 in bot._heal_order_tags
+    bot._heal_cast_tags.clear()
+    bot._heal_order_tags.clear()  # simulate the reward step consuming + clearing it
+
+    _apply_squad_heal(bot, 1)  # still locked onto the same patient, loop unchanged
+    assert 1 not in bot._heal_cast_tags
+    assert 1 in bot._heal_order_tags
+
+
+def test_squad_heal_new_patient_recredits_cast_even_while_prior_lock_active():
+    """Switching to a different wounded ally is a genuinely new cast."""
+    healer = _make_unit(1, UnitTypeId.QUEEN, 50.0, 50.0)
+    ally_a = _make_unit(2, UnitTypeId.QUEEN, 52.0, 50.0)
+    ally_b = _make_unit(3, UnitTypeId.QUEEN, 52.0, 52.0)
+    bot = _bot_with_healers(healer, ally_a, ally_b, click=ally_a.position)
+
+    _apply_squad_heal(bot, 1)
+    assert 1 in bot._heal_cast_tags
+    bot._heal_cast_tags.clear()
+
+    agent = bot.agent_system.unit_agents["active_agent"]
+    agent.convert_spatial_action_to_world.return_value = (
+        float(ally_b.position.x),
+        float(ally_b.position.y),
+    )
+    _apply_squad_heal(bot, 1)
+    assert 1 in bot._heal_cast_tags
+    assert bot._heal_lock[1][0] == 3
+
+
+def test_squad_heal_recredits_cast_after_lock_lapses():
+    """Once the walk-in/animation window elapses, resuming on the same patient
+    (e.g. re-wounded by ongoing combat) is a new cast again."""
+    healer = _make_unit(1, UnitTypeId.QUEEN, 50.0, 50.0)
+    ally = _make_unit(2, UnitTypeId.QUEEN, 52.0, 50.0)
+    bot = _bot_with_healers(healer, ally)
+
+    _apply_squad_heal(bot, 1)
+    until = bot._heal_lock[1][1]
+    bot._heal_cast_tags.clear()
+
+    bot.state.game_loop = until  # lock has lapsed
+    _apply_squad_heal(bot, 1)
+    assert 1 in bot._heal_cast_tags
 
 
 def test_squad_heal_lock_expires_after_cast_window():

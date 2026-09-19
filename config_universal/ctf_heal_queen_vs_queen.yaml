@@ -22,7 +22,7 @@ env:
   damaged_units: true
   # Click square width in spatial cells (1 cell ≈ 1 game unit). Shrinks by 0.5
   # each following heal level; omit the key for the default 1×1 pointer.
-  heal_click_cells: 4.5
+  heal_click_cells: 5
   # One-time graft prior (not CONTINUE_TRAINING). Blend heal_local 50% toward
   # attack_local so Transfuse is sampled without replacing combat. extra=0
   # (full copy + 1.0 nat made heal the default fight action).
@@ -80,10 +80,14 @@ env:
     pylon_damage_penalty: 0.5
     damage_reward: 0.2
     damage_penalty: 0.1
-    heal_reward: 0.4
-    # 2.0 was too small vs combat HP shaping (~0.2 × tens–hundreds of HP),
-    # so ~5% accurate Transfuse was -EV and PPO dropped heal_local after ~50k.
-    heal_cast_reward: 6.0
+    # 0.4 let two Queens mutually Transfuse (125 HP free heal, no combat risk)
+    # out-earn actually fighting; 0.2 matches every later heal level.
+    heal_reward: 0.2
+    # heal_cast_reward now only credits a genuinely new cast (see
+    # _issue_heal_at_point's continuing_same_patient gate) instead of paying
+    # every squad step the healer holds heal_local on a still-wounded ally,
+    # so this no longer needs to be large enough to out-earn camping.
+    heal_cast_reward: 3.0
     melee_multiplier: 0.5
     kill_reward: 0.25
     kill_penalty: -0.25

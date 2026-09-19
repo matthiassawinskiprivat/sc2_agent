@@ -271,3 +271,58 @@ def test_integrated_in_calculate_reward():
     expected_retreat = 0.5 * (6.0 - 5.0)
     step_penalty = -0.05
     assert reward == pytest.approx(expected_retreat + step_penalty)
+
+
+def test_cooldown_retreat_info_accumulates_episode_and_emits_on_done():
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env._episode_cooldown_retreat = 0.0
+    env.bot = _make_bot(scale=0.8)
+    env.bot._step_cooldown_retreat_reward = 1.6
+
+    step = env._record_cooldown_retreat_metrics(credit_trainee=True)
+    assert step == pytest.approx(1.6)
+    assert env._episode_cooldown_retreat == pytest.approx(1.6)
+    assert env.bot._step_cooldown_retreat_reward == 0.0
+    mid = env._heal_cast_info(0, done=False, truncated=False, step_cooldown_retreat=step)
+    assert mid["cooldown_retreat"] == pytest.approx(1.6)
+    assert "cooldown_retreat_episode" not in mid
+
+    env.bot._step_cooldown_retreat_reward = 0.4
+    # Opponent physics step: pop/clear but do not credit the trainee episode.
+    skipped = env._record_cooldown_retreat_metrics(credit_trainee=False)
+    assert skipped == 0.0
+    assert env._episode_cooldown_retreat == pytest.approx(1.6)
+
+    env.bot._step_cooldown_retreat_reward = 0.4
+    step2 = env._record_cooldown_retreat_metrics(credit_trainee=True)
+    terminal = env._heal_cast_info(
+        0, done=True, truncated=False, step_cooldown_retreat=step2
+    )
+    assert terminal["cooldown_retreat"] == pytest.approx(0.4)
+    assert terminal["cooldown_retreat_episode"] == pytest.approx(2.0)
+
+
+def test_squad_step_reward_tracks_cooldown_retreat_for_metrics():
+    bot = _make_bot(scale=0.8)
+    ally = _make_unit(101, 5.0, 0.0, owner_id=1)
+    enemy = _make_unit(201, 0.0, 0.0, owner_id=2)
+    bot.all_units = MagicMock()
+    bot.all_units.find_by_tag.return_value = ally
+    bot.units = [ally]
+    bot.enemy_units = [enemy]
+    bot.active_unit_tag = 101
+    bot.unit_command_map = {101: "attack"}
+    bot.prev_dist_per_squad = {}
+    bot.prev_own_unit_count = {1: 1, 2: 0}
+    bot.prev_enemy_unit_count = {1: 1, 2: 0}
+    bot.prev_own_units_health = {1: 100.0, 2: 0.0}
+    bot.prev_enemy_units_health = {1: 100.0, 2: 0.0}
+    bot._pre_action_weapon_cd_by_unit[101] = 7.0
+    bot._pre_action_dist_to_enemy_com[101] = 4.0
+    bot.last_action_was_move_by_unit[101] = True
+
+    bot.calculate_squad_step_reward([101], perspective_player_id=1)
+    assert bot.pop_cooldown_retreat_reward() == pytest.approx(0.8)
+    assert bot.pop_cooldown_retreat_reward() == 0.0

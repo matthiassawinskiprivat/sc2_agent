@@ -99,6 +99,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.steps_count = 0
         self._episode_heal_casts = 0
         self._episode_heal_attempts = 0
+        self._episode_move_commands = 0
+        self._episode_attack_commands = 0
+        self._episode_cloak_commands = 0
+        self._episode_uncloak_commands = 0
+        self._episode_cooldown_retreat = 0.0
         self.client_count = 1 # God-Mode uses only 1 connection
         
         # Use the config directory from training_conf (universal pipeline passes "config_universal").
@@ -904,7 +909,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
-        from train.envs.ctf.heal_spawn import guaranteed_healer_name
+        from train.envs.ctf.heal_spawn import guaranteed_healer_names
 
         map_path = str(self._resolve_map(self.map_name).path)
         pairs = self._load_region_pairs(map_path)
@@ -960,12 +965,15 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 and not any(str(n).upper() == "SHIELDBATTERY" for n in unit_names)
             ):
                 unit_names.append("SHIELDBATTERY")
-            # Active healer (Queen / Medivac / SCV) when listed but budget RNG missed.
+            # Active healer(s) (Queen / Medivac / SCV) when listed but budget RNG
+            # missed them. Guaranteed independently per type — Medivac's Heal
+            # (Biological-only) and SCV's Repair (Mechanical/structure-only)
+            # cover disjoint target sets, so a mixed terran pool needs *both*
+            # guaranteed or one whole unit category is unhealable all episode.
             if self._has_env_mode("heal"):
-                extra_healer = guaranteed_healer_name(
+                for extra_healer in guaranteed_healer_names(
                     pool.get("unit_pool", []), unit_names
-                )
-                if extra_healer is not None:
+                ):
                     unit_names.append(extra_healer)
             mobile_names = [n for n in unit_names if str(n).upper() != "SHIELDBATTERY"]
             battery_count = sum(1 for n in unit_names if str(n).upper() == "SHIELDBATTERY")
@@ -2579,22 +2587,80 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         )
         return casts, attempts
 
+    def _record_command_metrics(self, trainee_tags) -> dict:
+        """Count trainee move/attack/cloak/uncloak orders; add to episode totals.
+
+        Must run before ``calculate_squad_step_reward``, which clears the tag sets.
+        """
+        from src.agent.ctf_bot import COMMAND_METRIC_KINDS
+
+        bot = getattr(self, "bot", None)
+        fn = getattr(bot, "count_command_attempts_for_tags", None) if bot else None
+        counts = {kind: 0 for kind in COMMAND_METRIC_KINDS}
+        if callable(fn):
+            for kind in COMMAND_METRIC_KINDS:
+                try:
+                    counts[kind] = int(fn(kind, trainee_tags) or 0)
+                except (TypeError, ValueError):
+                    counts[kind] = 0
+        for kind, n in counts.items():
+            attr = f"_episode_{kind}_commands"
+            setattr(self, attr, int(getattr(self, attr, 0)) + n)
+        return counts
+
+    def _record_cooldown_retreat_metrics(self, *, credit_trainee: bool) -> float:
+        """Pop bot step cooldown-retreat reward; add to episode when trainee-owned."""
+        bot = getattr(self, "bot", None)
+        fn = getattr(bot, "pop_cooldown_retreat_reward", None) if bot else None
+        try:
+            step = float(fn() if callable(fn) else 0.0)
+        except (TypeError, ValueError):
+            step = 0.0
+        if not credit_trainee:
+            return 0.0
+        self._episode_cooldown_retreat = (
+            float(getattr(self, "_episode_cooldown_retreat", 0.0)) + step
+        )
+        return step
+
     def _heal_cast_info(
         self,
         step_casts: int,
         done: bool,
         truncated: bool,
         step_attempts: int = 0,
+        step_commands: Optional[dict] = None,
+        step_cooldown_retreat: float = 0.0,
     ) -> dict:
-        """TensorBoard: rollout sums for casts/attempts; episode means on done."""
+        """TensorBoard: rollout sums for casts/attempts/commands; episode means on done."""
         info = {
             "heal_casts": int(step_casts),
             "heal_attempts": int(step_attempts),
+            "move_commands": int((step_commands or {}).get("move", 0)),
+            "attack_commands": int((step_commands or {}).get("attack", 0)),
+            "cloak_commands": int((step_commands or {}).get("cloak", 0)),
+            "uncloak_commands": int((step_commands or {}).get("uncloak", 0)),
+            "cooldown_retreat": float(step_cooldown_retreat),
         }
         if done or truncated:
             info["heal_casts_episode"] = int(getattr(self, "_episode_heal_casts", 0))
             info["heal_attempts_episode"] = int(
                 getattr(self, "_episode_heal_attempts", 0)
+            )
+            info["move_commands_episode"] = int(
+                getattr(self, "_episode_move_commands", 0)
+            )
+            info["attack_commands_episode"] = int(
+                getattr(self, "_episode_attack_commands", 0)
+            )
+            info["cloak_commands_episode"] = int(
+                getattr(self, "_episode_cloak_commands", 0)
+            )
+            info["uncloak_commands_episode"] = int(
+                getattr(self, "_episode_uncloak_commands", 0)
+            )
+            info["cooldown_retreat_episode"] = float(
+                getattr(self, "_episode_cooldown_retreat", 0.0)
             )
         return info
 
@@ -2631,9 +2697,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         trainee_pid = self._trainee_sc2_player_id()
         tags_for_heal = squad_tags if acting_player_id == trainee_pid else []
         heal_casts, heal_attempts = self._record_heal_metrics(tags_for_heal)
+        step_commands = self._record_command_metrics(tags_for_heal)
 
         reward = self.bot.calculate_squad_step_reward(
             squad_tags, perspective_player_id=acting_player_id
+        )
+        step_cooldown_retreat = self._record_cooldown_retreat_metrics(
+            credit_trainee=(acting_player_id == trainee_pid)
         )
 
         p1_lost, p2_lost = self._pylon_loss_flags()
@@ -2712,14 +2782,25 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return obs, 0.0, False, False, {
                 "squad_physics_step": True,
                 "deferred_terminal": True,
-                "heal_casts": heal_casts,
-                "heal_attempts": heal_attempts,
+                **self._heal_cast_info(
+                    heal_casts,
+                    done=False,
+                    truncated=False,
+                    step_attempts=heal_attempts,
+                    step_commands=step_commands,
+                    step_cooldown_retreat=step_cooldown_retreat,
+                ),
             }
 
         return obs, reward, done, truncated, {
             "squad_physics_step": True,
             **self._heal_cast_info(
-                heal_casts, done, truncated, step_attempts=heal_attempts
+                heal_casts,
+                done,
+                truncated,
+                step_attempts=heal_attempts,
+                step_commands=step_commands,
+                step_cooldown_retreat=step_cooldown_retreat,
             ),
         }
 
@@ -2754,8 +2835,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._maybe_promote_defender_to_attack()
 
         heal_casts, heal_attempts = self._record_heal_metrics(trainee_tags)
+        step_commands = self._record_command_metrics(trainee_tags)
         reward = self.bot.calculate_squad_step_reward(
             trainee_tags, perspective_player_id=trainee_player_id
+        )
+        step_cooldown_retreat = self._record_cooldown_retreat_metrics(
+            credit_trainee=True
         )
 
         p1_lost, p2_lost = self._pylon_loss_flags()
@@ -2817,7 +2902,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             "squad_physics_step": True,
             "squad_pointer": True,
             **self._heal_cast_info(
-                heal_casts, done, truncated, step_attempts=heal_attempts
+                heal_casts,
+                done,
+                truncated,
+                step_attempts=heal_attempts,
+                step_commands=step_commands,
+                step_cooldown_retreat=step_cooldown_retreat,
             ),
         }
 
@@ -2930,6 +3020,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.steps_count = 0
         self._episode_heal_casts = 0
         self._episode_heal_attempts = 0
+        self._episode_move_commands = 0
+        self._episode_attack_commands = 0
+        self._episode_cloak_commands = 0
+        self._episode_uncloak_commands = 0
+        self._episode_cooldown_retreat = 0.0
         self._invalidate_squad_action_mask_cache()
         self.current_unit_index = 0
         self.current_squad_index = 0

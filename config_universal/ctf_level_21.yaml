@@ -1,5 +1,5 @@
 training:
-  training_steps: 250_000
+  training_steps: 500_000
   num_envs: 6
   n_steps: 1024
   batch_size: 256
@@ -16,11 +16,20 @@ env:
   alternate_trainee_race: true
   include_race: true
   env_mode: heal,cloak
+  heal_click_cells: 2.25
+  # One-time graft prior (not CONTINUE_TRAINING). Same recipe as heal_local
+  # intro: blend cloak/uncloak 50% toward attack_local so they get sampled
+  # without replacing combat.
+  loud_command_heads:
+  - cloak_burrow
+  - uncloak_unburrow
+  loud_command_mix: 0.5
+  loud_command_bias: 0.5
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack
     race: protoss
-    mineral_budget: 2800
+    mineral_budget: 2350
     vespene_budget: 2000
     unit_pool:
     - ZEALOT
@@ -39,7 +48,7 @@ env:
     region: A
   - high_level_command: defend
     race: terran
-    mineral_budget: 2100
+    mineral_budget: 1750
     vespene_budget: 1500
     unit_pool:
     - MARINE
@@ -60,7 +69,7 @@ env:
     region: A
   - high_level_command: defend
     race: protoss
-    mineral_budget: 2100
+    mineral_budget: 1750
     vespene_budget: 1500
     unit_pool:
     - ZEALOT
@@ -80,7 +89,7 @@ env:
     region: B
   - high_level_command: attack
     race: terran
-    mineral_budget: 2800
+    mineral_budget: 2350
     vespene_budget: 2000
     unit_pool:
     - MARINE
@@ -116,14 +125,13 @@ env:
     pylon_damage_penalty: 0.5
     damage_reward: 0.2
     damage_penalty: 0.1
-    heal_reward: 0.2
-    heal_cast_reward: 0.0
+    heal_reward: 0.4
     melee_multiplier: 0.5
     kill_reward: 0.25
     kill_penalty: -0.25
     distance_multiplier: 1.0
     defender_zone_radius: 10.0
-    cooldown_retreat_scale: 1.1
+    cooldown_retreat_scale: 1.5
     win_reward: 7.5
     loss_penalty: -5.0
     draw_penalty: -3.5
@@ -144,7 +152,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.98
+  gamma: 0.994
   ent_coef: 0.01
   n_epochs: 2
 agent_architecture: squad

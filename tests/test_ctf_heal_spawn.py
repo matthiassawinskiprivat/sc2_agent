@@ -6,7 +6,7 @@ from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 
 from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
-from train.envs.ctf.heal_spawn import guaranteed_healer_name
+from train.envs.ctf.heal_spawn import guaranteed_healer_names
 
 
 def _make_env(unit_pools, env_mode="heal"):
@@ -196,20 +196,33 @@ def test_without_heal_mode_no_battery_guarantee():
     assert any(c[0] == UnitTypeId.RAVEN for c in detectors)
 
 
-def test_guaranteed_healer_name_prefers_medivac_over_scv():
-    assert guaranteed_healer_name(["MARINE", "SCV", "MEDIVAC"], ["MARINE"]) == "MEDIVAC"
+def test_guaranteed_healer_names_adds_both_medivac_and_scv_when_missing():
+    """Heal (Biological-only) and Repair (Mechanical-only) cover disjoint unit
+    categories, so a mixed terran pool missing both needs both guaranteed —
+    not just the higher-priority one."""
+    assert guaranteed_healer_names(["MARINE", "SCV", "MEDIVAC"], ["MARINE"]) == [
+        "MEDIVAC",
+        "SCV",
+    ]
 
 
-def test_guaranteed_healer_name_prefers_queen():
-    assert guaranteed_healer_name(["ZERGLING", "QUEEN"], ["ZERGLING"]) == "QUEEN"
+def test_guaranteed_healer_names_prefers_queen_order_first():
+    assert guaranteed_healer_names(["ZERGLING", "QUEEN"], ["ZERGLING"]) == ["QUEEN"]
 
 
-def test_guaranteed_healer_name_none_when_already_present():
-    assert guaranteed_healer_name(["SCV", "MEDIVAC"], ["SCV"]) is None
+def test_guaranteed_healer_names_adds_missing_type_even_when_another_type_present():
+    """SCV already spawned must not block guaranteeing MEDIVAC too — Repair
+    cannot heal Biological units, so SCV alone does not cover a Medivac's job."""
+    assert guaranteed_healer_names(["SCV", "MEDIVAC"], ["SCV"]) == ["MEDIVAC"]
+    assert guaranteed_healer_names(["SCV", "MEDIVAC"], ["MEDIVAC"]) == ["SCV"]
 
 
-def test_guaranteed_healer_name_none_when_pool_has_none():
-    assert guaranteed_healer_name(["ZEALOT", "STALKER"], ["ZEALOT"]) is None
+def test_guaranteed_healer_names_empty_when_pool_has_none():
+    assert guaranteed_healer_names(["ZEALOT", "STALKER"], ["ZEALOT"]) == []
+
+
+def test_guaranteed_healer_names_empty_when_all_listed_types_present():
+    assert guaranteed_healer_names(["SCV", "MEDIVAC"], ["SCV", "MEDIVAC"]) == []
 
 
 def test_heal_mode_guarantees_healer_when_rng_misses():
@@ -241,10 +254,14 @@ def test_heal_mode_guarantees_healer_when_rng_misses():
     _spawn(env)
     cmds = _all_create_cmds(env)
     assert any(c[0] == UnitTypeId.MEDIVAC for c in cmds)
+    assert any(c[0] == UnitTypeId.SCV for c in cmds)
     assert any(c[0] == UnitTypeId.MARINE for c in cmds)
 
 
-def test_heal_mode_keeps_budget_healer_without_extra():
+def test_heal_mode_still_adds_missing_second_healer_type():
+    """Rolling one healer type (SCV) must not suppress guaranteeing the other
+    (MEDIVAC) when both are listed — Repair cannot heal the Biological units
+    a Medivac would otherwise cover, so "a healer" is not "the right healer"."""
     pools = [
         {
             "high_level_command": "attack",
@@ -275,7 +292,7 @@ def test_heal_mode_keeps_budget_healer_without_extra():
     medivacs = [c for c in cmds if c[0] == UnitTypeId.MEDIVAC]
     scvs = [c for c in cmds if c[0] == UnitTypeId.SCV]
     assert len(scvs) == 1
-    assert medivacs == []
+    assert len(medivacs) == 1
 
 
 def test_without_heal_mode_no_healer_guarantee():

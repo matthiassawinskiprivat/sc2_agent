@@ -17,6 +17,7 @@ env:
   include_race: true
   include_upgrades: true
   env_mode: heal,cloak,upgrades
+  heal_click_cells: 1.25
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack
@@ -83,7 +84,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.995
+  gamma: 0.98
   ent_coef: 0.01
   n_epochs: 2
 agent_architecture: squad

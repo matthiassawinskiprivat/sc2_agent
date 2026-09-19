@@ -1386,7 +1386,8 @@ class AsyncCollector(mp.Process):
                 signal_meta["rollout/ep_len_mean"] = np.mean(recent_ep_lengths)
             
             # Env info scalars: rolling means, plus rare-event rollout sums
-            # (heal_casts). Mean of the last 100 steps hides one-in-a-hundred casts.
+            # (heal_casts, move/attack/cloak/uncloak commands). Mean of the last
+            # 100 steps hides one-in-a-hundred casts.
             publish_custom_metrics(
                 signal_meta,
                 getattr(self, "custom_metrics", {}),

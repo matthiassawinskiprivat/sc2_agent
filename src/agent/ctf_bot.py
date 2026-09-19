@@ -28,6 +28,9 @@ from src.utils.unit_feature_helpers import (
 )
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
+# Per-step TensorBoard command mix (trainee tags only; see env _record_command_metrics).
+COMMAND_METRIC_KINDS: Tuple[str, ...] = ("move", "attack", "cloak", "uncloak")
+
 
 def _missing_health(unit: Any) -> float:
     """HP missing from *unit*; mocks without numeric bars count as wounded."""
@@ -122,12 +125,31 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_dist_to_enemy_com: Dict[int, float] = {}
         self._pre_action_dist_to_defend_pylon: Dict[int, float] = {}
         self.last_action_was_move_by_unit: Dict[int, bool] = {}
-        # Healer tags that successfully issued repair/heal/transfuse this step.
-        # heal_reward only pays when a selected tag is in this set (not battery
-        # ticks, Heal autocast, or Medivac attack-move). Cleared after reward.
+        # Healer tags where this step's heal/repair/transfuse is a genuinely
+        # *new* engagement (new patient, or the previous lock lapsed).
+        # heal_cast_reward only pays when a selected tag is in this set, so a
+        # camped re-issue on the same patient does not re-earn the cast bonus
+        # every step. Cleared after reward.
         self._heal_cast_tags: Set[int] = set()
+        # Healer tags that successfully issued repair/heal/transfuse this step,
+        # fresh cast OR a continuing walk-in/channel on the same patient.
+        # heal_reward (the per-HP shaping) pays off this broader set — a
+        # Medivac's Heal beam or an SCV's Repair restores HP over many steps
+        # after the *one* step that starts the cast; gating HP credit on
+        # "fresh cast only" (like heal_cast_reward) would zero out nearly all
+        # of a channeled heal's reward, since HP has usually not ticked yet on
+        # the single step that first issues the order. Not battery ticks, Heal
+        # autocast, or Medivac attack-move HP — those never populate this set.
+        # Cleared after reward.
+        self._heal_order_tags: Set[int] = set()
         # Selected tags that received a heal_* command this step (hit or miss).
         self._heal_attempt_tags: Set[int] = set()
+        # Selected tags that received move / attack / cloak / uncloak this step.
+        self._command_attempt_tags: Dict[str, Set[int]] = {
+            kind: set() for kind in COMMAND_METRIC_KINDS
+        }
+        # Sum of cooldown-retreat shaping paid this physics step (TensorBoard).
+        self._step_cooldown_retreat_reward: float = 0.0
         # healer_tag → (patient_tag, expiry_game_loop) while walk-in + cast
         # animation must not be overwritten by attack/move.
         self._heal_lock: Dict[int, Tuple[int, int]] = {}
@@ -153,6 +175,13 @@ class CaptureTheFlagBot(BotAI):
         """How many selected units were given a heal_* command this step."""
         return self._count_heal_tags(getattr(self, "_heal_attempt_tags", None), squad_tags)
 
+    def count_command_attempts_for_tags(self, kind: str, squad_tags: Iterable) -> int:
+        """How many selected units were given a move/attack/cloak/uncloak this step."""
+        buckets = getattr(self, "_command_attempt_tags", None)
+        if not isinstance(buckets, dict):
+            return 0
+        return self._count_heal_tags(buckets.get(kind), squad_tags)
+
     @staticmethod
     def _count_heal_tags(tag_set: Any, squad_tags: Iterable) -> int:
         if not isinstance(tag_set, set) or not squad_tags:
@@ -168,6 +197,35 @@ class CaptureTheFlagBot(BotAI):
             self._heal_attempt_tags = set()
             attempts = self._heal_attempt_tags
         attempts.add(tag)
+
+    def _mark_command_attempt(self, unit: Unit, kind: str) -> None:
+        """Record that ``unit`` received a move/attack/cloak/uncloak order this step."""
+        if kind not in COMMAND_METRIC_KINDS:
+            return
+        tag = int(getattr(unit, "tag", 0) or 0)
+        if tag <= 0:
+            return
+        buckets = getattr(self, "_command_attempt_tags", None)
+        if not isinstance(buckets, dict):
+            self._command_attempt_tags = {k: set() for k in COMMAND_METRIC_KINDS}
+            buckets = self._command_attempt_tags
+        bucket = buckets.get(kind)
+        if not isinstance(bucket, set):
+            bucket = set()
+            buckets[kind] = bucket
+        bucket.add(tag)
+
+    def _clear_command_attempt_tags(self) -> None:
+        buckets = getattr(self, "_command_attempt_tags", None)
+        if not isinstance(buckets, dict):
+            self._command_attempt_tags = {k: set() for k in COMMAND_METRIC_KINDS}
+            return
+        for kind in COMMAND_METRIC_KINDS:
+            bucket = buckets.get(kind)
+            if isinstance(bucket, set):
+                bucket.clear()
+            else:
+                buckets[kind] = set()
 
     def reset_episode_state(self):
         """Reset all per-episode tracking so reward baselines don't bleed across episodes."""
@@ -190,12 +248,21 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_dist_to_defend_pylon = {}
         self.last_action_was_move_by_unit = {}
         self._heal_cast_tags = set()
+        self._heal_order_tags = set()
         self._heal_attempt_tags = set()
+        self._command_attempt_tags = {kind: set() for kind in COMMAND_METRIC_KINDS}
+        self._step_cooldown_retreat_reward = 0.0
         self._heal_lock = {}
         self._heal_ability_ready_after_loop = {}
         self._available_abilities_by_tag = {}
         self.cached_observation = None
         self.frame_count = 0
+
+    def pop_cooldown_retreat_reward(self) -> float:
+        """Return and clear the cooldown-retreat shaping paid this physics step."""
+        total = float(getattr(self, "_step_cooldown_retreat_reward", 0.0) or 0.0)
+        self._step_cooldown_retreat_reward = 0.0
+        return total
 
     def prime_combat_reward_baselines(self) -> None:
         """Snapshot army/pylon HP after spawn so the first physics step is not a fake heal."""
@@ -495,10 +562,12 @@ class CaptureTheFlagBot(BotAI):
         # Categorical cloak/burrow: no spatial decode.
         if is_categorical and head_name in ("cloak_burrow", "uncloak_unburrow"):
             conceal = head_name == "cloak_burrow"
+            metric_kind = "cloak" if conceal else "uncloak"
             for unit_tag in selected_tags:
                 unit = self.all_units.find_by_tag(unit_tag)
                 if unit is None or unit.type_id == UnitTypeId.SHIELDBATTERY:
                     continue
+                self._mark_command_attempt(unit, metric_kind)
                 self._issue_cloak_burrow(unit, conceal=conceal)
                 self._unit_last_order[int(unit_tag)] = (head_name, None)
                 self.last_action_was_move_by_unit[int(unit_tag)] = False
@@ -546,10 +615,12 @@ class CaptureTheFlagBot(BotAI):
                 self.last_action_was_move_by_unit[int(unit_tag)] = False
             elif "attack" in head_name:
                 issue_attack_at_point(self, unit, target)
+                self._mark_command_attempt(unit, "attack")
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
                 self.last_action_was_move_by_unit[int(unit_tag)] = False
             else:
                 self.do(unit.move(target))
+                self._mark_command_attempt(unit, "move")
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
                 self.last_action_was_move_by_unit[int(unit_tag)] = True
 
@@ -565,6 +636,26 @@ class CaptureTheFlagBot(BotAI):
             and abs(float(unit.position.y) - float(target.y)) < cell_half
         )
 
+    @staticmethod
+    def _heal_target_is_eligible(healer: Unit, ally: Unit) -> bool:
+        """True when ``ally``'s biology matches what ``healer``'s ability can affect.
+
+        Real SC2 silently ignores an order targeting the wrong category — the
+        Medivac's Heal only affects Biological units, the SCV's Repair only
+        affects Mechanical units (or structures, excluded above already).
+        Without this check, a Medivac clicked onto a wounded Siege Tank (or an
+        SCV onto a wounded Marine) resolves a target, credits
+        heal_cast_reward, and sets the walk-in lock — but the in-game order
+        never actually heals anything, so ``heal_reward``'s HP credit never
+        follows and the click is not a real "finish" despite counting as a
+        cast in our own metrics.
+        """
+        if healer.type_id in (UnitTypeId.MEDIVAC, UnitTypeId.QUEEN):
+            return bool(getattr(ally, "is_biological", False))
+        if healer.type_id == UnitTypeId.SCV:
+            return bool(getattr(ally, "is_mechanical", False))
+        return True
+
     def _resolve_heal_target_in_cell(self, healer: Unit, target: Point2) -> Optional[Unit]:
         """Wounded allied non-structure under the click.
 
@@ -574,6 +665,9 @@ class CaptureTheFlagBot(BotAI):
         gate turned correct clicks into moves). Do not search for an ally near
         the click. Prefers the ally missing the most HP. A click hits the
         configured square (``env.heal_click_cells``; omit for 1×1) or the unit body.
+        Skips allies the healer's specific ability cannot affect (see
+        ``_heal_target_is_eligible``) — Heal is Biological-only, Repair is
+        Mechanical-only.
         """
         best: Optional[Unit] = None
         best_missing = 0.0
@@ -582,6 +676,8 @@ class CaptureTheFlagBot(BotAI):
             if ally is None or getattr(ally, "tag", None) == healer.tag:
                 continue
             if getattr(ally, "is_structure", False):
+                continue
+            if not self._heal_target_is_eligible(healer, ally):
                 continue
             if not heal_click_hits_unit(ally, target, cell_half=cell_half):
                 continue
@@ -708,19 +804,45 @@ class CaptureTheFlagBot(BotAI):
         self.do(unit(ability, heal_target))
         tag = int(getattr(unit, "tag", 0) or 0)
         if tag:
-            from src.utils.unit_feature_helpers import mark_heal_ability_cooldown
+            order_tags = getattr(self, "_heal_order_tags", None)
+            if not isinstance(order_tags, set):
+                self._heal_order_tags = set()
+                order_tags = self._heal_order_tags
+            order_tags.add(tag)
 
-            mark_heal_ability_cooldown(self, unit)
-            cast_tags = getattr(self, "_heal_cast_tags", None)
-            if not isinstance(cast_tags, set):
-                self._heal_cast_tags = set()
-                cast_tags = self._heal_cast_tags
-            cast_tags.add(tag)
             lock = getattr(self, "_heal_lock", None)
             if not isinstance(lock, dict):
                 self._heal_lock = {}
                 lock = self._heal_lock
             patient_tag = int(getattr(heal_target, "tag", 0) or 0)
+
+            # A reissue on the *same* patient while the previous cast's
+            # walk-in/animation lock is still active is the engine reaffirming
+            # one in-flight heal, not a new cast. Crediting heal_cast_reward
+            # on every squad step the policy keeps clicking pays *per step
+            # parked on heal*, not per cast landed — that let heal_local
+            # out-earn combat just by camping a wounded ally and crowded out
+            # attack_local. Only a fresh engagement (new patient, or the
+            # previous lock lapsed) is cast_bonus-eligible; heal_reward's
+            # per-HP shaping still uses the broader ``_heal_order_tags`` above
+            # so a Medivac beam / SCV repair keeps earning HP credit on every
+            # step it actually ticks HP, not just the step that started it.
+            prev_entry = lock.get(tag)
+            now = CaptureTheFlagBot._game_loop(self)
+            continuing_same_patient = (
+                prev_entry is not None
+                and int(prev_entry[0]) == patient_tag
+                and now < int(prev_entry[1])
+            )
+            if not continuing_same_patient:
+                from src.utils.unit_feature_helpers import mark_heal_ability_cooldown
+
+                mark_heal_ability_cooldown(self, unit)
+                cast_tags = getattr(self, "_heal_cast_tags", None)
+                if not isinstance(cast_tags, set):
+                    self._heal_cast_tags = set()
+                    cast_tags = self._heal_cast_tags
+                cast_tags.add(tag)
             if patient_tag:
                 lock[tag] = (
                     patient_tag,
@@ -899,7 +1021,11 @@ class CaptureTheFlagBot(BotAI):
             if head_idx >= n_spatial:
                 head_name = categorical_heads[head_idx - n_spatial]
                 if head_name in ("cloak_burrow", "uncloak_unburrow"):
-                    self._issue_cloak_burrow(unit, conceal=(head_name == "cloak_burrow"))
+                    conceal = head_name == "cloak_burrow"
+                    self._mark_command_attempt(
+                        unit, "cloak" if conceal else "uncloak"
+                    )
+                    self._issue_cloak_burrow(unit, conceal=conceal)
                     self._unit_last_order[unit_tag] = (head_name, None)
                     self.last_action_was_move_by_unit[unit_tag] = False
                 return
@@ -932,10 +1058,12 @@ class CaptureTheFlagBot(BotAI):
                 self.last_action_was_move_by_unit[unit_tag] = False
             elif "attack" in head_name:
                 issue_attack_at_point(self, unit, target)
+                self._mark_command_attempt(unit, "attack")
                 self._unit_last_order[unit_tag] = (head_name, target)
                 self.last_action_was_move_by_unit[unit_tag] = False
             else:
                 self.do(unit.move(target))
+                self._mark_command_attempt(unit, "move")
                 self._unit_last_order[unit_tag] = (head_name, target)
                 self.last_action_was_move_by_unit[unit_tag] = True
         else:
@@ -1369,6 +1497,7 @@ class CaptureTheFlagBot(BotAI):
         enemies inside ``defender_zone_radius``. Own ``damage_penalty`` /
         ``kill_penalty`` still apply when defenders are outside the zone.
         """
+        self._step_cooldown_retreat_reward = 0.0
         p_id = perspective_player_id if perspective_player_id is not None else self.player_id
 
         reward = 0.0
@@ -1496,27 +1625,40 @@ class CaptureTheFlagBot(BotAI):
         own_baseline_ready = (
             float(self.prev_own_unit_count.get(p_id, 0) or 0) > 0 or prev_own_hp > 0.0
         )
-        issued_heal = False
+        # cast_tags: fresh-cast-only, gates heal_cast_reward (see
+        # _issue_heal_at_point's continuing_same_patient comment).
+        # order_tags: fresh OR continuing, gates heal_reward's per-HP shaping
+        # so a multi-step Medivac beam / SCV repair keeps earning HP credit
+        # on every step it actually ticks HP, not just the step that started
+        # the lock (which usually has not ticked any HP yet).
         n_issued = 0
         cast_tags = getattr(self, "_heal_cast_tags", None)
         if isinstance(cast_tags, set) and squad_tags:
             n_issued = sum(1 for tag in squad_tags if int(tag) in cast_tags)
-            issued_heal = n_issued > 0
         cast_bonus = float(r_conf.get("heal_cast_reward", 0.0))
-        if issued_heal and cast_bonus != 0.0:
+        if n_issued > 0 and cast_bonus != 0.0:
             reward += cast_bonus * n_issued
+        order_tags = getattr(self, "_heal_order_tags", None)
+        healing_active = (
+            isinstance(order_tags, set)
+            and bool(squad_tags)
+            and any(int(tag) in order_tags for tag in squad_tags)
+        )
         if (
             heal_coeff != 0.0
-            and issued_heal
+            and healing_active
             and own_baseline_ready
             and curr_own_hp > prev_own_hp
         ):
             reward += (curr_own_hp - prev_own_hp) * heal_coeff
         if isinstance(cast_tags, set):
             cast_tags.clear()
+        if isinstance(order_tags, set):
+            order_tags.clear()
         attempt_tags = getattr(self, "_heal_attempt_tags", None)
         if isinstance(attempt_tags, set):
             attempt_tags.clear()
+        self._clear_command_attempt_tags()
         if own_baseline_ready and curr_own_hp < prev_own_hp:
             reward -= (prev_own_hp - curr_own_hp) * damage_penalty_coeff
         self.prev_own_units_health[p_id] = curr_own_hp
@@ -1571,7 +1713,11 @@ class CaptureTheFlagBot(BotAI):
         )
         for tag in squad_tags:
             self.active_unit_tag = tag
-            reward += self.calculate_cooldown_retreat_reward(tag, mobile_enemies)
+            retreat = self.calculate_cooldown_retreat_reward(tag, mobile_enemies)
+            self._step_cooldown_retreat_reward = (
+                float(getattr(self, "_step_cooldown_retreat_reward", 0.0)) + float(retreat)
+            )
+            reward += retreat
             reward += self.calculate_defender_zone_penalty(tag, own_pylon_pos)
         self.active_unit_tag = saved_active
 
