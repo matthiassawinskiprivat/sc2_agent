@@ -33,6 +33,39 @@
 
 
 agent_architecture: universal
+
+# SC2 process timing (applies to every level via pipeline root ``env``).
+# Parallel workers still stagger launches to avoid DirectX access-violation races;
+# these are the shortened defaults (override per-level YAML only if needed).
+env:
+  sc2_startup_stagger_sec: 2.5
+  sc2_post_create_delay_sec: 0.75
+  sc2_close_settle_sec: 0.5
+  sc2_process_tree_wait_sec: 1.0
+  sc2_retry_backoff_sec: 2.0
+  sc2_in_game_wait_sec: 15.0
+
+# Curriculum shape (CTF):
+#
+#   simple action lesson -> repeated mixed practice -> detailed tactical layers
+#   -> harder compositions
+#
+# Phase 1 introduces every command the squad policy can issue while the
+# observation is still just the base attack-curriculum stack (density, terrain,
+# objective, assignment, base ground DPS, health, weapon cooldown) plus the one
+# or two channels each new action actually needs. The agent therefore spends its
+# early budget learning *actions*, not decoding extra map channels.
+#
+# Phase 2 adds the detailed tactical channels (biological/mechanical overlays,
+# light/armored/massive damage modifiers, air DPS modifiers, splash, upgrades)
+# and the harder unit compositions. Because `action_heads` accumulate and are
+# never removed, every phase-2 level is also mixed practice for all phase-1
+# actions: an action the level's units cannot use is simply masked out of the
+# command slice, so it can no longer crowd out attacking (the failure mode that
+# made `attack_local` usage collapse when spatial healing was introduced).
+#
+# The full per-unit scalar catalog is declared once at `ctf_level_01` so pointer
+# identity and checkpoint shapes stay stable across the whole CTF run.
 levels:
   - "level_move_single_0"
   - "level_move_single_1"
@@ -45,11 +78,39 @@ levels:
   - "level_attack_3"
   - "level_attack_4"
   - "level_attack_5"
+
+  # ================= CTF phase 1: core actions, base layers =================
+  # unit-pointer attack (attack_unit) — same 9 global / 11 tactical channels as
+  # level_attack_5, so the universal->squad graft needs no channel expansion.
   - "ctf_level_01"
   - "ctf_level_01_zergling_vs_marine"
   - "ctf_level_02_melee_zealot_vs_roach"
   - "ctf_level_02_melee_helliontank_vs_hydralisk"
-  # mechanical
+  # unit-pointer healing (heal_unit) + healing field / creep channels
+  - "ctf_heal_queen_vs_queen"
+  - "ctf_heal_thor_scv_vs_thor_scv"
+  - "ctf_level_18"
+  - "ctf_level_19"
+  - "ctf_level_20"
+  - "scenario_queen_roach_vs_stalker_disruptor"
+  # concealment (cloak_burrow / uncloak_unburrow) + cloak channels
+  - "ctf_level_21"
+  - "ctf_level_22"
+  - "ctf_level_23"
+  # area-of-effect (aoe_local) + energy channels
+  - "aoe_high_templar_zealot_vs_marine_marauder"
+  - "aoe_infestor_roach_vs_marine_marauder"
+  - "aoe_zergling_infestor_vs_stalker_templar"
+  - "aoe_infestor_ling_vs_infestor_ling"
+  - "aoe_zergling_roach_vs_high_templar_immortal"
+  # transport (load_unit / unload_local) + cargo channels
+  # also attaches flying / air-DPS-base map layers (Medivac / Warp Prism / Overlord Transport)
+  - "ctf_level_24"
+  - "ctf_level_25"
+  - "ctf_level_26"
+
+  # ========= CTF phase 2: detailed layers and harder compositions ==========
+  # biological / light / mechanical overlays
   - "ctf_level_02"
   - "scenario_ravager_roach_vs_siegetank_marine"
   - "scenario_hellion_cyclone_vs_ling_bane"
@@ -63,8 +124,10 @@ levels:
   - "ctf_level_07"
   - "ctf_level_08"
   - "scenario_colossus_zealot_vs_swarmhost_hydra"
-  # flying
+  # flying (map channels already attached at ctf_level_24 for transports)
   - "ctf_level_09"
+  # mixed heal vs air
+  - "ctf_heal_queen_vs_battlecruiser_scv"
   - "ctf_level_10"
   - "ctf_level_11"
   - "scenario_stalker_vs_mutalisk"
@@ -84,43 +147,22 @@ levels:
   - "ctf_level_17_mirror_protoss"
   - "scenario_ling_bain_vs_marine"
   - "scenario_thor_vs_voidray"
-  # healing
-  - "ctf_heal_queen_vs_queen"
-  - "ctf_heal_thor_scv_vs_thor_scv"
-  - "ctf_heal_queen_vs_battlecruiser_scv"
-  - "ctf_level_18"
-  - "ctf_level_19"
-  - "ctf_level_20"
-  - "scenario_queen_roach_vs_stalker_disruptor"
-  # cloaking
-  - "ctf_level_21"
-  - "ctf_level_22"
-  - "ctf_level_23"
   # upgrades
   - "ctf_level_27"
   - "ctf_level_28"
   - "ctf_level_29"
   - "scenario_lurker_vs_thor"
   - "scenario_dt_vs_marauder"
-  - "scenario_widowmine_vs_zergling" #todo gamma
-  #- "scenario_ghost_marauder_vs_lurker_roach"
+  - "scenario_widowmine_vs_zergling"
   - "scenario_queen_vs_banshee"
   - "scenario_banshee_viking_vs_voidray_carrier"
   - "scenario_battlecruiser_viking_vs_corruptor_mutalisk"
   - "scenario_tempest_voidray_vs_corruptor_mutalisk"
   - "scenario_battlecruiser_liberator_vs_corruptor_mutalisk"
-  # aoe
-  - "aoe_high_templar_zealot_vs_marine_marauder"
-  - "aoe_infestor_roach_vs_marine_marauder"
-  - "aoe_zergling_infestor_vs_stalker_templar"
-  - "aoe_infestor_ling_vs_infestor_ling"
-  - "aoe_zergling_roach_vs_high_templar_immortal"
+  # mixed-action revisits on the full layer set (spellcasters vs flyers /
+  # massive / splash compositions — these need the phase-2 channels)
   - "aoe_ghost_marauder_vs_high_templar_sentry"
   - "aoe_marine_ghost_vs_darktemplar_adept"
   - "aoe_viper_hydra_vs_voidray_phoenix"
   - "aoe_viper_corruptor_vs_mutalisk"
   - "aoe_ravager_roach_vs_immortal_colossus"
-  # transport
-  - "ctf_level_24"
-  - "ctf_level_25"
-  - "ctf_level_26"

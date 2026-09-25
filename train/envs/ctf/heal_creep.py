@@ -22,6 +22,15 @@ from sc2.position import Point2
 
 logger = logging.getLogger(__name__)
 
+# Env-planted tumors, plus the morphing forms a Queen leaves behind.
+HEAL_TUMOR_TYPE_IDS = frozenset(
+    {
+        UnitTypeId.CREEPTUMOR,
+        UnitTypeId.CREEPTUMORBURROWED,
+        UnitTypeId.CREEPTUMORQUEEN,
+    }
+)
+
 _CREATE_BATCH = 40
 _XY = Tuple[float, float]
 

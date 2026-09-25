@@ -43,6 +43,9 @@ def env():
     env.bot._unit_last_order = {}
     env.bot.calculate_squad_step_reward = MagicMock(return_value=0.0)
     env.bot.get_observation = MagicMock(return_value=MagicMock())
+    # Unconfigured MagicMock() coerces via __float__ to 1.0, not 0.0 — pin the
+    # terminal army-value bonus explicitly (see src/agent/ctf_economic_rewards.py).
+    env.bot.terminal_retained_value_bonus = MagicMock(return_value=0.0)
 
     # Pylon / army state — default: both pylons alive, both armies alive
     pylon_group = MagicMock()
@@ -132,6 +135,25 @@ def test_p1_terminal_reward_timeout_no_attackers(env):
         all_units_gone=False, timeout=True, r_conf=r_conf
     )
     assert result == -2.0, "Timeout without P1 attackers alive → draw penalty"
+
+
+def test_p1_terminal_reward_opponent_army_wipe_is_not_win(env):
+    """Wiping the opponent army alone must not award win_reward (pylon required)."""
+    r_conf = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
+    result = env._compute_p1_terminal_reward(
+        p1_lost=False, p2_lost=False, p1_army_lost=False, p2_army_lost=True,
+        all_units_gone=False, timeout=False, r_conf=r_conf
+    )
+    assert result == 0.0
+
+
+def test_p1_terminal_reward_own_army_wipe_is_loss(env):
+    r_conf = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
+    result = env._compute_p1_terminal_reward(
+        p1_lost=False, p2_lost=False, p1_army_lost=True, p2_army_lost=False,
+        all_units_gone=False, timeout=False, r_conf=r_conf
+    )
+    assert result == -5.0
 
 
 # ---------------------------------------------------------------------------

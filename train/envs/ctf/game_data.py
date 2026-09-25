@@ -39,6 +39,13 @@ def _load_ids() -> Dict[str, int]:
         "VIPER": 499, "OVERLORD": 106, "OVERLORDTRANSPORT": 893, "OVERSEER": 129, "QUEEN": 126,
         "HATCHERY": 86, "LAIR": 100, "HIVE": 101,
         "SPINECRAWLER": 98, "SPORECRAWLER": 99,
+        "SHIELDBATTERY": 1910, "WARPPRISMPHASING": 136,
+        "INTERCEPTOR": 85, "LOCUSTMPFLYING": 693, "BROODLING": 289,
+        "OBSERVERSIEGEMODE": 1911, "OVERSEERSIEGEMODE": 1912,
+        "ZERGLINGBURROWED": 119, "BANELINGBURROWED": 115, "ROACHBURROWED": 118,
+        "RAVAGERBURROWED": 690, "HYDRALISKBURROWED": 117, "INFESTORBURROWED": 127,
+        "SWARMHOSTBURROWEDMP": 493, "ULTRALISKBURROWED": 131, "QUEENBURROWED": 125,
+        "DRONEBURROWED": 116, "LURKERBURROWED": 912,
     }
 
 
@@ -93,14 +100,19 @@ _UNIT_LIST: list[UnitInfo] = [
     UnitInfo(uid("IMMORTAL"),    "Immortal",    275, 100, frozenset({"mechanical", "armored"}),          1.0),
     UnitInfo(uid("COLOSSUS"),    "Colossus",    300, 200, frozenset({"mechanical", "armored", "massive", "light"}), 1.5),
     UnitInfo(uid("DISRUPTOR"),   "Disruptor",   150, 150, frozenset({"mechanical", "armored"}),          0.75),
-    UnitInfo(uid("ARCHON"),      "Archon",      0,   0,  frozenset({"psionic", "massive"}),             1.0),
+    # Composite cost: an Archon is merged from two templars and can never be
+    # bought directly, so its own build cost in the game data is 0/0. Priced here
+    # as High Templar + Dark Templar (175/275) — a 0/0 army unit would be free to
+    # lose and worthless to kill under the economic reward.
+    UnitInfo(uid("ARCHON"),      "Archon",      175, 275, frozenset({"psionic", "massive"}),             1.0),
     UnitInfo(uid("VOIDRAY"),     "Void Ray",    250, 150, frozenset({"mechanical", "armored"}),          1.0),
     UnitInfo(uid("PHOENIX"),     "Phoenix",     150, 100, frozenset({"mechanical", "light"}),            1.0),
     UnitInfo(uid("ORACLE"),      "Oracle",      150, 150, frozenset({"mechanical", "light"}),            1.0),
     UnitInfo(uid("CARRIER"),     "Carrier",     350, 250, frozenset({"mechanical", "armored", "massive"}), 1.75),
     UnitInfo(uid("TEMPEST"),     "Tempest",     300, 200, frozenset({"mechanical", "armored", "massive"}), 1.75),
     UnitInfo(uid("ZERGLING"),    "Zergling",    25,  0,  frozenset({"biological", "light"}),             0.375),
-    UnitInfo(uid("BANELING"),    "Baneling",    25,  25, frozenset({"biological", "light"}),             0.375),
+    # Composite cost: Zergling (25/0) plus the 25/25 morph.
+    UnitInfo(uid("BANELING"),    "Baneling",    50,  25, frozenset({"biological", "light"}),             0.375),
     UnitInfo(uid("ROACH"),       "Roach",       75,  25, frozenset({"biological", "armored"}),           0.75),
     UnitInfo(uid("RAVAGER"),     "Ravager",     100, 100, frozenset({"biological", "armored"}),          0.75),
     UnitInfo(uid("HYDRALISK"),   "Hydralisk",   100, 50, frozenset({"biological", "light"}),             0.625),
@@ -115,9 +127,83 @@ _UNIT_LIST: list[UnitInfo] = [
     UnitInfo(uid("OVERLORD"),    "Overlord",    100, 0,  frozenset({"biological", "armored"}),            1.0),
     UnitInfo(uid("OVERLORDTRANSPORT"), "Overlord Transport", 125, 25, frozenset({"biological", "armored"}), 1.0),
     UnitInfo(uid("WARPPRISM"),   "Warp Prism",  200, 0,  frozenset({"mechanical", "armored", "psionic"}), 0.875),
+    UnitInfo(uid("VIPER"),       "Viper",       100, 200, frozenset({"biological", "armored", "psionic"}), 0.75),
+    UnitInfo(uid("LIBERATOR"),   "Liberator",   150, 150, frozenset({"mechanical", "armored"}),          0.75),
+    UnitInfo(uid("MOTHERSHIP"),  "Mothership",  400, 400, frozenset({"mechanical", "armored", "massive", "psionic"}), 1.5),
+    # Composite cost: Overlord (100/0) plus the 50/50 Overseer morph.
+    UnitInfo(uid("OVERSEER"),    "Overseer",    150, 50, frozenset({"biological", "armored"}),            1.0),
+    UnitInfo(uid("OBSERVER"),    "Observer",    25,  75, frozenset({"mechanical", "light", "detector"}),  0.5),
+    # Worker units: heal/repair actors in the CTF healing curriculum, so they need
+    # a real price even though they never fight.
+    UnitInfo(uid("SCV"),         "SCV",         50,  0,  frozenset({"mechanical", "biological", "light"}), 0.375),
+    UnitInfo(uid("PROBE"),       "Probe",       50,  0,  frozenset({"mechanical", "light"}),              0.375),
+    UnitInfo(uid("DRONE"),       "Drone",       50,  0,  frozenset({"biological", "light"}),              0.375),
 ]
 
 UNIT_DATA: Dict[int, UnitInfo] = {u.type_id: u for u in _UNIT_LIST}
+
+# Transformed / morphed / burrowed bodies that are the *same* purchased unit.
+# Economic reward accounting must price a Sieged Tank exactly like a Siege Tank,
+# otherwise sieging would register as the whole army value vanishing and
+# reappearing. Keys resolve to the canonical type before any table lookup.
+_TRANSFORM_ALIAS_NAMES: Dict[str, str] = {
+    "SIEGETANKSIEGED": "SIEGETANK",
+    "WIDOWMINEBURROWED": "WIDOWMINE",
+    "VIKINGASSAULT": "VIKINGFIGHTER",
+    "LIBERATORAG": "LIBERATOR",
+    "WARPPRISMPHASING": "WARPPRISM",
+    "OBSERVERSIEGEMODE": "OBSERVER",
+    "OVERSEERSIEGEMODE": "OVERSEER",
+    "LURKERMPBURROWED": "LURKERMP",
+    "LURKERBURROWED": "LURKERMP",
+    "ZERGLINGBURROWED": "ZERGLING",
+    "BANELINGBURROWED": "BANELING",
+    "ROACHBURROWED": "ROACH",
+    "RAVAGERBURROWED": "RAVAGER",
+    "HYDRALISKBURROWED": "HYDRALISK",
+    "INFESTORBURROWED": "INFESTOR",
+    "SWARMHOSTBURROWEDMP": "SWARMHOSTMP",
+    "ULTRALISKBURROWED": "ULTRALISK",
+    "QUEENBURROWED": "QUEEN",
+    "DRONEBURROWED": "DRONE",
+}
+
+TRANSFORM_ALIASES: Dict[int, int] = {}
+for _alias, _canonical in _TRANSFORM_ALIAS_NAMES.items():
+    try:
+        TRANSFORM_ALIASES[uid(_alias)] = uid(_canonical)
+    except KeyError:  # pragma: no cover - alias absent from this SC2 build
+        continue
+
+# Temporary bodies: summoned, spawned, or hallucinated units that were never
+# purchased. Economic reward must ignore them or a Carrier's Interceptor churn
+# reads as army value appearing and dying every few steps.
+_TEMPORARY_UNIT_NAMES = (
+    "INTERCEPTOR", "LOCUSTMP", "LOCUSTMPFLYING", "BROODLING",
+    "ADEPTPHASESHIFT", "DISRUPTORPHASED", "CHANGELING",
+    "INFESTEDTERRAN", "INFESTORTERRAN", "MULE",
+)
+
+TEMPORARY_UNIT_IDS: FrozenSet[int] = frozenset(
+    _ID_TABLE[name] for name in _TEMPORARY_UNIT_NAMES if name in _ID_TABLE
+)
+
+
+def resolve_type_id(type_id: int) -> int:
+    """Canonical purchased type for a transformed/burrowed body."""
+    try:
+        key = int(type_id)
+    except (TypeError, ValueError):
+        return -1
+    return TRANSFORM_ALIASES.get(key, key)
+
+
+def is_temporary_unit_type(type_id: int) -> bool:
+    """True for summons/hallucinations that carry no purchased economic value."""
+    try:
+        return int(type_id) in TEMPORARY_UNIT_IDS
+    except (TypeError, ValueError):
+        return False
 
 _WEAPON_BONUS_LIST: list[WeaponBonus] = [
     WeaponBonus(uid("HELLION"),      "light",      5.0),
@@ -151,27 +237,28 @@ WEAPON_BONUS: Dict[tuple[int, str], float] = {
 
 
 def get_unit_info(type_id: int) -> Optional[UnitInfo]:
-    return UNIT_DATA.get(type_id)
+    return UNIT_DATA.get(resolve_type_id(type_id))
 
 
 def get_weapon_bonus(attacker_type_id: int, target_type_id: int) -> float:
-    attacker_info = UNIT_DATA.get(attacker_type_id)
-    target_info = UNIT_DATA.get(target_type_id)
+    attacker_id = resolve_type_id(attacker_type_id)
+    attacker_info = UNIT_DATA.get(attacker_id)
+    target_info = get_unit_info(target_type_id)
     if attacker_info is None or target_info is None:
         return 0.0
     total = 0.0
     for attr in target_info.attributes:
-        total += WEAPON_BONUS.get((attacker_type_id, attr), 0.0)
+        total += WEAPON_BONUS.get((attacker_id, attr), 0.0)
     return total
 
 
 def get_unit_cost(type_id: int) -> tuple[int, int]:
-    info = UNIT_DATA.get(type_id)
+    info = get_unit_info(type_id)
     if info is None:
         return (0, 0)
     return (info.mineral_cost, info.vespene_cost)
 
 
 def get_footprint_radius(type_id: int) -> float:
-    info = UNIT_DATA.get(type_id)
+    info = get_unit_info(type_id)
     return info.footprint_radius if info is not None else 0.5

@@ -66,3 +66,29 @@ def test_no_mask_does_not_crash():
     with torch.no_grad():
         out = enc(x, mask=None)
     assert out.shape == (2, 4, 16)
+
+
+def test_fully_masked_rows_finite_in_eval():
+    """Empty ally/enemy sets must not emit NaN under eval (rollout collection)."""
+    enc = EntityEncoder(input_dim=8, embed_dim=16, hidden_dim=16, use_self_attention=True)
+    enc.eval()
+    x = torch.randn(4, 6, 8)
+    mask = torch.zeros(4, 6)
+    mask[0, :2] = 1.0  # row 0 has entities; rows 1-3 fully padded
+    with torch.no_grad():
+        out = enc(x, mask)
+    assert torch.isfinite(out).all()
+    assert torch.all(out[1:] == 0.0)
+    assert not torch.all(out[0, :2] == 0.0)
+
+
+@pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
+def test_fully_masked_batch_finite_eval_cuda(device):
+    enc = EntityEncoder(input_dim=16, embed_dim=32, hidden_dim=32, use_self_attention=True)
+    enc.to(device).eval()
+    x = torch.randn(8, 12, 16, device=device)
+    mask = torch.zeros(8, 12, device=device)
+    with torch.no_grad():
+        out = enc(x, mask)
+    assert torch.isfinite(out).all()
+    assert torch.all(out == 0.0)

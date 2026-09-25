@@ -164,12 +164,34 @@ class TestComputeP1TerminalRewardTimeout:
         )
         assert r == LOSS
 
-    def test_p2_army_killed_before_timeout_gives_win_not_timeout_path(self, env):
-        """Killing all attackers triggers p2_army_lost path, not defender timeout."""
+    def test_opponent_army_killed_does_not_give_win(self, env):
+        """Opponent army wipe alone is not a win — attacker must destroy the pylon."""
         _pylon_alive(env)
         r = env._compute_p1_terminal_reward(
             p1_lost=False, p2_lost=False,
             p1_army_lost=False, p2_army_lost=True,
+            all_units_gone=False, timeout=False,
+            r_conf=_REWARDS_DEFENDER,
+        )
+        assert r == 0.0
+
+    def test_own_army_killed_still_loss(self, env):
+        """Losing the trainee's own combat units remains an immediate loss."""
+        _pylon_alive(env)
+        r = env._compute_p1_terminal_reward(
+            p1_lost=False, p2_lost=False,
+            p1_army_lost=True, p2_army_lost=False,
+            all_units_gone=False, timeout=False,
+            r_conf=_REWARDS_DEFENDER,
+        )
+        assert r == LOSS
+
+    def test_enemy_pylon_destroyed_gives_win(self, env):
+        """Attacker win condition is destroying the enemy pylon."""
+        _pylon_alive(env)
+        r = env._compute_p1_terminal_reward(
+            p1_lost=False, p2_lost=True,
+            p1_army_lost=False, p2_army_lost=False,
             all_units_gone=False, timeout=False,
             r_conf=_REWARDS_DEFENDER,
         )

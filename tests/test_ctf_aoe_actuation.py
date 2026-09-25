@@ -48,6 +48,10 @@ def _bot_with_caster(caster, extra_units=None):
     bot.structures = []
     bot.enemy_units = [u for u in extras if u.owner_id != 1]
     bot.enemy_structures = []
+    # MagicMock(spec=...) leaves unbound methods as truthy mocks; heal-lock
+    # would otherwise short-circuit every AoE before issue_aoe_at_point runs.
+    bot._refresh_heal_lock = lambda unit: False
+    bot._mark_command_attempt = MagicMock()
 
     agent = MagicMock()
     agent.last_game_info = None
@@ -76,6 +80,7 @@ def test_squad_aoe_infestor_fungal_at_point():
     caster.assert_called_once_with(AbilityId.FUNGALGROWTH_FUNGALGROWTH, Point2((60.0, 70.0)))
     bot.do.assert_called_once()
     caster.move.assert_not_called()
+    bot._mark_command_attempt.assert_called_once_with(caster, "aoe")
 
 
 def test_squad_aoe_burrowed_infestor_fungal():
@@ -131,6 +136,7 @@ def test_squad_aoe_non_caster_noop():
     marine.assert_not_called()
     marine.move.assert_not_called()
     bot.do.assert_not_called()
+    bot._mark_command_attempt.assert_called_once_with(marine, "aoe")
 
 
 def test_squad_aoe_mixed_selection_only_casters_fire():
@@ -158,3 +164,21 @@ def test_apply_action_aoe_ravager():
     asyncio.run(CaptureTheFlagBot.apply_action(bot, 1, np.array([3, 100], dtype=np.int64)))
     caster.assert_called_once_with(AbilityId.EFFECT_CORROSIVEBILE, Point2((60.0, 70.0)))
     bot.do.assert_called_once()
+    bot._mark_command_attempt.assert_called_once_with(caster, "aoe")
+
+
+def test_squad_unload_marks_unload_command():
+    medivac = _make_unit(1, UnitTypeId.MEDIVAC, 50.0, 50.0)
+    bot = _bot_with_caster(medivac)
+    bot.training_conf["action_heads"] = ["move_local", "unload_local"]
+    asyncio.run(
+        CaptureTheFlagBot.apply_squad_action(
+            bot,
+            selected_tags=[1],
+            anchor_tag=1,
+            command_idx=1,
+            spatial_idx=100,
+            perspective_player_id=1,
+        )
+    )
+    bot._mark_command_attempt.assert_called_once_with(medivac, "unload")

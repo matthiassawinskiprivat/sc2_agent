@@ -10,22 +10,54 @@ from sc2.maps import Map
 
 logger = logging.getLogger(__name__)
 
+# Parallel DirectX launches still need a short stagger, but the old 6–8s × worker
+# index made hard resets feel like multi-minute hangs with num_envs=6.
+DEFAULT_STARTUP_STAGGER_SEC = 2.0
+DEFAULT_STARTUP_STAGGER_MANY_SEC = 2.5  # num_workers >= 5
+DEFAULT_POST_CREATE_DELAY_SEC = 0.75
+DEFAULT_CLOSE_SETTLE_SEC = 0.5
+DEFAULT_PROCESS_TREE_WAIT_SEC = 1.0
+
+
 class SingleClientSC2Manager:
     """
     Manages a single SC2 process and one or more clients.
     """
-    def __init__(self, sc2_process_cls: Type[SC2Process] = SC2Process, client_cls: Type[Client] = Client, worker_index: int = 0, num_workers: int = 1):
+    def __init__(
+        self,
+        sc2_process_cls: Type[SC2Process] = SC2Process,
+        client_cls: Type[Client] = Client,
+        worker_index: int = 0,
+        num_workers: int = 1,
+        *,
+        startup_stagger_sec: Optional[float] = None,
+        post_create_delay_sec: float = DEFAULT_POST_CREATE_DELAY_SEC,
+        close_settle_sec: float = DEFAULT_CLOSE_SETTLE_SEC,
+        process_tree_wait_sec: float = DEFAULT_PROCESS_TREE_WAIT_SEC,
+    ):
         self.sc2_process_cls = sc2_process_cls
         self.client_cls = client_cls
         self.worker_index = worker_index
         self.num_workers = max(1, int(num_workers))
+        self._startup_stagger_override = (
+            None if startup_stagger_sec is None else float(startup_stagger_sec)
+        )
+        self.post_create_delay_sec = float(post_create_delay_sec)
+        self.close_settle_sec = float(close_settle_sec)
+        self.process_tree_wait_sec = float(process_tree_wait_sec)
         self.process: Optional[SC2Process] = None
         self.clients: List[Client] = []
         self.controller = None
 
     def _startup_stagger_sec(self) -> float:
-        """Delay between parallel worker SC2 launches (matches single_client_env timeout budget)."""
-        return 8.0 if self.num_workers >= 5 else 6.0
+        """Per-worker delay between parallel SC2 launches (GPU/DirectX race guard)."""
+        if self._startup_stagger_override is not None:
+            return max(0.0, self._startup_stagger_override)
+        return (
+            DEFAULT_STARTUP_STAGGER_MANY_SEC
+            if self.num_workers >= 5
+            else DEFAULT_STARTUP_STAGGER_SEC
+        )
 
     @property
     def client(self) -> Optional[Client]:
@@ -39,14 +71,14 @@ class SingleClientSC2Manager:
         port = 12000 + (self.worker_index * 1000)
 
         # Stagger SC2 startup across parallel workers to avoid DirectX/GPU init race.
-        # Without this, 5 instances launching simultaneously share GPU init paths and
+        # Without this, several instances launching simultaneously share GPU init paths and
         # one or more crash with 0xC0000005 (access violation).
         stagger_sec = self._startup_stagger_sec()
         startup_delay = self.worker_index * stagger_sec
         if startup_delay > 0:
             logger.info(
-                f"Worker {self.worker_index} waiting {startup_delay:.0f}s before SC2 launch "
-                f"(staggered startup, {stagger_sec:.0f}s × index)..."
+                f"Worker {self.worker_index} waiting {startup_delay:.1f}s before SC2 launch "
+                f"(staggered startup, {stagger_sec:.1f}s × index)..."
             )
             await asyncio.sleep(startup_delay)
 
@@ -95,9 +127,11 @@ class SingleClientSC2Manager:
             if result.create_game.HasField("error"):
                 logger.error(f"Engine Error: {result.create_game.error}")
             
-            # SC2 needs a moment to finish lobby setup before join_game; too short a pause
-            # yields WSMsgType.CLOSE (257) on join when multiple instances start in parallel.
-            await asyncio.sleep(3.0)
+            # SC2 needs a brief pause to finish lobby setup before join_game; too short
+            # a pause can yield WSMsgType.CLOSE (257) when multiple instances start in parallel.
+            delay = max(0.0, float(self.post_create_delay_sec))
+            if delay > 0:
+                await asyncio.sleep(delay)
         except Exception as e:
             logger.error(f"Exception during create_game: {e}")
             raise e
@@ -152,10 +186,12 @@ class SingleClientSC2Manager:
             # Kill process tree and wait until OS reaps it (releases DirectX VRAM).
             from src.utils.sc2_cleanup import kill_sc2_process_tree
 
-            kill_sc2_process_tree(pid, wait_sec=3.0)
+            kill_sc2_process_tree(pid, wait_sec=self.process_tree_wait_sec)
 
         # Extra settle time for WDDM to reclaim dedicated GPU memory before relaunch.
-        await asyncio.sleep(2.0)
+        settle = max(0.0, float(self.close_settle_sec))
+        if settle > 0:
+            await asyncio.sleep(settle)
 
         self.process = None
         self.clients.clear()

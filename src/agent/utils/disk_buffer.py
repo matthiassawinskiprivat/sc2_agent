@@ -18,6 +18,14 @@ def is_disk_offloaded_obs_key(key: str) -> bool:
     return "map" in key or "tactical" in key or key == "local_map"
 
 
+def obs_sample_mean(arr: np.ndarray) -> float:
+    """Cheap fingerprint: mean of first timestep, first env (matches shared-RAM IPC)."""
+    if arr is None or getattr(arr, "size", 0) == 0:
+        return 0.0
+    head = arr[0, 0] if getattr(arr, "ndim", 0) >= 2 else arr
+    return float(np.mean(head))
+
+
 DEFAULT_RNN_MAX_SEQ_LEN = 32
 
 
@@ -179,6 +187,9 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
         self.hidden_size = hidden_size
         self.instance_id = f"{os.getpid()}_{id(self)}"
         self.instance_dir = os.path.join(self.temp_dir, self.instance_id)
+        # Collector creates its own memmap files; learner attach flips this off so
+        # ``__del__`` cannot wipe the collector's static ``buffer_{i}`` binaries.
+        self._owns_disk_files = self.storage_backend == "disk"
         if self.storage_backend == "disk":
             os.makedirs(self.instance_dir, exist_ok=True)
 
@@ -264,11 +275,42 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
             # Robustly normalize incoming RNN states to (1, n_envs, hidden_size).
             # In async collectors, state tensors may occasionally come in as single-env
             # tensors (e.g. (1, 1, hidden) or (hidden,)); broadcast when needed.
-            self.hidden_states_pi[self.pos] = self._normalize_rnn_state(lstm_states.pi[0], "pi_h")
-            self.hidden_states_vf[self.pos] = self._normalize_rnn_state(lstm_states.vf[0], "vf_h")
+            # Nonfinite hiddens (e.g. empty-squad self-attn NaNs in eval) must not
+            # enter the buffer — sequence-packed PPO would then skip every minibatch.
+            self.hidden_states_pi[self.pos] = np.nan_to_num(
+                self._normalize_rnn_state(lstm_states.pi[0], "pi_h"),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            self.hidden_states_vf[self.pos] = np.nan_to_num(
+                self._normalize_rnn_state(lstm_states.vf[0], "vf_h"),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
             if self.rnn_type == "lstm" and len(lstm_states.pi) > 1:
-                self.cell_states_pi[self.pos] = self._normalize_rnn_state(lstm_states.pi[1], "pi_c")
-                self.cell_states_vf[self.pos] = self._normalize_rnn_state(lstm_states.vf[1], "vf_c")
+                self.cell_states_pi[self.pos] = np.nan_to_num(
+                    self._normalize_rnn_state(lstm_states.pi[1], "pi_c"),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+                self.cell_states_vf[self.pos] = np.nan_to_num(
+                    self._normalize_rnn_state(lstm_states.vf[1], "vf_c"),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+
+        # Nonfinite VF / log-prob entries poison GAE returns → NaN explained variance.
+        if isinstance(value, th.Tensor):
+            value = th.nan_to_num(value.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+        if isinstance(log_prob, th.Tensor):
+            log_prob = th.nan_to_num(log_prob.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+        reward = np.nan_to_num(
+            np.asarray(reward, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0
+        )
 
         super(DiskDictRolloutBuffer, self).add(
             obs,
@@ -292,6 +334,7 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
         corrupt advantages / returns (low explained variance, stalled learning).
         """
         last_values = last_values.clone().cpu().numpy().flatten()
+        last_values = np.nan_to_num(last_values, nan=0.0, posinf=0.0, neginf=0.0)
         filled = int(self.pos) if self.pos > 0 else self.buffer_size
         pa = getattr(self, "policy_active", None)
 
@@ -318,21 +361,33 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
                     next_non_terminal = 1.0 - float(self.episode_starts[t_next, env_idx])
                     next_value = float(self.values[t_next, env_idx])
 
+                reward_t = float(self.rewards[t, env_idx])
+                value_t = float(self.values[t, env_idx])
+                if not np.isfinite(reward_t):
+                    reward_t = 0.0
+                if not np.isfinite(value_t):
+                    value_t = 0.0
+                if not np.isfinite(next_value):
+                    next_value = 0.0
+
                 delta = (
-                    float(self.rewards[t, env_idx])
+                    reward_t
                     + self.gamma * next_value * next_non_terminal
-                    - float(self.values[t, env_idx])
+                    - value_t
                 )
                 last_gae_lam = (
                     delta
                     + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
                 )
+                if not np.isfinite(last_gae_lam):
+                    last_gae_lam = 0.0
                 self.advantages[t, env_idx] = last_gae_lam
 
             for t in active_ts:
-                self.returns[t, env_idx] = (
-                    self.advantages[t, env_idx] + self.values[t, env_idx]
-                )
+                v = float(self.values[t, env_idx])
+                if not np.isfinite(v):
+                    v = 0.0
+                self.returns[t, env_idx] = float(self.advantages[t, env_idx]) + v
 
     def _normalize_rnn_state(self, state_tensor: torch.Tensor, name: str) -> np.ndarray:
         """
@@ -549,14 +604,18 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
                 if key is not None and is_disk_offloaded_obs_key(key)
                 else len(arr_list)
             )
+            # Host→device copies must complete before the learner reads the batch.
+            # ``non_blocking=True`` without an explicit sync can leave spatial obs
+            # partially uploaded while evaluate_actions already runs — a multi-nat
+            # ``rollout_log_prob_abs_err`` with otherwise-matching collect/eval math.
             if len(arr_list) <= chunk_envs:
                 res = th.as_tensor(np.stack(arr_list))
-                res = res.to(self.device, non_blocking=True)
+                res = res.to(self.device, non_blocking=False)
             else:
                 parts = []
                 for i in range(0, len(arr_list), chunk_envs):
                     sub = th.as_tensor(np.stack(arr_list[i : i + chunk_envs]))
-                    parts.append(sub.to(self.device, non_blocking=True))
+                    parts.append(sub.to(self.device, non_blocking=False))
                 res = th.cat(parts, dim=0)
                 del parts
             return res.reshape(-1, *res.shape[2:]) if flatten else res
@@ -602,6 +661,10 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
     def __del__(self):
         self.close_memmaps()
         if getattr(self, "storage_backend", "disk") != "disk":
+            return
+        # Learner attaches to the collector's static ``buffer_{i}`` files. Never
+        # delete those on GC — that left the next fill without ``obs_map.bin``.
+        if not getattr(self, "_owns_disk_files", True):
             return
         if hasattr(self, "disk_files"):
             for key, filename in self.disk_files.items():

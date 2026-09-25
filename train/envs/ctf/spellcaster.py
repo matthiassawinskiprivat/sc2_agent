@@ -2,13 +2,19 @@
 
 ``apply_max_energy`` is also used by heal mode so Queens spawn with enough
 energy to Transfuse (50) instead of the default 25.
+
+``debug_upgrade`` grants researched abilities such as Psi Storm without a
+Templar Archives. The cheat reaches only the player whose client sends it, and
+the god-mode match joins player 1. Protoss must be the first race in the level
+so High Templars are that player. Ghost EMP and Infestor Fungal Growth need no
+research.
 """
 
 from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +25,22 @@ RefreshState = Callable[[], Awaitable[None]]
 SPELLCASTER_UPGRADE_CALLS = 20
 # debug_set_unit_value unit_value=1 is energy.
 _ENERGY_UNIT_VALUE = 1
+
+# AoE spell these casters use, and the upgrade that gates it.
+# ``None`` means the spell is available without research.
+# Ghost cloak and Infestor Neural Parasite are separate researched abilities.
+SPELLCASTER_CAST_UPGRADES: Dict[str, Optional[str]] = {
+    "HIGHTEMPLAR": "PSISTORMTECH",
+    "GHOST": None,
+    "INFESTOR": None,
+}
+
+# Race → unit added to post-AoE pools so the AoE command still has a caster.
+RACE_SPELLCASTER_UNIT: Dict[str, str] = {
+    "protoss": "HIGHTEMPLAR",
+    "terran": "GHOST",
+    "zerg": "INFESTOR",
+}
 
 
 def energy_units(bot: Any) -> List[Tuple[int, float]]:
@@ -70,7 +92,7 @@ async def apply_spell_upgrades(
 ) -> int:
     """Run the debug_upgrade ladder unless cloak already completed it.
 
-    Returns how many ``debug_upgrade`` calls were made this invocation.
+    The cheat applies to player 1 only. Returns how many calls completed.
     """
     if already_full_ladder or bot is None:
         return 0

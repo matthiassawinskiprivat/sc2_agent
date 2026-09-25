@@ -53,17 +53,40 @@ class EntityEncoder(nn.Module):
         embeddings = self.encoder(x)
 
         if mask is not None:
-            mask_expanded = mask.unsqueeze(-1).expand_as(embeddings)
+            # Accept bool or float masks; treat anything != 0 as alive.
+            alive = mask if mask.dtype == torch.bool else mask != 0
+            mask_expanded = alive.unsqueeze(-1).to(dtype=embeddings.dtype)
             embeddings = embeddings * mask_expanded
 
         if self.use_self_attention:
             # TransformerEncoderLayer src_key_padding_mask convention:
             # True = IGNORE that position (opposite of our mask convention).
-            padding_mask = (mask == 0) if mask is not None else None
-            embeddings = self.self_attn(embeddings, src_key_padding_mask=padding_mask)
-            # Re-zero padding slots that attention may have polluted.
-            if mask is not None:
-                embeddings = embeddings * mask_expanded
+            #
+            # Fully-masked rows (no allies / no visible enemies) make every key
+            # padded. In ``eval`` mode that path yields NaN attention outputs
+            # with trained weights; ``NaN * 0`` stays NaN and poisons the squad
+            # query / GRU hidden states written into the rollout buffer.
+            if mask is None:
+                embeddings = self.self_attn(embeddings)
+            else:
+                fully_masked = ~alive.any(dim=-1)
+                if bool(fully_masked.all()):
+                    # Nothing to attend over — keep the zeroed MLP embeddings.
+                    pass
+                else:
+                    padding_mask = ~alive
+                    if bool(fully_masked.any()):
+                        # Keep one dummy key legal so softmax stays defined, then
+                        # zero those rows after attention.
+                        padding_mask = padding_mask.clone()
+                        padding_mask[fully_masked, 0] = False
+                    embeddings = self.self_attn(
+                        embeddings, src_key_padding_mask=padding_mask
+                    )
+                    embeddings = embeddings * mask_expanded
+                    if bool(fully_masked.any()):
+                        embeddings = embeddings.clone()
+                        embeddings[fully_masked] = 0
 
         return embeddings
 

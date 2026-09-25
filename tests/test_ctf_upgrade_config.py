@@ -15,10 +15,19 @@ def test_ctf_level_27_29_upgrade_config():
     for level in ("ctf_level_27", "ctf_level_28", "ctf_level_29"):
         cfg = cm.get_level_config(level)
         modes = {p.strip() for p in str(cfg["env"]["env_mode"]).split(",") if p.strip()}
-        assert "upgrades" in modes
-        assert "heal" in modes
-        assert "cloak" in modes
+        assert modes == {"heal", "cloak", "spellcaster", "drop", "upgrades"}, level
         assert cfg["env"].get("include_upgrades") is True
+
+
+def test_levels_after_ctf_27_include_upgrades():
+    """The upgrade observation stays on for every level after the upgrades intro."""
+    cm = ConfigManager("config_universal")
+    start = cm.levels.index("ctf_level_27")
+    later = cm.levels[start + 1 :]
+    assert later, "expected levels after ctf_level_27"
+    for level in later:
+        cfg = cm.get_level_config(level)
+        assert cfg["env"].get("include_upgrades") is True, level
 
 
 def test_pipeline_registers_27_29():

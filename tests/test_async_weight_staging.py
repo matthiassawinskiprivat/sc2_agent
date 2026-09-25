@@ -29,6 +29,7 @@ def test_maybe_poll_collector_weights_respects_interval(monkeypatch):
 
     calls = {"n": 0}
     sync = MagicMock()
+    sync.fill_frozen = False
     sync.try_reload.side_effect = lambda *a, **k: calls.__setitem__("n", calls["n"] + 1)
 
     state = {"last_poll": 0.0}
@@ -43,8 +44,21 @@ def test_maybe_poll_collector_weights_respects_interval(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_collector_weight_sync_skips_when_fill_frozen(tmp_path: Path, monkeypatch):
+    import train.async_train_universal as mod
+
+    monkeypatch.setattr(mod, "TEMP_DIR", str(tmp_path))
+    learner_zip = tmp_path / "latest_learner_model.zip"
+    learner_zip.write_bytes(b"PK\x03\x04v1")
+    sync = mod.CollectorWeightSync()
+    sync.fill_frozen = True
+    model = type("M", (), {"device": "cpu"})()
+    assert sync.try_reload(model, object()) is False
+
+
 def test_collector_weight_sync_skips_unchanged_mtime(tmp_path: Path, monkeypatch):
     import train.async_train_universal as mod
+    import time
 
     monkeypatch.setattr(mod, "TEMP_DIR", str(tmp_path))
     monkeypatch.setattr(mod, "COLLECTOR_WEIGHTS_STAGING_ZIP", str(tmp_path / "staging.zip"))
@@ -52,21 +66,25 @@ def test_collector_weight_sync_skips_unchanged_mtime(tmp_path: Path, monkeypatch
     learner_zip = tmp_path / "latest_learner_model.zip"
     learner_zip.write_bytes(b"PK\x03\x04v1")
 
-    model = type("M", (), {"device": "cpu"})()
+    model = type("M", (), {"device": "cpu", "policy": object()})()
     vec_env = object()
     sync = CollectorWeightSync()
 
     calls = {"n": 0}
 
-    def fake_set_parameters(*_a, **_k):
+    def fake_load_policy(*_a, **_k):
         calls["n"] += 1
+        return True, [], []
 
-    monkeypatch.setattr(mod, "set_parameters_with_retry", fake_set_parameters)
     monkeypatch.setattr(mod, "stage_learner_zip_for_collector", lambda *_a, **_k: None)
     monkeypatch.setattr(mod, "push_opponent_checkpoint_to_envs", lambda *_a, **_k: None)
     monkeypatch.setattr(
         "src.utils.model_utils.inspect_checkpoint_policy_weights",
         lambda *_a, **_k: (True, "ok", []),
+    )
+    monkeypatch.setattr(
+        "src.utils.model_utils.load_policy_weights_from_zip",
+        fake_load_policy,
     )
 
     assert sync.try_reload(model, vec_env) is True
@@ -75,9 +93,6 @@ def test_collector_weight_sync_skips_unchanged_mtime(tmp_path: Path, monkeypatch
     assert calls["n"] == 1
 
     learner_zip.write_bytes(b"PK\x03\x04v2")
-    import os
-    import time
-
     time.sleep(0.05)
     os.utime(learner_zip, None)
     assert sync.try_reload(model, vec_env) is True

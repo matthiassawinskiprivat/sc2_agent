@@ -58,9 +58,12 @@ def test_alternate_trainee_race_enabled_reads_nested_env_flag():
 
 def test_include_race_enabled_reads_nested_env_flag():
     assert include_race_enabled({"env": {"include_race": True}})
-    assert not include_race_enabled({"env": {}})
+    # Omitted → default True (stable 144-wide race obs after ctf_level_01).
+    assert include_race_enabled({"env": {}})
+    assert include_race_enabled({})
     assert include_race_enabled({"include_race": True})
     assert not include_race_enabled({"include_race": False})
+    assert not include_race_enabled({"env": {"include_race": False}})
 
 
 def test_encode_race_vector_own_enemy_one_hots():

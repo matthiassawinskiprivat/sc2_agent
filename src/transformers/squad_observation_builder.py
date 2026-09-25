@@ -9,14 +9,23 @@ from sc2.ids.unit_typeid import UnitTypeId
 from sc2.unit import Unit
 
 from src.agent.squad_constants import (
+    MAX_SQUAD_ENEMIES,
     MAX_SQUAD_UNITS,
     SQUAD_COMMAND_DIM,
     SQUAD_RACE_DIM,
     SQUAD_UPGRADES_DIM,
+    command_target_modes,
     encode_race_vector,
     include_race_enabled,
     include_upgrades_enabled,
     update_armor_shield_cache,
+)
+from src.agent.squad_target_masks import (
+    build_enemy_target_mask,
+    build_engage_enemy_mask,
+    build_squad_target_masks,
+    build_tactical_enemy_mask,
+    zero_target_masks,
 )
 from src.agent.unit_scalar_constants import UnitScalarConstants as USC
 from src.utils.unit_feature_helpers import (
@@ -100,6 +109,11 @@ class SquadObservationBuilder:
         )
         self._include_race = include_race_enabled(training_conf)
         self._include_upgrades = include_upgrades_enabled(training_conf)
+        # Static per level: which terminal target each command index expects.
+        self._command_modes = command_target_modes(
+            training_conf.get("action_heads") or [],
+            training_conf.get("categorical_heads") or [],
+        )
         self._upgrade_caches: Dict[int, np.ndarray] = {
             1: np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
             2: np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
@@ -121,6 +135,11 @@ class SquadObservationBuilder:
             2: np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
         }
 
+    @property
+    def command_modes(self) -> np.ndarray:
+        """Per-command terminal-target mode table (see ``command_target_modes``)."""
+        return self._command_modes.copy()
+
     def zero_observation(self) -> Dict[str, np.ndarray]:
         n_g = len(self.active_layers) or 1
         n_t = len(self.active_tactical_layers) or n_g
@@ -132,6 +151,14 @@ class SquadObservationBuilder:
                 (MAX_SQUAD_UNITS, self.unit_feat_dim), dtype=np.float32
             ),
             "unit_mask": np.zeros(MAX_SQUAD_UNITS, dtype=np.float32),
+            "enemy_scalars": np.zeros(
+                (MAX_SQUAD_ENEMIES, self.unit_feat_dim), dtype=np.float32
+            ),
+            "enemy_mask": np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32),
+            "tactical_enemy_mask": np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32),
+            "engage_enemy_mask": np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32),
+            "command_modes": self._command_modes.copy(),
+            **zero_target_masks(),
         }
         if self._include_race:
             obs["race"] = np.zeros(SQUAD_RACE_DIM, dtype=np.float32)
@@ -153,6 +180,30 @@ class SquadObservationBuilder:
         if preferred_tag is not None and int(preferred_tag) in alive:
             return int(preferred_tag)
         return ordered[0]
+
+    @staticmethod
+    def resolve_enemy_target_tags(bot, perspective_player_id: int) -> List[int]:
+        """Stable visible-enemy slot order for the ``attack_unit`` target pointer.
+
+        Sorted hostile **mobile** tags, capped at ``MAX_SQUAD_ENEMIES``. Hostile
+        structures stay off this pointer (and ``enemy_mask``) so ``attack_unit``
+        stays army-only. They still open ``attack_local`` / ``aoe_local`` via
+        ``engage_enemy_mask`` when a building is in any ally's tactical fovea;
+        spatial actuation hard-targets a building whose center lies in the
+        clicked cell.
+
+        Ownership-based (``perspective_unit_groups``), not alliance buckets: under
+        ``debug_control_enemy`` both armies look allied to the P1 client.
+        """
+        _, vis_enemies, _, _ = perspective_unit_groups(bot, int(perspective_player_id))
+        tags: List[int] = []
+        for unit in vis_enemies or []:
+            if unit is None or getattr(unit, "is_structure", False):
+                continue
+            tag = getattr(unit, "tag", None)
+            if tag is not None:
+                tags.append(int(tag))
+        return sorted(set(tags))[:MAX_SQUAD_ENEMIES]
 
     def build(
         self,
@@ -207,8 +258,11 @@ class SquadObservationBuilder:
         upgrades = _bot_state_upgrades(bot)
 
         # Enemy center-of-mass (owner-id; god-mode alliance buckets mix armies)
-        _, vis_enemies, _, _ = perspective_unit_groups(bot, int(perspective_player_id))
+        _, vis_enemies, _, vis_structs = perspective_unit_groups(
+            bot, int(perspective_player_id)
+        )
         enemy_com = _center_of_mass(vis_enemies)
+        enemy_structures = [s for s in (vis_structs or []) if s is not None]
 
         # Allied squad center-of-mass from live unit positions
         squad_positions = []
@@ -229,12 +283,60 @@ class SquadObservationBuilder:
         anchor_tactical = np.zeros((n_t, 32, 32), dtype=np.float32)
         unit_scalars = np.zeros((MAX_SQUAD_UNITS, self.unit_feat_dim), dtype=np.float32)
         unit_mask = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+        ally_units: List[Optional[Unit]] = [None] * MAX_SQUAD_UNITS
 
         for slot, tag in enumerate(sorted_tags[:MAX_SQUAD_UNITS]):
             unit = bot.all_units.find_by_tag(tag)
             if unit is None:
                 continue
             unit_mask[slot] = 1.0
+            ally_units[slot] = unit
+
+        # --- Visible-enemy pointer keys (attack_unit target slots) ---
+        enemy_tags = self.resolve_enemy_target_tags(bot, perspective_player_id)
+        enemy_scalars = np.zeros((MAX_SQUAD_ENEMIES, self.unit_feat_dim), dtype=np.float32)
+        enemy_units: List[Optional[Unit]] = [None] * MAX_SQUAD_ENEMIES
+        for slot, tag in enumerate(enemy_tags[:MAX_SQUAD_ENEMIES]):
+            unit = bot.all_units.find_by_tag(tag)
+            if unit is None:
+                continue
+            enemy_units[slot] = unit
+
+        # Hard-anchor crop + fovea legality before actor masks / CAN_AOE scalars.
+        anchor_unit = None
+        if resolved_anchor is not None:
+            anchor_unit = bot.all_units.find_by_tag(resolved_anchor)
+            if anchor_unit is not None:
+                tactical = self._transformer.transform_tactical(raw_obs, anchor_unit)
+                anchor_tactical = np.asarray(tactical, dtype=np.float32)
+        tactical_enemy_mask = build_tactical_enemy_mask(
+            enemy_units, anchor_unit, extra_hostiles=enemy_structures
+        )
+        # Engage fovea = mobile *or building* near *any* ally. Command gating
+        # for attack_local / aoe_local uses this. Viper air stays mobiles only.
+        # Spatial decode this step uses the newly selected anchor, not the
+        # previous hard-anchor crop reflected by tactical_enemy_mask.
+        engage_enemy_mask = build_engage_enemy_mask(
+            enemy_units, ally_units, extra_hostiles=enemy_structures
+        )
+        has_engage_air_enemy = bool(
+            build_engage_enemy_mask(
+                enemy_units, ally_units, air_only=True
+            ).any()
+        )
+        enemy_mask = build_enemy_target_mask(enemy_units)
+        target_masks = build_squad_target_masks(
+            ally_units,
+            bot=bot,
+            enemy_race=enemy_race,
+            upgrades=upgrades,
+            has_tactical_air_enemy=has_engage_air_enemy,
+        )
+
+        for slot, tag in enumerate(sorted_tags[:MAX_SQUAD_UNITS]):
+            unit = ally_units[slot]
+            if unit is None:
+                continue
             objective = bot.unit_target_map.get(tag)
             unit_scalars[slot] = self._unit_scalars(
                 unit,
@@ -247,14 +349,25 @@ class SquadObservationBuilder:
                 enemy_com=enemy_com,
                 allied_com=allied_com,
                 enemy_race=enemy_race,
+                has_tactical_air_enemy=has_engage_air_enemy,
             )
 
-        # Single hard-anchor crop (Option A): O(1) vs previous O(N) transform_tactical.
-        if resolved_anchor is not None:
-            anchor_unit = bot.all_units.find_by_tag(resolved_anchor)
-            if anchor_unit is not None:
-                tactical = self._transformer.transform_tactical(raw_obs, anchor_unit)
-                anchor_tactical = np.asarray(tactical, dtype=np.float32)
+        for slot, unit in enumerate(enemy_units):
+            if unit is None:
+                continue
+            enemy_scalars[slot] = self._unit_scalars(
+                unit,
+                pool_high_level_command,
+                bot=bot,
+                playable_w=pw,
+                playable_h=ph,
+                upgrades=upgrades,
+                objective=None,
+                enemy_com=allied_com,
+                allied_com=enemy_com,
+                enemy_race=enemy_race,
+                has_tactical_air_enemy=has_engage_air_enemy,
+            )
 
         obs = {
             "map": map_obs,
@@ -262,6 +375,12 @@ class SquadObservationBuilder:
             "anchor_tactical": anchor_tactical,
             "unit_scalars": unit_scalars,
             "unit_mask": unit_mask,
+            "enemy_scalars": enemy_scalars,
+            "enemy_mask": enemy_mask,
+            "tactical_enemy_mask": tactical_enemy_mask,
+            "engage_enemy_mask": engage_enemy_mask,
+            "command_modes": self._command_modes.copy(),
+            **target_masks,
         }
         if self._include_race:
             obs["race"] = encode_race_vector(own_race, enemy_race)
@@ -361,7 +480,7 @@ class SquadObservationBuilder:
         unit: Unit,
         pool_command: str,
         *,
-        bot,
+        bot=None,
         playable_w: float,
         playable_h: float,
         upgrades: frozenset,
@@ -369,6 +488,7 @@ class SquadObservationBuilder:
         enemy_com,
         allied_com,
         enemy_race: Optional[str] = None,
+        has_tactical_air_enemy: bool = False,
     ) -> np.ndarray:
         # Fill the full catalog buffer (catalog index order), then gather into
         # active_unit_scalars config order — same pattern as active_layers slicing.
@@ -446,14 +566,22 @@ class SquadObservationBuilder:
 
         # --- Group I: Immobility / cloak readiness ---
         catalog[_F[USC.IS_IMMOBILE]] = float(unit_is_immobile(unit, upgrades))
-        catalog[_F[USC.CAN_CLOAK]] = float(unit_can_cloak(unit))
+        catalog[_F[USC.CAN_CLOAK]] = float(unit_can_cloak(unit, upgrades))
 
         # --- Group J: Heal / repair readiness ---
         catalog[_F[USC.CAN_HEAL]] = float(unit_can_heal(unit, bot))
         catalog[_F[USC.CAN_REPAIR]] = float(unit_can_repair(unit, bot))
 
         # --- Group L: AoE spell readiness ---
-        catalog[_F[USC.CAN_AOE]] = float(unit_can_aoe(unit, enemy_race=enemy_race))
+        catalog[_F[USC.CAN_AOE]] = float(
+            unit_can_aoe(
+                unit,
+                enemy_race=enemy_race,
+                upgrades=upgrades,
+                bot=bot,
+                has_tactical_air_enemy=has_tactical_air_enemy,
+            )
+        )
 
         # --- Group K: Transport / cargo ---
         catalog[_F[USC.IS_TRANSPORT]] = float(unit_is_transport(unit))

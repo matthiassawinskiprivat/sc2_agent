@@ -114,6 +114,10 @@ def test_record_pre_action_snapshots_defender_distance():
 
 
 def test_integrated_defender_penalty_in_calculate_reward():
+    """Defenders pay the shared ``step_penalty`` now; the old free per-step
+    ``defender_step_reward`` (farmable by hiding all episode) is gone — see
+    ``src/agent/ctf_economic_rewards.py`` and ``defender_retained_value_bonus``.
+    """
     bot = _make_bot(dist_mult=0.5)
     pylon_pos = Point2((0.0, 0.0))
     own_pylon = _make_unit(888, 0.0, 0.0)
@@ -150,5 +154,5 @@ def test_integrated_defender_penalty_in_calculate_reward():
 
     reward = bot.calculate_reward(perspective_player_id=1)
     expected_penalty = -0.5 * (13.0 - 11.0)
-    defender_step = 0.001
-    assert reward == pytest.approx(expected_penalty + defender_step)
+    step_penalty = -0.05  # shared default; both roles pay it now
+    assert reward == pytest.approx(expected_penalty + step_penalty)

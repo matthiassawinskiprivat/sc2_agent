@@ -70,3 +70,26 @@ def test_calculate_spawns_expensive_pool():
     # 50 minerals. Zealot costs 100.
     spawns, rem_m, rem_v = calculate_spawns(50, 0, unit_pool, MOCK_UNIT_DATA)
     assert len(spawns) == 0
+
+
+def test_ctf_level_01_attacker_can_afford_reaper():
+    """Regression: Reaper is 50/50; gas=0 used to spawn an empty attacker army."""
+    import json
+    from pathlib import Path
+
+    import yaml
+
+    from train.envs.ctf.budgeted_spawns import calculate_budgeted_spawns
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((root / "config_universal" / "ctf_level_01.yaml").read_text())
+    unit_data = json.loads((root / "data" / "unit_data.json").read_text())
+    attack = next(p for p in cfg["env"]["unit_pools"] if p.get("high_level_command") == "attack")
+    spawns = calculate_budgeted_spawns(
+        attack["unit_pool"],
+        unit_data,
+        attack["mineral_budget"],
+        attack["vespene_budget"],
+    )
+    assert spawns, "attacker pool must spawn at least one unit"
+    assert all(u == "REAPER" for u in spawns)

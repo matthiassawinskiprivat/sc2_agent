@@ -50,23 +50,51 @@ def test_is_immobile_cloaked_ghost():
 
 
 def test_can_cloak_ghost_with_energy():
+    from sc2.ids.upgrade_id import UpgradeId
+
     u = _unit(UnitTypeId.GHOST, energy=50.0)
-    assert unit_can_cloak(u) is True
+    assert unit_can_cloak(u, frozenset({UpgradeId.PERSONALCLOAKING})) is True
+    assert unit_can_cloak(u, frozenset()) is False
 
 
 def test_can_cloak_ghost_already_cloaked():
+    from sc2.ids.upgrade_id import UpgradeId
+
     u = _unit(UnitTypeId.GHOST, is_cloaked=True, energy=50.0)
-    assert unit_can_cloak(u) is False
+    assert unit_can_cloak(u, frozenset({UpgradeId.PERSONALCLOAKING})) is False
 
 
 def test_can_cloak_ghost_low_energy():
+    from sc2.ids.upgrade_id import UpgradeId
+
     u = _unit(UnitTypeId.GHOST, energy=10.0)
-    assert unit_can_cloak(u) is False
+    assert unit_can_cloak(u, frozenset({UpgradeId.PERSONALCLOAKING})) is False
 
 
 def test_can_cloak_zergling_and_dt():
     assert unit_can_cloak(_unit(UnitTypeId.ZERGLING, energy=100.0)) is False
     assert unit_can_cloak(_unit(UnitTypeId.DARKTEMPLAR, energy=0.0)) is False
+
+
+def test_can_burrow_requires_tech_except_widow_mine():
+    from sc2.ids.upgrade_id import UpgradeId
+    from src.utils.unit_feature_helpers import unit_can_burrow
+
+    ling = _unit(UnitTypeId.ZERGLING)
+    assert unit_can_burrow(ling, frozenset()) is False
+    assert unit_can_burrow(ling, frozenset({UpgradeId.BURROW})) is True
+    assert unit_can_burrow(_unit(UnitTypeId.WIDOWMINE), frozenset()) is True
+    assert unit_can_burrow(_unit(UnitTypeId.ZERGLINGBURROWED, is_burrowed=True)) is False
+
+
+def test_can_reveal_cloaked_or_burrowed():
+    from src.utils.unit_feature_helpers import unit_can_reveal
+
+    ghost = _unit(UnitTypeId.GHOST, is_cloaked=True, energy=50.0)
+    assert unit_can_reveal(ghost) is True
+    assert unit_can_reveal(_unit(UnitTypeId.GHOST, energy=50.0)) is False
+    assert unit_can_reveal(_unit(UnitTypeId.ZERGLINGBURROWED, is_burrowed=True)) is True
+    assert unit_can_reveal(_unit(UnitTypeId.ZERGLING)) is False
 
 
 def test_can_repair_scv_only():

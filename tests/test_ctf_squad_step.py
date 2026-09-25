@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 from gymnasium import spaces
 
-from src.agent.squad_constants import SQUAD_UNIT_FEAT_DIM, squad_action_space_nvec
+from src.agent.squad_constants import (
+    SQUAD_FLAT_ACTION_DIM,
+    SQUAD_UNIT_FEAT_DIM,
+    squad_action_space_nvec,
+)
 
 
 @pytest.fixture
@@ -96,7 +100,13 @@ def squad_env():
         env.bot.structures = MagicMock(return_value=MagicMock(amount=1))
         env.bot.enemy_structures = MagicMock(return_value=MagicMock(amount=1))
         env.bot.calculate_squad_step_reward = MagicMock(return_value=0.5)
-        env.bot.squad_action_masks = MagicMock(return_value=np.ones(1136, dtype=bool))
+        # Unconfigured MagicMock() coerces via __float__ to 1.0, not 0.0 — pin the
+        # terminal army-value bonus explicitly so unrelated tests are not silently
+        # off by one full value unit (see src/agent/ctf_economic_rewards.py).
+        env.bot.terminal_retained_value_bonus = MagicMock(return_value=0.0)
+        env.bot.squad_action_masks = MagicMock(
+            return_value=np.ones(SQUAD_FLAT_ACTION_DIM, dtype=bool)
+        )
         yield env
 
 
@@ -173,21 +183,26 @@ def test_squad_action_masks_reuses_cache_without_rebuilding_obs(squad_env):
     assert squad_env.bot.squad_action_masks.call_count == 1
 
 
-def test_squad_action_masks_uses_alive_tags_not_full_obs(squad_env):
-    unit_mask = np.array([1.0, 1.0] + [0.0] * 22, dtype=np.float32)
-    flat_mask = np.ones(1136, dtype=bool)
+def test_squad_action_masks_cache_miss_uses_pool_observation(squad_env):
+    """Cache miss must rebuild from the pool observation.
+
+    Command legality (``heal_unit`` needs a ready healer and a wounded patient,
+    ``attack_unit`` a visible hostile) is observation-derived, so the bare unit
+    mask is not enough to produce a mask the learner can reproduce.
+    """
+    flat_mask = np.ones(SQUAD_FLAT_ACTION_DIM, dtype=bool)
     squad_env.steps_count = 2
     squad_env.current_trainee_pool_index = 0
-    squad_env._squad_unit_mask_for_pool = MagicMock(return_value=unit_mask)
+    squad_env._squad_action_mask_cache = None
     squad_env.bot.squad_action_masks = MagicMock(return_value=flat_mask)
 
-    with patch.object(
-        squad_env, "_get_squad_observation_for_pool", side_effect=AssertionError("should not rebuild obs")
-    ):
-        out = squad_env.action_masks()
+    out = squad_env.action_masks()
 
-    squad_env._squad_unit_mask_for_pool.assert_called_once_with(0)
-    squad_env.bot.squad_action_masks.assert_called_once()
+    squad_env._get_squad_observation_for_pool.assert_called_with(0)
+    obs = squad_env._get_squad_observation_for_pool.return_value
+    args = squad_env.bot.squad_action_masks.call_args.args
+    assert args[0] is obs["unit_mask"]
+    assert args[1] is obs
     assert np.array_equal(out, flat_mask)
 
 

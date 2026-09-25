@@ -16,14 +16,38 @@ def _bot_with_unit(unit):
     bot.training_conf = {
         "agent_architecture": "universal",
         "action_heads": ["move_global", "move_local", "attack_local"],
+        "categorical_heads": [],
     }
     bot.actions = []
     bot.do = MagicMock()
     bot._unit_last_order = {}
     bot.last_action_was_move_by_unit = {}
+    bot.last_action_was_attack_by_unit = {}
+    bot._command_attempt_tags = {
+        "move": set(),
+        "attack": set(),
+        "cloak": set(),
+        "uncloak": set(),
+        "aoe": set(),
+        "unload": set(),
+        "load": set(),
+    }
     bot.game_info = None
     bot.all_units = MagicMock()
     bot.all_units.find_by_tag.return_value = unit
+    # Bind real helpers: MagicMock defaults are truthy and would skip attack
+    # via ``elif self._refresh_heal_lock(unit)``.
+    bot._refresh_heal_lock = lambda u: CaptureTheFlagBot._refresh_heal_lock(bot, u)
+    bot._mark_command_attempt = (
+        lambda u, kind: CaptureTheFlagBot._mark_command_attempt(bot, u, kind)
+    )
+    bot._set_last_order_flags = (
+        lambda unit_tag, *, moved=False, attacked=False: (
+            CaptureTheFlagBot._set_last_order_flags(
+                bot, unit_tag, moved=moved, attacked=attacked
+            )
+        )
+    )
     agent = MagicMock()
     agent.last_game_info = None
     agent.convert_spatial_action_to_world.return_value = (60.0, 70.0)

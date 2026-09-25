@@ -53,6 +53,9 @@ def test_heal_casts_published_as_rollout_sum_not_short_window_mean():
                 "attack_commands": 1,
                 "cloak_commands": 0,
                 "uncloak_commands": 0,
+                "aoe_commands": 0,
+                "load_commands": 0,
+                "unload_commands": 0,
                 "move_commands_episode": 0,
                 "attack_commands_episode": 0,
                 "cloak_commands_episode": 0,
@@ -73,6 +76,9 @@ def test_heal_casts_published_as_rollout_sum_not_short_window_mean():
             "attack_commands": 0,
             "cloak_commands": 1,
             "uncloak_commands": 1,
+            "aoe_commands": 3,
+            "load_commands": 1,
+            "unload_commands": 2,
             "move_commands_episode": 2,
             "attack_commands_episode": 99,
             "cloak_commands_episode": 1,
@@ -91,6 +97,9 @@ def test_heal_casts_published_as_rollout_sum_not_short_window_mean():
     assert signal["env/attack_commands"] == 99.0
     assert signal["env/cloak_commands"] == 1.0
     assert signal["env/uncloak_commands"] == 1.0
+    assert signal["env/aoe_commands"] == 3.0
+    assert signal["env/load_commands"] == 1.0
+    assert signal["env/unload_commands"] == 2.0
     assert signal["env/move_commands_episode"] == 0.02
     assert signal["env/attack_commands_episode"] == 0.99
     assert signal["env/cooldown_retreat"] == 0.5

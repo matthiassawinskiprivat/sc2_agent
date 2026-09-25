@@ -2,24 +2,18 @@
 
 from pathlib import Path
 import importlib.util
-import sys
-import types
 
 import yaml
 
 from src.utils.config_manager import ConfigManager
 
-# Load pool_assignment without importing train.envs (pulls SC2 bot stack).
+# Load pool_assignment under a unique module name. Do NOT install stub
+# ``train`` / ``train.envs`` packages into sys.modules — that poisons later
+# imports (``train.envs.ctf.game_data``, CaptureTheFlagSingleEnv, …) for the
+# rest of the pytest process.
 _pool_path = Path(__file__).resolve().parents[1] / "train" / "envs" / "ctf" / "pool_assignment.py"
-_train = types.ModuleType("train")
-_train_envs = types.ModuleType("train.envs")
-_train_ctf = types.ModuleType("train.envs.ctf")
-sys.modules.setdefault("train", _train)
-sys.modules.setdefault("train.envs", _train_envs)
-sys.modules.setdefault("train.envs.ctf", _train_ctf)
-_spec = importlib.util.spec_from_file_location("train.envs.ctf.pool_assignment", _pool_path)
+_spec = importlib.util.spec_from_file_location("_ctf_pool_assignment_under_test", _pool_path)
 _pool_mod = importlib.util.module_from_spec(_spec)
-sys.modules["train.envs.ctf.pool_assignment"] = _pool_mod
 _spec.loader.exec_module(_pool_mod)
 get_trainee_race = _pool_mod.get_trainee_race
 is_pool_trainee = _pool_mod.is_pool_trainee
@@ -27,20 +21,32 @@ pool_player_id = _pool_mod.pool_player_id
 
 _CONFIG_DIR = Path(__file__).resolve().parents[1] / "config_universal"
 
-_CTF_BOOTSTRAP_LEVELS = frozenset({"ctf_level_01", "ctf_level_01_zergling_vs_marine"})
+# Phase-1 bootstrap / intro levels keep static ``agent:`` flags and
+# ``alternate_trainee_race: false`` so spawn owners stay simple while the
+# pointer / heal actions are introduced.
+_CTF_BOOTSTRAP_LEVELS = frozenset(
+    {
+        "ctf_level_01",
+        "ctf_level_01_zergling_vs_marine",
+        "ctf_level_02_melee_zealot_vs_roach",
+        "ctf_level_02_melee_helliontank_vs_hydralisk",
+    }
+)
 
 _RACE_UNITS = {
     "terran": {
         "MARINE", "MARAUDER", "GHOST", "HELLION", "HELLIONTANK", "SIEGETANK", "VIKINGFIGHTER", "BANSHEE", "THOR",
-        "THORAP", "CYCLONE", "REAPER", "BATTLECRUISER",
+        "THORAP", "CYCLONE", "REAPER", "BATTLECRUISER", "SCV", "MEDIVAC", "LIBERATOR", "WIDOWMINE",
     },
     "zerg": {
         "ZERGLING", "ROACH", "HYDRALISK", "MUTALISK", "ULTRALISK", "RAVAGER", "BANELING",
-        "CORRUPTOR", "SWARMHOSTMP", "BROODLORD",
+        "CORRUPTOR", "SWARMHOSTMP", "BROODLORD", "QUEEN", "INFESTOR", "LURKERMP", "VIPER",
+        "OVERLORD", "OVERLORDTRANSPORT", "OVERSEER",
     },
     "protoss": {
         "ZEALOT", "STALKER", "ADEPT", "IMMORTAL", "PHOENIX", "VOIDRAY", "COLOSSUS", "ARCHON",
-        "DISRUPTOR", "TEMPEST", "CARRIER",
+        "DISRUPTOR", "TEMPEST", "CARRIER", "HIGHTEMPLAR", "DARKTEMPLAR", "SENTRY", "ORACLE",
+        "MOTHERSHIP", "WARPPRISM", "OBSERVER", "PROBE", "SHIELDBATTERY",
     },
 }
 
@@ -88,45 +94,53 @@ def test_pool_assignment_legacy_agent_flag_when_not_alternating():
 def test_ctf_levels_enable_alternate_trainee_race_except_bootstrap():
     cm = ConfigManager(str(_CONFIG_DIR))
     ctf_levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_level_")]
+    # Same-race mirrors keep a fixed trainee race.
+    mirror_levels = {lvl for lvl in ctf_levels if "_mirror_" in lvl}
+    exempt = _CTF_BOOTSTRAP_LEVELS | mirror_levels
     for level in ctf_levels:
         env = _load_env(level)
-        if level in _CTF_BOOTSTRAP_LEVELS:
+        if level in exempt:
             assert env.get("alternate_trainee_race") is False, level
             continue
         assert env.get("alternate_trainee_race") is True, level
 
 
-def test_ctf_levels_include_race_from_level_12():
-    """Race obs encoding starts after ctf_level_11 (query_linear 138→144)."""
+def test_ctf_include_race_off_only_on_level_01():
+    """Only ctf_level_01 disables race so the universal→squad graft stays 138-wide.
+
+    Every other CTF / scenario / AoE level in the pipeline must keep race on
+    (explicit ``include_race: true`` or the code default).
+    """
+    from src.agent.squad_constants import include_race_enabled
+
     cm = ConfigManager(str(_CONFIG_DIR))
-    ctf_levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_level_")]
-    for level in ctf_levels:
-        env = _load_env(level)
-        # Extract numeric suffix when present (ctf_level_12 → 12); skip named variants.
-        parts = level.replace("ctf_level_", "").split("_", 1)
-        try:
-            num = int(parts[0])
-        except ValueError:
-            assert not env.get("include_race"), level
+    for level in cm.levels:
+        if not (
+            level.startswith("ctf_")
+            or level.startswith("scenario_")
+            or level.startswith("aoe_")
+        ):
             continue
-        if num >= 12:
-            assert env.get("include_race") is True, level
+        env = _load_env(level)
+        enabled = include_race_enabled({"env": env})
+        if level == "ctf_level_01":
+            assert enabled is False, level
+            assert env.get("include_race") is False, level
         else:
-            assert not env.get("include_race"), level
+            assert enabled is True, level
 
 
-def test_ctf_levels_define_race_per_pool_static_agent_only_on_bootstrap():
+def test_ctf_levels_define_race_per_pool():
     cm = ConfigManager(str(_CONFIG_DIR))
     ctf_levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_level_")]
     for level in ctf_levels:
-        env = _load_env(level)
-        for pool in _load_unit_pools(level):
+        pools = _load_unit_pools(level)
+        for pool in pools:
             assert "race" in pool, f"{level} missing race on pool"
-            if level in _CTF_BOOTSTRAP_LEVELS and not env.get("alternate_trainee_race", False):
-                if pool.get("agent"):
-                    assert pool.get("high_level_command") == "attack"
-                continue
-            assert "agent" not in pool, f"{level} still uses static agent flag"
+        if level in _CTF_BOOTSTRAP_LEVELS:
+            assert any(p.get("agent") for p in pools), level
+            assert _load_env(level).get("alternate_trainee_race") is False, level
+
 
 
 def test_ctf_level_01_zergling_attack_vs_marine_defend():
@@ -144,7 +158,7 @@ def test_ctf_level_01_zergling_attack_vs_marine_defend():
     assert pools[1]["unit_pool"] == ["MARINE"]
     assert pools[1]["mineral_budget"] == 150
     assert pools[0]["region"] == pools[1]["region"] == "A"
-    assert env["squad_selection"]["min_selected_units"] == 8
+    assert env["squad_selection"]["min_selected_units"] == 3
 
 
 def test_ctf_pipeline_inserts_zergling_vs_marine_after_level_01():
@@ -173,8 +187,18 @@ def test_ctf_level_01_reaper_attack_vs_zergling_defend():
 
 
 def test_thor_pools_include_both_payload_modes():
-    """Explosive Payload (THOR, Javelin splash) and High Impact (THORAP) stay paired."""
+    """Explosive Payload (THOR, Javelin splash) and High Impact (THORAP) stay paired.
+
+    Heal intro scenarios are exempt: they teach SCV repair on a single Thor mode,
+    not the dual-payload combat curriculum.
+    """
+    exempt = {
+        "ctf_heal_thor_scv_vs_thor_scv.yaml",
+        "ctf_heal_queen_vs_battlecruiser_scv.yaml",
+    }
     for path in sorted(_CONFIG_DIR.glob("*.yaml")):
+        if path.name in exempt:
+            continue
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         for i, pool in enumerate((data.get("env") or {}).get("unit_pools") or []):
             units = set(pool.get("unit_pool") or [])
@@ -285,16 +309,21 @@ def test_ctf_levels_15_17_mirror_12_14_matchups_and_budgets():
 
 
 def test_ctf_pipeline_inserts_mirror_matchups_after_level_17():
+    """Phase-2: mirrors sit after level 17, before the upgrades block (27+).
+
+    Heal intros moved to phase 1 (before level 18), so they are no longer between
+    the mirrors and ctf_level_18.
+    """
     cm = ConfigManager(str(_CONFIG_DIR))
     idx_17 = cm.levels.index("ctf_level_17")
     idx_t = cm.levels.index("ctf_level_17_mirror_terran")
     idx_z = cm.levels.index("ctf_level_17_mirror_zerg")
     idx_p = cm.levels.index("ctf_level_17_mirror_protoss")
     idx_heal = cm.levels.index("ctf_heal_queen_vs_queen")
-    idx_thor = cm.levels.index("ctf_heal_thor_scv_vs_thor_scv")
-    idx_qvbc = cm.levels.index("ctf_heal_queen_vs_battlecruiser_scv")
     idx_18 = cm.levels.index("ctf_level_18")
-    assert idx_17 < idx_t < idx_z < idx_p < idx_heal < idx_thor < idx_qvbc < idx_18
+    idx_27 = cm.levels.index("ctf_level_27")
+    assert idx_heal < idx_18 < idx_17
+    assert idx_17 < idx_t < idx_z < idx_p < idx_27
 
 
 def test_ctf_level_17_mirror_matchups_reuse_level_17_config_and_prior_pools():
@@ -322,7 +351,8 @@ def test_ctf_level_17_mirror_matchups_reuse_level_17_config_and_prior_pools():
         env = _load_env(level)
         assert env["rewards"] == env_17["rewards"], level
         assert env["squad_selection"] == env_17["squad_selection"], level
-        assert env.get("alternate_trainee_race") is True, level
+        # Same-race mirrors keep a fixed trainee race (no alternate).
+        assert env.get("alternate_trainee_race") is False, level
         assert env.get("include_race") is True, level
         pools = env["unit_pools"]
         assert len(pools) == 4, level
@@ -349,22 +379,22 @@ def test_ctf_level_15_adds_splash_layers_and_scalars():
     added_tac = [layer for layer in at_15_tac if layer not in prior_tac]
     assert added_tac == ["allied_splash", "enemy_splash"]
 
-    prior_scalars = set(cm.get_cumulative_active_unit_scalars("ctf_level_14"))
+    # Per-unit scalar catalog is declared once at ctf_level_01; level 15 does
+    # not append splash-related scalars again.
+    prior_scalars = cm.get_cumulative_active_unit_scalars("ctf_level_14")
     at_15_scalars = cm.get_cumulative_active_unit_scalars("ctf_level_15")
-    added_scalars = [s for s in at_15_scalars if s not in prior_scalars]
-    assert added_scalars == [
+    assert at_15_scalars == prior_scalars
+    for name in (
         "air_dps_norm",
         "has_splash",
         "onetime_unit",
         "is_friendly_fire",
         "is_temporary",
-    ]
+    ):
+        assert name in at_15_scalars
 
-    # 16/17 inherit without re-listing
     assert "allied_splash" in cm.get_cumulative_active_layers("ctf_level_16")
     assert "onetime_unit" in cm.get_cumulative_active_unit_scalars("ctf_level_17")
-    assert "is_friendly_fire" in cm.get_cumulative_active_unit_scalars("ctf_level_17")
-    assert "is_temporary" in cm.get_cumulative_active_unit_scalars("ctf_level_17")
     env_16 = _load_env("ctf_level_16")
     assert "active_layers" not in env_16 or not env_16.get("active_layers")
     assert "active_unit_scalars" not in env_16 or not env_16.get("active_unit_scalars")
@@ -381,6 +411,7 @@ def test_ctf_levels_cover_all_three_races():
 
 
 def test_ctf_pipeline_inserts_two_levels_between_01_and_02():
+    """Melee intros sit in phase 1; detailed ctf_level_02 opens phase 2."""
     cm = ConfigManager(str(_CONFIG_DIR))
 
     idx_01 = cm.levels.index("ctf_level_01")
@@ -396,26 +427,37 @@ def test_ctf_pipeline_inserts_two_levels_between_01_and_02():
     idx_i1 = cm.levels.index(inserted_1)
     idx_i2 = cm.levels.index(inserted_2)
 
-    assert idx_01 < idx_i1 < idx_i2 < idx_02
-    # Training should still proceed into what used to be ctf_level_03.
-    assert idx_02 < idx_03
+    assert idx_01 < idx_i1 < idx_i2
+    # Phase-1 heal / cloak / aoe / transport sit between the melee intros and
+    # the phase-2 detailed-layer block that starts at ctf_level_02.
+    assert idx_i2 < idx_02 < idx_03
 
 
 def test_ctf_level_01_zergling_vs_marine_inherits_layers_without_adding():
     cm = ConfigManager(str(_CONFIG_DIR))
-    at_01 = set(cm.get_cumulative_active_layers("ctf_level_01"))
-    at_zvm = cm.get_cumulative_active_layers("ctf_level_01_zergling_vs_marine")
-    assert at_zvm == sorted(at_01)
-
-
-def test_ctf_level_01_adds_only_bio_light_layers():
-    cm = ConfigManager(str(_CONFIG_DIR))
-    prior = set(cm.get_cumulative_active_layers("level_attack_5"))
     at_01 = cm.get_cumulative_active_layers("ctf_level_01")
-    added = [layer for layer in at_01 if layer not in prior]
+    at_zvm = cm.get_cumulative_active_layers("ctf_level_01_zergling_vs_marine")
+    assert at_zvm == at_01
+
+
+def test_ctf_level_01_adds_no_map_layers_phase1_defers_detail():
+    """Phase-1 ctf_level_01 keeps the grafted attack-5 channel set unchanged.
+
+    Biological / light / mechanical overlays land on ctf_level_02 when phase 2 begins.
+    """
+    cm = ConfigManager(str(_CONFIG_DIR))
+    prior = cm.get_cumulative_active_layers("level_attack_5")
+    at_01 = cm.get_cumulative_active_layers("ctf_level_01")
+    assert at_01 == prior
+
+    # End of phase 1 (after heal / cloak / aoe / transport channel adds).
+    prior_phase2 = set(cm.get_cumulative_active_layers("ctf_level_26"))
+    at_02 = cm.get_cumulative_active_layers("ctf_level_02")
+    added = [layer for layer in at_02 if layer not in prior_phase2]
     assert added == [
         "allied_unit_biological",
         "enemy_unit_biological",
         "allied_g_dps_light",
         "enemy_g_dps_light",
+        "allied_unit_mechanical",
     ]

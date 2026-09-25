@@ -1,5 +1,5 @@
 training:
-  training_steps: 500_000
+  training_steps: 250_000
   num_envs: 6
   n_steps: 1024
   batch_size: 256
@@ -10,18 +10,19 @@ training:
   rollout_buffer: disk
 env:
   env_class: CaptureTheFlagEnv
-  max_steps: 200
+  max_steps: 100
   headless: true
-  every_k_episodes: 100
+  every_k_episodes: 200
   alternate_trainee_race: false
   include_race: true
   maps_dir: train/maps/ladder/with_region
+  env_mode: heal,cloak,spellcaster,drop
   unit_pools:
   - high_level_command: attack
     agent: true
     race: terran
-    mineral_budget: 2000
-    vespene_budget: 2000
+    mineral_budget: 1325
+    vespene_budget: 975
     unit_pool:
     - MARINE
     - MARAUDER
@@ -38,8 +39,8 @@ env:
     region: A
   - high_level_command: defend
     race: terran
-    mineral_budget: 1500
-    vespene_budget: 1500
+    mineral_budget: 1000
+    vespene_budget: 725
     unit_pool:
     - MARINE
     - MARAUDER
@@ -57,8 +58,8 @@ env:
   - high_level_command: defend
     agent: true
     race: terran
-    mineral_budget: 1500
-    vespene_budget: 1500
+    mineral_budget: 1000
+    vespene_budget: 725
     unit_pool:
     - MARINE
     - MARAUDER
@@ -75,8 +76,8 @@ env:
     region: B
   - high_level_command: attack
     race: terran
-    mineral_budget: 2000
-    vespene_budget: 2000
+    mineral_budget: 1325
+    vespene_budget: 975
     unit_pool:
     - MARINE
     - MARAUDER
@@ -92,21 +93,25 @@ env:
     - BATTLECRUISER
     region: B
   rewards:
-    pylon_damage_reward: 1.0
-    pylon_damage_penalty: 0.5
-    damage_reward: 0.2
-    damage_penalty: 0.1
+    economic_vespene_weight: 1.5
+    economic_value_norm: 100.0
+    attacker_enemy_value_reward: 3.0
+    attacker_own_value_penalty: 1.0
+    defender_enemy_value_reward: 2.5
+    defender_own_value_penalty: 3.0
+    defender_pylon_penalty_scale: 1.5
+    defender_retained_value_bonus: 4.0
+    heal_value_reward: 4.0
+    pylon_damage_reward: 2.0
+    pylon_damage_penalty: 0.9
     melee_multiplier: 0.5
-    kill_reward: 0.25
-    kill_penalty: -0.25
-    distance_multiplier: 1.0
+    distance_multiplier: 2.0
     defender_zone_radius: 10.0
-    cooldown_retreat_scale: 1.1
-    win_reward: 7.5
-    loss_penalty: -5.0
-    draw_penalty: -3.5
-    step_penalty: -0.015
-    defender_step_reward: 0.001
+    cooldown_retreat_scale: 0.9
+    win_reward: 15.0
+    loss_penalty: -12.5
+    draw_penalty: -10.0
+    step_penalty: -0.03
   squad_selection:
     score_threshold: 0.5
     min_selected_units: 1
@@ -122,7 +127,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.98
+  gamma: 0.99
   ent_coef: 0.01
-  n_epochs: 2
+  n_epochs: 4
 agent_architecture: squad

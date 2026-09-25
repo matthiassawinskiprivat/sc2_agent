@@ -314,27 +314,58 @@ The policy head uses `thought` for the command head and `_spatial_fused` + laten
 
 ## CTF squad pointer architecture (`agent_architecture: "squad"`)
 
-CTF levels override the pipeline default (`universal`) with **`agent_architecture: squad`** in each `ctf_level_*.yaml`. Attack curriculum levels remain universal.
+CTF levels override the pipeline default (`universal`) with **`agent_architecture: squad`** in each `ctf_level_*.yaml` / scenario / AoE YAML. Attack curriculum levels remain universal.
+
+### Autoregressive action (AlphaStar-style)
+
+Sampling order is **command → actors → terminal target / spatial**, not the older who→command→where layout:
+
+| Piece | Shape / index | Role |
+|-------|---------------|------|
+| **Command** | index into cumulative `action_heads` (+ categoricals) | Chosen first; selects a **command mode** |
+| **Actors** | `MultiDiscrete([2]*N_max)` Bernoulli pointer bits | Which allied units execute the order |
+| **Terminal target** | one of `SQUAD_TARGET_SLOTS` = `N_max` allies + `MAX_SQUAD_ENEMIES` hostiles + **NULL** | Used by `heal_unit` / `load_unit` / `attack_unit` |
+| **Spatial cell** | `32²` world cell | Used by move / `attack_local` / AoE / unload |
+
+Command modes (`src/agent/squad_constants.py`): `CMD_MODE_SPATIAL`, `CMD_MODE_ALLY_TARGET` (`heal_unit`), `CMD_MODE_LOAD_TARGET` (`load_unit`), `CMD_MODE_ENEMY_TARGET` (`attack_unit`). Legality masks (`src/agent/squad_target_masks.py`) gate actors and target slots from the chosen command. PPO log-probs sum the autoregressive factors (`SquadRecurrentPolicy`).
+
+Unit-pointer heads are **agent-faithful**: the order goes to the exact SC2 tag the policy selected (`_issue_heal_on_unit` / `_issue_load_on_unit` / `_issue_attack_on_unit`). There is no click-square heal or load (`heal_click_cells` / spatial `load_local` removed). At the universal→squad graft, `attack_unit` / `heal_unit` / `load_unit` command rows are seeded from spatial templates (`POINTER_COMMAND_ROW_TEMPLATES` / `seed_pointer_command_rows`).
+
+### Observation / stepping contracts
 
 | Topic | Contract |
 |-------|----------|
-| **WHO observation** | Per-unit `unit_scalars[N_max,F]` + `unit_mask[N_max]` (pointer keys; no per-unit tactical stack) |
+| **WHO observation** | Per-unit `unit_scalars[N_max,F]` + `unit_mask[N_max]` (pointer keys; no per-unit tactical stack). Full scalar catalog declared once at **`ctf_level_01`**. Optional `enemy_scalars` / `enemy_mask` for terminal targets. |
 | **WHERE observation** | Global `map[C_g,128,128]` + `command[10]` + single hard-anchor `anchor_tactical[C_t,32,32]` (previous-step selection, or provisional first-alive) |
-| **Action space** | `MultiDiscrete([2]*N_max + [64, 1024])` — binary pointer slot per padded unit + command + spatial |
+| **Action space** | `MultiDiscrete([2]*N_max + [64, SQUAD_TARGET_SLOTS, 1024])` — actor bits + command + target slot + spatial |
 | **Selection** | Env resolves sigmoid/Bernoulli pointer via threshold + min/max clamp (`env.squad_selection`); stores hard `anchor_tag` for the next obs crop |
-| **Local actions** | Decode spatial target in **anchor unit frame**; all selected units share one world `Point2` |
+| **Local actions** | Spatial targets decode in **anchor unit frame** to one shared world `Point2`; unit-target commands bypass spatial decode |
 | **Physics stepping** | **One trainee squad decision per env step**, paired with **one opponent squad** (same `region`) → one `client.step()` → one rollout row |
 | **Recurrent** | LSTM/GRU resets on **episode done only** (`get_obs_focus_unit_tag` returns `-1`) |
-| **Checkpoint graft** | CTF starts from the **last attack level** checkpoint (e.g. `models_universal/level_attack_5/final_model.zip`), **not** legacy CTF zips. Use `load_squad_checkpoint` / `graft_squad_policy_from_universal`. Fresh Adam on architecture switch. Squad `query_linear` must be **64+64+10** (global GAP + tactical GAP + command) so universal fusion weights remap. From **`ctf_level_12`**, `env.include_race: true` appends a 6-dim own/enemy race one-hot after command (`query_linear` in = **144**); levels ≤11 omit it so the universal→squad graft stays 138-wide. |
-| **Race obs (`include_race`)** | Optional Dict key `race` shape `(6,)` = `[own_T, own_Z, own_P, enemy_T, enemy_Z, enemy_P]` (perspective-relative). Not part of `command`. Boolean is per-level YAML (not ConfigManager-accumulated). |
-| **Opponent** | Same `SquadRecurrentPolicy`; synced via `_sync_opponent_model` with squad graft path |
+| **Checkpoint graft** | CTF starts from the **last attack level** checkpoint (e.g. `models_universal/level_attack_5/final_model.zip`), **not** legacy CTF zips. Use `load_squad_checkpoint` / `graft_squad_policy_from_universal`. Fresh Adam on architecture switch. Squad `query_linear` must be **64+64+10** (global GAP + tactical GAP + command) so universal fusion weights remap. Only **`ctf_level_01`** sets `env.include_race: false` so that graft stays 138-wide; from the next CTF level onward race is on by default (`query_linear` in = **144**, with a trailing 6-dim race one-hot). |
+| **Race obs (`include_race`)** | Optional Dict key `race` shape `(6,)` = `[own_T, own_Z, own_P, enemy_T, enemy_Z, enemy_P]` (perspective-relative). Not part of `command`. Defaults to **true** in `include_race_enabled` when omitted; only `ctf_level_01` opts out. Per-level YAML boolean (not ConfigManager-accumulated). |
+| **Opponent** | Same `SquadRecurrentPolicy`; synced via `_sync_opponent_model` with squad graft path; opponent `predict` is stochastic |
 | **Trainee vs spawn owners** | With `alternate_trainee_race`, SC2 spawn owners are **static** (first-seen race → player 1, every other race → player 2). The policy controls the pool whose `race` matches `get_trainee_race` for the episode — that pool may be player 2. Do **not** swap `debug_create_unit` owners across episodes (DirectX VRAM leak). `is_pool_trainee` is independent of `pool_player_id`. |
 | **P2 observation frame** | Spawn owners stay frozen, so the trainee may be SC2 player 2. Allied vs enemy is still ownership (`perspective_unit_groups`). Maps, `x_norm`/`y_norm`, and spatial actions stay in **world coordinates** — the same frame as pre-leak-fix P1 of that race. CTF spawn is **region + attack/defend side**, not ladder home corners; a 180° rotate would move a P2 trainee off the cells the old P1 policy trained on. **Do not** rotate `anchor_tactical` (local crop is already world-egocentric). `PerspectiveTransformer.decode_world_spatial_idx` is a pass-through. |
 | **Soft-reset cleanup** | Before `debug_kill`, uncloak/unburrow leftovers and **STOP** Mothership/Oracle cloaking fields (`train/envs/ctf/map_cleanup.py`). Extra `client.step` frames during reset are **not** training steps (`steps_count` unchanged). Prevents cloaked/burrowed units leaking into the next episode (wrong-race obs + DirectX VRAM). |
 
-**Key files:** `src/agent/squad_constants.py`, `src/agent/squad_selection.py`, `src/transformers/squad_observation_builder.py`, `src/agent/models/squad_network.py`, `src/agent/models/squad_policy.py`, `train/envs/capture_the_flag_single_env.py` (`_async_step_squad_pointer`), `train/squad_pointer_rollout.py`.
+### Curriculum shape (two phases)
 
-**Tests:** `tests/test_squad_selection.py`, `tests/test_squad_observation_builder.py`, `tests/test_graft_squad_policy.py`, `tests/test_squad_action_masks.py`, `tests/test_squad_pool_pairing.py`, `tests/test_ctf_squad_step.py`, `tests/test_ctf_map_cleanup.py`, `tests/test_ctf_opponent_spatial_flip.py`, `tests/test_squad_command_objective_roles.py`, `tests/test_ctf_perspective_obs_identity.py`.
+See `config_universal/pipeline.yaml`. **Phase 1** introduces every squad command (`attack_unit`, `heal_unit`, cloak, `aoe_local`, `load_unit`/`unload_local`) while the map stack stays close to the attack-5 graft, plus only the channels each action needs (HPS/creep, cloak, energy, cargo). **Phase 2** adds detailed overlays (bio/mech, light/armored/massive, air DPS modifiers, splash, upgrades) and harder compositions. Actions accumulate and are never removed; unused commands are masked.
+
+### Economic role rewards
+
+Flat per-hit-point / flat kill bonuses are gone. Combat credit is **resource-weighted** (`src/agent/ctf_economic_rewards.py`):
+
+\[
+\mathrm{value} = (\mathrm{minerals} + w_{\mathrm{vespene}}\cdot\mathrm{vespene}) / \mathrm{norm}
+\]
+
+Damage pays the fraction of that value removed; a death pays only the value still standing (no double-count with prior damage). Attackers get a strong enemy-value reward and a smaller own-loss penalty; defenders get a heavier own-value penalty, zone-gated enemy credit, scaled pylon penalty, and a **terminal** `defender_retained_value_bonus` (not a farmable per-step survival payout). Temporary summons (Interceptors, Locusts, Broodlings, …) are excluded; transformed bodies (sieged tank, burrowed units) alias to the purchased type (`train/envs/ctf/game_data.py`).
+
+**Key files:** `src/agent/squad_constants.py`, `src/agent/squad_selection.py`, `src/agent/squad_target_masks.py`, `src/transformers/squad_observation_builder.py`, `src/agent/models/squad_network.py`, `src/agent/models/squad_policy.py`, `src/agent/ctf_economic_rewards.py`, `train/envs/capture_the_flag_single_env.py` (`_async_step_squad_pointer`), `train/squad_pointer_rollout.py`.
+
+**Tests:** `tests/test_squad_selection.py`, `tests/test_squad_observation_builder.py`, `tests/test_graft_squad_policy.py`, `tests/test_squad_action_masks.py`, `tests/test_squad_target_masks.py`, `tests/test_squad_autoregressive_policy.py`, `tests/test_ctf_unit_target_actuation.py`, `tests/test_ctf_economic_death_reward.py`, `tests/test_squad_pool_pairing.py`, `tests/test_ctf_squad_step.py`, `tests/test_ctf_map_cleanup.py`, `tests/test_ctf_opponent_spatial_flip.py`, `tests/test_squad_command_objective_roles.py`, `tests/test_ctf_perspective_obs_identity.py`.
 
 ---
 

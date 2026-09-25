@@ -83,7 +83,59 @@ def test_single_client_env_startup_timeout_scales_with_worker_index():
     env0 = SingleClientEnv(worker_index=0, num_workers=5, training_conf={"env": {}})
     env4 = SingleClientEnv(worker_index=4, num_workers=5, training_conf={"env": {}})
     assert env4._startup_timeout_sec() > env0._startup_timeout_sec()
-    assert env4._startup_timeout_sec() - env0._startup_timeout_sec() == pytest.approx(32.0)
+    # Default stagger for >=5 workers is 2.5s → worker 4 adds 10s to the budget.
+    assert env4._startup_timeout_sec() - env0._startup_timeout_sec() == pytest.approx(10.0)
+
+
+def test_single_client_env_accepts_faster_startup_knobs():
+    env = SingleClientEnv(
+        worker_index=2,
+        num_workers=6,
+        training_conf={
+            "env": {
+                "sc2_startup_stagger_sec": 0.5,
+                "sc2_post_create_delay_sec": 0.25,
+                "sc2_close_settle_sec": 0.1,
+                "sc2_process_tree_wait_sec": 0.25,
+            }
+        },
+    )
+    assert env._manager._startup_stagger_sec() == pytest.approx(0.5)
+    assert env._manager.post_create_delay_sec == pytest.approx(0.25)
+    assert env._manager.close_settle_sec == pytest.approx(0.1)
+    assert env._manager.process_tree_wait_sec == pytest.approx(0.25)
+    assert env._startup_timeout_sec() - 60.0 == pytest.approx(1.0)
+
+
+def test_single_client_env_reads_sc2_timing_from_pipeline_yaml(tmp_path):
+    """pipeline.yaml ``env`` is the shared home for SC2 launch / hard-reset knobs."""
+    (tmp_path / "pipeline.yaml").write_text(
+        "\n".join(
+            [
+                "levels: []",
+                "env:",
+                "  sc2_startup_stagger_sec: 1.25",
+                "  sc2_post_create_delay_sec: 0.4",
+                "  sc2_close_settle_sec: 0.2",
+                "  sc2_process_tree_wait_sec: 0.3",
+                "  sc2_retry_backoff_sec: 1.5",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = SingleClientEnv(
+        worker_index=3,
+        num_workers=4,
+        training_conf={"config_dir": str(tmp_path)},
+    )
+    assert env._manager._startup_stagger_sec() == pytest.approx(1.25)
+    assert env._manager.post_create_delay_sec == pytest.approx(0.4)
+    assert env._manager.close_settle_sec == pytest.approx(0.2)
+    assert env._manager.process_tree_wait_sec == pytest.approx(0.3)
+    assert env._conf_float("sc2_retry_backoff_sec", 2.0) == pytest.approx(1.5)
+    # Timeout budget includes worker_index × pipeline stagger.
+    assert env._startup_timeout_sec() - 60.0 == pytest.approx(3.75)
 
 
 def test_single_client_env_reset_raises_after_max_startup_retries(mock_sc2_process, mock_client):

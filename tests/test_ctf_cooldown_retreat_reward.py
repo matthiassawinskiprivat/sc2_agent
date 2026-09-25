@@ -57,6 +57,24 @@ def _make_bot(scale: float = 0.8) -> CaptureTheFlagBot:
     return bot
 
 
+def _arm_cooldown_retreat(
+    bot,
+    tag: int,
+    *,
+    cd: float,
+    prev_dist: float,
+    com: Point2,
+    moved: bool = True,
+    attacked_prev: bool = False,
+) -> None:
+    bot._pre_action_weapon_cd_by_unit[tag] = cd
+    bot._pre_action_dist_to_enemy_com[tag] = prev_dist
+    bot._pre_action_enemy_com[tag] = com
+    bot._pre_action_attacked_prev_step[tag] = attacked_prev
+    bot.last_action_was_move_by_unit[tag] = moved
+    bot.last_action_was_attack_by_unit[tag] = False
+
+
 def test_cooldown_retreat_fires_when_moving_away_from_enemy_com():
     bot = _make_bot(scale=0.8)
     ally = _make_unit(101, 5.0, 0.0, owner_id=1)
@@ -68,9 +86,9 @@ def test_cooldown_retreat_fires_when_moving_away_from_enemy_com():
     bot.enemy_units = [enemy]
     bot.active_unit_tag = 101
 
-    bot._pre_action_weapon_cd_by_unit[101] = 7.0
-    bot._pre_action_dist_to_enemy_com[101] = 4.0
-    bot.last_action_was_move_by_unit[101] = True
+    _arm_cooldown_retreat(
+        bot, 101, cd=7.0, prev_dist=4.0, com=Point2((0.0, 0.0))
+    )
 
     reward = bot.calculate_cooldown_retreat_reward(101, [enemy])
     assert reward == pytest.approx(0.8 * (5.0 - 4.0))
@@ -82,9 +100,9 @@ def test_no_reward_for_melee_unit():
     enemy = _make_unit(201, 0.0, 0.0, owner_id=2, ground_range=0.1)
     bot.all_units.find_by_tag = MagicMock(return_value=ally)
 
-    bot._pre_action_weapon_cd_by_unit[101] = 5.0
-    bot._pre_action_dist_to_enemy_com[101] = 4.0
-    bot.last_action_was_move_by_unit[101] = True
+    _arm_cooldown_retreat(
+        bot, 101, cd=5.0, prev_dist=4.0, com=Point2((0.0, 0.0))
+    )
 
     assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
 
@@ -105,9 +123,9 @@ def test_no_reward_for_helliontank_even_if_ground_range_is_large():
     enemy = _make_unit(201, 0.0, 0.0, owner_id=2, ground_range=2.0)
     bot.all_units.find_by_tag = MagicMock(return_value=ally)
 
-    bot._pre_action_weapon_cd_by_unit[101] = 5.0
-    bot._pre_action_dist_to_enemy_com[101] = 4.0
-    bot.last_action_was_move_by_unit[101] = True
+    _arm_cooldown_retreat(
+        bot, 101, cd=5.0, prev_dist=4.0, com=Point2((0.0, 0.0))
+    )
 
     assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
 
@@ -127,9 +145,9 @@ def test_no_reward_for_archon_even_if_ground_range_is_large():
     enemy = _make_unit(201, 0.0, 0.0, owner_id=2, ground_range=3.0)
     bot.all_units.find_by_tag = MagicMock(return_value=ally)
 
-    bot._pre_action_weapon_cd_by_unit[101] = 5.0
-    bot._pre_action_dist_to_enemy_com[101] = 4.0
-    bot.last_action_was_move_by_unit[101] = True
+    _arm_cooldown_retreat(
+        bot, 101, cd=5.0, prev_dist=4.0, com=Point2((0.0, 0.0))
+    )
 
     assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
     assert bot._is_melee_combat_unit(ally, [enemy]) is True
@@ -141,9 +159,9 @@ def test_no_reward_when_weapon_ready():
     enemy = _make_unit(201, 0.0, 0.0, owner_id=2)
     bot.all_units.find_by_tag = MagicMock(return_value=ally)
 
-    bot._pre_action_weapon_cd_by_unit[101] = 0.0
-    bot._pre_action_dist_to_enemy_com[101] = 4.0
-    bot.last_action_was_move_by_unit[101] = True
+    _arm_cooldown_retreat(
+        bot, 101, cd=0.0, prev_dist=4.0, com=Point2((0.0, 0.0))
+    )
 
     assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
 
@@ -154,9 +172,9 @@ def test_no_reward_when_attack_command_issued():
     enemy = _make_unit(201, 0.0, 0.0, owner_id=2)
     bot.all_units.find_by_tag = MagicMock(return_value=ally)
 
-    bot._pre_action_weapon_cd_by_unit[101] = 5.0
-    bot._pre_action_dist_to_enemy_com[101] = 4.0
-    bot.last_action_was_move_by_unit[101] = False
+    _arm_cooldown_retreat(
+        bot, 101, cd=5.0, prev_dist=4.0, com=Point2((0.0, 0.0)), moved=False
+    )
 
     assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
 
@@ -167,25 +185,107 @@ def test_no_reward_when_moving_toward_enemy_com():
     enemy = _make_unit(201, 0.0, 0.0, owner_id=2)
     bot.all_units.find_by_tag = MagicMock(return_value=ally)
 
-    bot._pre_action_weapon_cd_by_unit[101] = 5.0
-    bot._pre_action_dist_to_enemy_com[101] = 5.0
-    bot.last_action_was_move_by_unit[101] = True
+    _arm_cooldown_retreat(
+        bot, 101, cd=5.0, prev_dist=5.0, com=Point2((0.0, 0.0))
+    )
 
     assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
 
 
-def test_no_reward_when_enemy_outside_tactical_fovea():
+def test_no_reward_without_frozen_enemy_com_snapshot():
+    """Pre-action fovea miss leaves no frozen CoM — no retreat credit."""
     bot = _make_bot()
     ally = _make_unit(101, 50.0, 50.0)
-    # Enemy 20 units away — outside 17-unit fovea half-extent
     enemy = _make_unit(201, 70.0, 50.0, owner_id=2)
     bot.all_units.find_by_tag = MagicMock(return_value=ally)
 
     bot._pre_action_weapon_cd_by_unit[101] = 5.0
     bot._pre_action_dist_to_enemy_com[101] = 20.0
+    # Intentionally omit _pre_action_enemy_com (enemies were outside fovea).
     bot.last_action_was_move_by_unit[101] = True
 
     assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
+
+
+def test_retreat_rewarded_when_faster_enemies_chase_and_close_live_gap():
+    """Marine walks away from pre-action CoM; Zerglings chase and shrink live gap.
+
+    Old live-CoM gate would see curr_live_dist < prev_dist and pay 0. Frozen CoM
+    still credits the unit's own retreat — the signal we want for kite learning.
+    """
+    bot = _make_bot(scale=0.9)
+    # Marine retreated from x=5 to x=7 (away from CoM at origin).
+    ally = _make_unit(101, 7.0, 0.0, owner_id=1)
+    # Zergling chased from x=0 to x=4 — live gap is now 3 < prev_dist 5.
+    enemy = _make_unit(201, 4.0, 0.0, owner_id=2, ground_range=0.1)
+    bot.all_units.find_by_tag = MagicMock(return_value=ally)
+
+    _arm_cooldown_retreat(
+        bot, 101, cd=7.0, prev_dist=5.0, com=Point2((0.0, 0.0))
+    )
+
+    live_gap = bot._dist_to_point(ally, enemy.position)
+    assert live_gap < 5.0  # chase closed the live gap
+
+    reward = bot.calculate_cooldown_retreat_reward(101, [enemy])
+    assert reward == pytest.approx(0.9 * (7.0 - 5.0))
+
+
+def test_retreat_rewarded_when_cd_expired_but_previous_order_was_attack():
+    """Long physics steps can burn weapon_cooldown to 0 before the next decision.
+
+    Attack-then-move must still open the kite window via the previous-order flag.
+    """
+    bot = _make_bot(scale=0.8)
+    ally = _make_unit(101, 6.0, 0.0, owner_id=1)
+    enemy = _make_unit(201, 0.0, 0.0, owner_id=2)
+    bot.all_units.find_by_tag = MagicMock(return_value=ally)
+
+    _arm_cooldown_retreat(
+        bot,
+        101,
+        cd=0.0,
+        prev_dist=4.0,
+        com=Point2((0.0, 0.0)),
+        attacked_prev=True,
+    )
+
+    assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == pytest.approx(
+        0.8 * (6.0 - 4.0)
+    )
+
+
+def test_no_reward_when_cd_ready_and_previous_order_was_not_attack():
+    bot = _make_bot(scale=0.8)
+    ally = _make_unit(101, 6.0, 0.0, owner_id=1)
+    enemy = _make_unit(201, 0.0, 0.0, owner_id=2)
+    bot.all_units.find_by_tag = MagicMock(return_value=ally)
+
+    _arm_cooldown_retreat(
+        bot,
+        101,
+        cd=0.0,
+        prev_dist=4.0,
+        com=Point2((0.0, 0.0)),
+        attacked_prev=False,
+    )
+
+    assert bot.calculate_cooldown_retreat_reward(101, [enemy]) == 0.0
+
+
+def test_record_snapshots_previous_attack_flag():
+    bot = _make_bot()
+    ally = _make_unit(101, 8.0, 0.0, weapon_cd=0.0)
+    enemy = _make_unit(201, 0.0, 0.0, owner_id=2)
+    bot.all_units.find_by_tag = MagicMock(return_value=ally)
+    bot.enemy_units = [enemy]
+    bot.units = [ally]
+    bot.last_action_was_attack_by_unit[101] = True
+
+    bot.record_pre_action_retreat_state(101)
+
+    assert bot._pre_action_weapon_cd_by_unit[101] == 0.0
+    assert bot._pre_action_attacked_prev_step[101] is True
 
 
 def test_enemy_com_uses_all_fovea_enemies():
@@ -195,13 +295,12 @@ def test_enemy_com_uses_all_fovea_enemies():
     e2 = _make_unit(202, 0.0, 4.0, owner_id=2)
     bot.all_units.find_by_tag = MagicMock(return_value=ally)
 
-    com_x = (0.0 + 0.0) / 2
-    com_y = (0.0 + 4.0) / 2
-    com_dist = math.hypot(10.0 - com_x, 0.0 - com_y)
+    com = Point2((0.0, 2.0))
+    com_dist = math.hypot(10.0 - com.x, 0.0 - com.y)
 
-    bot._pre_action_weapon_cd_by_unit[101] = 3.0
-    bot._pre_action_dist_to_enemy_com[101] = com_dist - 1.0
-    bot.last_action_was_move_by_unit[101] = True
+    _arm_cooldown_retreat(
+        bot, 101, cd=3.0, prev_dist=com_dist - 1.0, com=com
+    )
 
     reward = bot.calculate_cooldown_retreat_reward(101, [e1, e2])
     assert reward == pytest.approx(1.0)
@@ -219,6 +318,9 @@ def test_record_pre_action_retreat_state_snapshots_baseline():
 
     assert bot._pre_action_weapon_cd_by_unit[101] == 6.0
     assert bot._pre_action_dist_to_enemy_com[101] == pytest.approx(8.0)
+    frozen = bot._pre_action_enemy_com[101]
+    assert frozen.x == pytest.approx(0.0)
+    assert frozen.y == pytest.approx(0.0)
 
 
 def test_record_pre_action_clears_when_no_fovea_enemies():
@@ -232,6 +334,7 @@ def test_record_pre_action_clears_when_no_fovea_enemies():
     bot.record_pre_action_retreat_state(101)
 
     assert 101 not in bot._pre_action_dist_to_enemy_com
+    assert 101 not in bot._pre_action_enemy_com
 
 
 def test_integrated_in_calculate_reward():
@@ -263,9 +366,9 @@ def test_integrated_in_calculate_reward():
     bot.structures = _struct_col(own_pylon)
     bot.enemy_structures = _struct_col(enemy_pylon)
 
-    bot._pre_action_weapon_cd_by_unit[101] = 4.0
-    bot._pre_action_dist_to_enemy_com[101] = 5.0
-    bot.last_action_was_move_by_unit[101] = True
+    _arm_cooldown_retreat(
+        bot, 101, cd=4.0, prev_dist=5.0, com=Point2((0.0, 0.0))
+    )
 
     reward = bot.calculate_reward(perspective_player_id=1)
     expected_retreat = 0.5 * (6.0 - 5.0)
@@ -319,9 +422,9 @@ def test_squad_step_reward_tracks_cooldown_retreat_for_metrics():
     bot.prev_enemy_unit_count = {1: 1, 2: 0}
     bot.prev_own_units_health = {1: 100.0, 2: 0.0}
     bot.prev_enemy_units_health = {1: 100.0, 2: 0.0}
-    bot._pre_action_weapon_cd_by_unit[101] = 7.0
-    bot._pre_action_dist_to_enemy_com[101] = 4.0
-    bot.last_action_was_move_by_unit[101] = True
+    _arm_cooldown_retreat(
+        bot, 101, cd=7.0, prev_dist=4.0, com=Point2((0.0, 0.0))
+    )
 
     bot.calculate_squad_step_reward([101], perspective_player_id=1)
     assert bot.pop_cooldown_retreat_reward() == pytest.approx(0.8)

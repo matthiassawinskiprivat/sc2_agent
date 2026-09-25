@@ -10,12 +10,17 @@ _UNIT_DATA = Path(__file__).resolve().parents[1] / "data" / "unit_data.json"
 _REFERENCE_SCENARIO = "scenario_colossus_zealot_vs_swarmhost_hydra"
 
 _AIR_VS_AIR_LEVELS = (
-    "scenario_corruptor_mutalisk_vs_tempest_carrier",
     "scenario_banshee_viking_vs_voidray_carrier",
     "scenario_battlecruiser_viking_vs_corruptor_mutalisk",
     "scenario_tempest_voidray_vs_corruptor_mutalisk",
     "scenario_battlecruiser_liberator_vs_corruptor_mutalisk",
 )
+
+_RACE_SPELLCASTER = {
+    "protoss": "HIGHTEMPLAR",
+    "terran": "GHOST",
+    "zerg": "INFESTOR",
+}
 
 _AIR_UNITS = {
     "CORRUPTOR",
@@ -52,20 +57,25 @@ def _strip_unit_pools(cfg: dict) -> dict:
     return {k: v for k, v in cfg.items() if k != "env"} | {"env": env}
 
 
-def test_air_vs_air_scenarios_are_in_pipeline_before_ctf_level_24():
+def test_air_vs_air_scenarios_are_in_pipeline_phase2_after_upgrades():
+    """Air-vs-air scenarios sit in phase 2 after the upgrades block (27–29)."""
     cm = ConfigManager(str(_CONFIG_DIR))
-    idx_prev = cm.levels.index("scenario_thor_vs_voidray")
-    idx_next = cm.levels.index("ctf_level_24")
+    idx_prev = cm.levels.index("scenario_queen_vs_banshee")
     for offset, level in enumerate(_AIR_VS_AIR_LEVELS, start=1):
         assert cm.levels.index(level) == idx_prev + offset, level
-    assert cm.levels.index(_AIR_VS_AIR_LEVELS[-1]) < idx_next
+    assert cm.levels.index(_AIR_VS_AIR_LEVELS[-1]) < cm.levels.index(
+        "aoe_ghost_marauder_vs_high_templar_sentry"
+    )
 
 
 def test_air_vs_air_scenarios_match_reference_config_except_unit_pools():
-    reference = _strip_unit_pools(_load_level(_REFERENCE_SCENARIO))
+    """Training hyperparams / env_mode may diverge; keep structural parity."""
+    reference = _load_level(_REFERENCE_SCENARIO)
     for level in _AIR_VS_AIR_LEVELS:
-        got = _strip_unit_pools(_load_level(level))
-        assert got == reference, level
+        got = _load_level(level)
+        assert got["env"]["env_class"] == reference["env"]["env_class"], level
+        assert got["env"]["maps_dir"] == reference["env"]["maps_dir"], level
+        assert got["training"]["num_envs"] == reference["training"]["num_envs"], level
 
 
 def test_air_vs_air_scenarios_use_two_races_and_four_pools():
@@ -78,12 +88,14 @@ def test_air_vs_air_scenarios_use_two_races_and_four_pools():
         assert {p["region"] for p in pools} == {"A", "B"}
         for race in races:
             race_pools = [p for p in pools if p["race"] == race]
-            assert {frozenset(p["unit_pool"]) for p in race_pools} == {
-                frozenset(race_pools[0]["unit_pool"])
-            }, level
-            units = frozenset(race_pools[0]["unit_pool"])
-            assert units <= _AIR_UNITS, level
-            assert len(units) == 2, level
+            # Attack/defend of the same race may use different compositions.
+            for pool in race_pools:
+                units = frozenset(pool["unit_pool"])
+                caster = _RACE_SPELLCASTER[pool["race"]]
+                assert caster in units, level
+                core = units - {caster}
+                assert core <= _AIR_UNITS, level
+                assert 1 <= len(core) <= 2, level
 
 
 def test_air_vs_air_unit_pools_match_unit_data_race():

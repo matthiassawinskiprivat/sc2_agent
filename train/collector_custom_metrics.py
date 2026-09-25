@@ -17,7 +17,20 @@ ROLLOUT_SUM_INFO_KEYS: FrozenSet[str] = frozenset(
         "attack_commands",
         "cloak_commands",
         "uncloak_commands",
+        "aoe_commands",
+        "load_commands",
+        "unload_commands",
         "cooldown_retreat",
+        # Per-step economic value flows. Tiny per step (a Marine is 0.5 value
+        # units at the default normalisation, spread over many steps), so the
+        # windowed mean rounds to 0 in TensorBoard — sum them per rollout instead.
+        # Their ``*_episode`` companions stay windowed means, which is what makes
+        # them readable as "value traded per episode".
+        "economic_damage_dealt",
+        "economic_enemy_killed",
+        "economic_attacker_loss",
+        "economic_defender_loss",
+        "economic_healing",
     }
 )
 

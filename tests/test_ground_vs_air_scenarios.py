@@ -25,6 +25,8 @@ _GROUND_AA_UNITS = {
     "THOR",
     "THORAP",
 }
+_SPELLCASTER_UNITS = {"HIGHTEMPLAR", "GHOST", "INFESTOR"}
+
 _AIR_UNITS = {
     "TEMPEST",
     "MUTALISK",
@@ -94,6 +96,8 @@ def test_ground_vs_air_scenarios_use_two_races_and_four_pools():
 def test_ground_vs_air_scenarios_pair_ground_aa_with_air():
     for level in _GROUND_VS_AIR_LEVELS:
         ground, air = _compositions(_load_level(level)["env"]["unit_pools"])
+        ground = ground - _SPELLCASTER_UNITS
+        air = air - _SPELLCASTER_UNITS
         sides = {ground, air}
         assert any(side <= _GROUND_AA_UNITS for side in sides), level
         assert any(side <= _AIR_UNITS for side in sides), level

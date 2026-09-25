@@ -6,7 +6,11 @@ import time
 from typing import Dict, Any, Optional, Union, Tuple
 from gymnasium import spaces
 from loguru import logger
-from src.agent.utils.disk_buffer import DiskDictRolloutBuffer, is_disk_offloaded_obs_key
+from src.agent.utils.disk_buffer import (
+    DiskDictRolloutBuffer,
+    is_disk_offloaded_obs_key,
+    obs_sample_mean,
+)
 
 class AsyncDiskBuffer(DiskDictRolloutBuffer):
     """
@@ -70,6 +74,17 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
         metadata["n_envs"] = self.n_envs
         metadata["observation_space"] = {k: v.shape for k, v in self.observation_space.spaces.items()}
         metadata["ipc_backend"] = "disk"
+        # Fingerprints for memmap obs — learner must reopen the same bytes (Windows
+        # can otherwise serve a stale/empty view → multi-nat logπ mismatch).
+        disk_obs = {}
+        for key, obs in self.observations.items():
+            if is_disk_offloaded_obs_key(key) and isinstance(obs, np.memmap):
+                disk_obs[key] = {
+                    "sample_mean": obs_sample_mean(obs),
+                    "shape": list(obs.shape),
+                }
+        if disk_obs:
+            metadata["disk_obs"] = disk_obs
 
         tmp_signal = self.signal_file + ".tmp"
         with open(tmp_signal, "w") as f:
@@ -121,7 +136,10 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
         n_envs = int(meta["n_envs"])
         if not hasattr(buffer, "disk_files"):
             buffer.disk_files = {}
+        # Attached files belong to the collector's static buffer directory.
+        buffer._owns_disk_files = False
 
+        disk_meta = meta.get("disk_obs") or {}
         for key, subspace in buffer.observation_space.spaces.items():
             if not is_disk_offloaded_obs_key(key):
                 continue
@@ -136,9 +154,21 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
                 except Exception:
                     pass
             shape = (buffer_size, n_envs, *subspace.shape)
-            buffer.observations[key] = np.memmap(
+            mapped = np.memmap(
                 filename, dtype=np.float32, mode="r+", shape=shape
             )
+            expected_info = disk_meta.get(key) or {}
+            expected = expected_info.get("sample_mean")
+            if expected is not None:
+                got = obs_sample_mean(mapped)
+                tol = max(1e-4, 1e-3 * abs(float(expected)))
+                if not np.isfinite(got) or abs(got - float(expected)) > tol:
+                    raise RuntimeError(
+                        f"Disk obs {key!r} attach mismatch: collector "
+                        f"sample_mean={expected} learner={got}. Stale/empty "
+                        f"memmap — PPO would train with obs≠old_log_prob."
+                    )
+            buffer.observations[key] = mapped
             buffer.disk_files[key] = filename
 
     def wait_for_consumer(self, timeout=60):

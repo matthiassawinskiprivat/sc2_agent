@@ -11,7 +11,7 @@ import logging
 
 from train.envs.single_client_env import SingleClientEnv
 from train.envs.sc2_session_config import every_k_episodes
-from src.agent.ctf_bot import CaptureTheFlagBot
+from src.agent.ctf_bot import COMMAND_METRIC_KINDS, CaptureTheFlagBot
 from src.utils.config_manager import ConfigManager
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM, universal_fallback_action
 from src.utils.layer_constants import LayerConstants
@@ -99,17 +99,22 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.steps_count = 0
         self._episode_heal_casts = 0
         self._episode_heal_attempts = 0
-        self._episode_move_commands = 0
-        self._episode_attack_commands = 0
-        self._episode_cloak_commands = 0
-        self._episode_uncloak_commands = 0
+        self._reset_episode_command_counts()
         self._episode_cooldown_retreat = 0.0
+        self._episode_economic: dict = {}
         self.client_count = 1 # God-Mode uses only 1 connection
+        # Tags of creep tumors this environment created or has seen. Soft reset
+        # kills these even when a later observation no longer lists them.
+        self._heal_tumor_tags: set = set()
         
-        # Use the config directory from training_conf (universal pipeline passes "config_universal").
-        # SingleClientEnv defaults to "config" so we override here.
+        # Prefer the ConfigManager SingleClientEnv already built from
+        # training_conf["config_dir"] (so pipeline.yaml ``env`` timing applies).
+        # Recreate only when the directory disagrees (legacy callers without config_dir).
         config_dir = self.training_conf.get("config_dir", "config_universal")
-        self.config_manager = ConfigManager(config_dir)
+        existing_dir = str(getattr(self.config_manager, "config_dir", "") or "")
+        wanted = config_dir.replace("\\", "/").rstrip("/")
+        if wanted not in existing_dir.replace("\\", "/"):
+            self.config_manager = ConfigManager(config_dir)
 
         self.agent_architecture = self.training_conf.get(
             "agent_architecture",
@@ -155,13 +160,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self.action_space = spaces.MultiDiscrete([FIXED_UNIVERSAL_COMMAND_DIM, 32 * 32])
         elif self.agent_architecture == "squad":
             from src.agent.squad_constants import (
+                MAX_SQUAD_ENEMIES,
                 MAX_SQUAD_UNITS,
                 SQUAD_COMMAND_DIM,
+                SQUAD_COMMAND_MODE_DIM,
+                SQUAD_COMMAND_MODE_MAX,
                 SQUAD_RACE_DIM,
                 SQUAD_UPGRADES_DIM,
                 include_upgrades_enabled,
                 squad_action_space_nvec,
             )
+            from src.agent.squad_target_masks import SQUAD_TARGET_MASK_KEYS
             from src.agent.unit_scalar_constants import UnitScalarConstants
 
             self.active_tactical_layers = self._resolve_cumulative_list(
@@ -191,6 +200,31 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             obs_dict["unit_mask"] = spaces.Box(
                 low=0.0, high=1.0, shape=(MAX_SQUAD_UNITS,), dtype=np.float32
             )
+            # Visible-enemy pointer keys for the attack_unit target slot.
+            obs_dict["enemy_scalars"] = spaces.Box(
+                low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES, n_unit_scalars), dtype=np.float32
+            )
+            obs_dict["enemy_mask"] = spaces.Box(
+                low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
+            )
+            obs_dict["tactical_enemy_mask"] = spaces.Box(
+                low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
+            )
+            obs_dict["engage_enemy_mask"] = spaces.Box(
+                low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
+            )
+            # Command-dependent legality rides in the observation, not the flat
+            # action mask: the mask is built before the command is sampled.
+            obs_dict["command_modes"] = spaces.Box(
+                low=0.0,
+                high=SQUAD_COMMAND_MODE_MAX,
+                shape=(SQUAD_COMMAND_MODE_DIM,),
+                dtype=np.float32,
+            )
+            for key in SQUAD_TARGET_MASK_KEYS:
+                obs_dict[key] = spaces.Box(
+                    low=0.0, high=1.0, shape=(MAX_SQUAD_UNITS,), dtype=np.float32
+                )
             if include_race_enabled(self.training_conf):
                 obs_dict["race"] = spaces.Box(
                     low=0.0, high=1.0, shape=(SQUAD_RACE_DIM,), dtype=np.float32
@@ -513,8 +547,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         # in init_game causes it to close the WebSocket (WSMsgType.CLOSE / message 257).
         client = self._manager.clients[0]
         self._log("Waiting for SC2 to transition from init_game → in_game...")
-        _in_game_wait_secs = 30.0
-        _poll_interval = 0.3
+        _in_game_wait_secs = float(
+            self._conf_float("sc2_in_game_wait_sec", 15.0) or 15.0
+        )
+        _poll_interval = 0.2
         _waited = 0.0
         while _waited < _in_game_wait_secs:
             try:
@@ -545,12 +581,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.bot._prepare_start(client, 1, game_info, game_data, sim_realtime)
         self.bot._proto_game_info = raw_game_info
         await self.bot.on_start()
-        
+
         await client.debug_show_map()
         if not self._preview_computer_opponent():
             await client.debug_control_enemy()
-        
-        # Initial step and spawn
+
+        # Initial step and spawn.
         await client.step()
         await self._refresh_bot_state()
         await self._spawn_initial_units()
@@ -566,6 +602,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         state = game_state_from_response_observation(obs.observation)
         self.bot._prepare_step(state, self.bot._proto_game_info)
         await refresh_healer_ability_cache(self.bot)
+        self._note_visible_heal_tumors()
 
     # ------------------------------------------------------------------
     # Region helpers (mirrors CaptureTheFlagEnv)
@@ -759,12 +796,12 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             if all_units is None:
                 return
             killable = all_units.filter(unit_is_subject_to_map_cleanup)
-            tags = self._cleanup_unit_tags(killable)
+            tags = self._cleanup_tags_including_heal_tumors(killable)
             if not tags:
                 return
             await self._reveal_concealed_units_for_cleanup(killable)
             killable = self.bot.all_units.filter(unit_is_subject_to_map_cleanup)
-            tags = self._cleanup_unit_tags(killable)
+            tags = self._cleanup_tags_including_heal_tumors(killable)
             if not tags:
                 return
             await self.bot.client.debug_kill_unit(tags)
@@ -775,12 +812,56 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             leftover_tags = self._cleanup_unit_tags(leftover)
             leftover_n = len(leftover_tags)
             if leftover_n == 0:
+                self._heal_tumor_tags = set()
                 return
             self._log(
                 f"CTF map cleanup attempt {attempt + 1}/{max_attempts} "
                 f"left {leftover_n} killable unit(s)."
             )
         raise MapCleanupFailedError(leftover_n)
+
+    def _note_visible_heal_tumors(self) -> None:
+        """Remember tumor tags from the current observation.
+
+        The environment plants these with ``debug_create_unit``, which does not
+        return tags. The next refresh is what makes the tag known. A later
+        observation can omit a burrowed tumor; the saved tag is still killed.
+        """
+        from train.envs.ctf.heal_creep import HEAL_TUMOR_TYPE_IDS
+
+        units = getattr(getattr(self, "bot", None), "all_units", None)
+        if not units:
+            return
+        bag = getattr(self, "_heal_tumor_tags", None)
+        if bag is None:
+            bag = set()
+            self._heal_tumor_tags = bag
+        for unit in units:
+            if getattr(unit, "type_id", None) not in HEAL_TUMOR_TYPE_IDS:
+                continue
+            tag = getattr(unit, "tag", None)
+            if tag is None:
+                continue
+            try:
+                bag.add(int(tag))
+            except (TypeError, ValueError):
+                continue
+
+    def _cleanup_tags_including_heal_tumors(self, killable) -> List[int]:
+        """Visible cleanup tags plus tumor tags recorded earlier in the episode."""
+        merged: List[int] = []
+        seen = set()
+        tracked = getattr(self, "_heal_tumor_tags", ()) or ()
+        for tag in [*self._cleanup_unit_tags(killable), *tracked]:
+            try:
+                tag_i = int(tag)
+            except (TypeError, ValueError):
+                continue
+            if tag_i in seen:
+                continue
+            seen.add(tag_i)
+            merged.append(tag_i)
+        return merged
 
     async def _spawn_initial_units(self):
         from sc2.ids.unit_typeid import UnitTypeId
@@ -1095,6 +1176,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return
         # debug_upgrade unlocks the next research tier each call; enough iterations
         # cover Burrow, Tunneling Claws, Personal/Banshee Cloak, Overlord Speed.
+        # The cheat reaches player 1 only, so Protoss is listed first when present.
         for _ in range(20):
             await self.bot.client.debug_upgrade()
             await self.bot.client.step()
@@ -1116,8 +1198,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     async def _apply_upgrades_env_mode(self) -> None:
         """Progressive ``debug_upgrade`` at 25% / 50% / 75% of every_k_episodes.
 
-        Applies to all players (game-state cheat). Soft resets keep upgrades;
-        hard reset starts a new game at tier 0.
+        Reaches player 1, the client that sends the cheat. Soft resets keep
+        upgrades; hard reset starts a new game at tier 0.
         """
         if not self._has_env_mode("upgrades") or self.bot is None:
             return
@@ -1147,7 +1229,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return
         from train.envs.ctf.spellcaster import apply_spell_upgrades
 
-        # Cloak (without upgrades mode) already ran the same 20-call ladder.
+        # Cloak (without upgrades mode) already ran the same ladder for player 1.
         already_full = self._has_env_mode("cloak") and not self._has_env_mode("upgrades")
         await apply_spell_upgrades(
             bot=self.bot,
@@ -1511,7 +1593,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """Reuse mask on collector ``action_masks`` IPC without rebuilding squad obs."""
         if not self.bot:
             return
-        mask = self.bot.squad_action_masks(obs["unit_mask"])
+        mask = self.bot.squad_action_masks(obs["unit_mask"], obs)
         self._squad_action_mask_cache = (self.steps_count, int(pool_idx), mask)
 
     def _cached_squad_action_masks(self) -> Optional[np.ndarray]:
@@ -2016,7 +2098,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     async def _predict_opponent_squad_pointer(self, pool_idx: int) -> np.ndarray:
         """Single opponent squad forward for paired arena physics step."""
         obs = self._get_squad_observation_for_pool(pool_idx)
-        mask = self.bot.squad_action_masks(obs["unit_mask"])
+        mask = self.bot.squad_action_masks(obs["unit_mask"], obs)
         from src.agent.squad_constants import squad_fallback_action
 
         default = squad_fallback_action(obs["unit_mask"])
@@ -2044,10 +2126,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         episode_start = pool_lstm is None
 
         opp_model.policy.set_training_mode(False)
+        # Stochastic, like the trainee. A deterministic opponent collapses onto one
+        # command/actor/target combination and stops fighting, which is exactly the
+        # "inactive opponent" failure this redesign addresses.
         predict_kwargs: dict = dict(
             state=pool_lstm,
             episode_start=np.array([episode_start], dtype=bool),
-            deterministic=True,
+            deterministic=False,
         )
         import torch as _torch
         try:
@@ -2109,6 +2194,26 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self._logged_opponent_cuda_fallback = True
         return np.asarray(default, dtype=np.int64).reshape(-1)
 
+    def _squad_target_slot_tag(
+        self, pool_idx: int, target_slot: int, ally_tags: List[int]
+    ) -> Optional[int]:
+        """Resolve a sampled terminal target slot to an SC2 unit tag.
+
+        Ally slots use the same sorted pool tags that filled ``unit_scalars``;
+        enemy slots use ``SquadObservationBuilder.resolve_enemy_target_tags`` for
+        the same perspective. No ``client.step`` runs between building the
+        observation and actuating it, so both orderings are identical to the ones
+        the policy pointed at.
+        """
+        from src.agent.squad_selection import target_tag_from_slot
+        from src.transformers.squad_observation_builder import SquadObservationBuilder
+
+        player_id = self._pool_player_id(self.unit_pools_config[pool_idx])
+        enemy_tags = SquadObservationBuilder.resolve_enemy_target_tags(
+            self.bot, player_id
+        )
+        return target_tag_from_slot(target_slot, ally_tags, enemy_tags)
+
     async def _apply_squad_action_for_pool(
         self, pool_idx: int, action: np.ndarray
     ) -> List[int]:
@@ -2119,24 +2224,34 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         )
 
         unit_mask = self._squad_unit_mask_for_pool(pool_idx)
-        selection, command_idx, spatial_idx = decode_squad_action(
+        obs = self._get_squad_observation_for_pool(pool_idx)
+        decoded = decode_squad_action(
             action,
             unit_mask,
             config=self._squad_selection_config(),
+            obs=obs,
         )
         sorted_tags = sorted(self._pool_alive_tags(pool_idx))
-        selected = selected_tags_from_indices(sorted_tags, selection.selected_indices)
-        anchor_tag = sorted_tags[selection.anchor_index] if sorted_tags else 0
+        selected = selected_tags_from_indices(
+            sorted_tags, decoded.selection.selected_indices
+        )
+        anchor_tag = (
+            sorted_tags[decoded.selection.anchor_index] if sorted_tags else 0
+        )
         self._remember_squad_anchor_tag(pool_idx, int(anchor_tag))
         player_id = self._pool_player_id(self.unit_pools_config[pool_idx])
+        target_unit_tag = self._squad_target_slot_tag(
+            pool_idx, decoded.target_slot, sorted_tags
+        )
         for tag in sorted_tags:
             self.bot.record_pre_action_retreat_state(tag)
         await self.bot.apply_squad_action(
             selected,
             anchor_tag=int(anchor_tag),
-            command_idx=command_idx,
-            spatial_idx=spatial_idx,
+            command_idx=decoded.command_idx,
+            spatial_idx=decoded.spatial_idx,
             perspective_player_id=player_id,
+            target_unit_tag=target_unit_tag,
         )
         return list(selected)
 
@@ -2392,12 +2507,18 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 continue
             if "attack" in head_name:
                 issue_attack_at_point(self.bot, unit, target)
+                set_flags = getattr(self.bot, "_set_last_order_flags", None)
+                if callable(set_flags):
+                    set_flags(tag, moved=False, attacked=True)
             elif "aoe" in head_name:
                 issue_aoe_at_point(self.bot, unit, target)
             elif target is None:
                 continue
             else:
                 self.bot.do(unit.move(target))
+                set_flags = getattr(self.bot, "_set_last_order_flags", None)
+                if callable(set_flags):
+                    set_flags(tag, moved=True, attacked=False)
 
     async def _flush_bot_actions(self) -> None:
         if hasattr(self.bot, "actions") and self.bot.actions:
@@ -2484,25 +2605,21 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         done = False
         truncated = False
         r_conf = self.training_conf.get("rewards", {})
+        draw_penalty = r_conf.get("draw_penalty", -10.0)
         win_reward = r_conf.get("win_reward", 100.0)
         loss_penalty = r_conf.get("loss_penalty", -100.0)
-        draw_penalty = r_conf.get("draw_penalty", -10.0)
 
-        if p1_lost:
+        terminate, term_delta = self._pylon_army_outcome(
+            p1_lost,
+            p2_lost,
+            p1_army_lost,
+            p2_army_lost,
+            acting_player_id,
+            r_conf,
+        )
+        if terminate:
             done = True
-            reward += win_reward if acting_player_id == 2 else loss_penalty
-        elif p2_lost:
-            done = True
-            reward += win_reward if acting_player_id == 1 else loss_penalty
-        elif p1_army_lost and p2_army_lost:
-            done = True
-            reward += draw_penalty
-        elif p1_army_lost:
-            done = True
-            reward += loss_penalty if acting_player_id == 1 else win_reward
-        elif p2_army_lost:
-            done = True
-            reward += win_reward if acting_player_id == 1 else loss_penalty
+            reward += term_delta
 
         await self._refresh_unit_lists()
         p1_units_count = len(self.player_units[1])
@@ -2524,6 +2641,43 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         obs = await self._get_joint_observation()
         return obs, reward, done, truncated, {"squad_physics_step": True}
 
+    def _pylon_army_outcome(
+        self,
+        p1_lost: bool,
+        p2_lost: bool,
+        p1_army_lost: bool,
+        p2_army_lost: bool,
+        perspective_player_id: int,
+        r_conf: dict,
+    ) -> Tuple[bool, float]:
+        """Pylon / army-wipe terminal from ``perspective_player_id``.
+
+        Returns ``(should_terminate, reward_delta)``.
+
+        Wiping the opponent's army alone does **not** end the episode or award a
+        win: the attacker must destroy the enemy pylon (same persistence rule as
+        multi-client ``CaptureTheFlagEnv``). Own-army wipe is still a loss;
+        mutual wipe is a draw.
+        """
+        if int(perspective_player_id) == 2:
+            p1_lost, p2_lost = p2_lost, p1_lost
+            p1_army_lost, p2_army_lost = p2_army_lost, p1_army_lost
+        win_reward = r_conf.get("win_reward", 100.0)
+        loss_penalty = r_conf.get("loss_penalty", -100.0)
+        draw_penalty = r_conf.get("draw_penalty", -10.0)
+
+        if p1_lost:
+            return True, loss_penalty
+        if p2_lost:
+            return True, win_reward
+        if p1_army_lost and p2_army_lost:
+            return True, draw_penalty
+        if p1_army_lost:
+            return True, loss_penalty
+        if p2_army_lost:
+            return False, 0.0
+        return False, 0.0
+
     def _compute_p1_terminal_reward(
         self,
         p1_lost: bool,
@@ -2534,28 +2688,57 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         timeout: bool,
         r_conf: dict,
         perspective_player_id: int = 1,
+        squad_tags: Optional[List[int]] = None,
     ) -> float:
-        """Trainee-perspective terminal reward (default P1 for legacy callers)."""
-        if int(perspective_player_id) == 2:
-            p1_lost, p2_lost = p2_lost, p1_lost
-            p1_army_lost, p2_army_lost = p2_army_lost, p1_army_lost
-        win_reward = r_conf.get("win_reward", 100.0)
-        loss_penalty = r_conf.get("loss_penalty", -100.0)
-        draw_penalty = r_conf.get("draw_penalty", -10.0)
+        """Trainee-perspective terminal reward (default P1 for legacy callers).
 
-        if p1_lost:
-            return loss_penalty
-        if p2_lost:
-            return win_reward
-        if p1_army_lost and p2_army_lost:
-            return draw_penalty
+        ``squad_tags`` adds the defender's terminal retained-army-value bonus, which
+        the deferred-terminal path would otherwise drop.
+        """
+        bonus = (
+            self._terminal_retained_value_bonus(squad_tags, perspective_player_id)
+            if squad_tags
+            else 0.0
+        )
+        return bonus + self._terminal_outcome_reward(
+            p1_lost,
+            p2_lost,
+            p1_army_lost,
+            p2_army_lost,
+            all_units_gone,
+            timeout,
+            r_conf,
+            perspective_player_id,
+        )
+
+    def _terminal_outcome_reward(
+        self,
+        p1_lost: bool,
+        p2_lost: bool,
+        p1_army_lost: bool,
+        p2_army_lost: bool,
+        all_units_gone: bool,
+        timeout: bool,
+        r_conf: dict,
+        perspective_player_id: int = 1,
+    ) -> float:
+        """Win / loss / draw payout only, from the given player's perspective."""
+        terminate, delta = self._pylon_army_outcome(
+            p1_lost,
+            p2_lost,
+            p1_army_lost,
+            p2_army_lost,
+            perspective_player_id,
+            r_conf,
+        )
+        if terminate:
+            return delta
         if all_units_gone:
-            return draw_penalty
-        if p1_army_lost:
-            return loss_penalty
-        if p2_army_lost:
-            return win_reward
+            return r_conf.get("draw_penalty", -10.0)
         if timeout:
+            win_reward = r_conf.get("win_reward", 100.0)
+            loss_penalty = r_conf.get("loss_penalty", -100.0)
+            draw_penalty = r_conf.get("draw_penalty", -10.0)
             if self._agent_attack_units_alive() > 0:
                 return loss_penalty
             if self._p1_defended_on_timeout(r_conf):
@@ -2588,7 +2771,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return casts, attempts
 
     def _record_command_metrics(self, trainee_tags) -> dict:
-        """Count trainee move/attack/cloak/uncloak orders; add to episode totals.
+        """Count trainee command orders; add to episode totals.
 
         Must run before ``calculate_squad_step_reward``, which clears the tag sets.
         """
@@ -2607,6 +2790,94 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             attr = f"_episode_{kind}_commands"
             setattr(self, attr, int(getattr(self, attr, 0)) + n)
         return counts
+
+    def _record_economic_metrics(self, *, credit_trainee: bool) -> dict:
+        """Pop the bot's per-step economic ledger; add to the episode totals.
+
+        Must run right after ``calculate_squad_step_reward``, which is what fills
+        the ledger. Values are normalised economic value
+        (``minerals + vespene_weight × vespene`` divided by ``economic_value_norm``).
+        """
+        from src.agent.ctf_bot import ECONOMIC_METRIC_KEYS, EMPTY_ECONOMIC_METRICS
+
+        bot = getattr(self, "bot", None)
+        fn = getattr(bot, "pop_economic_metrics", None) if bot else None
+        step = dict(EMPTY_ECONOMIC_METRICS)
+        if callable(fn):
+            try:
+                for key, value in (fn() or {}).items():
+                    step[key] = float(value)
+            except (TypeError, ValueError):
+                step = dict(EMPTY_ECONOMIC_METRICS)
+        if not credit_trainee:
+            return dict(EMPTY_ECONOMIC_METRICS)
+        totals = getattr(self, "_episode_economic", None)
+        if not isinstance(totals, dict):
+            totals = dict(EMPTY_ECONOMIC_METRICS)
+        for key in ECONOMIC_METRIC_KEYS:
+            totals[key] = float(totals.get(key, 0.0)) + step.get(key, 0.0)
+        self._episode_economic = totals
+        return step
+
+    def _economic_info(self, step: dict, done: bool, truncated: bool) -> dict:
+        """TensorBoard: per-step economic flows, plus episode sums and ratios on done."""
+        from src.agent.ctf_bot import ECONOMIC_METRIC_KEYS, EMPTY_ECONOMIC_METRICS
+        from src.agent.ctf_economic_rewards import trade_efficiency
+
+        info = {key: float(step.get(key, 0.0)) for key in ECONOMIC_METRIC_KEYS}
+        if not (done or truncated):
+            return info
+        totals = getattr(self, "_episode_economic", None) or EMPTY_ECONOMIC_METRICS
+        for key in ECONOMIC_METRIC_KEYS:
+            info[f"{key}_episode"] = float(totals.get(key, 0.0))
+        own_lost = float(totals.get("economic_attacker_loss", 0.0)) + float(
+            totals.get("economic_defender_loss", 0.0)
+        )
+        # Share of all traded value that came off the enemy: 0.5 is an even trade.
+        info["economic_trade_efficiency_episode"] = trade_efficiency(
+            float(totals.get("economic_damage_dealt", 0.0))
+            + float(totals.get("economic_enemy_killed", 0.0)),
+            own_lost,
+        )
+        bot = getattr(self, "bot", None)
+        fn = getattr(bot, "retained_defender_value_fraction", None) if bot else None
+        retained = 0.0
+        if callable(fn):
+            try:
+                retained = float(fn(self._trainee_sc2_player_id()) or 0.0)
+            except (TypeError, ValueError):
+                retained = 0.0
+        info["economic_retained_defender_value_episode"] = retained
+        return info
+
+    def _trainee_defender_tags_for_terminal_bonus(self) -> Optional[List[int]]:
+        """Trainee squad tags for the deferred-terminal retained-value bonus.
+
+        The episode ended on the *opponent's* physics step, so the acting squad is
+        not the trainee's. Look up the trainee's own current squad instead, or
+        return ``None`` when this env is not running the squad-pointer path.
+        """
+        if not self._uses_squad_pointer():
+            return None
+        try:
+            return self._pool_alive_tags(self.current_trainee_pool_index)
+        except (AttributeError, IndexError, KeyError, TypeError):
+            return None
+
+    def _terminal_retained_value_bonus(
+        self, squad_tags: Optional[List[int]], trainee_player_id: int
+    ) -> float:
+        """Defender-only terminal bonus for army value preserved (0.0 for attackers)."""
+        if not squad_tags:
+            return 0.0
+        bot = getattr(self, "bot", None)
+        fn = getattr(bot, "terminal_retained_value_bonus", None) if bot else None
+        if not callable(fn):
+            return 0.0
+        try:
+            return float(fn(list(squad_tags), trainee_player_id) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _record_cooldown_retreat_metrics(self, *, credit_trainee: bool) -> float:
         """Pop bot step cooldown-retreat reward; add to episode when trainee-owned."""
@@ -2633,36 +2904,31 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         step_cooldown_retreat: float = 0.0,
     ) -> dict:
         """TensorBoard: rollout sums for casts/attempts/commands; episode means on done."""
+        counts = step_commands or {}
         info = {
             "heal_casts": int(step_casts),
             "heal_attempts": int(step_attempts),
-            "move_commands": int((step_commands or {}).get("move", 0)),
-            "attack_commands": int((step_commands or {}).get("attack", 0)),
-            "cloak_commands": int((step_commands or {}).get("cloak", 0)),
-            "uncloak_commands": int((step_commands or {}).get("uncloak", 0)),
             "cooldown_retreat": float(step_cooldown_retreat),
         }
+        for kind in COMMAND_METRIC_KINDS:
+            info[f"{kind}_commands"] = int(counts.get(kind, 0))
         if done or truncated:
             info["heal_casts_episode"] = int(getattr(self, "_episode_heal_casts", 0))
             info["heal_attempts_episode"] = int(
                 getattr(self, "_episode_heal_attempts", 0)
             )
-            info["move_commands_episode"] = int(
-                getattr(self, "_episode_move_commands", 0)
-            )
-            info["attack_commands_episode"] = int(
-                getattr(self, "_episode_attack_commands", 0)
-            )
-            info["cloak_commands_episode"] = int(
-                getattr(self, "_episode_cloak_commands", 0)
-            )
-            info["uncloak_commands_episode"] = int(
-                getattr(self, "_episode_uncloak_commands", 0)
-            )
+            for kind in COMMAND_METRIC_KINDS:
+                info[f"{kind}_commands_episode"] = int(
+                    getattr(self, f"_episode_{kind}_commands", 0)
+                )
             info["cooldown_retreat_episode"] = float(
                 getattr(self, "_episode_cooldown_retreat", 0.0)
             )
         return info
+
+    def _reset_episode_command_counts(self) -> None:
+        for kind in COMMAND_METRIC_KINDS:
+            setattr(self, f"_episode_{kind}_commands", 0)
 
     async def _finalize_squad_physics_step(
         self, squad_tags: List[int], acting_player_id: int
@@ -2702,6 +2968,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         reward = self.bot.calculate_squad_step_reward(
             squad_tags, perspective_player_id=acting_player_id
         )
+        step_economic = self._record_economic_metrics(
+            credit_trainee=(acting_player_id == trainee_pid)
+        )
         step_cooldown_retreat = self._record_cooldown_retreat_metrics(
             credit_trainee=(acting_player_id == trainee_pid)
         )
@@ -2717,21 +2986,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         loss_penalty = r_conf.get("loss_penalty", -100.0)
         draw_penalty = r_conf.get("draw_penalty", -10.0)
 
-        if p1_lost:
+        terminate, term_delta = self._pylon_army_outcome(
+            p1_lost,
+            p2_lost,
+            p1_army_lost,
+            p2_army_lost,
+            acting_player_id,
+            r_conf,
+        )
+        if terminate:
             done = True
-            reward += win_reward if acting_player_id == 2 else loss_penalty
-        elif p2_lost:
-            done = True
-            reward += win_reward if acting_player_id == 1 else loss_penalty
-        elif p1_army_lost and p2_army_lost:
-            done = True
-            reward += draw_penalty
-        elif p1_army_lost:
-            done = True
-            reward += loss_penalty if acting_player_id == 1 else win_reward
-        elif p2_army_lost:
-            done = True
-            reward += win_reward if acting_player_id == 1 else loss_penalty
+            reward += term_delta
 
         await self._refresh_unit_lists()
         p1_units_count = len(self.player_units[1])
@@ -2751,6 +3016,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 reward += win_reward
             else:
                 reward += draw_penalty
+
+        if done or truncated:
+            reward += self._terminal_retained_value_bonus(squad_tags, acting_player_id)
 
         # Advance the squad index BEFORE generating the observation.
         # The observation returned from this step is what the collector uses as
@@ -2774,6 +3042,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 p1_lost, p2_lost, p1_army_lost, p2_army_lost,
                 all_units_gone, timeout, r_conf,
                 perspective_player_id=trainee_pid,
+                squad_tags=self._trainee_defender_tags_for_terminal_bonus(),
             )
             self._deferred_done = done
             self._deferred_truncated = truncated
@@ -2782,6 +3051,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return obs, 0.0, False, False, {
                 "squad_physics_step": True,
                 "deferred_terminal": True,
+                **self._economic_info(step_economic, False, False),
                 **self._heal_cast_info(
                     heal_casts,
                     done=False,
@@ -2794,6 +3064,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         return obs, reward, done, truncated, {
             "squad_physics_step": True,
+            **self._economic_info(step_economic, done, truncated),
             **self._heal_cast_info(
                 heal_casts,
                 done,
@@ -2839,6 +3110,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         reward = self.bot.calculate_squad_step_reward(
             trainee_tags, perspective_player_id=trainee_player_id
         )
+        step_economic = self._record_economic_metrics(credit_trainee=True)
         step_cooldown_retreat = self._record_cooldown_retreat_metrics(
             credit_trainee=True
         )
@@ -2854,21 +3126,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         loss_penalty = r_conf.get("loss_penalty", -100.0)
         draw_penalty = r_conf.get("draw_penalty", -10.0)
 
-        if p1_lost:
+        terminate, term_delta = self._pylon_army_outcome(
+            p1_lost,
+            p2_lost,
+            p1_army_lost,
+            p2_army_lost,
+            trainee_player_id,
+            r_conf,
+        )
+        if terminate:
             done = True
-            reward += win_reward if trainee_player_id == 2 else loss_penalty
-        elif p2_lost:
-            done = True
-            reward += win_reward if trainee_player_id == 1 else loss_penalty
-        elif p1_army_lost and p2_army_lost:
-            done = True
-            reward += draw_penalty
-        elif p1_army_lost:
-            done = True
-            reward += loss_penalty if trainee_player_id == 1 else win_reward
-        elif p2_army_lost:
-            done = True
-            reward += win_reward if trainee_player_id == 1 else loss_penalty
+            reward += term_delta
 
         await self._refresh_unit_lists()
         p1_units_count = len(self.player_units[1])
@@ -2889,6 +3157,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             else:
                 reward += draw_penalty
 
+        # Terminal defender bonus: pay army preservation once, at the end, rather
+        # than per step (which a defender could farm by hiding all episode).
+        if done or truncated:
+            reward += self._terminal_retained_value_bonus(
+                trainee_tags, trainee_player_id
+            )
+
         if not done and not truncated:
             await self._advance_trainee_pool_index()
 
@@ -2901,6 +3176,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return obs, reward, done, truncated, {
             "squad_physics_step": True,
             "squad_pointer": True,
+            **self._economic_info(step_economic, done, truncated),
             **self._heal_cast_info(
                 heal_casts,
                 done,
@@ -3020,11 +3296,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.steps_count = 0
         self._episode_heal_casts = 0
         self._episode_heal_attempts = 0
-        self._episode_move_commands = 0
-        self._episode_attack_commands = 0
-        self._episode_cloak_commands = 0
-        self._episode_uncloak_commands = 0
+        self._reset_episode_command_counts()
         self._episode_cooldown_retreat = 0.0
+        self._episode_economic = {}
         self._invalidate_squad_action_mask_cache()
         self.current_unit_index = 0
         self.current_squad_index = 0
@@ -3249,9 +3523,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             if cached is not None:
                 return cached
             pool_idx = self.current_trainee_pool_index
-            mask = self.bot.squad_action_masks(
-                self._squad_unit_mask_for_pool(pool_idx)
-            )
+            # Command legality (heal_unit needs a healer + patient, attack_unit a
+            # visible hostile) is observation-derived, so rebuild from the same
+            # per-step cached squad observation instead of the bare unit mask.
+            obs = self._get_squad_observation_for_pool(pool_idx)
+            mask = self.bot.squad_action_masks(obs["unit_mask"], obs)
             self._squad_action_mask_cache = (self.steps_count, int(pool_idx), mask)
             return mask
         if self.bot:

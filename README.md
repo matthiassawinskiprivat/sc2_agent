@@ -77,7 +77,7 @@ Training progresses through a sequence of levels defined in `pipeline.yaml`. Eac
 | Single-unit movement | `level_move_single_0` – `level_move_single_2` | Navigate one unit to a beacon on progressively harder maps |
 | Multi-unit movement | `level_move_multi_0` – `level_move_multi_4` | Coordinate multiple units to their assigned beacons |
 | Combat | `level_attack_0` – `level_attack_5` | Attack micro — kiting, focus fire, multi-unit fights |
-| Capture the Flag | `ctf_level_01` – `ctf_level_18` | Multi-race CTF; trainee race alternates each episode; gradual unit/layer curriculum |
+| Capture the Flag | `ctf_level_01` … + scenarios / AoE | Squad architecture: AlphaStar-style command→actors→unit-target/spatial; phase-1 actions then phase-2 detailed layers; economic role rewards |
 
 Capabilities are **additive** across the curriculum. Observation layers, action heads, and tactical layers accumulate: each level can add new ones, but never removes what earlier levels defined. This lets the network retain learned features as new capabilities are introduced.
 
@@ -148,6 +148,14 @@ flowchart TB
     dec --> logits
   end
 ```
+
+### CTF squad policy (`agent_architecture: squad`)
+
+CTF / scenario / AoE levels use a **squad** policy grafted from the last attack checkpoint. Sampling is AlphaStar-style **command → actors → terminal target or spatial cell**:
+
+- **`attack_unit` / `heal_unit` / `load_unit`** name a unit by tag (terminal target slot); spatial click-heals and click-loads (`heal_local`, `load_local`, `heal_click_cells`) are gone. Unload stays spatial (`unload_local`).
+- Spatial heads (`move_*`, `attack_local`, `aoe_local`, load/unload) still decode a world cell.
+- The curriculum is **two-phase**: phase 1 teaches those actions on the base attack-5 observation stack; phase 2 adds detailed map overlays. Combat reward is **economic** (resource-weighted, role-asymmetric) — see **CTF squad pointer architecture** in [AGENTS.md](AGENTS.md).
 
 ---
 

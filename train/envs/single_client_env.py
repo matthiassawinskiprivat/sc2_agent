@@ -32,8 +32,14 @@ class SingleClientEnv(gym.Env):
         self.worker_index = worker_index
         self.num_workers = num_workers
         
-        # Load configuration manager
-        self.config_manager = ConfigManager("config")
+        # Load configuration manager (config_dir comes from the training pipeline;
+        # pipeline.yaml ``env`` holds shared SC2 startup timing defaults).
+        config_dir = (
+            self.training_conf.get("config_dir")
+            or (self.training_conf.get("env") or {}).get("config_dir")
+            or "config"
+        )
+        self.config_manager = ConfigManager(config_dir)
         
         # Logging setup
         self.worker_id = f"{random.randint(1000, 9999)}"
@@ -52,11 +58,28 @@ class SingleClientEnv(gym.Env):
         self._sc2_process_cls = sc2_process_cls if sc2_process_cls else SC2Process
         self._client_cls = client_cls if client_cls else Client
 
+        from src.utils.single_client_manager import (
+            DEFAULT_CLOSE_SETTLE_SEC,
+            DEFAULT_POST_CREATE_DELAY_SEC,
+            DEFAULT_PROCESS_TREE_WAIT_SEC,
+        )
+
+        stagger = self._conf_float("sc2_startup_stagger_sec", None)
         self._manager = SingleClientSC2Manager(
-            sc2_process_cls=self._sc2_process_cls, 
+            sc2_process_cls=self._sc2_process_cls,
             client_cls=self._client_cls,
             worker_index=self.worker_index,
             num_workers=self.num_workers,
+            startup_stagger_sec=stagger,
+            post_create_delay_sec=self._conf_float(
+                "sc2_post_create_delay_sec", DEFAULT_POST_CREATE_DELAY_SEC
+            ),
+            close_settle_sec=self._conf_float(
+                "sc2_close_settle_sec", DEFAULT_CLOSE_SETTLE_SEC
+            ),
+            process_tree_wait_sec=self._conf_float(
+                "sc2_process_tree_wait_sec", DEFAULT_PROCESS_TREE_WAIT_SEC
+            ),
         )
         self._loop = asyncio.new_event_loop()
 
@@ -73,6 +96,36 @@ class SingleClientEnv(gym.Env):
         # State tracking
         self._last_obs: Optional[np.ndarray] = None
         self.game_ended: bool = False
+
+    def _conf_float(self, key: str, default: Optional[float]) -> Optional[float]:
+        """Read a float from training_conf, then pipeline.yaml ``env``, then default.
+
+        Shared SC2 launch timing lives in ``config_universal/pipeline.yaml`` under
+        ``env:`` so every level inherits the same hard-reset / startup knobs.
+        Per-level YAML may still override by setting the same key.
+        """
+        env_conf = self.training_conf.get("env", {})
+        if not isinstance(env_conf, dict):
+            env_conf = {}
+        if key in self.training_conf:
+            raw = self.training_conf[key]
+        elif key in env_conf:
+            raw = env_conf[key]
+        else:
+            pipe_env = {}
+            cm = getattr(self, "config_manager", None)
+            if cm is not None:
+                pipe = getattr(cm, "pipeline_config", None) or {}
+                pipe_env = pipe.get("env", {}) if isinstance(pipe, dict) else {}
+                if not isinstance(pipe_env, dict):
+                    pipe_env = {}
+            if key in pipe_env:
+                raw = pipe_env[key]
+            else:
+                return default
+        if raw is None:
+            return default
+        return float(raw)
 
     def _discover_maps(self):
         from pathlib import Path
@@ -210,8 +263,10 @@ class SingleClientEnv(gym.Env):
                 self._log(traceback.format_exc())
                 self.close()
                 if attempt < max_retries - 1:
-                    # Desync retries across parallel workers; longer backoff reduces GPU/port races.
-                    time.sleep(8.0 + self.worker_index * 2.0)
+                    # Desync retries across parallel workers; short backoff still
+                    # reduces GPU/port races without multi-second dead air.
+                    base = self._conf_float("sc2_retry_backoff_sec", 2.0) or 2.0
+                    time.sleep(base + self.worker_index * 1.0)
 
         assert last_error is not None
         self._log(

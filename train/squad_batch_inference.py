@@ -707,7 +707,7 @@ class SquadBatchRolloutHelper:
         if need_forward:
             sub_obs = {k: v[need_forward] for k, v in obs.items()}
             sub_masks = np.array(vec_env.env_method("action_masks"))[need_forward]
-            obs_t = model.policy.obs_to_tensor(sub_obs)[0]
+            obs_t = _obs_tensor_to_finite(model.policy.obs_to_tensor(sub_obs)[0])
             m_t = torch.as_tensor(sub_masks).to(device)
 
             lstm_starts = np.zeros((len(need_forward),), dtype=np.float32)

@@ -155,6 +155,21 @@ _AOE_ENERGY_COST: dict = (
     else {}
 )
 
+# AoE spells that require research before the ability exists.
+_AOE_REQUIRED_UPGRADE: dict = (
+    {UnitTypeId.HIGHTEMPLAR: UpgradeId.PSISTORMTECH} if _SC2_AVAILABLE else {}
+)
+
+# Ability id used for cooldown / availability checks (same as actuation).
+_AOE_ABILITY_BY_TYPE: dict = (
+    {
+        **_AOE_POINT_ABILITIES,
+        **_AOE_AIR_UNIT_ABILITIES,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+
 # Controllable Purification Nova ball (steer with move / attack→move).
 _PURIFICATION_NOVA_BALL_TYPES: FrozenSet = (
     frozenset({UnitTypeId.DISRUPTORPHASED}) if _SC2_AVAILABLE else frozenset()
@@ -349,22 +364,49 @@ def uses_aoe_spell(unit: "Unit") -> bool:
     return tid in _AOE_POINT_ABILITIES or tid in _AOE_AIR_UNIT_ABILITIES
 
 
-def unit_can_aoe(unit: "Unit", enemy_race: str | None = None) -> bool:
+def unit_can_aoe(
+    unit: "Unit",
+    enemy_race: str | None = None,
+    upgrades: frozenset | None = None,
+    bot: Any = None,
+    *,
+    has_tactical_air_enemy: bool = True,
+) -> bool:
     """True when this unit can usefully issue ``aoe_local`` this step.
 
     Energy-gated for Infestor / High Templar / Ghost / Viper. Ravager bile has
-    no energy cost. Ghost EMP is only flagged vs Protoss (shields / high energy).
+    no energy cost but still needs the ability off cooldown. Ghost EMP is only
+    flagged vs Protoss. High Templar Psi Storm requires ``PSISTORMTECH``.
+    Viper Parasitic Bomb needs a flying hostile within engage fovea of any ally
+    (``has_tactical_air_enemy``). When ``bot._available_abilities_by_tag`` is
+    present, the spell ability must appear there (CD only for AoE casters —
+    energy is checked above; see ``refresh_healer_ability_cache``).
     """
     if not _SC2_AVAILABLE or unit is None:
         return False
     tid = getattr(unit, "type_id", None)
     if tid not in _AOE_ENERGY_COST:
         return False
+    required = _AOE_REQUIRED_UPGRADE.get(tid)
+    if required is not None:
+        if required not in (upgrades or frozenset()):
+            return False
     if tid == UnitTypeId.GHOST:
         if str(enemy_race or "").lower().strip() != "protoss":
             return False
+    if tid == UnitTypeId.VIPER and not has_tactical_air_enemy:
+        return False
     energy = float(getattr(unit, "energy", 0.0) or 0.0)
-    return energy >= float(_AOE_ENERGY_COST[tid])
+    if energy < float(_AOE_ENERGY_COST[tid]):
+        return False
+    ability = _AOE_ABILITY_BY_TYPE.get(tid)
+    if ability is not None:
+        abilities = _available_abilities_for_unit(unit, bot)
+        if abilities is not None:
+            return ability in abilities
+        if _unit_is_using_any_ability(unit, frozenset({ability})):
+            return False
+    return True
 
 
 def is_purification_nova_ball(unit: "Unit") -> bool:
@@ -991,6 +1033,91 @@ _CLOAK_ACTIVATION_ENERGY = 25.0
 # Mothership cloak-field energy gate (approximation).
 _MOTHERSHIP_CLOAK_ENERGY = 50.0
 
+# Surface types that can burrow (aligned with CaptureTheFlagBot._BURROW_DOWN_BY_TYPE).
+_BURROW_DOWN_TYPES: FrozenSet = (
+    frozenset(
+        {
+            UnitTypeId.ZERGLING,
+            UnitTypeId.BANELING,
+            UnitTypeId.ROACH,
+            UnitTypeId.RAVAGER,
+            UnitTypeId.HYDRALISK,
+            UnitTypeId.INFESTOR,
+            UnitTypeId.SWARMHOSTMP,
+            UnitTypeId.ULTRALISK,
+            UnitTypeId.QUEEN,
+            UnitTypeId.DRONE,
+            UnitTypeId.WIDOWMINE,
+            UnitTypeId.LURKERMP,
+        }
+    )
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
+# Burrowed morphs that can unburrow (aligned with CaptureTheFlagBot._BURROW_UP_BY_TYPE).
+_BURROW_UP_TYPES: FrozenSet = (
+    frozenset(
+        {
+            UnitTypeId.ZERGLINGBURROWED,
+            UnitTypeId.BANELINGBURROWED,
+            UnitTypeId.ROACHBURROWED,
+            UnitTypeId.RAVAGERBURROWED,
+            UnitTypeId.HYDRALISKBURROWED,
+            UnitTypeId.INFESTORBURROWED,
+            UnitTypeId.SWARMHOSTBURROWEDMP,
+            UnitTypeId.ULTRALISKBURROWED,
+            UnitTypeId.QUEENBURROWED,
+            UnitTypeId.DRONEBURROWED,
+            UnitTypeId.WIDOWMINEBURROWED,
+            UnitTypeId.LURKERMPBURROWED,
+            UnitTypeId.LURKERBURROWED,
+        }
+    )
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
+# Unit types that burrow without the general BURROW tech (inherent ability).
+_BURROW_WITHOUT_TECH: FrozenSet = (
+    frozenset({UnitTypeId.WIDOWMINE, UnitTypeId.LURKERMP})
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
+# Fire from a planted / burrowed morph (lurker-style). Still receive attack orders
+# even though ``unit_is_immobile`` is true.
+_ATTACKS_WHILE_IMMOBILE: FrozenSet = (
+    frozenset(
+        {
+            UnitTypeId.LURKERMPBURROWED,
+            UnitTypeId.LURKERBURROWED,
+            UnitTypeId.SIEGETANKSIEGED,
+            UnitTypeId.LIBERATORAG,
+            UnitTypeId.WIDOWMINEBURROWED,
+        }
+    )
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
+# Surface morphs that only attack after burrowing.
+_ATTACK_ONLY_WHEN_BURROWED: FrozenSet = (
+    frozenset({UnitTypeId.LURKERMP, UnitTypeId.WIDOWMINE})
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
+# Personal cloak types that require research.
+_CLOAK_REQUIRED_UPGRADE: dict = (
+    {
+        UnitTypeId.GHOST: UpgradeId.PERSONALCLOAKING,
+        UnitTypeId.BANSHEE: UpgradeId.BANSHEECLOAK,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+
 # Heal / repair readiness (``can_heal`` / ``can_repair`` scalars).
 GAME_LOOPS_PER_SECOND = 22.4
 HEAL_ABILITY_COOLDOWN_SECONDS: dict = (
@@ -1016,9 +1143,15 @@ _HEAL_ABILITIES_BY_TYPE: dict = (
         UnitTypeId.QUEEN: frozenset({AbilityId.TRANSFUSION_TRANSFUSION}),
         UnitTypeId.MEDIVAC: frozenset({AbilityId.MEDIVACHEAL_HEAL}),
         UnitTypeId.SHIELDBATTERY: frozenset(
-            {
-                AbilityId.SHIELDBATTERYRECHARGEEX5_SHIELDBATTERYRECHARGE,
-            }
+            a
+            for a in (
+                getattr(
+                    AbilityId,
+                    "SHIELDBATTERYRECHARGEEX5_SHIELDBATTERYRECHARGE",
+                    None,
+                ),
+            )
+            if a is not None
         ),
     }
     if _SC2_AVAILABLE
@@ -1031,11 +1164,17 @@ _REPAIR_ABILITIES: FrozenSet = (
 )
 _HEAL_CHANNEL_ABILITIES: FrozenSet = (
     frozenset(
-        {
+        a
+        for a in (
             AbilityId.MEDIVACHEAL_HEAL,
             AbilityId.TRANSFUSION_TRANSFUSION,
-            AbilityId.SHIELDBATTERYRECHARGEEX5_SHIELDBATTERYRECHARGE,
-        }
+            getattr(
+                AbilityId,
+                "SHIELDBATTERYRECHARGEEX5_SHIELDBATTERYRECHARGE",
+                None,
+            ),
+        )
+        if a is not None
     )
     if _SC2_AVAILABLE
     else frozenset()
@@ -1167,11 +1306,15 @@ def _owner_can_afford_repair(bot: Any, unit: "Unit") -> bool:
 
 
 async def refresh_healer_ability_cache(bot: Any) -> None:
-    """Refresh ``bot._available_abilities_by_tag`` for healers / SCVs.
+    """Refresh ``bot._available_abilities_by_tag`` for healers / SCVs / AoE casters.
 
-    Uses SC2 ``query_available_abilities`` (energy, cooldown, minerals when
-    ``ignore_resource_requirements=False``). Falls back to per-step heuristics
-    when a unit tag is missing from the query result.
+    Healers / SCVs are queried with ``ignore_resource_requirements=False`` so
+    mineral cost and energy are visible to ``unit_can_heal`` / ``unit_can_repair``.
+
+    AoE casters are queried with ``ignore_resource_requirements=True`` so the
+    cache reflects **cooldown only**. Energy for Fungal / Storm / EMP / Bomb is
+    gated separately in ``unit_can_aoe``; double-gating energy through SC2 caused
+    false negatives (AoE permanently closed while cloak stayed open).
     """
     if bot is None or not _SC2_AVAILABLE:
         return
@@ -1179,16 +1322,28 @@ async def refresh_healer_ability_cache(bot: Any) -> None:
     query = getattr(client, "query_available_abilities_with_tag", None)
     if client is None or not callable(query):
         return
-    units = []
+    heal_units = []
+    aoe_units = []
     for unit in getattr(bot, "all_units", []) or []:
         tid = getattr(unit, "type_id", None)
         if tid in _HEAL_ABILITIES_BY_TYPE or tid == UnitTypeId.SCV:
-            units.append(unit)
-    if not units:
+            heal_units.append(unit)
+        if tid in _AOE_ENERGY_COST:
+            aoe_units.append(unit)
+    if not heal_units and not aoe_units:
         bot._available_abilities_by_tag = {}
         return
+    cache: dict = {}
     try:
-        bot._available_abilities_by_tag = await query(units, ignore_resource_requirements=False)
+        if heal_units:
+            heal_cache = await query(heal_units, ignore_resource_requirements=False)
+            if isinstance(heal_cache, dict):
+                cache.update(heal_cache)
+        if aoe_units:
+            aoe_cache = await query(aoe_units, ignore_resource_requirements=True)
+            if isinstance(aoe_cache, dict):
+                cache.update(aoe_cache)
+        bot._available_abilities_by_tag = cache
     except Exception:
         return
 
@@ -1214,22 +1369,75 @@ def unit_is_immobile(unit: "Unit", upgrades: frozenset | None = None) -> bool:
     return True
 
 
-def unit_can_cloak(unit: "Unit") -> bool:
+def unit_can_cloak(unit: "Unit", upgrades: frozenset | None = None) -> bool:
     """True when the unit can activate personal/field cloak this step.
 
-    Already-cloaked units return False. Energy-gated for Ghost/Banshee/Mothership.
+    Already-cloaked units return False. Ghost / Banshee need their cloak tech
+    and activation energy. Mothership field cloak is energy-gated only.
     """
     if not _SC2_AVAILABLE or unit is None:
         return False
     if bool(getattr(unit, "is_cloaked", False)):
         return False
     tid = getattr(unit, "type_id", None)
+    upgrades = upgrades or frozenset()
     energy = float(getattr(unit, "energy", 0.0) or 0.0)
-    if tid in {UnitTypeId.GHOST, UnitTypeId.BANSHEE}:
+    required = _CLOAK_REQUIRED_UPGRADE.get(tid)
+    if required is not None:
+        if required not in upgrades:
+            return False
         return energy >= _CLOAK_ACTIVATION_ENERGY
     if tid == UnitTypeId.MOTHERSHIP:
         return energy >= _MOTHERSHIP_CLOAK_ENERGY
     return False
+
+
+def unit_can_burrow(unit: "Unit", upgrades: frozenset | None = None) -> bool:
+    """True when the unit can burrow this step (not already burrowed).
+
+    Most Zerg need ``BURROW`` researched. Widow Mine and Lurker burrow without
+    that tech.
+    """
+    if not _SC2_AVAILABLE or unit is None:
+        return False
+    tid = getattr(unit, "type_id", None)
+    if tid not in _BURROW_DOWN_TYPES:
+        return False
+    if bool(getattr(unit, "is_burrowed", False)):
+        return False
+    if tid in _BURROW_WITHOUT_TECH:
+        return True
+    return UpgradeId.BURROW in (upgrades or frozenset())
+
+
+def unit_can_conceal(unit: "Unit", upgrades: frozenset | None = None) -> bool:
+    """True when ``cloak_burrow`` can do useful work on this unit."""
+    return unit_can_cloak(unit, upgrades) or unit_can_burrow(unit, upgrades)
+
+
+def unit_can_uncloak(unit: "Unit") -> bool:
+    """True when a toggle-cloak unit is currently cloaked and can reveal."""
+    if not _SC2_AVAILABLE or unit is None:
+        return False
+    tid = getattr(unit, "type_id", None)
+    if tid not in {UnitTypeId.GHOST, UnitTypeId.BANSHEE}:
+        return False
+    return bool(getattr(unit, "is_cloaked", False))
+
+
+def unit_can_unburrow(unit: "Unit") -> bool:
+    """True when the unit is in a burrowed morph that can surface."""
+    if not _SC2_AVAILABLE or unit is None:
+        return False
+    tid = getattr(unit, "type_id", None)
+    if tid in _BURROW_UP_TYPES:
+        return True
+    return bool(getattr(unit, "is_burrowed", False)) and tid in _BURROW_DOWN_TYPES
+
+
+def unit_can_reveal(unit: "Unit") -> bool:
+    """True when ``uncloak_unburrow`` can do useful work on this unit."""
+    return unit_can_uncloak(unit) or unit_can_unburrow(unit)
 
 
 def unit_can_repair(unit: "Unit", bot: Any = None) -> bool:
@@ -1274,6 +1482,43 @@ def unit_can_heal(unit: "Unit", bot: Any = None) -> bool:
     if abilities is not None:
         return bool(required & abilities)
     return True
+
+
+def unit_can_cast_heal(unit: "Unit", bot: Any = None) -> bool:
+    """True when *unit* can start a heal/repair/transfuse right now (either family)."""
+    return unit_can_heal(unit, bot) or unit_can_repair(unit, bot)
+
+
+def heal_target_is_eligible(healer: "Unit", ally: "Unit") -> bool:
+    """True when ``ally``'s biology matches what ``healer``'s ability can affect.
+
+    Real SC2 silently ignores an order targeting the wrong category — Medivac
+    Heal and Queen Transfuse only affect Biological units, SCV Repair only
+    Mechanical ones. Without this check a Medivac clicked onto a wounded Siege
+    Tank resolves a target and credits a cast, but the in-game order never heals.
+    """
+    if not _SC2_AVAILABLE or healer is None or ally is None:
+        return True
+    tid = getattr(healer, "type_id", None)
+    if tid in (UnitTypeId.MEDIVAC, UnitTypeId.QUEEN):
+        return bool(getattr(ally, "is_biological", False))
+    if tid == UnitTypeId.SCV:
+        return bool(getattr(ally, "is_mechanical", False))
+    return True
+
+
+def unit_is_wounded(unit: "Unit") -> bool:
+    """True when *unit* is missing health (shields excluded — heals restore HP)."""
+    if unit is None:
+        return False
+    try:
+        health = float(getattr(unit, "health", 0.0) or 0.0)
+        health_max = float(getattr(unit, "health_max", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if health_max <= 0.0:
+        return False
+    return health < health_max - 1e-6
 
 
 _CARGO_SIZE_NORM_DIVISOR = 8.0
@@ -1321,9 +1566,158 @@ def unit_can_load(unit: "Unit") -> bool:
     return float(getattr(unit, "cargo_size", 0) or 0) > 0
 
 
+def unit_is_loadable_passenger(unit: "Unit") -> bool:
+    """Non-structure, non-transport with a positive embark cost."""
+    if unit is None or bool(getattr(unit, "is_structure", False)):
+        return False
+    if unit_is_transport(unit):
+        return False
+    return float(getattr(unit, "cargo_size", 0) or 0) > 0
+
+
+def unit_transport_free_slots(unit: "Unit") -> int:
+    cargo_max = int(getattr(unit, "cargo_max", 0) or 0)
+    if cargo_max <= 0:
+        return 0
+    used = int(getattr(unit, "cargo_used", 0) or 0)
+    return max(cargo_max - used, 0)
+
+
+def load_pair_is_eligible(actor: "Unit", target: "Unit") -> bool:
+    """Whether ``actor`` can load/board ``target`` (dual-role transport↔passenger).
+
+    Transport actors issue ``LOAD`` on a passenger; passenger actors smart onto a
+    transport. Cargo size must fit the transport's free slots.
+    """
+    if actor is None or target is None:
+        return False
+    if int(getattr(actor, "tag", 0) or 0) == int(getattr(target, "tag", 0) or 0):
+        return False
+    if int(getattr(actor, "owner_id", 0) or 0) != int(
+        getattr(target, "owner_id", 0) or 0
+    ):
+        return False
+    if bool(getattr(actor, "is_structure", False)) or bool(
+        getattr(target, "is_structure", False)
+    ):
+        return False
+
+    actor_is_transport = unit_is_transport(actor)
+    target_is_transport = unit_is_transport(target)
+    if actor_is_transport and unit_is_loadable_passenger(target):
+        size = int(getattr(target, "cargo_size", 0) or 0)
+        return unit_transport_free_slots(actor) >= size > 0
+    if (not actor_is_transport) and target_is_transport and unit_is_loadable_passenger(
+        actor
+    ):
+        size = int(getattr(actor, "cargo_size", 0) or 0)
+        return unit_transport_free_slots(target) >= size > 0
+    return False
+
+
 def unit_can_unload(unit: "Unit") -> bool:
     if unit is None:
         return False
     return int(getattr(unit, "cargo_max", 0) or 0) > 0 and int(
         getattr(unit, "cargo_used", 0) or 0
     ) > 0
+
+
+# Half-width of the 32×32 tactical crop in game units (matches CTF / Level7 bots).
+TACTICAL_FOVEA_MAX_DELTA = 17.0
+
+
+def unit_weapon_ready(unit: "Unit") -> bool:
+    """True when the unit's weapon can fire this step.
+
+    Prefers an explicit ``weapon_ready`` bool. Falls back to ``weapon_cooldown``
+    (ready when ≤ 0). Missing cooldown info is treated as ready so unarmed /
+    mock units without the attribute do not spuriously block attacks.
+    """
+    if unit is None:
+        return False
+    wr = getattr(unit, "weapon_ready", None)
+    if isinstance(wr, bool):
+        return wr
+    try:
+        cd = float(getattr(unit, "weapon_cooldown", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return True
+    return cd <= 1e-6
+
+
+def unit_has_weapon(unit: "Unit") -> bool:
+    """True when the unit has a positive ground or air DPS."""
+    if unit is None:
+        return False
+    try:
+        ground = float(getattr(unit, "ground_dps", 0.0) or 0.0)
+        air = float(getattr(unit, "air_dps", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return ground > 0.0 or air > 0.0
+
+
+def _unit_is_burrowed(unit: "Unit") -> bool:
+    """True when the unit is currently burrowed (flag or BURROWED type name)."""
+    if unit is None:
+        return False
+    if bool(getattr(unit, "is_burrowed", False)):
+        return True
+    tid = getattr(unit, "type_id", None)
+    return tid is not None and "BURROWED" in str(getattr(tid, "name", "")).upper()
+
+
+def unit_can_attack(
+    unit: "Unit", upgrades: frozenset | None = None
+) -> bool:
+    """True when this unit can usefully receive an attack order this step.
+
+    Requires a ready weapon, **or** a weaponless unit whose policy ``attack``
+    head maps to a combat ability (Swarm Host → Spawn Locusts, Disruptor →
+    Purification Nova, Nova ball → move). Burrowed units that cannot fire
+    (Zergling, Roach, …) are excluded even if Tunneling Claws makes them
+    mobile. Lurkers, sieged tanks, Liberator AG, and burrowed Widow Mines
+    still count — they attack from that planted morph. Burrowed Swarm Hosts
+    stay legal: Spawn Locusts works while burrowed.
+    """
+    # Ability-mapped attackers have no DPS; gate them before the weapon check
+    # so attack_local / attack_unit stay open for Swarm Host-only squads.
+    if uses_spawn_locusts_for_attack(unit):
+        return True
+    if uses_purification_nova_for_attack(unit):
+        return True
+    if is_purification_nova_ball(unit):
+        return True
+    if not unit_has_weapon(unit) or not unit_weapon_ready(unit):
+        return False
+    tid = getattr(unit, "type_id", None)
+    if tid in _ATTACKS_WHILE_IMMOBILE:
+        return True
+    if tid in _ATTACK_ONLY_WHEN_BURROWED and not _unit_is_burrowed(unit):
+        return False
+    if _unit_is_burrowed(unit):
+        return False
+    if unit_is_immobile(unit, upgrades):
+        return False
+    return True
+
+
+def unit_in_tactical_fovea(
+    focal: "Unit",
+    other: "Unit",
+    *,
+    half: float = TACTICAL_FOVEA_MAX_DELTA,
+) -> bool:
+    """True if ``other`` lies inside the 32×32 tactical crop centered on ``focal``."""
+    if focal is None or other is None:
+        return False
+    try:
+        fx = float(focal.position.x)
+        fy = float(focal.position.y)
+        ox = float(other.position.x)
+        oy = float(other.position.y)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    h = float(half)
+    return abs(ox - fx) <= h and abs(oy - fy) <= h

@@ -1,8 +1,8 @@
 """Progressive ``debug_upgrade`` schedule for CTF ``env_mode: upgrades``.
 
 SC2 has no selective per-upgrade debug grant. ``Client.debug_upgrade()`` unlocks the
-next tier of *all* available research (weapons/armor and unit abilities). It is a
-game-state cheat (no player id) and applies to **all players** in the match.
+next tier of available research (weapons/armor and unit abilities) for the player
+whose client sends it. God-mode joins only player 1, so that player receives it.
 
 Within each hard-reset window of ``every_k_episodes``:
   - before 25% → 0 calls

@@ -1,5 +1,5 @@
 training:
-  training_steps: 1000000
+  training_steps: 500000
   num_envs: 6
   n_steps: 1024
   batch_size: 256
@@ -12,39 +12,39 @@ training:
   rollout_buffer: disk
 env:
   env_class: CaptureTheFlagEnv
-  max_steps: 200
+  max_steps: 100
   headless: true
   every_k_episodes: 200
   alternate_trainee_race: false
+  # Keep query_linear at 138 (no race one-hot) for the universal→squad graft.
+  # All later CTF/scenario/AoE levels default include_race to true (144-wide).
+  include_race: false
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - agent: true
     high_level_command: attack
     race: terran
-    mineral_budget: 200
+    mineral_budget: 150
     vespene_budget: 150
     unit_pool:
     - REAPER
     region: A
   - high_level_command: defend
     race: zerg
-    mineral_budget: 75
+    mineral_budget: 150
     vespene_budget: 0
     unit_pool:
     - ZERGLING
     region: A
 
-  active_layers:
-  - allied_unit_biological
-  - enemy_unit_biological
-  - allied_g_dps_light
-  - enemy_g_dps_light
-  active_tactical_layers:
-  - allied_unit_biological
-  - enemy_unit_biological
-  - allied_g_dps_light
-  - enemy_g_dps_light
-  # Squad pointer key features (append-only across CTF curriculum; config order = feature order)
+  # First unit-pointer command. attack_unit is attack_local with an enemy-unit
+  # target instead of a world cell; its command_head row is seeded from
+  # attack_local at the universal->squad graft (see POINTER_COMMAND_ROW_TEMPLATES).
+  action_heads:
+  - attack_unit
+  # The FULL per-unit scalar catalog is declared once, here, so pointer identity
+  # and every checkpoint shape stay fixed for the whole CTF curriculum. Features
+  # a level's units cannot use simply read zero.
   active_unit_scalars:
   - health_pct
   - shield_pct
@@ -77,14 +77,35 @@ env:
   - is_detected
   - role_attack
   - role_defend
+  - air_dps_norm
+  - has_splash
+  - onetime_unit
+  - is_friendly_fire
+  - is_temporary
+  - is_immobile
+  - can_cloak
+  - can_heal
+  - can_repair
+  - is_transport
+  - cargo_used_norm
+  - cargo_free_norm
+  - cargo_size_norm
+  - can_load
+  - can_unload
+  - can_aoe
   rewards:
+    economic_vespene_weight: 1.5
+    economic_value_norm: 100.0
+    attacker_enemy_value_reward: 3.0
+    attacker_own_value_penalty: 1.0
+    defender_enemy_value_reward: 2.5
+    defender_own_value_penalty: 3.0
+    defender_pylon_penalty_scale: 1.5
+    defender_retained_value_bonus: 4.0
+    heal_value_reward: 4.0
     pylon_damage_reward: 2.0
     pylon_damage_penalty: 0.9
-    damage_reward: 0.4
-    damage_penalty: 0.15
     melee_multiplier: 0.5
-    kill_reward: 0.5
-    kill_penalty: -0.4
     distance_multiplier: 2.0
     defender_zone_radius: 10.0
     cooldown_retreat_scale: 0.9
@@ -92,7 +113,6 @@ env:
     loss_penalty: -12.5
     draw_penalty: -10.0
     step_penalty: -0.03
-    defender_step_reward: 0.001
   squad_selection:
     score_threshold: 0.5
     min_selected_units: 1
@@ -107,7 +127,7 @@ model:
       thinking_steps: 3
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.994
+  gamma: 0.99
   ent_coef: 0.015
-  n_epochs: 2
+  n_epochs: 4
 agent_architecture: squad

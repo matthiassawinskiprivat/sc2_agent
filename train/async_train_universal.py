@@ -671,11 +671,16 @@ def maybe_poll_collector_weights(
     poll_state: dict,
 ) -> None:
     """
-    Poll learner zip mtime every 100 ms during rollout collection.
+    Optional mid-rollout mtime poll — **must not run during an active fill**.
 
-    CTF spends many env steps on opponent squads (no buffer rows); polling only
-    at rollout boundaries lets stale weights persist for ~one full rollout.
+    Reloading learner weights after ``rollout_policy.zip`` was snapshotted (or while
+    ``old_log_prob`` rows are being written) desyncs PPO: learner evaluates W_zip
+    while the buffer was collected with W_new → multi-nat ``rollout_log_prob_abs_err``.
+    Prefer boundary-only ``try_reload`` before each fill; this helper no-ops when
+    ``weight_sync.fill_frozen``.
     """
+    if getattr(weight_sync, "fill_frozen", False):
+        return
     now = time.perf_counter()
     if now - poll_state.get("last_poll", 0.0) < COLLECTOR_WEIGHT_RELOAD_POLL_SEC:
         return
@@ -683,17 +688,36 @@ def maybe_poll_collector_weights(
     weight_sync.try_reload(model, vec_env, sync_opponent=False, log_success=True)
 
 
+def save_rollout_policy_atomic(model, rollout_policy_path: str) -> str:
+    """
+    Atomically publish collector policy weights for the learner.
+
+    Returns ``rollout_policy_zip_checksum`` of the published zip (what the learner
+    will actually load — not an in-memory GPU float reduction).
+    """
+    from src.utils.model_utils import rollout_policy_zip_checksum
+
+    staging = os.path.join(
+        os.path.dirname(rollout_policy_path) or ".",
+        "rollout_policy_staging.zip",
+    )
+    model.save(staging)
+    replace_file_retry(staging, rollout_policy_path)
+    return rollout_policy_zip_checksum(rollout_policy_path)
+
+
 class CollectorWeightSync:
     """
     Hot-reload learner weights into the collector process.
 
-    Async double-buffering fills the *other* buffer while the learner trains, so checking
-    only at rollout boundaries can leave the collector on a stale policy for an entire
-    rollout (~tens of seconds on CTF). Mid-rollout mtime polls fix that.
+    Only safe at **rollout boundaries** (before a buffer fill begins). Mid-fill
+    reloads break on-policy PPO because ``rollout_policy.zip`` / ``old_log_prob``
+    would no longer match the collecting weights.
     """
 
     def __init__(self) -> None:
         self.last_model_load_time: Optional[float] = None
+        self.fill_frozen: bool = False
 
     def try_reload(
         self,
@@ -703,6 +727,8 @@ class CollectorWeightSync:
         sync_opponent: bool = False,
         log_success: bool = True,
     ) -> bool:
+        if self.fill_frozen:
+            return False
         updated_model_path = os.path.join(TEMP_DIR, "latest_learner_model.zip")
         if not os.path.exists(updated_model_path):
             return False
@@ -754,7 +780,31 @@ class CollectorWeightSync:
                     )
                 self.last_model_load_time = mtime
                 return False
-            set_parameters_with_retry(model, COLLECTOR_WEIGHTS_STAGING_ZIP, model.device)
+            # Prefer policy-only load (strict=False + graft) over SB3 set_parameters:
+            # learner/collector obs-space drift (e.g. missing enemy_encoder) must not
+            # abort hot-swap with a Missing key RuntimeError.
+            from src.utils.model_utils import load_policy_weights_from_zip
+
+            ok, missing, unexpected = load_policy_weights_from_zip(
+                model.policy,
+                COLLECTOR_WEIGHTS_STAGING_ZIP,
+                model.device,
+                strict=False,
+            )
+            if not ok:
+                raise RuntimeError(
+                    f"no policy weights in {COLLECTOR_WEIGHTS_STAGING_ZIP!r}"
+                )
+            if missing:
+                logger.warning(
+                    "Collector hot-swap partial load missing="
+                    f"{missing[:8]}{'…' if len(missing) > 8 else ''}"
+                )
+            if unexpected:
+                logger.debug(
+                    "Collector hot-swap ignored unexpected="
+                    f"{unexpected[:8]}{'…' if len(unexpected) > 8 else ''}"
+                )
             self.last_model_load_time = mtime
             if log_success:
                 from src.utils.model_utils import read_checkpoint_timesteps
@@ -1028,11 +1078,21 @@ class AsyncCollector(mp.Process):
             else:
                 model.num_timesteps = 0
 
-        # One-time heal_local (etc.) prior at curriculum graft. Skip CONTINUE
-        # so a mid-level resume does not double-boost. Applied before
+        # One-time command-row priors at curriculum graft. Skip CONTINUE so a
+        # mid-level resume does not double-boost. Applied before
         # initial_model.zip so the learner and opponent load the same logits.
-        from src.utils.model_utils import maybe_apply_loud_command_head_init
+        from src.utils.model_utils import (
+            maybe_apply_loud_command_head_init,
+            maybe_seed_pointer_command_rows,
+        )
 
+        # Pointer commands (attack_unit / heal_unit) inherit their spatial
+        # counterpart's row first, then any YAML loud-command prior applies.
+        maybe_seed_pointer_command_rows(
+            model,
+            self.config,
+            resume=bool(self.resume_timesteps_from_save),
+        )
         maybe_apply_loud_command_head_init(
             model,
             self.config,
@@ -1152,14 +1212,15 @@ class AsyncCollector(mp.Process):
             # Runs here (rollout boundary), not immediately when the learner publishes weights.
             weight_sync.try_reload(model, vec_env, sync_opponent=False)
 
-            # Snapshot policy weights *before* filling — learner must evaluate the same
-            # weights that produced old_log_prob. A post-fill reload here would publish a
-            # newer learner zip into rollout_policy.zip while the buffer still holds the
-            # previous policy's log_probs (approx_kl ~6+).
+            # Freeze hot-reload for the entire fill. Mid-fill try_reload would collect
+            # old_log_prob under W_new while the learner still loads a different zip.
+            weight_sync.fill_frozen = True
+            from src.utils.model_utils import policy_params_checksum
+
+            fill_policy_checksum = policy_params_checksum(model.policy)
             rollout_policy_path = os.path.join(
                 current_buffer.instance_dir, "rollout_policy.zip"
             )
-            model.save(rollout_policy_path)
 
             # FILL BUFFER
             current_buffer.reset()
@@ -1353,6 +1414,8 @@ class AsyncCollector(mp.Process):
                         fe.clear_forward_cache()
             finally:
                 stall_watchdog.stop()
+                # Always unfreeze so a failed fill cannot permanently block hot-reload.
+                weight_sync.fill_frozen = False
             
             current_buffer.compute_returns_and_advantage(last_values=last_values, dones=dones)
 
@@ -1360,6 +1423,19 @@ class AsyncCollector(mp.Process):
             # Ensure the Learner sees the data we just wrote
             for key, mm in current_buffer.observations.items():
                 if isinstance(mm, np.memmap): mm.flush()
+
+            # Snapshot the *exact* weights that produced this buffer's old_log_prob.
+            # Atomic replace avoids the learner reading a half-written zip. Saving
+            # after the fill (still before any try_reload) pairs zip ↔ payload.
+            end_checksum = policy_params_checksum(model.policy)
+            if end_checksum != fill_policy_checksum:
+                logger.error(
+                    "Collector: policy checksum changed during fill "
+                    f"({fill_policy_checksum} → {end_checksum}); "
+                    "refusing to signal a desynced buffer"
+                )
+                continue
+            saved_checksum = save_rollout_policy_atomic(model, rollout_policy_path)
 
             t_rollout_end = time.perf_counter()
             rollout_wall_sec = t_rollout_end - t_rollout_start
@@ -1379,6 +1455,7 @@ class AsyncCollector(mp.Process):
                 "filled_steps": filled_steps,
                 "collector/rollout_wall_sec": rollout_wall_sec,
                 "collector/instant_fps": instant_fps,
+                "rollout_policy_checksum": saved_checksum,
             }
             
             if recent_ep_rewards:
@@ -1386,7 +1463,7 @@ class AsyncCollector(mp.Process):
                 signal_meta["rollout/ep_len_mean"] = np.mean(recent_ep_lengths)
             
             # Env info scalars: rolling means, plus rare-event rollout sums
-            # (heal_casts, move/attack/cloak/uncloak commands). Mean of the last
+            # (heal_casts, move/attack/cloak/uncloak/aoe/load/unload commands). Mean of the last
             # 100 steps hides one-in-a-hundred casts.
             publish_custom_metrics(
                 signal_meta,
@@ -1750,13 +1827,37 @@ class AsyncLearner:
                         continue
 
                     if meta.get("ipc_backend") == "shared_memory":
-                        AsyncSharedRamBuffer.attach_shared_observations(
-                            target_buffer, meta
-                        )
+                        try:
+                            AsyncSharedRamBuffer.attach_shared_observations(
+                                target_buffer, meta
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                f"Learner: shared obs attach failed ({exc}); "
+                                "clearing signal so collector can refill"
+                            )
+                            try:
+                                if os.path.exists(signal_path):
+                                    os.remove(signal_path)
+                            except OSError:
+                                pass
+                            continue
                     else:
-                        AsyncDiskBuffer.attach_disk_observations(
-                            target_buffer, instance_dir, meta
-                        )
+                        try:
+                            AsyncDiskBuffer.attach_disk_observations(
+                                target_buffer, instance_dir, meta
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                f"Learner: disk obs attach failed ({exc}); "
+                                "clearing signal so collector can refill"
+                            )
+                            try:
+                                if os.path.exists(signal_path):
+                                    os.remove(signal_path)
+                            except OSError:
+                                pass
+                            continue
                         from src.agent.utils.disk_buffer import is_disk_offloaded_obs_key
 
                         for key in dummy_env.observation_space.keys():
@@ -1772,6 +1873,12 @@ class AsyncLearner:
                                     ),
                                     dtype=np.float32,
                                 )
+                        # Fingerprint already validated inside attach; mirror real result.
+                        disk_obs = meta.get("disk_obs") or {}
+                        model.logger.record(
+                            "train/disk_obs_fingerprint_ok",
+                            1.0 if disk_obs else 0.0,
+                        )
 
                     model.rollout_buffer = target_buffer
                     model.rollout_buffer.full = True
@@ -1781,16 +1888,41 @@ class AsyncLearner:
 
                     rollout_policy_path = os.path.join(instance_dir, "rollout_policy.zip")
                     rollout_load_ok = 0.0
+                    rollout_checksum_ok = 0.0
+                    expected_checksum = meta.get("rollout_policy_checksum")
                     if os.path.exists(rollout_policy_path):
-                        from src.utils.model_utils import load_policy_weights_from_zip
+                        from src.utils.model_utils import (
+                            load_policy_weights_from_zip,
+                            rollout_policy_zip_checksum,
+                        )
+
+                        file_checksum = rollout_policy_zip_checksum(rollout_policy_path)
+                        if expected_checksum and file_checksum != expected_checksum:
+                            logger.error(
+                                "Learner: rollout_policy.zip checksum mismatch "
+                                f"(meta={expected_checksum} file={file_checksum}). "
+                                "Skipping train — obs/logπ would be off-policy."
+                            )
+                            try:
+                                if os.path.exists(signal_path):
+                                    os.remove(signal_path)
+                            except OSError:
+                                pass
+                            continue
 
                         ok, missing, unexpected = load_policy_weights_from_zip(
                             model.policy, rollout_policy_path, train_device, strict=False
                         )
                         if ok and not missing:
                             rollout_load_ok = 1.0
+                            rollout_checksum_ok = (
+                                1.0
+                                if (not expected_checksum or file_checksum == expected_checksum)
+                                else 0.0
+                            )
                             logger.info(
                                 "Learner: loaded rollout_policy.zip (collector snapshot for this buffer)"
+                                + (f" checksum={file_checksum}" if file_checksum else "")
                             )
                         else:
                             if not ok:
@@ -1817,6 +1949,20 @@ class AsyncLearner:
                                 model.logger.record(f"metrics/{key}", val)
 
                     model.logger.record("train/rollout_policy_load_ok", rollout_load_ok)
+                    model.logger.record(
+                        "train/rollout_policy_checksum_ok", rollout_checksum_ok
+                    )
+                    if rollout_load_ok < 0.5:
+                        logger.error(
+                            "Learner: refusing PPO update without a matching "
+                            "rollout_policy.zip (would poison approx_kl / abs_err)"
+                        )
+                        try:
+                            if os.path.exists(signal_path):
+                                os.remove(signal_path)
+                        except OSError:
+                            pass
+                        continue
 
                     # 2. PERFORM PPO UPDATE (+ timings: explains low GPU % = PCIe/Python vs kernel)
                     # Per-minibatch profiling: training.learner_profile in YAML (see parse_learner_profile_option).

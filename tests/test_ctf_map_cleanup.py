@@ -82,6 +82,32 @@ def test_queued_unit_command_rejects_bool_returns():
     assert queued_unit_command(cmd) is cmd
 
 
+def test_clear_kills_tracked_heal_tumor_missing_from_observation():
+    """Env-planted tumor tags are killed even when this observation omits them."""
+    env = _make_env(lambda: _KillableUnits([]))
+    env._heal_tumor_tags = {11}
+
+    killed = []
+
+    async def _kill(tags):
+        killed.append(list(tags))
+
+    env.bot.client.debug_kill_unit.side_effect = _kill
+    asyncio.run(env._clear_ctf_map_units())
+    assert killed and 11 in killed[0]
+    assert env._heal_tumor_tags == set()
+
+
+def test_note_visible_heal_tumors_records_env_planted_tags():
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env._heal_tumor_tags = set()
+    tumor = _cleanup_unit(tag=11, type_id=UnitTypeId.CREEPTUMORBURROWED)
+    marine = _cleanup_unit(tag=12, type_id=UnitTypeId.MARINE)
+    env.bot = SimpleNamespace(all_units=[tumor, marine])
+    env._note_visible_heal_tumors()
+    assert env._heal_tumor_tags == {11}
+
+
 def test_reveal_ability_unburrows_burrowed_morph():
     u = _cleanup_unit(tag=1, type_id=UnitTypeId.ZERGLINGBURROWED, is_burrowed=True)
     assert reveal_ability_for_cleanup(u) == AbilityId.BURROWUP_ZERGLING

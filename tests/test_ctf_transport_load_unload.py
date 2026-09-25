@@ -46,6 +46,28 @@ def _bot_with_allies(allies, player_id=1):
     return bot
 
 
+def test_load_on_unit_transport_loads_selected_ally():
+    marine = _unit(UnitTypeId.MARINE, tag=2, pos=(50.0, 50.0), cargo_max=0)
+    medivac = _unit(
+        UnitTypeId.MEDIVAC, tag=1, pos=(5.0, 5.0), cargo_max=8, cargo_used=0
+    )
+    bot = _bot_with_allies([marine, medivac])
+    bot._issue_load_on_unit(medivac, marine)
+    medivac.assert_called_once_with(AbilityId.LOAD_MEDIVAC, marine)
+    bot.do.assert_called_once()
+
+
+def test_load_on_unit_passenger_smarts_onto_transport():
+    marine = _unit(UnitTypeId.MARINE, tag=2, pos=(5.0, 5.0), cargo_max=0)
+    medivac = _unit(
+        UnitTypeId.MEDIVAC, tag=1, pos=(10.0, 10.0), cargo_max=8, cargo_used=0
+    )
+    bot = _bot_with_allies([marine, medivac])
+    bot._issue_load_on_unit(marine, medivac)
+    marine.smart.assert_called_once_with(medivac)
+    bot.do.assert_called_once()
+
+
 def test_load_transport_loads_ally_in_cell():
     marine = _unit(UnitTypeId.MARINE, tag=2, pos=(10.2, 10.1), cargo_max=0)
     medivac = _unit(

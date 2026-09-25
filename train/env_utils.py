@@ -14,11 +14,18 @@ from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
 
 def is_squad_pointer_action_space(action_space) -> bool:
-    """True when vec-env uses squad pointer MultiDiscrete layout."""
-    from src.agent.squad_constants import MAX_SQUAD_UNITS
+    """True when vec-env uses squad pointer MultiDiscrete layout.
+
+    Layout is ``[2]*N_max + [command, target_slot, spatial]`` (see
+    ``squad_action_space_nvec`` / ``SQUAD_ACTION_DIM``). The older who→cmd→where
+    layout was ``N_max + 2``; detecting that length here would mis-route the
+    async collector onto the universal per-unit batch helper and feed ``tactical``
+    obs into a squad policy (``KeyError: 'tactical'``).
+    """
+    from src.agent.squad_constants import MAX_SQUAD_UNITS, SQUAD_ACTION_DIM
 
     nvec = getattr(action_space, "nvec", None)
-    if nvec is None or len(nvec) != MAX_SQUAD_UNITS + 2:
+    if nvec is None or len(nvec) != SQUAD_ACTION_DIM:
         return False
     return all(int(n) == 2 for n in nvec[:MAX_SQUAD_UNITS])
 
@@ -109,18 +116,36 @@ def create_dummy_env_from_config(config: dict, level_name: str | None = None):
 
     if agent_architecture == "squad":
         from src.agent.squad_constants import (
+            MAX_SQUAD_ENEMIES,
             MAX_SQUAD_UNITS,
+            SQUAD_COMMAND_DIM,
+            SQUAD_COMMAND_MODE_DIM,
+            SQUAD_COMMAND_MODE_MAX,
             SQUAD_RACE_DIM,
             SQUAD_UPGRADES_DIM,
             include_race_enabled,
             include_upgrades_enabled,
             squad_action_space_nvec,
         )
+        from src.agent.squad_target_masks import SQUAD_TARGET_MASK_KEYS
         from src.agent.unit_scalar_constants import UnitScalarConstants
 
         resolved_scalars = UnitScalarConstants.resolve_active_features(active_unit_scalars)
         n_unit_scalars = len(resolved_scalars)
 
+        # Prefer the level YAML ``env`` block when ``level_name`` is set so sparse
+        # configs (learner startup) still honor ``include_race: false`` on level 01.
+        race_conf = config
+        if level:
+            try:
+                level_cfg = cm.get_level_config(level)
+                race_conf = {**level_cfg, **config}
+            except Exception:
+                race_conf = config
+
+        obs_dict["command"] = spaces.Box(
+            low=0.0, high=1.0, shape=(SQUAD_COMMAND_DIM,), dtype=np.float32
+        )
         obs_dict["anchor_tactical"] = spaces.Box(
             low=0.0, high=1.0, shape=(num_tactical_layers, 32, 32), dtype=np.float32
         )
@@ -130,11 +155,36 @@ def create_dummy_env_from_config(config: dict, level_name: str | None = None):
         obs_dict["unit_mask"] = spaces.Box(
             low=0.0, high=1.0, shape=(MAX_SQUAD_UNITS,), dtype=np.float32
         )
-        if include_race_enabled(config):
+        # Must match CaptureTheFlagSingleEnv squad spaces — omitting enemy_* drops
+        # SquadNetwork.enemy_encoder on the learner, so latest_learner_model.zip is
+        # missing those keys and collector hot-reload fails (strict set_parameters).
+        obs_dict["enemy_scalars"] = spaces.Box(
+            low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES, n_unit_scalars), dtype=np.float32
+        )
+        obs_dict["enemy_mask"] = spaces.Box(
+            low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
+        )
+        obs_dict["tactical_enemy_mask"] = spaces.Box(
+            low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
+        )
+        obs_dict["engage_enemy_mask"] = spaces.Box(
+            low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
+        )
+        obs_dict["command_modes"] = spaces.Box(
+            low=0.0,
+            high=SQUAD_COMMAND_MODE_MAX,
+            shape=(SQUAD_COMMAND_MODE_DIM,),
+            dtype=np.float32,
+        )
+        for key in SQUAD_TARGET_MASK_KEYS:
+            obs_dict[key] = spaces.Box(
+                low=0.0, high=1.0, shape=(MAX_SQUAD_UNITS,), dtype=np.float32
+            )
+        if include_race_enabled(race_conf):
             obs_dict["race"] = spaces.Box(
                 low=0.0, high=1.0, shape=(SQUAD_RACE_DIM,), dtype=np.float32
             )
-        if include_upgrades_enabled(config):
+        if include_upgrades_enabled(race_conf):
             obs_dict["upgrades"] = spaces.Box(
                 low=0.0, high=1.0, shape=(SQUAD_UPGRADES_DIM,), dtype=np.float32
             )

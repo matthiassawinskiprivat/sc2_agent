@@ -79,6 +79,9 @@ def _bot_with_healers(healer, *allies, click=None):
     bot._issue_heal_at_point = lambda unit, target: CaptureTheFlagBot._issue_heal_at_point(
         bot, unit, target
     )
+    bot._record_heal_cast = (
+        lambda unit, patient: CaptureTheFlagBot._record_heal_cast(bot, unit, patient)
+    )
     bot._mark_heal_command_attempt = (
         lambda unit: CaptureTheFlagBot._mark_heal_command_attempt(bot, unit)
     )
@@ -88,6 +91,9 @@ def _bot_with_healers(healer, *allies, click=None):
         )
     )
     bot._heal_target_is_eligible = CaptureTheFlagBot._heal_target_is_eligible
+    # spec= restricts attribute names but does not copy real class values, so
+    # this stays a MagicMock (not the real ability table) unless rebound.
+    bot._HEAL_ABILITY_BY_TYPE = CaptureTheFlagBot._HEAL_ABILITY_BY_TYPE
     bot._allied_units_for_owner = (
         lambda owner_id: CaptureTheFlagBot._allied_units_for_owner(bot, owner_id)
     )

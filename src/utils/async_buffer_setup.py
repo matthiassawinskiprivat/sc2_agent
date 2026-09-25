@@ -52,6 +52,7 @@ def configure_collector_static_buffer(
                 filename, dtype=np.float32, mode="w+", shape=shape
             )
             buf.disk_files[key] = filename
+    buf._owns_disk_files = True
 
 
 def prepare_learner_placeholder_buffer(buf: AsyncDiskBuffer) -> None:
@@ -65,6 +66,7 @@ def prepare_learner_placeholder_buffer(buf: AsyncDiskBuffer) -> None:
         return
 
     buf.disk_files = {}
+    buf._owns_disk_files = False
     for key in list(buf.observations.keys()):
         if isinstance(buf.observations[key], np.memmap):
             try:

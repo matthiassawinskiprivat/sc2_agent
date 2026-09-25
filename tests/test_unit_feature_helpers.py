@@ -27,6 +27,7 @@ from src.utils.unit_feature_helpers import (
     unit_click_radius,
     uses_aoe_spell,
     unit_can_aoe,
+    unit_can_attack,
     uses_caustic_spray_on_structures,
     uses_lock_on_for_attack,
     uses_purification_nova_for_attack,
@@ -808,12 +809,73 @@ def _caster(uid, energy=200.0):
     return unit
 
 
+def _armed(uid, *, ground_dps=10.0, is_burrowed=False, weapon_ready=True):
+    unit = _mock_unit(uid)
+    unit.ground_dps = ground_dps
+    unit.air_dps = 0.0
+    unit.is_burrowed = is_burrowed
+    unit.weapon_ready = weapon_ready
+    unit.weapon_cooldown = 0.0 if weapon_ready else 8.0
+    return unit
+
+
+def test_unit_can_attack_excludes_burrowed_non_lurkers():
+    from sc2.ids.upgrade_id import UpgradeId
+
+    assert unit_can_attack(_armed(UnitTypeId.ZERGLING)) is True
+    assert unit_can_attack(
+        _armed(UnitTypeId.ZERGLINGBURROWED, is_burrowed=True)
+    ) is False
+    # Tunneling Claws make a burrowed Roach mobile, but it still cannot fire.
+    roach = _armed(UnitTypeId.ROACHBURROWED, is_burrowed=True)
+    assert unit_can_attack(roach, frozenset({UpgradeId.TUNNELINGCLAWS})) is False
+    assert unit_can_attack(_armed(UnitTypeId.MARINE, weapon_ready=False)) is False
+
+
+def test_unit_can_attack_includes_weaponless_ability_attackers():
+    # Swarm Host / Disruptor have no DPS; attack remaps to Spawn Locusts /
+    # Purification Nova. Without this gate, attack_local stays masked forever.
+    host = _mock_unit(UnitTypeId.SWARMHOSTMP)
+    host.ground_dps = 0.0
+    host.air_dps = 0.0
+    assert unit_can_attack(host) is True
+    burrowed = _mock_unit(UnitTypeId.SWARMHOSTBURROWEDMP)
+    burrowed.ground_dps = 0.0
+    burrowed.air_dps = 0.0
+    burrowed.is_burrowed = True
+    assert unit_can_attack(burrowed) is True
+    disruptor = _mock_unit(UnitTypeId.DISRUPTOR)
+    disruptor.ground_dps = 0.0
+    disruptor.air_dps = 0.0
+    assert unit_can_attack(disruptor) is True
+    # Unarmed medivac still cannot attack.
+    medivac = _mock_unit(UnitTypeId.MEDIVAC)
+    medivac.ground_dps = 0.0
+    medivac.air_dps = 0.0
+    assert unit_can_attack(medivac) is False
+
+
+def test_unit_can_attack_keeps_lurker_and_planted_forms():
+    lurker = _armed(UnitTypeId.LURKERMPBURROWED, is_burrowed=True)
+    assert unit_can_attack(lurker) is True
+    assert unit_can_attack(_armed(UnitTypeId.LURKERMP, is_burrowed=False)) is False
+    assert unit_can_attack(_armed(UnitTypeId.SIEGETANKSIEGED)) is True
+    assert unit_can_attack(
+        _armed(UnitTypeId.WIDOWMINEBURROWED, is_burrowed=True)
+    ) is True
+
+
 def test_unit_can_aoe_energy_and_ghost_vs_protoss():
-    assert unit_can_aoe(_caster(UnitTypeId.HIGHTEMPLAR, 75.0)) is True
-    assert unit_can_aoe(_caster(UnitTypeId.HIGHTEMPLAR, 74.0)) is False
+    from sc2.ids.upgrade_id import UpgradeId
+
+    storm = frozenset({UpgradeId.PSISTORMTECH})
+    assert unit_can_aoe(_caster(UnitTypeId.HIGHTEMPLAR, 75.0), upgrades=storm) is True
+    assert unit_can_aoe(_caster(UnitTypeId.HIGHTEMPLAR, 75.0), upgrades=frozenset()) is False
+    assert unit_can_aoe(_caster(UnitTypeId.HIGHTEMPLAR, 74.0), upgrades=storm) is False
     assert unit_can_aoe(_caster(UnitTypeId.INFESTOR, 75.0)) is True
     assert unit_can_aoe(_caster(UnitTypeId.INFESTORBURROWED, 75.0)) is True
     assert unit_can_aoe(_caster(UnitTypeId.VIPER, 125.0)) is True
+    assert unit_can_aoe(_caster(UnitTypeId.VIPER, 125.0), has_tactical_air_enemy=False) is False
     assert unit_can_aoe(_caster(UnitTypeId.VIPER, 124.0)) is False
     assert unit_can_aoe(_caster(UnitTypeId.RAVAGER, 0.0)) is True
     assert unit_can_aoe(_caster(UnitTypeId.MARINE, 200.0)) is False
@@ -824,6 +886,51 @@ def test_unit_can_aoe_energy_and_ghost_vs_protoss():
     assert unit_can_aoe(ghost, enemy_race="terran") is False
     assert unit_can_aoe(ghost) is False
     assert unit_can_aoe(_caster(UnitTypeId.GHOST, 74.0), enemy_race="protoss") is False
+
+
+def test_unit_can_aoe_respects_ability_cooldown_cache():
+    from sc2.ids.ability_id import AbilityId
+
+    ravager = _caster(UnitTypeId.RAVAGER, 0.0)
+    ravager.tag = 42
+    bot = MagicMock()
+    bot._available_abilities_by_tag = {42: {AbilityId.EFFECT_CORROSIVEBILE}}
+    assert unit_can_aoe(ravager, bot=bot) is True
+
+    bot._available_abilities_by_tag = {42: set()}
+    assert unit_can_aoe(ravager, bot=bot) is False
+
+
+def test_refresh_ability_cache_queries_aoe_with_resources_ignored():
+    """AoE CD query must not double-gate energy (cloak stayed open, AoE closed)."""
+    import asyncio
+    from sc2.ids.ability_id import AbilityId
+    from src.utils.unit_feature_helpers import refresh_healer_ability_cache
+
+    infestor = _caster(UnitTypeId.INFESTOR, 75.0)
+    infestor.tag = 7
+    medivac = _caster(UnitTypeId.MEDIVAC, 50.0)
+    medivac.tag = 8
+
+    async def query(units, ignore_resource_requirements=False):
+        out = {}
+        for u in units:
+            if u.type_id == UnitTypeId.INFESTOR:
+                assert ignore_resource_requirements is True
+                out[u.tag] = {AbilityId.FUNGALGROWTH_FUNGALGROWTH}
+            else:
+                assert ignore_resource_requirements is False
+                out[u.tag] = {AbilityId.MEDIVACHEAL_HEAL}
+        return out
+
+    bot = MagicMock()
+    bot.all_units = [infestor, medivac]
+    bot.client = MagicMock()
+    bot.client.query_available_abilities_with_tag = query
+
+    asyncio.run(refresh_healer_ability_cache(bot))
+    assert AbilityId.FUNGALGROWTH_FUNGALGROWTH in bot._available_abilities_by_tag[7]
+    assert AbilityId.MEDIVACHEAL_HEAL in bot._available_abilities_by_tag[8]
 
 
 def test_issue_aoe_at_point_ravager_bile():

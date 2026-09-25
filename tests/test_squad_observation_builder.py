@@ -8,6 +8,7 @@ from sc2.ids.unit_typeid import UnitTypeId
 
 from src.transformers.squad_observation_builder import SquadObservationBuilder
 from src.agent.squad_constants import (
+    MAX_SQUAD_ENEMIES,
     MAX_SQUAD_UNITS,
     SQUAD_COMMAND_DIM,
     SQUAD_RACE_DIM,
@@ -22,6 +23,8 @@ def training_conf():
         "active_layers": ["allied_unit_biological", "enemy_unit_biological"],
         "active_tactical_layers": ["allied_unit_biological", "enemy_unit_biological"],
         "agent_architecture": "squad",
+        # Explicit: production defaults race on; these shape tests opt out.
+        "include_race": False,
     }
 
 
@@ -32,7 +35,8 @@ def test_zero_observation_shapes(training_conf):
     assert obs["command"].shape == (SQUAD_COMMAND_DIM,)
     assert obs["anchor_tactical"].shape == (2, 32, 32)
     assert "unit_tactical" not in obs
-    assert "race" not in obs
+    assert obs["tactical_enemy_mask"].shape == (MAX_SQUAD_ENEMIES,)
+    assert obs["engage_enemy_mask"].shape == (MAX_SQUAD_ENEMIES,)
     assert obs["unit_scalars"].shape == (MAX_SQUAD_UNITS, builder.unit_feat_dim)
     assert builder.unit_feat_dim == SQUAD_UNIT_FEAT_DIM  # default = full catalog
     assert obs["unit_mask"].shape == (MAX_SQUAD_UNITS,)

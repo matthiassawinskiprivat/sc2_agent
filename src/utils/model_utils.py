@@ -261,6 +261,42 @@ def policy_state_dict_finite(state_dict: Dict[str, Any]) -> bool:
     return not non_finite_state_dict_keys(state_dict, max_keys=1)
 
 
+def policy_params_checksum(policy: torch.nn.Module, *, digest_len: int = 16) -> str:
+    """
+    Device-invariant fingerprint of ``policy.state_dict()`` (CPU float32 bytes).
+
+    Prefer ``rollout_policy_zip_checksum`` when pairing async IPC — that hashes the
+    exact ``policy.pth`` bytes the learner will load, avoiding GPU-reduction noise
+    and shared-module alias differences vs the on-disk zip.
+    """
+    import hashlib
+
+    hasher = hashlib.sha1()
+    with torch.no_grad():
+        for name, value in sorted(policy.state_dict().items()):
+            if not isinstance(value, torch.Tensor):
+                continue
+            arr = (
+                value.detach()
+                .to(dtype=torch.float32, device="cpu")
+                .contiguous()
+                .numpy()
+            )
+            hasher.update(name.encode("utf-8"))
+            hasher.update(arr.tobytes())
+    return hasher.hexdigest()[:digest_len]
+
+
+def rollout_policy_zip_checksum(zip_path: str, *, digest_len: int = 16) -> str:
+    """SHA1 of the SB3 zip's ``policy.pth`` member — stable across collector/learner."""
+    import hashlib
+    import zipfile
+
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        payload = archive.read("policy.pth")
+    return hashlib.sha1(payload).hexdigest()[:digest_len]
+
+
 def inspect_checkpoint_policy_weights(
     zip_path: str, *, max_keys: int = 8
 ) -> Tuple[bool, str, List[str]]:
@@ -869,6 +905,72 @@ def apply_loud_command_head_init(
                 head.bias[idx].copy_(head.bias[idx] + extra_f)
             boosted.append(idx)
     return boosted
+
+
+# A unit-pointer command has no counterpart in the universal attack curriculum,
+# so its command_head row arrives as a near-zero padded ``_unused`` row that can
+# never out-compete a peaked attack logit. Seed it from the spatial head it
+# generalises, exactly like the loud-command graft prior, but automatically —
+# the mapping is a property of the architecture, not of any one level's YAML.
+POINTER_COMMAND_ROW_TEMPLATES: Dict[str, str] = {
+    "attack_unit": "attack_local",
+    "heal_unit": "heal_local",
+    # load_unit is introduced with unload at ctf_level_24; no prior spatial
+    # load row exists in the graft. Seed from attack_local so the new head is
+    # not a near-zero padded unused logit at first sample.
+    "load_unit": "attack_local",
+}
+
+
+def seed_pointer_command_rows(
+    policy_or_model: Any,
+    command_names: Sequence[str],
+    *,
+    templates: Optional[Dict[str, str]] = None,
+) -> List[int]:
+    """Copy each pointer command's template ``command_head`` row onto it.
+
+    Full copy (not a blend): ``attack_unit`` *is* ``attack_local`` with a unit
+    target instead of a cell, so the grafted attack logits transfer directly.
+    Idempotent — copying the same source row twice is a no-op. Returns the
+    command indices that were seeded.
+    """
+    table = dict(POINTER_COMMAND_ROW_TEMPLATES if templates is None else templates)
+    head = _resolve_command_head(policy_or_model)
+    if head is None:
+        return []
+    names = [str(n).lower() for n in command_names]
+    name_to_idx = {n: i for i, n in enumerate(names)}
+    n_out = int(head.weight.shape[0])
+    seeded: List[int] = []
+    with torch.no_grad():
+        for new_name, template_name in table.items():
+            dst = name_to_idx.get(new_name)
+            src = name_to_idx.get(template_name)
+            if dst is None or src is None or dst == src:
+                continue
+            if max(dst, src) >= n_out or max(dst, src) >= int(head.bias.numel()):
+                continue
+            head.weight[dst].copy_(head.weight[src])
+            head.bias[dst].copy_(head.bias[src])
+            seeded.append(dst)
+    if seeded:
+        logger.info(f"Seeded pointer command rows from templates: indices={seeded}")
+    return seeded
+
+
+def maybe_seed_pointer_command_rows(
+    policy_or_model: Any,
+    training_conf: Optional[dict],
+    *,
+    resume: bool,
+) -> List[int]:
+    """Curriculum-graft hook for pointer commands. No-op on same-level resume."""
+    if resume:
+        return []
+    return seed_pointer_command_rows(
+        policy_or_model, configured_command_names(training_conf)
+    )
 
 
 def maybe_apply_loud_command_head_init(

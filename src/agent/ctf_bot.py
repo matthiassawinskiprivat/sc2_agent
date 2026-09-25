@@ -20,16 +20,56 @@ from src.utils.unit_feature_helpers import (
     first_unit_of_type,
     heal_click_cell_half,
     heal_click_hits_unit,
+    heal_target_is_eligible,
     HEAL_CAST_RANGE,
     is_force_melee_unit,
     issue_aoe_at_point,
     issue_attack_at_point,
     perspective_unit_groups,
+    uses_purification_nova_for_attack,
+    uses_spawn_locusts_for_attack,
 )
 from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
+from src.agent.squad_constants import (
+    ALLY_TARGET_COMMAND_HEADS,
+    ENEMY_TARGET_COMMAND_HEADS,
+    LOAD_TARGET_COMMAND_HEADS,
+)
+from src.agent.ctf_economic_rewards import (
+    ROLE_ATTACK,
+    ROLE_DEFEND,
+    EconomicRewardConfig,
+    UnitValue,
+    build_value_snapshot,
+    retained_value_fraction,
+    value_delta,
+)
+
+# Per-step economic telemetry keys (all in normalised economic value units).
+ECONOMIC_METRIC_KEYS: Tuple[str, ...] = (
+    "economic_damage_dealt",
+    "economic_enemy_killed",
+    "economic_attacker_loss",
+    "economic_defender_loss",
+    "economic_healing",
+)
+EMPTY_ECONOMIC_METRICS: Dict[str, float] = {key: 0.0 for key in ECONOMIC_METRIC_KEYS}
+
+# Command heads whose terminal target is a unit pointer, not a world cell.
+UNIT_TARGET_COMMAND_HEADS: Tuple[str, ...] = (
+    ALLY_TARGET_COMMAND_HEADS + LOAD_TARGET_COMMAND_HEADS + ENEMY_TARGET_COMMAND_HEADS
+)
 
 # Per-step TensorBoard command mix (trainee tags only; see env _record_command_metrics).
-COMMAND_METRIC_KINDS: Tuple[str, ...] = ("move", "attack", "cloak", "uncloak")
+COMMAND_METRIC_KINDS: Tuple[str, ...] = (
+    "move",
+    "attack",
+    "cloak",
+    "uncloak",
+    "aoe",
+    "load",
+    "unload",
+)
 
 
 def _missing_health(unit: Any) -> float:
@@ -97,6 +137,14 @@ class CaptureTheFlagBot(BotAI):
             1: {},
             2: {},
         }
+        # tag → UnitValue (economic value, vitality, position, role) per
+        # perspective. Drives the resource-weighted role rewards; the HP ledgers
+        # above remain only as the baseline-ready / fog-of-war bookkeeping they
+        # always were. See src/agent/ctf_economic_rewards.py.
+        self.prev_enemy_value_snapshot: Dict[int, Dict[int, UnitValue]] = {1: {}, 2: {}}
+        self.prev_own_value_snapshot: Dict[int, Dict[int, UnitValue]] = {1: {}, 2: {}}
+        # Per-step economic telemetry, popped by the env for TensorBoard.
+        self._step_economic_metrics: Dict[str, float] = dict(EMPTY_ECONOMIC_METRICS)
         self.prev_dist_to_pylon = {1: None, 2: None}
         self.prev_dist_per_unit: Dict[int, Optional[float]] = {}
         # Squad CoM distance tracking: (player_id, role) → float distance
@@ -121,10 +169,19 @@ class CaptureTheFlagBot(BotAI):
 
         # Cooldown-retreat shaping — populated by record_pre_action_retreat_state()
         # before apply_action so the delta is single-step accurate in squad cycling.
+        # Enemy CoM is frozen at pre-action so opponent chase in the same physics
+        # step cannot cancel credit for the unit's own retreat (Marine vs Zergling).
         self._pre_action_weapon_cd_by_unit: Dict[int, float] = {}
         self._pre_action_dist_to_enemy_com: Dict[int, float] = {}
+        self._pre_action_enemy_com: Dict[int, Point2] = {}
         self._pre_action_dist_to_defend_pylon: Dict[int, float] = {}
+        # True when this unit's last *policy* order was a move / attack. Attack is
+        # snapshotted at record_pre_action time as "fired last step" so the kite
+        # window still opens when weapon_cooldown has already ticked to 0 across
+        # a long multi-unit physics step (Marine CD ≈ one paired squad step).
         self.last_action_was_move_by_unit: Dict[int, bool] = {}
+        self.last_action_was_attack_by_unit: Dict[int, bool] = {}
+        self._pre_action_attacked_prev_step: Dict[int, bool] = {}
         # Healer tags where this step's heal/repair/transfuse is a genuinely
         # *new* engagement (new patient, or the previous lock lapsed).
         # heal_cast_reward only pays when a selected tag is in this set, so a
@@ -144,7 +201,8 @@ class CaptureTheFlagBot(BotAI):
         self._heal_order_tags: Set[int] = set()
         # Selected tags that received a heal_* command this step (hit or miss).
         self._heal_attempt_tags: Set[int] = set()
-        # Selected tags that received move / attack / cloak / uncloak this step.
+        # Selected tags that received move / attack / cloak / uncloak / aoe /
+        # load / unload this step.
         self._command_attempt_tags: Dict[str, Set[int]] = {
             kind: set() for kind in COMMAND_METRIC_KINDS
         }
@@ -176,7 +234,7 @@ class CaptureTheFlagBot(BotAI):
         return self._count_heal_tags(getattr(self, "_heal_attempt_tags", None), squad_tags)
 
     def count_command_attempts_for_tags(self, kind: str, squad_tags: Iterable) -> int:
-        """How many selected units were given a move/attack/cloak/uncloak this step."""
+        """How many selected units were given this command kind this step."""
         buckets = getattr(self, "_command_attempt_tags", None)
         if not isinstance(buckets, dict):
             return 0
@@ -199,7 +257,7 @@ class CaptureTheFlagBot(BotAI):
         attempts.add(tag)
 
     def _mark_command_attempt(self, unit: Unit, kind: str) -> None:
-        """Record that ``unit`` received a move/attack/cloak/uncloak order this step."""
+        """Record that ``unit`` received this command kind this step."""
         if kind not in COMMAND_METRIC_KINDS:
             return
         tag = int(getattr(unit, "tag", 0) or 0)
@@ -237,6 +295,9 @@ class CaptureTheFlagBot(BotAI):
         self.prev_enemy_unit_count: Dict[int, int] = {1: 0, 2: 0}
         self.prev_own_unit_count: Dict[int, int] = {1: 0, 2: 0}
         self.prev_enemy_combat_snapshot = {1: {}, 2: {}}
+        self.prev_enemy_value_snapshot = {1: {}, 2: {}}
+        self.prev_own_value_snapshot = {1: {}, 2: {}}
+        self._step_economic_metrics = dict(EMPTY_ECONOMIC_METRICS)
         self.prev_dist_to_pylon = {1: None, 2: None}
         self.prev_dist_per_unit = {}
         self.unit_command_map = {}
@@ -245,8 +306,11 @@ class CaptureTheFlagBot(BotAI):
         self.prev_dist_per_squad = {}
         self._pre_action_weapon_cd_by_unit = {}
         self._pre_action_dist_to_enemy_com = {}
+        self._pre_action_enemy_com = {}
         self._pre_action_dist_to_defend_pylon = {}
         self.last_action_was_move_by_unit = {}
+        self.last_action_was_attack_by_unit = {}
+        self._pre_action_attacked_prev_step = {}
         self._heal_cast_tags = set()
         self._heal_order_tags = set()
         self._heal_attempt_tags = set()
@@ -265,10 +329,28 @@ class CaptureTheFlagBot(BotAI):
         return total
 
     def prime_combat_reward_baselines(self) -> None:
-        """Snapshot army/pylon HP after spawn so the first physics step is not a fake heal."""
+        """Snapshot army value/HP/pylon HP after spawn.
+
+        Without this the first physics step compares a full army against an empty
+        baseline and pays the whole army's economic value as healing.
+        """
+        econ = EconomicRewardConfig.from_rewards_conf(
+            self.training_conf.get("rewards", {})
+        )
         for p_id in (1, 2):
             own_units, enemy_units, own_structs, enemy_structs = self._perspective_unit_groups(
                 p_id
+            )
+            self.prev_own_value_snapshot[p_id] = build_value_snapshot(
+                own_units,
+                config=econ,
+                include_filter=counts_for_combat_hp_reward,
+                role_for_tag=lambda tag: self.unit_command_map.get(tag, ROLE_ATTACK),
+            )
+            self.prev_enemy_value_snapshot[p_id] = build_value_snapshot(
+                enemy_units,
+                config=econ,
+                include_filter=counts_for_combat_hp_reward,
             )
             self.prev_own_units_health[p_id] = self._mobile_combat_hp_sum(
                 own_units, include_filter=counts_for_combat_hp_reward
@@ -487,17 +569,49 @@ class CaptureTheFlagBot(BotAI):
         spatial_mask = np.ones(32 * 32, dtype=bool)
         return np.concatenate([cmd_mask, spatial_mask])
 
-    def squad_action_masks(self, unit_mask: np.ndarray) -> np.ndarray:
-        """Flat mask for squad pointer + command + spatial action vector."""
+    def squad_action_masks(
+        self,
+        unit_mask: np.ndarray,
+        obs: Optional[Dict[str, np.ndarray]] = None,
+    ) -> np.ndarray:
+        """Flat mask for the squad ``[actors | command | target | spatial]`` vector.
+
+        Only the **actor** and **command** slices carry information here.
+        Actor/target legality that depends on the sampled command lives in the
+        observation (``heal_actor_mask`` / ``heal_target_mask`` / ``enemy_mask``
+        / ``command_modes`` / AoE / unload / cloak masks) and is applied inside
+        ``SquadRecurrentPolicy``, because the command has not been sampled yet
+        when this mask is built.
+
+        Command legality gates a head whose prerequisites are entirely absent:
+        ``heal_unit`` needs a ready healer *and* a wounded compatible ally,
+        ``load_unit`` needs a load-capable actor *and* a compatible partner,
+        ``attack_unit`` / ``attack_local`` need a weapon-ready attacker,
+        ``attack_unit`` also needs a visible **mobile** hostile, ``attack_local`` /
+        ``aoe_local`` a mobile *or building* within tactical half-width of any
+        living ally (``engage_enemy_mask`` — buildings are not pointer slots but
+        spatial attack already hard-targets them), ``aoe_local`` also a ready
+        caster (Viper needs air in that engage fovea),
+        ``unload_local`` a loaded transport, ``cloak_burrow`` a unit that can
+        conceal, and ``uncloak_unburrow`` a currently concealed unit.
+        """
         from src.agent.squad_constants import (
+            CMD_MODE_ALLY_TARGET,
+            CMD_MODE_AOE,
+            CMD_MODE_ATTACK_LOCAL,
+            CMD_MODE_CLOAK,
+            CMD_MODE_ENEMY_TARGET,
+            CMD_MODE_LOAD_TARGET,
+            CMD_MODE_UNCLOAK,
+            CMD_MODE_UNLOAD,
             MAX_SQUAD_UNITS,
-            squad_action_space_nvec,
+            SQUAD_FLAT_ACTION_DIM,
+            SQUAD_MASK_COMMAND_OFFSET,
+            command_target_modes,
         )
         from src.agent.universal_constants import FIXED_UNIVERSAL_COMMAND_DIM
 
-        nvec = squad_action_space_nvec()
-        flat_len = int(sum(nvec))
-        mask = np.ones(flat_len, dtype=bool)
+        mask = np.ones(SQUAD_FLAT_ACTION_DIM, dtype=bool)
         unit_mask = np.asarray(unit_mask, dtype=np.float32).reshape(-1)
         for i in range(min(MAX_SQUAD_UNITS, len(unit_mask))):
             if unit_mask[i] < 0.5:
@@ -505,13 +619,73 @@ class CaptureTheFlagBot(BotAI):
                 # makes MaskableCategorical fall back to uniform 50/50 sampling.
                 mask[i * 2] = True
                 mask[i * 2 + 1] = False
+
         action_heads = list(self.training_conf.get("action_heads") or [])
         categorical_heads = list(self.training_conf.get("categorical_heads") or [])
-        configured = action_heads + categorical_heads
-        n_configured = min(FIXED_UNIVERSAL_COMMAND_DIM, len(configured))
-        cmd_start = MAX_SQUAD_UNITS * 2
+        n_configured = min(
+            FIXED_UNIVERSAL_COMMAND_DIM, len(action_heads) + len(categorical_heads)
+        )
+        cmd_start = SQUAD_MASK_COMMAND_OFFSET
         mask[cmd_start : cmd_start + FIXED_UNIVERSAL_COMMAND_DIM] = False
         mask[cmd_start : cmd_start + n_configured] = True
+
+        if obs is not None:
+            modes = command_target_modes(action_heads, categorical_heads)
+            has_heal = bool(
+                np.any(np.asarray(obs.get("heal_actor_mask", 0.0)) > 0.5)
+                and np.any(np.asarray(obs.get("heal_target_mask", 0.0)) > 0.5)
+            )
+            has_load = bool(
+                np.any(np.asarray(obs.get("load_actor_mask", 0.0)) > 0.5)
+                and np.any(np.asarray(obs.get("load_target_mask", 0.0)) > 0.5)
+            )
+            has_attack_ready = bool(
+                np.any(np.asarray(obs.get("attack_actor_mask", 0.0)) > 0.5)
+            )
+            has_enemy = bool(np.any(np.asarray(obs.get("enemy_mask", 0.0)) > 0.5))
+            # Prefer engage (any-ally fovea); fall back to hard-anchor crop for
+            # older obs dicts / tests that only populate tactical_enemy_mask.
+            engage = obs.get("engage_enemy_mask", None)
+            if engage is None:
+                engage = obs.get("tactical_enemy_mask", 0.0)
+            has_engage_enemy = bool(np.any(np.asarray(engage) > 0.5))
+            has_aoe = bool(np.any(np.asarray(obs.get("aoe_actor_mask", 0.0)) > 0.5))
+            has_unload = bool(
+                np.any(np.asarray(obs.get("unload_actor_mask", 0.0)) > 0.5)
+            )
+            has_cloak = bool(
+                np.any(np.asarray(obs.get("cloak_actor_mask", 0.0)) > 0.5)
+            )
+            has_uncloak = bool(
+                np.any(np.asarray(obs.get("uncloak_actor_mask", 0.0)) > 0.5)
+            )
+            for idx in range(n_configured):
+                mode = int(round(float(modes[idx])))
+                if mode == CMD_MODE_ALLY_TARGET and not has_heal:
+                    mask[cmd_start + idx] = False
+                elif mode == CMD_MODE_LOAD_TARGET and not has_load:
+                    mask[cmd_start + idx] = False
+                elif mode == CMD_MODE_ENEMY_TARGET and (
+                    not has_enemy or not has_attack_ready
+                ):
+                    mask[cmd_start + idx] = False
+                elif mode == CMD_MODE_ATTACK_LOCAL and (
+                    not has_engage_enemy or not has_attack_ready
+                ):
+                    mask[cmd_start + idx] = False
+                elif mode == CMD_MODE_AOE and (
+                    not has_aoe or not has_engage_enemy
+                ):
+                    mask[cmd_start + idx] = False
+                elif mode == CMD_MODE_UNLOAD and not has_unload:
+                    mask[cmd_start + idx] = False
+                elif mode == CMD_MODE_CLOAK and not has_cloak:
+                    mask[cmd_start + idx] = False
+                elif mode == CMD_MODE_UNCLOAK and not has_uncloak:
+                    mask[cmd_start + idx] = False
+            if not mask[cmd_start : cmd_start + n_configured].any():
+                # Never hand the policy a fully-masked command slice.
+                mask[cmd_start : cmd_start + n_configured] = True
         return mask
 
     async def apply_squad_action(
@@ -522,8 +696,14 @@ class CaptureTheFlagBot(BotAI):
         command_idx: int,
         spatial_idx: int,
         perspective_player_id: int,
+        target_unit_tag: Optional[int] = None,
     ) -> None:
-        """Apply one squad group order to selected units (shared world target).
+        """Apply one squad group order to selected units.
+
+        Spatial commands share one decoded world ``Point2`` (agent-faithful: the
+        clicked cell is the order target). Unit-pointer commands (``heal_unit``,
+        ``load_unit``, ``attack_unit``) instead take ``target_unit_tag``, the SC2
+        tag the policy selected through the terminal target slot.
 
         ``perspective_player_id`` is the env's SC2 owner for this order (trainee
         or opponent). Spatial cells are world-frame for every owner: no 180°
@@ -570,11 +750,17 @@ class CaptureTheFlagBot(BotAI):
                 self._mark_command_attempt(unit, metric_kind)
                 self._issue_cloak_burrow(unit, conceal=conceal)
                 self._unit_last_order[int(unit_tag)] = (head_name, None)
-                self.last_action_was_move_by_unit[int(unit_tag)] = False
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             return
 
         if is_categorical:
             return  # Unknown categorical head — no-op
+
+        if head_name in UNIT_TARGET_COMMAND_HEADS:
+            self._apply_unit_target_command(
+                selected_tags, head_name=head_name, target_unit_tag=target_unit_tag
+            )
+            return
 
         decode_unit = anchor
         world_x, world_y = agent.convert_spatial_action_to_world(
@@ -597,32 +783,114 @@ class CaptureTheFlagBot(BotAI):
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
                 # Misses are no-ops, not moves: cooldown-retreat must not treat
                 # a failed Transfuse as a kite.
-                self.last_action_was_move_by_unit[int(unit_tag)] = False
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif self._refresh_heal_lock(unit):
                 # Walk-in + Transfuse/Heal start still inside the lock window.
                 continue
             elif "aoe" in head_name:
+                self._mark_command_attempt(unit, "aoe")
                 issue_aoe_at_point(self, unit, target)
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
-                self.last_action_was_move_by_unit[int(unit_tag)] = False
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif "unload" in head_name:
+                self._mark_command_attempt(unit, "unload")
                 self._issue_unload_at_point(unit, target)
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
-                self.last_action_was_move_by_unit[int(unit_tag)] = False
-            elif "load" in head_name:
-                self._issue_load_at_point(unit, target)
-                self._unit_last_order[int(unit_tag)] = (head_name, target)
-                self.last_action_was_move_by_unit[int(unit_tag)] = False
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif "attack" in head_name:
                 issue_attack_at_point(self, unit, target)
                 self._mark_command_attempt(unit, "attack")
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
-                self.last_action_was_move_by_unit[int(unit_tag)] = False
+                self._set_last_order_flags(unit_tag, moved=False, attacked=True)
             else:
                 self.do(unit.move(target))
                 self._mark_command_attempt(unit, "move")
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
-                self.last_action_was_move_by_unit[int(unit_tag)] = True
+                self._set_last_order_flags(unit_tag, moved=True, attacked=False)
+
+    def _apply_unit_target_command(
+        self,
+        selected_tags: List[int],
+        *,
+        head_name: str,
+        target_unit_tag: Optional[int],
+    ) -> None:
+        """Issue ``heal_unit`` / ``load_unit`` / ``attack_unit`` against one tag.
+
+        The policy already chose *which* unit through the terminal target slot, so
+        there is no cell geometry to get wrong and no hidden retargeting: the
+        order goes to exactly that tag. Per-caster legality is still re-checked
+        (an SCV cannot repair a Marine; a full Medivac cannot load), because the
+        observation's target masks only guarantee *some* actor in the squad matches.
+        """
+        if target_unit_tag is None:
+            return
+        target = self.all_units.find_by_tag(int(target_unit_tag))
+        if target is None:
+            return
+        is_heal = head_name in ALLY_TARGET_COMMAND_HEADS
+        is_load = head_name in LOAD_TARGET_COMMAND_HEADS
+        for unit_tag in selected_tags:
+            unit = self.all_units.find_by_tag(unit_tag)
+            if unit is None or unit.type_id == UnitTypeId.SHIELDBATTERY:
+                continue
+            if int(getattr(unit, "tag", 0) or 0) == int(target_unit_tag):
+                continue  # never order a unit onto itself
+            if is_heal:
+                self._mark_heal_command_attempt(unit)
+                self._issue_heal_on_unit(unit, target)
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
+            elif is_load:
+                self._mark_command_attempt(unit, "load")
+                self._issue_load_on_unit(unit, target)
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
+            else:
+                self._issue_attack_on_unit(unit, target)
+                self._mark_command_attempt(unit, "attack")
+                self._set_last_order_flags(unit_tag, moved=False, attacked=True)
+            self._unit_last_order[int(unit_tag)] = (head_name, target.position)
+
+    def _issue_attack_on_unit(self, unit: Unit, target: Unit) -> None:
+        """Focus-fire ``target``; skip friendly fire under ``debug_control_enemy``.
+
+        Both armies look allied to the P1 client after ``debug_control_enemy``, so
+        hostility must be decided by ``owner_id`` — an alliance-bucket check would
+        happily let the opponent shoot its own army and inflate damage rewards.
+
+        Weaponless casters whose spatial attack already remaps (Swarm Host →
+        Spawn Locusts, Disruptor → Purification Nova) cast at ``target.position``
+        so ``attack_unit`` stays agent-faithful to the same ability mapping.
+        """
+        if int(getattr(target, "owner_id", 0) or 0) == int(
+            getattr(unit, "owner_id", 0) or 0
+        ):
+            return
+        if uses_spawn_locusts_for_attack(unit):
+            self.do(unit(AbilityId.EFFECT_SPAWNLOCUSTS, target.position))
+            return
+        if uses_purification_nova_for_attack(unit):
+            self.do(unit(AbilityId.EFFECT_PURIFICATIONNOVA, target.position))
+            return
+        self.do(unit.attack(target))
+
+    def _issue_heal_on_unit(self, healer: Unit, patient: Unit) -> Optional[str]:
+        """Heal/Repair/Transfuse ``patient`` directly, bookkeeping casts as usual."""
+        if int(getattr(patient, "owner_id", 0) or 0) != int(
+            getattr(healer, "owner_id", 0) or 0
+        ):
+            return None
+        if getattr(patient, "is_structure", False):
+            return None
+        if not heal_target_is_eligible(healer, patient):
+            return None
+        if _missing_health(patient) <= 0.0:
+            return None
+        ability = self._HEAL_ABILITY_BY_TYPE.get(healer.type_id)
+        if ability is None:
+            return None
+        self.do(healer(ability, patient))
+        self._record_heal_cast(healer, patient)
+        return "cast"
 
     def _allied_units_for_owner(self, owner_id: int) -> List[Unit]:
         """Allied units visible from God-Mode for a given owner."""
@@ -638,23 +906,8 @@ class CaptureTheFlagBot(BotAI):
 
     @staticmethod
     def _heal_target_is_eligible(healer: Unit, ally: Unit) -> bool:
-        """True when ``ally``'s biology matches what ``healer``'s ability can affect.
-
-        Real SC2 silently ignores an order targeting the wrong category — the
-        Medivac's Heal only affects Biological units, the SCV's Repair only
-        affects Mechanical units (or structures, excluded above already).
-        Without this check, a Medivac clicked onto a wounded Siege Tank (or an
-        SCV onto a wounded Marine) resolves a target, credits
-        heal_cast_reward, and sets the walk-in lock — but the in-game order
-        never actually heals anything, so ``heal_reward``'s HP credit never
-        follows and the click is not a real "finish" despite counting as a
-        cast in our own metrics.
-        """
-        if healer.type_id in (UnitTypeId.MEDIVAC, UnitTypeId.QUEEN):
-            return bool(getattr(ally, "is_biological", False))
-        if healer.type_id == UnitTypeId.SCV:
-            return bool(getattr(ally, "is_mechanical", False))
-        return True
+        """Biology compatibility of a heal order (see ``heal_target_is_eligible``)."""
+        return heal_target_is_eligible(healer, ally)
 
     def _resolve_heal_target_in_cell(self, healer: Unit, target: Point2) -> Optional[Unit]:
         """Wounded allied non-structure under the click.
@@ -775,6 +1028,62 @@ class CaptureTheFlagBot(BotAI):
             return False
         return True
 
+    _HEAL_ABILITY_BY_TYPE: Dict[UnitTypeId, AbilityId] = {
+        UnitTypeId.MEDIVAC: AbilityId.MEDIVACHEAL_HEAL,
+        UnitTypeId.SCV: AbilityId.EFFECT_REPAIR_SCV,
+        UnitTypeId.QUEEN: AbilityId.TRANSFUSION_TRANSFUSION,
+    }
+
+    def _record_heal_cast(self, unit: Unit, heal_target: Unit) -> None:
+        """Bookkeep a just-issued heal order (cast metrics, walk-in lock, cooldown).
+
+        A reissue on the *same* patient while the previous cast's walk-in /
+        animation lock is still active is the engine reaffirming one in-flight
+        heal, not a new cast. Crediting ``heal_cast_reward`` on every squad step
+        the policy keeps clicking pays *per step parked on heal*, not per cast
+        landed, which let healing out-earn combat by camping a wounded ally.
+        Only a fresh engagement (new patient, or the previous lock lapsed) is
+        cast-bonus eligible; ``heal_reward``'s per-HP shaping uses the broader
+        ``_heal_order_tags`` so a Medivac beam / SCV repair keeps earning HP
+        credit on every step it actually ticks HP.
+        """
+        tag = int(getattr(unit, "tag", 0) or 0)
+        if not tag:
+            return
+        order_tags = getattr(self, "_heal_order_tags", None)
+        if not isinstance(order_tags, set):
+            self._heal_order_tags = set()
+            order_tags = self._heal_order_tags
+        order_tags.add(tag)
+
+        lock = getattr(self, "_heal_lock", None)
+        if not isinstance(lock, dict):
+            self._heal_lock = {}
+            lock = self._heal_lock
+        patient_tag = int(getattr(heal_target, "tag", 0) or 0)
+
+        prev_entry = lock.get(tag)
+        now = CaptureTheFlagBot._game_loop(self)
+        continuing_same_patient = (
+            prev_entry is not None
+            and int(prev_entry[0]) == patient_tag
+            and now < int(prev_entry[1])
+        )
+        if not continuing_same_patient:
+            from src.utils.unit_feature_helpers import mark_heal_ability_cooldown
+
+            mark_heal_ability_cooldown(self, unit)
+            cast_tags = getattr(self, "_heal_cast_tags", None)
+            if not isinstance(cast_tags, set):
+                self._heal_cast_tags = set()
+                cast_tags = self._heal_cast_tags
+            cast_tags.add(tag)
+        if patient_tag:
+            lock[tag] = (
+                patient_tag,
+                CaptureTheFlagBot._heal_lock_until_loop(self, unit, heal_target),
+            )
+
     def _issue_heal_at_point(self, unit: Unit, target: Point2) -> Optional[str]:
         """Heal the cell-local wounded ally, or no-op on a miss.
 
@@ -788,66 +1097,15 @@ class CaptureTheFlagBot(BotAI):
         Returns ``\"cast\"`` when a heal/repair/transfuse was issued, or
         ``None`` for a miss or non-healer.
         """
-        ability = None
-        if unit.type_id == UnitTypeId.MEDIVAC:
-            ability = AbilityId.MEDIVACHEAL_HEAL
-        elif unit.type_id == UnitTypeId.SCV:
-            ability = AbilityId.EFFECT_REPAIR_SCV
-        elif unit.type_id == UnitTypeId.QUEEN:
-            ability = AbilityId.TRANSFUSION_TRANSFUSION
-        else:
+        ability = self._HEAL_ABILITY_BY_TYPE.get(unit.type_id)
+        if ability is None:
             return None
 
         heal_target = self._resolve_heal_target_in_cell(unit, target)
         if heal_target is None:
             return None
         self.do(unit(ability, heal_target))
-        tag = int(getattr(unit, "tag", 0) or 0)
-        if tag:
-            order_tags = getattr(self, "_heal_order_tags", None)
-            if not isinstance(order_tags, set):
-                self._heal_order_tags = set()
-                order_tags = self._heal_order_tags
-            order_tags.add(tag)
-
-            lock = getattr(self, "_heal_lock", None)
-            if not isinstance(lock, dict):
-                self._heal_lock = {}
-                lock = self._heal_lock
-            patient_tag = int(getattr(heal_target, "tag", 0) or 0)
-
-            # A reissue on the *same* patient while the previous cast's
-            # walk-in/animation lock is still active is the engine reaffirming
-            # one in-flight heal, not a new cast. Crediting heal_cast_reward
-            # on every squad step the policy keeps clicking pays *per step
-            # parked on heal*, not per cast landed — that let heal_local
-            # out-earn combat just by camping a wounded ally and crowded out
-            # attack_local. Only a fresh engagement (new patient, or the
-            # previous lock lapsed) is cast_bonus-eligible; heal_reward's
-            # per-HP shaping still uses the broader ``_heal_order_tags`` above
-            # so a Medivac beam / SCV repair keeps earning HP credit on every
-            # step it actually ticks HP, not just the step that started it.
-            prev_entry = lock.get(tag)
-            now = CaptureTheFlagBot._game_loop(self)
-            continuing_same_patient = (
-                prev_entry is not None
-                and int(prev_entry[0]) == patient_tag
-                and now < int(prev_entry[1])
-            )
-            if not continuing_same_patient:
-                from src.utils.unit_feature_helpers import mark_heal_ability_cooldown
-
-                mark_heal_ability_cooldown(self, unit)
-                cast_tags = getattr(self, "_heal_cast_tags", None)
-                if not isinstance(cast_tags, set):
-                    self._heal_cast_tags = set()
-                    cast_tags = self._heal_cast_tags
-                cast_tags.add(tag)
-            if patient_tag:
-                lock[tag] = (
-                    patient_tag,
-                    CaptureTheFlagBot._heal_lock_until_loop(self, unit, heal_target),
-                )
+        self._record_heal_cast(unit, heal_target)
         return "cast"
 
     _TRANSPORT_LOAD_ABILITY = {
@@ -864,6 +1122,20 @@ class CaptureTheFlagBot(BotAI):
         UnitTypeId.WARPPRISM: AbilityId.UNLOADALLAT_WARPPRISM,
         UnitTypeId.WARPPRISMPHASING: AbilityId.UNLOADALL_WARPPRISM,
     }
+
+    def _issue_load_on_unit(self, unit: Unit, target: Unit) -> None:
+        """Dual-role load by tag: transport LOADs passenger; passenger smarts onto transport."""
+        from src.utils.unit_feature_helpers import load_pair_is_eligible, unit_is_transport
+
+        if not load_pair_is_eligible(unit, target):
+            return
+        if unit_is_transport(unit):
+            ability = self._TRANSPORT_LOAD_ABILITY.get(unit.type_id)
+            if ability is None:
+                return
+            self.do(unit(ability, target))
+            return
+        self.do(unit.smart(target))
 
     def _resolve_loadable_in_cell(self, transport: Unit, target: Point2) -> Optional[Unit]:
         """Allied non-transport in the clicked cell (loadable passenger)."""
@@ -890,7 +1162,7 @@ class CaptureTheFlagBot(BotAI):
         return None
 
     def _issue_load_at_point(self, unit: Unit, target: Point2) -> None:
-        """Dual-role load: transport LOADs cell ally; non-transport smarts onto cell transport."""
+        """Legacy cell-click load (tests / non-squad paths). Prefer ``_issue_load_on_unit``."""
         cargo_max = int(getattr(unit, "cargo_max", 0) or 0)
         if cargo_max > 0:
             ability = self._TRANSPORT_LOAD_ABILITY.get(unit.type_id)
@@ -1027,7 +1299,7 @@ class CaptureTheFlagBot(BotAI):
                     )
                     self._issue_cloak_burrow(unit, conceal=conceal)
                     self._unit_last_order[unit_tag] = (head_name, None)
-                    self.last_action_was_move_by_unit[unit_tag] = False
+                    self._set_last_order_flags(unit_tag, moved=False, attacked=False)
                 return
 
             head_name = action_heads[head_idx]
@@ -1041,31 +1313,29 @@ class CaptureTheFlagBot(BotAI):
                 self._mark_heal_command_attempt(unit)
                 self._issue_heal_at_point(unit, target)
                 self._unit_last_order[unit_tag] = (head_name, target)
-                self.last_action_was_move_by_unit[unit_tag] = False
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif self._refresh_heal_lock(unit):
                 return
             elif "aoe" in head_name:
+                self._mark_command_attempt(unit, "aoe")
                 issue_aoe_at_point(self, unit, target)
                 self._unit_last_order[unit_tag] = (head_name, target)
-                self.last_action_was_move_by_unit[unit_tag] = False
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif "unload" in head_name:
+                self._mark_command_attempt(unit, "unload")
                 self._issue_unload_at_point(unit, target)
                 self._unit_last_order[unit_tag] = (head_name, target)
-                self.last_action_was_move_by_unit[unit_tag] = False
-            elif "load" in head_name:
-                self._issue_load_at_point(unit, target)
-                self._unit_last_order[unit_tag] = (head_name, target)
-                self.last_action_was_move_by_unit[unit_tag] = False
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif "attack" in head_name:
                 issue_attack_at_point(self, unit, target)
                 self._mark_command_attempt(unit, "attack")
                 self._unit_last_order[unit_tag] = (head_name, target)
-                self.last_action_was_move_by_unit[unit_tag] = False
+                self._set_last_order_flags(unit_tag, moved=False, attacked=True)
             else:
                 self.do(unit.move(target))
                 self._mark_command_attempt(unit, "move")
                 self._unit_last_order[unit_tag] = (head_name, target)
-                self.last_action_was_move_by_unit[unit_tag] = True
+                self._set_last_order_flags(unit_tag, moved=True, attacked=False)
         else:
             # Original: flat integer action on grid_size×grid_size grid
             grid_area = self.grid_size * self.grid_size
@@ -1085,7 +1355,9 @@ class CaptureTheFlagBot(BotAI):
                 self.do(unit.move(target))
             head_name_orig = "attack" if is_attack else "move"
             self._unit_last_order[unit_tag] = (head_name_orig, target)
-            self.last_action_was_move_by_unit[unit_tag] = not is_attack
+            self._set_last_order_flags(
+                unit_tag, moved=not is_attack, attacked=is_attack
+            )
 
     def _enemies_for_unit(self, unit: Unit) -> List[Unit]:
         """Return hostile mobile units for ``unit`` in God-Mode (bot.player_id is always P1)."""
@@ -1161,22 +1433,6 @@ class CaptureTheFlagBot(BotAI):
                 return True
         return False
 
-    @staticmethod
-    def _scaled_damage_reward_coeff(r_conf: Dict, *, squad_is_melee: bool) -> float:
-        base = float(r_conf.get("damage_reward", 0.1))
-        if not squad_is_melee:
-            return base
-        melee_mult = float(r_conf.get("melee_multiplier", 0.5))
-        return base * (melee_mult + 1.0)
-
-    @staticmethod
-    def _scaled_damage_penalty_coeff(r_conf: Dict, *, squad_is_melee: bool) -> float:
-        base = float(r_conf.get("damage_penalty", 0.1))
-        if not squad_is_melee:
-            return base
-        melee_mult = float(r_conf.get("melee_multiplier", 0.5))
-        return base * melee_mult
-
     def _defend_pylon_pos_for_unit(
         self, unit: Unit, fallback_pylon_pos: Optional[Point2] = None
     ) -> Optional[Point2]:
@@ -1197,30 +1453,55 @@ class CaptureTheFlagBot(BotAI):
         pylon = first_unit_of_type(structs, UnitTypeId.PYLON)
         return pylon.position if pylon is not None else None
 
+    def _set_last_order_flags(
+        self, unit_tag: int, *, moved: bool = False, attacked: bool = False
+    ) -> None:
+        """Record whether this unit's latest policy/reissue order was move or attack."""
+        tag = int(unit_tag)
+        self.last_action_was_move_by_unit[tag] = bool(moved)
+        self.last_action_was_attack_by_unit[tag] = bool(attacked)
+
     def record_pre_action_retreat_state(self, unit_tag: int) -> None:
         """
         Snapshot pre-action state for per-step distance shaping.
 
-        Captures weapon cooldown / enemy-CoM distance (cooldown retreat) and
-        distance to the defender pylon (defender zone penalty).
+        Captures weapon cooldown / enemy-CoM (cooldown retreat) and distance to
+        the defender pylon (defender zone penalty). The enemy CoM point is frozen
+        so post-step chase by faster melee cannot erase retreat credit.
+
+        Also snapshots whether the unit's last order was an attack — paired with
+        cooldown, that opens the kite window even when ``weapon_cooldown`` has
+        already returned to 0 across a long physics step.
         """
         unit = self.all_units.find_by_tag(unit_tag)
         if unit is None:
             self._pre_action_weapon_cd_by_unit.pop(unit_tag, None)
             self._pre_action_dist_to_enemy_com.pop(unit_tag, None)
+            self._pre_action_enemy_com.pop(unit_tag, None)
+            self._pre_action_attacked_prev_step.pop(unit_tag, None)
             self._pre_action_dist_to_defend_pylon.pop(unit_tag, None)
             return
 
-        self._pre_action_weapon_cd_by_unit[unit_tag] = float(
-            getattr(unit, "weapon_cooldown", 0.0) or 0.0
+        # python-sc2 returns -1 when the unit cannot attack.
+        try:
+            raw_cd = float(getattr(unit, "weapon_cooldown", 0.0))
+        except (TypeError, ValueError):
+            raw_cd = 0.0
+        self._pre_action_weapon_cd_by_unit[unit_tag] = max(0.0, raw_cd)
+        self._pre_action_attacked_prev_step[unit_tag] = bool(
+            self.last_action_was_attack_by_unit.get(unit_tag, False)
         )
 
         enemies = self._enemies_for_unit(unit)
         enemy_com = self._enemy_com_in_tactical_fovea(unit, enemies)
         if enemy_com is None:
             self._pre_action_dist_to_enemy_com.pop(unit_tag, None)
+            self._pre_action_enemy_com.pop(unit_tag, None)
         else:
-            self._pre_action_dist_to_enemy_com[unit_tag] = self._dist_to_point(unit, enemy_com)
+            self._pre_action_enemy_com[unit_tag] = enemy_com
+            self._pre_action_dist_to_enemy_com[unit_tag] = self._dist_to_point(
+                unit, enemy_com
+            )
 
         if self.unit_command_map.get(unit_tag, "attack") == "defend":
             pylon_pos = self._defend_pylon_pos_for_unit(unit)
@@ -1237,15 +1518,20 @@ class CaptureTheFlagBot(BotAI):
         self, unit_tag: int, enemies: Iterable[Unit]
     ) -> float:
         """
-        Reward moving away from the enemy cluster CoM while the weapon is on cooldown.
+        Reward moving away from the enemy cluster CoM while in the post-shot kite window.
 
         Gates (all required):
         - ``cooldown_retreat_scale`` > 0 in config
         - Unit has ranged weapon range (> ``_RANGED_WEAPON_RANGE_MIN``)
-        - Pre-action weapon cooldown > 0
-        - Last issued command was a move (not attack)
-        - At least one enemy in the unit's tactical fovea (pre- and post-step)
-        - Distance to enemy CoM increased since the pre-action snapshot
+        - Kite window open: pre-action ``weapon_cooldown`` > 0 **or** the unit's
+          last order was an attack (covers long physics steps that burn CD to 0)
+        - This step's order was a move (not attack)
+        - Enemies were in the unit's tactical fovea at pre-action (frozen CoM)
+        - Distance to that **frozen** pre-action CoM increased
+
+        Distance is measured against the pre-action CoM, not the live post-step
+        CoM. Trainee and opponent act in one physics step; faster melee chase
+        would otherwise shrink the live gap and cancel a correct kite move.
         """
         if unit_tag is None:
             return 0.0
@@ -1259,7 +1545,9 @@ class CaptureTheFlagBot(BotAI):
         unit = self.all_units.find_by_tag(unit_tag)
         if unit is None:
             self._pre_action_dist_to_enemy_com.pop(unit_tag, None)
+            self._pre_action_enemy_com.pop(unit_tag, None)
             self._pre_action_weapon_cd_by_unit.pop(unit_tag, None)
+            self._pre_action_attacked_prev_step.pop(unit_tag, None)
             return 0.0
 
         if not self._is_ranged_combat_unit(unit, enemies):
@@ -1267,21 +1555,19 @@ class CaptureTheFlagBot(BotAI):
 
         pre_cd = self._pre_action_weapon_cd_by_unit.get(unit_tag)
         prev_dist = self._pre_action_dist_to_enemy_com.get(unit_tag)
-        if pre_cd is None or prev_dist is None:
+        pre_com = self._pre_action_enemy_com.get(unit_tag)
+        if pre_cd is None or prev_dist is None or pre_com is None:
             return 0.0
 
         eps = 1e-3
-        if float(pre_cd) <= eps:
+        attacked_prev = bool(self._pre_action_attacked_prev_step.get(unit_tag, False))
+        if float(pre_cd) <= eps and not attacked_prev:
             return 0.0
 
         if not self.last_action_was_move_by_unit.get(unit_tag, False):
             return 0.0
 
-        enemy_com = self._enemy_com_in_tactical_fovea(unit, enemies)
-        if enemy_com is None:
-            return 0.0
-
-        curr_dist = self._dist_to_point(unit, enemy_com)
+        curr_dist = self._dist_to_point(unit, pre_com)
         if curr_dist <= prev_dist + eps:
             return 0.0
 
@@ -1559,78 +1845,120 @@ class CaptureTheFlagBot(BotAI):
             reward += (self.prev_pylon_health[enemy_global_idx] - curr_pylon_hp_map[enemy_global_idx]) * r_conf.get("pylon_damage_reward", 2.0)
             
         if curr_pylon_hp_map[own_global_idx] < self.prev_pylon_health[own_global_idx]:
-            reward -= (self.prev_pylon_health[own_global_idx] - curr_pylon_hp_map[own_global_idx]) * r_conf.get("pylon_damage_penalty", 2.0)
+            # Pylon protection: a defender squad pays a heavier price for letting
+            # its own pylon be hit, since protecting it *is* the defender's job.
+            pylon_penalty = float(r_conf.get("pylon_damage_penalty", 2.0))
+            if self._squad_is_defend(squad_tags, self.unit_command_map):
+                pylon_penalty *= float(r_conf.get("defender_pylon_penalty_scale", 1.5))
+            reward -= (
+                self.prev_pylon_health[own_global_idx]
+                - curr_pylon_hp_map[own_global_idx]
+            ) * pylon_penalty
 
         # Update global health tracking
         self.prev_pylon_health[1] = p1_pylon_hp
         self.prev_pylon_health[2] = p2_pylon_hp
         
-        # 2. Combat Rewards (Mobile Units)
+        # 2. Combat Rewards — resource-weighted economic trades
+        #
+        # Value flows, not hit points: damage pays the *fraction of a unit's
+        # economic value* it removed, so gutting a 300/200 Thor is worth far more
+        # than gutting a 25/0 Zergling. A death pays only the value still
+        # standing, so per-step damage credit plus the death credit sum to exactly
+        # the unit's price — no flat kill bonus double-counting.
         mobile_enemies_for_melee = [u for u in enemy_units if not u.is_structure]
         squad_is_melee = self._squad_has_melee_unit(squad_tags, mobile_enemies_for_melee)
-        damage_reward_coeff = self._scaled_damage_reward_coeff(
-            r_conf, squad_is_melee=squad_is_melee
-        )
-        damage_penalty_coeff = self._scaled_damage_penalty_coeff(
-            r_conf, squad_is_melee=squad_is_melee
-        )
-
-        # Permanent-army HP only (skip timed summons' bodies). Shots from
-        # Interceptors still count: they change permanent units' HP, which is
-        # what this ledger tracks. We only ignore Interceptor launch/recall/
-        # despawn as fake damage_reward / kill_reward.
-        curr_enemy_hp = self._mobile_combat_hp_sum(
-            enemy_units, include_filter=counts_for_combat_hp_reward
-        )
-        curr_enemy_count = self._mobile_combat_count(
-            enemy_units, include_filter=counts_for_combat_hp_reward
-        )
-        curr_enemy_snap = self._combat_snapshot(
-            enemy_units, include_filter=counts_for_combat_hp_reward
-        )
-        kill_reward_val = float(r_conf.get("kill_reward", 0.0))
-        kill_penalty_val = float(r_conf.get("kill_penalty", 0.0))
+        econ = EconomicRewardConfig.from_rewards_conf(r_conf)
+        metrics = dict(EMPTY_ECONOMIC_METRICS)
         squad_is_defend = self._squad_is_defend(squad_tags, self.unit_command_map)
 
-        # Defend role: only credit enemy damage/kills inside defender_zone_radius.
-        # Attack role keeps the global HP/count delta. Own attrition is never gated.
+        # Permanent army only (timed summons carry no purchased value). Shots
+        # *from* Interceptors still count: they move permanent units' value,
+        # which is what this ledger tracks. Only Interceptor launch / recall /
+        # despawn is ignored, so it cannot read as free damage or a free kill.
+        curr_enemy_values = build_value_snapshot(
+            enemy_units,
+            config=econ,
+            include_filter=counts_for_combat_hp_reward,
+        )
+        curr_own_values = build_value_snapshot(
+            own_units,
+            config=econ,
+            include_filter=counts_for_combat_hp_reward,
+            role_for_tag=lambda tag: self.unit_command_map.get(tag, ROLE_ATTACK),
+        )
+        prev_enemy_values = self.prev_enemy_value_snapshot.get(p_id) or {}
+        prev_own_values = self.prev_own_value_snapshot.get(p_id) or {}
+
+        # Defend role: enemy value only counts inside defender_zone_radius, so a
+        # defender cannot farm reward by abandoning the pylon to chase a fight.
+        # Attack role credits enemy value anywhere on the map.
+        zone_filter = None
         if squad_is_defend:
             zone_radius = float(r_conf.get("defender_zone_radius", 10.0))
             zone_anchor = self._defender_zone_anchor(squad_tags, own_pylon_pos)
-            zoned_hp_delta, zoned_kills = self._defender_zone_credited_enemy_combat(
-                p_id, curr_enemy_snap, zone_anchor, zone_radius
+            zone_filter = lambda pos: self._is_in_defender_zone(  # noqa: E731
+                pos, zone_anchor, zone_radius
             )
-            if zoned_hp_delta > 0:
-                reward += zoned_hp_delta * damage_reward_coeff
-            if kill_reward_val != 0.0 and zoned_kills > 0:
-                reward += kill_reward_val * zoned_kills
-        else:
-            if curr_enemy_hp < self.prev_enemy_units_health[p_id]:
-                reward += (self.prev_enemy_units_health[p_id] - curr_enemy_hp) * damage_reward_coeff
-            if kill_reward_val != 0.0 and curr_enemy_count < self.prev_enemy_unit_count[p_id]:
-                reward += kill_reward_val * (self.prev_enemy_unit_count[p_id] - curr_enemy_count)
+        enemy_flow = value_delta(
+            prev_enemy_values, curr_enemy_values, position_filter=zone_filter
+        )
+        enemy_coeff = econ.scaled_enemy_value_reward(
+            econ.defender_enemy_value_reward
+            if squad_is_defend
+            else econ.attacker_enemy_value_reward,
+            squad_is_melee=squad_is_melee,
+        )
+        reward += enemy_coeff * enemy_flow.lost
+        metrics["economic_damage_dealt"] = enemy_flow.damaged
+        metrics["economic_enemy_killed"] = enemy_flow.destroyed
 
-        self.prev_enemy_units_health[p_id] = curr_enemy_hp
-        self.prev_enemy_unit_count[p_id] = curr_enemy_count
+        # Own attrition is never zone-gated, and is split by each lost unit's own
+        # role: attackers pay a deliberately smaller penalty so a favourable (or
+        # simply necessary) trade into the pylon stays learnable, while defenders
+        # pay heavily for losing army they were supposed to preserve.
+        own_baseline_ready = bool(prev_own_values)
+        for role, coeff_base, metric in (
+            (ROLE_ATTACK, econ.attacker_own_value_penalty, "economic_attacker_loss"),
+            (ROLE_DEFEND, econ.defender_own_value_penalty, "economic_defender_loss"),
+        ):
+            flow = value_delta(
+                prev_own_values,
+                curr_own_values,
+                role_filter=lambda unit_role, want=role: unit_role == want,
+            )
+            metrics[metric] = flow.lost
+            if not own_baseline_ready:
+                continue
+            coeff = econ.scaled_own_value_penalty(
+                coeff_base, squad_is_melee=squad_is_melee
+            )
+            reward -= coeff * flow.lost
+
+        self.prev_enemy_value_snapshot[p_id] = curr_enemy_values
+        # prev_own_value_snapshot is written after the healing section below,
+        # which needs the pre-step vitality to measure restored value.
+
+        curr_enemy_snap = self._combat_snapshot(
+            enemy_units, include_filter=counts_for_combat_hp_reward
+        )
+        self.prev_enemy_units_health[p_id] = self._mobile_combat_hp_sum(
+            enemy_units, include_filter=counts_for_combat_hp_reward
+        )
+        self.prev_enemy_unit_count[p_id] = self._mobile_combat_count(
+            enemy_units, include_filter=counts_for_combat_hp_reward
+        )
         self.prev_enemy_combat_snapshot[p_id] = curr_enemy_snap
 
         curr_own_hp = self._mobile_combat_hp_sum(
             own_units, include_filter=counts_for_combat_hp_reward
         )
-        prev_own_hp = self.prev_own_units_health[p_id]
-        heal_coeff = float(r_conf.get("heal_reward", 0.0))
-        # prev_own == 0 after reset_episode_state is "no baseline yet", not an
-        # empty army. Crediting that delta as heal pays ~0.1 × full army HP on
-        # the first step of every episode and blows up return scale / EV.
-        own_baseline_ready = (
-            float(self.prev_own_unit_count.get(p_id, 0) or 0) > 0 or prev_own_hp > 0.0
-        )
         # cast_tags: fresh-cast-only, gates heal_cast_reward (see
         # _issue_heal_at_point's continuing_same_patient comment).
-        # order_tags: fresh OR continuing, gates heal_reward's per-HP shaping
-        # so a multi-step Medivac beam / SCV repair keeps earning HP credit
-        # on every step it actually ticks HP, not just the step that started
-        # the lock (which usually has not ticked any HP yet).
+        # order_tags: fresh OR continuing, gates the economic heal reward so a
+        # multi-step Medivac beam / SCV repair keeps earning credit on every step
+        # it actually ticks vitality, not just the step that started the lock
+        # (which usually has not ticked any vitality yet).
         n_issued = 0
         cast_tags = getattr(self, "_heal_cast_tags", None)
         if isinstance(cast_tags, set) and squad_tags:
@@ -1644,13 +1972,14 @@ class CaptureTheFlagBot(BotAI):
             and bool(squad_tags)
             and any(int(tag) in order_tags for tag in squad_tags)
         )
-        if (
-            heal_coeff != 0.0
-            and healing_active
-            and own_baseline_ready
-            and curr_own_hp > prev_own_hp
-        ):
-            reward += (curr_own_hp - prev_own_hp) * heal_coeff
+        # Economic healing credit is double-gated: a live heal order from this
+        # squad AND vitality actually restored. Restoring 10% of a 400/300
+        # Battlecruiser pays 10% of its price; the same 10% on an SCV pays almost
+        # nothing, which is exactly the trade a real player makes.
+        own_heal_flow = value_delta(prev_own_values, curr_own_values)
+        if healing_active and own_baseline_ready and own_heal_flow.restored > 0.0:
+            reward += econ.heal_value_reward * own_heal_flow.restored
+            metrics["economic_healing"] = own_heal_flow.restored
         if isinstance(cast_tags, set):
             cast_tags.clear()
         if isinstance(order_tags, set):
@@ -1659,19 +1988,12 @@ class CaptureTheFlagBot(BotAI):
         if isinstance(attempt_tags, set):
             attempt_tags.clear()
         self._clear_command_attempt_tags()
-        if own_baseline_ready and curr_own_hp < prev_own_hp:
-            reward -= (prev_own_hp - curr_own_hp) * damage_penalty_coeff
         self.prev_own_units_health[p_id] = curr_own_hp
-
-        # Kill bonuses: flat per-unit reward/penalty on top of continuous HP shaping.
-        # Counts include embarked passengers so transport deaths credit cargo and
-        # load/unload alone does not look like a kill.
-        curr_own_count = self._mobile_combat_count(
+        self.prev_own_value_snapshot[p_id] = curr_own_values
+        self.prev_own_unit_count[p_id] = self._mobile_combat_count(
             own_units, include_filter=counts_for_combat_hp_reward
         )
-        if kill_penalty_val != 0.0 and curr_own_count < self.prev_own_unit_count[p_id]:
-            reward += kill_penalty_val * (self.prev_own_unit_count[p_id] - curr_own_count)
-        self.prev_own_unit_count[p_id] = curr_own_count
+        self._step_economic_metrics = metrics
 
         # 3. Progress Rewards — attacker squad Center-of-Mass distance shaping
         #
@@ -1721,13 +2043,56 @@ class CaptureTheFlagBot(BotAI):
             reward += self.calculate_defender_zone_penalty(tag, own_pylon_pos)
         self.active_unit_tag = saved_active
 
+        # Both roles pay the step penalty. The old per-step defender_step_reward is
+        # gone: paying a defender simply for existing is farmable by hiding in a
+        # corner for the whole episode. Army preservation is now rewarded once, at
+        # the end, by terminal_retained_value_bonus.
         if squad_tags:
-            if squad_is_attack:
-                reward += r_conf.get("step_penalty", -0.05)
-            else:
-                reward += r_conf.get("defender_step_reward", 0.001)
+            reward += r_conf.get("step_penalty", -0.05)
 
         return reward
+
+    def pop_economic_metrics(self) -> Dict[str, float]:
+        """Take this step's economic telemetry (see ``ECONOMIC_METRIC_KEYS``)."""
+        metrics = dict(getattr(self, "_step_economic_metrics", None) or EMPTY_ECONOMIC_METRICS)
+        self._step_economic_metrics = dict(EMPTY_ECONOMIC_METRICS)
+        return metrics
+
+    def retained_defender_value_fraction(
+        self, perspective_player_id: Optional[int] = None
+    ) -> float:
+        """Share of this player's *defender* army value still standing, in [0, 1].
+
+        Read at episode end for the terminal preservation bonus. Uses the value
+        snapshot from the last reward step, so it reflects the same ledger the
+        per-step penalties used.
+        """
+        p_id = perspective_player_id if perspective_player_id is not None else self.player_id
+        snapshot = self.prev_own_value_snapshot.get(int(p_id)) or {}
+        return retained_value_fraction(
+            snapshot, role_filter=lambda role: role == ROLE_DEFEND
+        )
+
+    def terminal_retained_value_bonus(
+        self,
+        squad_tags: List[int],
+        perspective_player_id: Optional[int] = None,
+    ) -> float:
+        """Terminal defender bonus proportional to army value preserved.
+
+        Zero for attacker squads (attackers are paid for pressure, not survival)
+        and zero for a wiped defender.
+        """
+        if not self._squad_is_defend(squad_tags, self.unit_command_map):
+            return 0.0
+        econ = EconomicRewardConfig.from_rewards_conf(
+            self.training_conf.get("rewards", {})
+        )
+        if econ.defender_retained_value_bonus == 0.0:
+            return 0.0
+        return econ.defender_retained_value_bonus * self.retained_defender_value_fraction(
+            perspective_player_id
+        )
 
     def calculate_reward(self, perspective_player_id: Optional[int] = None) -> float:
         """Single-unit wrapper around :meth:`calculate_squad_step_reward`."""

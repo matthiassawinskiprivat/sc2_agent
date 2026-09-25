@@ -19,7 +19,7 @@ from imitation_learning.config_resolver import ConfigResolver
 from imitation_learning.recorder import Recorder
 from imitation_learning.replay_manager import ReplayManager
 from imitation_learning.translator import ReplayTranslator
-from imitation_learning.universal_translator import UniversalReplayTranslator
+from imitation_learning.universal_translator import HybridReplayTranslator
 from imitation_learning.validator import Validator
 from src.ui.debug_ui import DebugUI
 from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
@@ -1254,7 +1254,7 @@ class ImitationLearningWorkstation(QMainWindow):
         
         # We start with the original translator as default
         self.translator = ReplayTranslator(project_root)
-        self.universal_translator = UniversalReplayTranslator(project_root)
+        self.universal_translator = HybridReplayTranslator(project_root)
         
         self.validator = Validator(project_root)
         
@@ -1283,7 +1283,7 @@ class ImitationLearningWorkstation(QMainWindow):
         arch = config.get("agent_architecture", "original")
         
         if arch == "universal":
-            logger.info(f"Switching to UniversalReplayTranslator for level {level_name}")
+            logger.info(f"Switching to HybridReplayTranslator for level {level_name}")
             active_translator = self.universal_translator
         else:
             logger.info(f"Using original ReplayTranslator for level {level_name}")
