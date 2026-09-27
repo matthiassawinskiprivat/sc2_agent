@@ -56,14 +56,16 @@ CMD_MODE_UNLOAD = 6        # world cell; only loaded transports act
 CMD_MODE_CLOAK = 7         # no target; only units that can conceal act
 CMD_MODE_UNCLOAK = 8       # no target; only currently concealed units act
 CMD_MODE_ATTACK_LOCAL = 9  # world cell; weapon-ready actors + enemy in tactical fovea
+CMD_MODE_SNIPE = 10        # hostile unit pointer; ready snipe casters only
 SQUAD_COMMAND_MODE_DIM = FIXED_UNIVERSAL_COMMAND_DIM
 # Inclusive upper bound for the ``command_modes`` observation Box.
-SQUAD_COMMAND_MODE_MAX = float(CMD_MODE_ATTACK_LOCAL)
+SQUAD_COMMAND_MODE_MAX = float(CMD_MODE_SNIPE)
 
 # Head names whose terminal target is a unit pointer rather than a world cell.
 ALLY_TARGET_COMMAND_HEADS = ("heal_unit",)
 LOAD_TARGET_COMMAND_HEADS = ("load_unit",)
 ENEMY_TARGET_COMMAND_HEADS = ("attack_unit",)
+SNIPE_COMMAND_HEADS = ("snipe",)
 AOE_COMMAND_HEADS = ("aoe_local",)
 UNLOAD_COMMAND_HEADS = ("unload_local",)
 CLOAK_COMMAND_HEADS = ("cloak_burrow",)
@@ -96,6 +98,8 @@ def command_target_mode(head_name: str, *, is_categorical: bool = False) -> int:
         return CMD_MODE_LOAD_TARGET
     if name in ENEMY_TARGET_COMMAND_HEADS:
         return CMD_MODE_ENEMY_TARGET
+    if name in SNIPE_COMMAND_HEADS:
+        return CMD_MODE_SNIPE
     if name in ATTACK_LOCAL_COMMAND_HEADS:
         return CMD_MODE_ATTACK_LOCAL
     if name in AOE_COMMAND_HEADS:

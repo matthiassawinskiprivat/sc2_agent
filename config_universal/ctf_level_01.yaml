@@ -93,6 +93,7 @@ env:
   - can_load
   - can_unload
   - can_aoe
+  - can_snipe
   rewards:
     economic_vespene_weight: 1.5
     economic_value_norm: 100.0

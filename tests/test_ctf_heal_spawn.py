@@ -120,7 +120,7 @@ def test_protoss_defend_defers_budget_batteries():
             else ["MARINE"]
         )
     )
-    centers, _, deferred, _detectors = _spawn(env)
+    centers, _, deferred, _detectors, _transports = _spawn(env)
 
     army_cmds = _all_create_cmds(env)
     assert not any(c[0] == UnitTypeId.SHIELDBATTERY for c in army_cmds)
@@ -158,7 +158,7 @@ def test_protoss_defend_guarantees_battery_when_rng_misses():
             ["ZEALOT"] if pool["race"] == "protoss" else ["MARINE"]
         )
     )
-    _, _, deferred, _detectors = _spawn(env)
+    _, _, deferred, _detectors, _transports = _spawn(env)
     assert len(deferred) == 1
     assert deferred[0][0] == UnitTypeId.SHIELDBATTERY
 
@@ -189,7 +189,7 @@ def test_without_heal_mode_no_battery_guarantee():
             ["ZEALOT"] if pool["race"] == "protoss" else ["MARINE"]
         )
     )
-    _, _, deferred, detectors = _spawn(env)
+    _, _, deferred, detectors, _transports = _spawn(env)
     assert deferred == []
     # Cloak mode still defers race detectors even when battery guarantee is off.
     assert any(c[0] == UnitTypeId.OBSERVER for c in detectors)

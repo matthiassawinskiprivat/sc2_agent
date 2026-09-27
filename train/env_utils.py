@@ -170,6 +170,9 @@ def create_dummy_env_from_config(config: dict, level_name: str | None = None):
         obs_dict["engage_enemy_mask"] = spaces.Box(
             low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
         )
+        obs_dict["snipe_target_mask"] = spaces.Box(
+            low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
+        )
         obs_dict["command_modes"] = spaces.Box(
             low=0.0,
             high=SQUAD_COMMAND_MODE_MAX,

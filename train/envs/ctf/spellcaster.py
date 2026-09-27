@@ -29,6 +29,10 @@ _ENERGY_UNIT_VALUE = 1
 # AoE spell these casters use, and the upgrade that gates it.
 # ``None`` means the spell is available without research.
 # Ghost cloak and Infestor Neural Parasite are separate researched abilities.
+# Neural is unlocked by the debug_upgrade ladder (same as Psi Storm).
+# Unit-target specials: Ghost Steady Targeting and Feedback need no research;
+# Yamato (YAMATOCANNON) and Neural Parasite are unlocked by the debug_upgrade
+# ladder (same as Psi Storm).
 SPELLCASTER_CAST_UPGRADES: Dict[str, Optional[str]] = {
     "HIGHTEMPLAR": "PSISTORMTECH",
     "GHOST": None,

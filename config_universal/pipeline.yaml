@@ -56,6 +56,10 @@ env:
 # or two channels each new action actually needs. The agent therefore spends its
 # early budget learning *actions*, not decoding extra map channels.
 #
+# Order: unit attack → heal → cloak → AoE → heal revisit (Queen vs BC) → snipe.
+# Transport (load/unload) is deferred to the end of the pipeline so load does
+# not crowd heal out mid phase-1.
+#
 # Phase 2 adds the detailed tactical channels (biological/mechanical overlays,
 # light/armored/massive damage modifiers, air DPS modifiers, splash, upgrades)
 # and the harder unit compositions. Because `action_heads` accumulate and are
@@ -103,11 +107,14 @@ levels:
   - "aoe_zergling_infestor_vs_stalker_templar"
   - "aoe_infestor_ling_vs_infestor_ling"
   - "aoe_zergling_roach_vs_high_templar_immortal"
-  # transport (load_unit / unload_local) + cargo channels
-  # also attaches flying / air-DPS-base map layers (Medivac / Warp Prism / Overlord Transport)
-  - "ctf_level_24"
-  - "ctf_level_25"
-  - "ctf_level_26"
+  # heal duty-cycle revisit (damaged_units) + flying / air-DPS-base channels
+  - "scenario_queen_vs_battlecruiser"
+  # unit-target specials (snipe): Ghost Steady Targeting / Yamato / Neural / Feedback
+  # damaged_units kept on so heal_unit stays open while snipe is learned
+  - "snipe_ghost_marauder_vs_roach_hydra"
+  - "snipe_infestor_roach_vs_battlecruiser_scv"
+  - "snipe_high_templar_zealot_vs_ghost_medivac"
+  - "snipe_battlecruiser_marine_vs_corruptor_hydra"
 
   # ========= CTF phase 2: detailed layers and harder compositions ==========
   # biological / light / mechanical overlays
@@ -124,7 +131,7 @@ levels:
   - "ctf_level_07"
   - "ctf_level_08"
   - "scenario_colossus_zealot_vs_swarmhost_hydra"
-  # flying (map channels already attached at ctf_level_24 for transports)
+  # flying (map channels attached at scenario_queen_vs_battlecruiser)
   - "ctf_level_09"
   # mixed heal vs air
   - "ctf_heal_queen_vs_battlecruiser_scv"
@@ -166,3 +173,8 @@ levels:
   - "aoe_viper_hydra_vs_voidray_phoenix"
   - "aoe_viper_corruptor_vs_mutalisk"
   - "aoe_ravager_roach_vs_immortal_colossus"
+  # transport (load_unit / unload_local) + cargo channels — end of pipeline so
+  # load does not crowd heal/snipe during phase 1 / phase 2 practice
+  - "ctf_level_24"
+  - "ctf_level_25"
+  - "ctf_level_26"

@@ -170,6 +170,44 @@ _AOE_ABILITY_BY_TYPE: dict = (
     else {}
 )
 
+# Policy ``snipe``: unit-targeted specials (enemy pointer + per-type ability).
+# Ghost Steady Targeting, BC Yamato, Infestor Neural, HT Feedback.
+_SNIPE_ABILITIES: dict = (
+    {
+        UnitTypeId.GHOST: AbilityId.EFFECT_GHOSTSNIPE,
+        UnitTypeId.BATTLECRUISER: AbilityId.YAMATO_YAMATOGUN,
+        UnitTypeId.INFESTOR: AbilityId.NEURALPARASITE_NEURALPARASITE,
+        UnitTypeId.INFESTORBURROWED: AbilityId.NEURALPARASITE_NEURALPARASITE,
+        UnitTypeId.HIGHTEMPLAR: AbilityId.FEEDBACK_FEEDBACK,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+
+# Energy gate for ``snipe`` (Yamato is cooldown-only).
+_SNIPE_ENERGY_COST: dict = (
+    {
+        UnitTypeId.GHOST: 50.0,
+        UnitTypeId.BATTLECRUISER: 0.0,
+        UnitTypeId.INFESTOR: 100.0,
+        UnitTypeId.INFESTORBURROWED: 100.0,
+        UnitTypeId.HIGHTEMPLAR: 50.0,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+
+# Snipe spells that require research before the ability exists.
+_SNIPE_REQUIRED_UPGRADE: dict = (
+    {
+        UnitTypeId.INFESTOR: UpgradeId.NEURALPARASITE,
+        UnitTypeId.INFESTORBURROWED: UpgradeId.NEURALPARASITE,
+        UnitTypeId.BATTLECRUISER: UpgradeId.YAMATOCANNON,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+
 # Controllable Purification Nova ball (steer with move / attack→move).
 _PURIFICATION_NOVA_BALL_TYPES: FrozenSet = (
     frozenset({UnitTypeId.DISRUPTORPHASED}) if _SC2_AVAILABLE else frozenset()
@@ -362,6 +400,90 @@ def uses_aoe_spell(unit: "Unit") -> bool:
     """True when policy ``aoe_local`` should cast a splash spell for this type."""
     tid = getattr(unit, "type_id", None)
     return tid in _AOE_POINT_ABILITIES or tid in _AOE_AIR_UNIT_ABILITIES
+
+
+def uses_snipe_spell(unit: "Unit") -> bool:
+    """True when policy ``snipe`` should cast a unit-targeted special for this type."""
+    tid = getattr(unit, "type_id", None)
+    return tid in _SNIPE_ABILITIES
+
+
+def unit_can_snipe(
+    unit: "Unit",
+    upgrades: frozenset | None = None,
+    bot: Any = None,
+) -> bool:
+    """True when this unit can usefully issue ``snipe`` this step.
+
+    Energy-gated for Ghost / Infestor / High Templar. Battlecruiser Yamato is
+    cooldown-only but requires ``YAMATOCANNON`` research. Infestor Neural
+    Parasite requires ``NEURALPARASITE``. When ``bot._available_abilities_by_tag``
+    is present, the spell ability must appear there (CD only — energy is checked
+    above; same pattern as AoE).
+    """
+    if not _SC2_AVAILABLE or unit is None:
+        return False
+    tid = getattr(unit, "type_id", None)
+    if tid not in _SNIPE_ENERGY_COST:
+        return False
+    required = _SNIPE_REQUIRED_UPGRADE.get(tid)
+    if required is not None:
+        if required not in (upgrades or frozenset()):
+            return False
+    energy = float(getattr(unit, "energy", 0.0) or 0.0)
+    if energy < float(_SNIPE_ENERGY_COST[tid]):
+        return False
+    ability = _SNIPE_ABILITIES.get(tid)
+    if ability is not None:
+        abilities = _available_abilities_for_unit(unit, bot)
+        if abilities is not None:
+            return ability in abilities
+        if _unit_is_using_any_ability(unit, frozenset({ability})):
+            return False
+    return True
+
+
+def snipe_target_is_eligible(caster: "Unit", target: "Unit") -> bool:
+    """Per-ability legality for a ``snipe`` enemy-pointer target.
+
+    Ghost Steady Targeting needs a biological non-structure; Feedback needs an
+    energy unit; Neural / Yamato accept any hostile mobile (structures stay off
+    the enemy pointer). Ownership is checked by the caller.
+    """
+    if caster is None or target is None:
+        return False
+    if bool(getattr(target, "is_structure", False)):
+        return False
+    tid = getattr(caster, "type_id", None)
+    if tid == UnitTypeId.GHOST:
+        return bool(getattr(target, "is_biological", False))
+    if tid == UnitTypeId.HIGHTEMPLAR:
+        return float(getattr(target, "energy_max", 0.0) or 0.0) > 0.0
+    if tid in (
+        UnitTypeId.BATTLECRUISER,
+        UnitTypeId.INFESTOR,
+        UnitTypeId.INFESTORBURROWED,
+    ):
+        return True
+    return False
+
+
+def issue_snipe_on_unit(bot: Any, unit: "Unit", target: "Unit") -> bool:
+    """Issue the caster's ``snipe`` ability on *target*. Returns True if issued."""
+    if bot is None or unit is None or target is None:
+        return False
+    if int(getattr(target, "owner_id", 0) or 0) == int(
+        getattr(unit, "owner_id", 0) or 0
+    ):
+        return False
+    if not snipe_target_is_eligible(unit, target):
+        return False
+    tid = getattr(unit, "type_id", None)
+    ability = _SNIPE_ABILITIES.get(tid)
+    if ability is None:
+        return False
+    bot.do(unit(ability, target))
+    return True
 
 
 def unit_can_aoe(
@@ -1306,15 +1428,16 @@ def _owner_can_afford_repair(bot: Any, unit: "Unit") -> bool:
 
 
 async def refresh_healer_ability_cache(bot: Any) -> None:
-    """Refresh ``bot._available_abilities_by_tag`` for healers / SCVs / AoE casters.
+    """Refresh ``bot._available_abilities_by_tag`` for healers / SCVs / AoE / snipe.
 
     Healers / SCVs are queried with ``ignore_resource_requirements=False`` so
     mineral cost and energy are visible to ``unit_can_heal`` / ``unit_can_repair``.
 
-    AoE casters are queried with ``ignore_resource_requirements=True`` so the
-    cache reflects **cooldown only**. Energy for Fungal / Storm / EMP / Bomb is
-    gated separately in ``unit_can_aoe``; double-gating energy through SC2 caused
-    false negatives (AoE permanently closed while cloak stayed open).
+    AoE and snipe casters are queried with ``ignore_resource_requirements=True``
+    so the cache reflects **cooldown only**. Energy for Fungal / Storm / EMP /
+    Bomb / Snipe / Neural / Feedback is gated separately in ``unit_can_aoe`` /
+    ``unit_can_snipe``; double-gating energy through SC2 caused false negatives
+    (AoE permanently closed while cloak stayed open).
     """
     if bot is None or not _SC2_AVAILABLE:
         return
@@ -1323,14 +1446,18 @@ async def refresh_healer_ability_cache(bot: Any) -> None:
     if client is None or not callable(query):
         return
     heal_units = []
-    aoe_units = []
+    spell_units = []
+    seen_tags: set = set()
     for unit in getattr(bot, "all_units", []) or []:
         tid = getattr(unit, "type_id", None)
         if tid in _HEAL_ABILITIES_BY_TYPE or tid == UnitTypeId.SCV:
             heal_units.append(unit)
-        if tid in _AOE_ENERGY_COST:
-            aoe_units.append(unit)
-    if not heal_units and not aoe_units:
+        if tid in _AOE_ENERGY_COST or tid in _SNIPE_ENERGY_COST:
+            tag = int(getattr(unit, "tag", 0) or 0)
+            if tag and tag not in seen_tags:
+                seen_tags.add(tag)
+                spell_units.append(unit)
+    if not heal_units and not spell_units:
         bot._available_abilities_by_tag = {}
         return
     cache: dict = {}
@@ -1339,10 +1466,10 @@ async def refresh_healer_ability_cache(bot: Any) -> None:
             heal_cache = await query(heal_units, ignore_resource_requirements=False)
             if isinstance(heal_cache, dict):
                 cache.update(heal_cache)
-        if aoe_units:
-            aoe_cache = await query(aoe_units, ignore_resource_requirements=True)
-            if isinstance(aoe_cache, dict):
-                cache.update(aoe_cache)
+        if spell_units:
+            spell_cache = await query(spell_units, ignore_resource_requirements=True)
+            if isinstance(spell_cache, dict):
+                cache.update(spell_cache)
         bot._available_abilities_by_tag = cache
     except Exception:
         return

@@ -22,9 +22,11 @@ collector sampled from (watch ``train/rollout_log_prob_abs_err``).
 Command-dependent legality rides in the observation (``command_modes``,
 ``heal_actor_mask``, ``heal_target_mask``, ``load_actor_mask``,
 ``load_target_mask``, ``attack_actor_mask``, ``aoe_actor_mask``,
-``unload_actor_mask``, ``cloak_actor_mask``, ``uncloak_actor_mask``,
-``enemy_mask``, ``tactical_enemy_mask``, ``engage_enemy_mask``) rather than in the flat action mask,
-because the flat mask is built by the env before the command has been sampled.
+``snipe_actor_mask``, ``snipe_target_mask``, ``unload_actor_mask``,
+``cloak_actor_mask``, ``uncloak_actor_mask``, ``enemy_mask``,
+``tactical_enemy_mask``, ``engage_enemy_mask``) rather than in the flat action
+mask, because the flat mask is built by the env before the command has been
+sampled.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from src.agent.squad_constants import (
     CMD_MODE_CLOAK,
     CMD_MODE_ENEMY_TARGET,
     CMD_MODE_LOAD_TARGET,
+    CMD_MODE_SNIPE,
     CMD_MODE_SPATIAL,
     CMD_MODE_UNCLOAK,
     CMD_MODE_UNLOAD,
@@ -302,6 +305,9 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
             obs, "attack_actor_mask", batch, MAX_SQUAD_UNITS, device
         )
         aoe_actor = self._obs_bool(obs, "aoe_actor_mask", batch, MAX_SQUAD_UNITS, device)
+        snipe_actor = self._obs_bool(
+            obs, "snipe_actor_mask", batch, MAX_SQUAD_UNITS, device
+        )
         unload_actor = self._obs_bool(
             obs, "unload_actor_mask", batch, MAX_SQUAD_UNITS, device
         )
@@ -315,6 +321,7 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
         is_ally_cmd = (modes == CMD_MODE_ALLY_TARGET).unsqueeze(-1)
         is_load_cmd = (modes == CMD_MODE_LOAD_TARGET).unsqueeze(-1)
         is_enemy_cmd = (modes == CMD_MODE_ENEMY_TARGET).unsqueeze(-1)
+        is_snipe_cmd = (modes == CMD_MODE_SNIPE).unsqueeze(-1)
         is_attack_local = (modes == CMD_MODE_ATTACK_LOCAL).unsqueeze(-1)
         is_aoe_cmd = (modes == CMD_MODE_AOE).unsqueeze(-1)
         is_unload_cmd = (modes == CMD_MODE_UNLOAD).unsqueeze(-1)
@@ -332,18 +339,22 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
                     is_attack_cmd,
                     attack_actor,
                     torch.where(
-                        is_aoe_cmd,
-                        aoe_actor,
+                        is_snipe_cmd,
+                        snipe_actor,
                         torch.where(
-                            is_unload_cmd,
-                            unload_actor,
+                            is_aoe_cmd,
+                            aoe_actor,
                             torch.where(
-                                is_cloak_cmd,
-                                cloak_actor,
+                                is_unload_cmd,
+                                unload_actor,
                                 torch.where(
-                                    is_uncloak_cmd,
-                                    uncloak_actor,
-                                    torch.where(is_move_cmd, move_actor, alive),
+                                    is_cloak_cmd,
+                                    cloak_actor,
+                                    torch.where(
+                                        is_uncloak_cmd,
+                                        uncloak_actor,
+                                        torch.where(is_move_cmd, move_actor, alive),
+                                    ),
                                 ),
                             ),
                         ),
@@ -363,18 +374,26 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
             obs, "load_target_mask", batch, MAX_SQUAD_UNITS, device
         )
         enemy = self._obs_bool(obs, "enemy_mask", batch, MAX_SQUAD_ENEMIES, device)
+        snipe_target = self._obs_bool(
+            obs, "snipe_target_mask", batch, MAX_SQUAD_ENEMIES, device
+        )
         zeros_ally = torch.zeros_like(heal_target)
         zeros_enemy = torch.zeros_like(enemy)
         is_ally_cmd = (modes == CMD_MODE_ALLY_TARGET).unsqueeze(-1)
         is_load_cmd = (modes == CMD_MODE_LOAD_TARGET).unsqueeze(-1)
         is_enemy_cmd = (modes == CMD_MODE_ENEMY_TARGET).unsqueeze(-1)
+        is_snipe_cmd = (modes == CMD_MODE_SNIPE).unsqueeze(-1)
         ally_part = torch.where(
             is_ally_cmd,
             heal_target,
             torch.where(is_load_cmd, load_target, zeros_ally),
         )
-        enemy_part = torch.where(is_enemy_cmd, enemy, zeros_enemy)
-        unit_target_cmd = is_ally_cmd | is_load_cmd | is_enemy_cmd
+        enemy_part = torch.where(
+            is_enemy_cmd,
+            enemy,
+            torch.where(is_snipe_cmd, snipe_target, zeros_enemy),
+        )
+        unit_target_cmd = is_ally_cmd | is_load_cmd | is_enemy_cmd | is_snipe_cmd
         null_part = ~unit_target_cmd
         mask = torch.cat([ally_part, enemy_part, null_part], dim=-1)
         # A unit-target command with no legal unit falls back to null so the

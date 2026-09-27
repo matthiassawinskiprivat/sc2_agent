@@ -36,6 +36,9 @@ env:
     unit_pool:
     - ZERGLING
     - ROACH
+    - QUEEN
+    - INFESTOR
+    - RAVAGER
     region: A
   - high_level_command: defend
     race: zerg
@@ -44,6 +47,9 @@ env:
     unit_pool:
     - ZERGLING
     - ROACH
+    - QUEEN
+    - INFESTOR
+    - RAVAGER
     region: B
   - high_level_command: attack
     race: protoss

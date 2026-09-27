@@ -901,6 +901,48 @@ def test_unit_can_aoe_respects_ability_cooldown_cache():
     assert unit_can_aoe(ravager, bot=bot) is False
 
 
+def test_unit_can_snipe_energy_upgrade_and_types():
+    from sc2.ids.upgrade_id import UpgradeId
+    from src.utils.unit_feature_helpers import (
+        snipe_target_is_eligible,
+        unit_can_snipe,
+    )
+
+    neural = frozenset({UpgradeId.NEURALPARASITE})
+    yamato = frozenset({UpgradeId.YAMATOCANNON})
+    assert unit_can_snipe(_caster(UnitTypeId.GHOST, 50.0)) is True
+    assert unit_can_snipe(_caster(UnitTypeId.GHOST, 49.0)) is False
+    assert unit_can_snipe(_caster(UnitTypeId.BATTLECRUISER, 0.0), upgrades=yamato) is True
+    assert unit_can_snipe(_caster(UnitTypeId.BATTLECRUISER, 0.0), upgrades=frozenset()) is False
+    assert unit_can_snipe(_caster(UnitTypeId.HIGHTEMPLAR, 50.0)) is True
+    assert unit_can_snipe(_caster(UnitTypeId.HIGHTEMPLAR, 49.0)) is False
+    assert unit_can_snipe(_caster(UnitTypeId.INFESTOR, 100.0), upgrades=neural) is True
+    assert unit_can_snipe(_caster(UnitTypeId.INFESTOR, 100.0), upgrades=frozenset()) is False
+    assert unit_can_snipe(
+        _caster(UnitTypeId.INFESTORBURROWED, 100.0), upgrades=neural
+    ) is True
+    assert unit_can_snipe(_caster(UnitTypeId.MARINE, 200.0)) is False
+
+    ghost = _caster(UnitTypeId.GHOST, 50.0)
+    bio = MagicMock()
+    bio.is_biological = True
+    bio.is_structure = False
+    mech = MagicMock()
+    mech.is_biological = False
+    mech.is_structure = False
+    energy_tgt = MagicMock()
+    energy_tgt.is_structure = False
+    energy_tgt.energy_max = 200.0
+    no_energy = MagicMock()
+    no_energy.is_structure = False
+    no_energy.energy_max = 0.0
+    assert snipe_target_is_eligible(ghost, bio) is True
+    assert snipe_target_is_eligible(ghost, mech) is False
+    ht = _caster(UnitTypeId.HIGHTEMPLAR, 50.0)
+    assert snipe_target_is_eligible(ht, energy_tgt) is True
+    assert snipe_target_is_eligible(ht, no_energy) is False
+
+
 def test_refresh_ability_cache_queries_aoe_with_resources_ignored():
     """AoE CD query must not double-gate energy (cloak stayed open, AoE closed)."""
     import asyncio

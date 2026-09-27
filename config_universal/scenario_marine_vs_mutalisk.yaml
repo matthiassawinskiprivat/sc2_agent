@@ -16,7 +16,7 @@ env:
   alternate_trainee_race: true
   include_race: true
   maps_dir: train/maps/ladder/with_region
-  env_mode: heal,cloak,spellcaster,drop
+  env_mode: heal,cloak,spellcaster
   unit_pools:
   - high_level_command: attack
     race: terran
@@ -25,6 +25,7 @@ env:
     unit_pool:
     - MARINE
     - GHOST
+    - MEDIVAC
     region: A
   - high_level_command: defend
     race: zerg
@@ -33,6 +34,8 @@ env:
     unit_pool:
     - MUTALISK
     - INFESTOR
+    - QUEEN
+    - VIPER
     region: A
   - high_level_command: defend
     race: terran
@@ -41,6 +44,7 @@ env:
     unit_pool:
     - MARINE
     - GHOST
+    - MEDIVAC
     region: B
   - high_level_command: attack
     race: zerg
@@ -49,6 +53,8 @@ env:
     unit_pool:
     - MUTALISK
     - INFESTOR
+    - QUEEN
+    - VIPER
     region: B
   rewards:
     economic_vespene_weight: 1.5

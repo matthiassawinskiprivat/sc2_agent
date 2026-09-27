@@ -201,7 +201,7 @@ def test_cloak_mode_defers_detectors_per_pool_all_races():
         }[pool["race"]]
     )
 
-    _, _, _, deferred_detectors = _spawn(env)
+    _, _, _, deferred_detectors, _transports = _spawn(env)
     types = [c[0] for c in deferred_detectors]
     assert types.count(UnitTypeId.OBSERVER) == 1
     assert types.count(UnitTypeId.RAVEN) == 1
@@ -259,7 +259,7 @@ def test_non_cloak_mode_does_not_spawn_detectors():
         )
     )
 
-    _, _, _, deferred_detectors = _spawn(env)
+    _, _, _, deferred_detectors, _transports = _spawn(env)
     assert deferred_detectors == []
     cmds = _all_create_cmds(env)
     types = [c[0] for c in cmds]

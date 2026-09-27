@@ -62,19 +62,21 @@ def _obs_space():
             "unit_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "enemy_scalars": spaces.Box(0, 1, (MAX_SQUAD_ENEMIES, N_FEAT), dtype=np.float32),
             "enemy_mask": spaces.Box(0, 1, (MAX_SQUAD_ENEMIES,), dtype=np.float32),
-            "command_modes": spaces.Box(0, 9, (FIXED_UNIVERSAL_COMMAND_DIM,), dtype=np.float32),
+            "command_modes": spaces.Box(0, 10, (FIXED_UNIVERSAL_COMMAND_DIM,), dtype=np.float32),
             "heal_actor_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "heal_target_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "load_actor_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "load_target_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "attack_actor_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "aoe_actor_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
+            "snipe_actor_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "unload_actor_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "cloak_actor_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "uncloak_actor_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "move_actor_mask": spaces.Box(0, 1, (MAX_SQUAD_UNITS,), dtype=np.float32),
             "tactical_enemy_mask": spaces.Box(0, 1, (MAX_SQUAD_ENEMIES,), dtype=np.float32),
             "engage_enemy_mask": spaces.Box(0, 1, (MAX_SQUAD_ENEMIES,), dtype=np.float32),
+            "snipe_target_mask": spaces.Box(0, 1, (MAX_SQUAD_ENEMIES,), dtype=np.float32),
         }
     )
 
@@ -143,12 +145,14 @@ def _obs(
         "load_target_mask": load_target,
         "attack_actor_mask": unit_mask.copy(),
         "aoe_actor_mask": unit_mask.copy(),
+        "snipe_actor_mask": unit_mask.copy(),
         "unload_actor_mask": np.zeros_like(unit_mask),
         "cloak_actor_mask": np.zeros_like(unit_mask),
         "uncloak_actor_mask": np.zeros_like(unit_mask),
         "move_actor_mask": unit_mask.copy(),
         "tactical_enemy_mask": enemy_mask.copy(),
         "engage_enemy_mask": enemy_mask.copy(),
+        "snipe_target_mask": enemy_mask.copy(),
     }
 
 

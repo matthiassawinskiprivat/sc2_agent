@@ -16,7 +16,7 @@ env:
   alternate_trainee_race: false
   include_race: true
   maps_dir: train/maps/ladder/with_region
-  env_mode: heal,cloak,spellcaster,drop
+  env_mode: heal,cloak,spellcaster
   unit_pools:
   - high_level_command: attack
     agent: true
@@ -36,6 +36,8 @@ env:
     - BANSHEE
     - VIKINGFIGHTER
     - BATTLECRUISER
+    - SCV
+    - MEDIVAC
     region: A
   - high_level_command: defend
     race: terran
@@ -54,6 +56,8 @@ env:
     - BANSHEE
     - VIKINGFIGHTER
     - BATTLECRUISER
+    - SCV
+    - MEDIVAC
     region: A
   - high_level_command: defend
     agent: true
@@ -73,6 +77,8 @@ env:
     - BANSHEE
     - VIKINGFIGHTER
     - BATTLECRUISER
+    - SCV
+    - MEDIVAC
     region: B
   - high_level_command: attack
     race: terran
@@ -91,6 +97,8 @@ env:
     - BANSHEE
     - VIKINGFIGHTER
     - BATTLECRUISER
+    - SCV
+    - MEDIVAC
     region: B
   rewards:
     economic_vespene_weight: 1.5

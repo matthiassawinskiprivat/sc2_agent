@@ -114,7 +114,7 @@ def main() -> None:
 
     print("\nViolations:")
     for name in PIPELINE:
-        if not name.startswith(("ctf_", "scenario_", "aoe_")):
+        if not name.startswith(("ctf_", "scenario_", "aoe_", "snipe_")):
             continue
         units = _units(name)
         if not units:

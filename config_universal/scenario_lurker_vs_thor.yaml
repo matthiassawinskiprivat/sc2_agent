@@ -16,7 +16,7 @@ env:
   alternate_trainee_race: true
   include_race: true
   include_upgrades: true
-  env_mode: heal,cloak,spellcaster,drop,upgrades
+  env_mode: heal,cloak,spellcaster,upgrades
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack
@@ -27,6 +27,7 @@ env:
     - LURKERMP
     - HYDRALISK
     - INFESTOR
+    - QUEEN
     region: A
   - high_level_command: defend
     race: terran
@@ -37,6 +38,7 @@ env:
     - THORAP
     - SCV
     - GHOST
+    - MEDIVAC
     region: A
   - high_level_command: defend
     race: zerg
@@ -46,6 +48,7 @@ env:
     - LURKERMP
     - HYDRALISK
     - INFESTOR
+    - QUEEN
     region: B
   - high_level_command: attack
     race: terran
@@ -56,6 +59,7 @@ env:
     - THORAP
     - SCV
     - GHOST
+    - MEDIVAC
     region: B
   rewards:
     economic_vespene_weight: 1.5

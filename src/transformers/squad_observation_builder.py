@@ -23,6 +23,7 @@ from src.agent.squad_constants import (
 from src.agent.squad_target_masks import (
     build_enemy_target_mask,
     build_engage_enemy_mask,
+    build_snipe_target_mask,
     build_squad_target_masks,
     build_tactical_enemy_mask,
     zero_target_masks,
@@ -38,6 +39,7 @@ from src.utils.unit_feature_helpers import (
     unit_can_heal,
     unit_can_load,
     unit_can_repair,
+    unit_can_snipe,
     unit_can_unload,
     unit_cargo_free_norm,
     unit_cargo_size_norm,
@@ -157,6 +159,7 @@ class SquadObservationBuilder:
             "enemy_mask": np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32),
             "tactical_enemy_mask": np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32),
             "engage_enemy_mask": np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32),
+            "snipe_target_mask": np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32),
             "command_modes": self._command_modes.copy(),
             **zero_target_masks(),
         }
@@ -332,6 +335,12 @@ class SquadObservationBuilder:
             upgrades=upgrades,
             has_tactical_air_enemy=has_engage_air_enemy,
         )
+        snipe_target_mask = build_snipe_target_mask(
+            enemy_units,
+            ally_units,
+            bot=bot,
+            upgrades=upgrades,
+        )
 
         for slot, tag in enumerate(sorted_tags[:MAX_SQUAD_UNITS]):
             unit = ally_units[slot]
@@ -379,6 +388,7 @@ class SquadObservationBuilder:
             "enemy_mask": enemy_mask,
             "tactical_enemy_mask": tactical_enemy_mask,
             "engage_enemy_mask": engage_enemy_mask,
+            "snipe_target_mask": snipe_target_mask,
             "command_modes": self._command_modes.copy(),
             **target_masks,
         }
@@ -572,7 +582,7 @@ class SquadObservationBuilder:
         catalog[_F[USC.CAN_HEAL]] = float(unit_can_heal(unit, bot))
         catalog[_F[USC.CAN_REPAIR]] = float(unit_can_repair(unit, bot))
 
-        # --- Group L: AoE spell readiness ---
+        # --- Group L: AoE / snipe spell readiness ---
         catalog[_F[USC.CAN_AOE]] = float(
             unit_can_aoe(
                 unit,
@@ -581,6 +591,9 @@ class SquadObservationBuilder:
                 bot=bot,
                 has_tactical_air_enemy=has_tactical_air_enemy,
             )
+        )
+        catalog[_F[USC.CAN_SNIPE]] = float(
+            unit_can_snipe(unit, upgrades=upgrades, bot=bot)
         )
 
         # --- Group K: Transport / cargo ---

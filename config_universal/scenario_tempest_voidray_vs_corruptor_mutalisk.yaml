@@ -16,7 +16,7 @@ env:
   alternate_trainee_race: true
   include_race: true
   include_upgrades: true
-  env_mode: heal,cloak,spellcaster,drop,upgrades
+  env_mode: heal,cloak,spellcaster,upgrades
   maps_dir: train/maps/ladder/with_region
   unit_pools:
   - high_level_command: attack
@@ -36,6 +36,8 @@ env:
     - CORRUPTOR
     - MUTALISK
     - INFESTOR
+    - QUEEN
+    - VIPER
     region: A
   - high_level_command: defend
     race: protoss
@@ -54,6 +56,8 @@ env:
     - CORRUPTOR
     - MUTALISK
     - INFESTOR
+    - QUEEN
+    - VIPER
     region: B
   rewards:
     economic_vespene_weight: 1.5

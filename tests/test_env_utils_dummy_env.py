@@ -66,13 +66,15 @@ def test_dummy_env_level_name_matches_config_manager():
             "heal_actor_mask",
             "attack_actor_mask",
             "aoe_actor_mask",
+            "snipe_actor_mask",
             "unload_actor_mask",
             "cloak_actor_mask",
             "uncloak_actor_mask",
             "move_actor_mask",
+            "snipe_target_mask",
         ):
             assert key in env.observation_space.spaces, key
-        assert float(env.observation_space["command_modes"].high.flat[0]) >= 9.0
+        assert float(env.observation_space["command_modes"].high.flat[0]) >= 10.0
     finally:
         env.close()
 

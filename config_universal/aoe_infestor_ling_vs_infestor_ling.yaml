@@ -29,6 +29,7 @@ env:
     unit_pool:
     - INFESTOR
     - ZERGLING
+    - QUEEN
     region: A
   - high_level_command: defend
     race: zerg
@@ -37,6 +38,7 @@ env:
     unit_pool:
     - INFESTOR
     - ZERGLING
+    - QUEEN
     region: A
   - high_level_command: defend
     agent: true
@@ -46,6 +48,7 @@ env:
     unit_pool:
     - INFESTOR
     - ZERGLING
+    - QUEEN
     region: B
   - high_level_command: attack
     race: zerg
@@ -54,6 +57,7 @@ env:
     unit_pool:
     - INFESTOR
     - ZERGLING
+    - QUEEN
     region: B
   rewards:
     economic_vespene_weight: 1.5

@@ -1,7 +1,7 @@
 """Align CTF unit pools with map-layer gates — keep pipeline level order.
 
-- Flying / air-DPS-base channels are introduced at ``ctf_level_24`` (transport),
-  because Medivac / Warp Prism / Overlord Transport need them.
+- Flying / air-DPS-base channels are introduced at ``scenario_queen_vs_battlecruiser``
+  (heal revisit; transport was deferred to pipeline end).
 - Massive overlay channels stay at ``ctf_level_07``.
 - Levels before a gate lose units that require that gate's layers.
 - ``ctf_heal_thor_scv_vs_thor_scv`` keeps Thor (repair intro; overlays not the lesson).
@@ -53,7 +53,12 @@ MASSIVE = {
     "BATTLECRUISER",
     "BROODLORD",
 }
-KEEP_MASSIVE = {"ctf_heal_thor_scv_vs_thor_scv"}
+KEEP_MASSIVE = {
+    "ctf_heal_thor_scv_vs_thor_scv",
+    "scenario_queen_vs_battlecruiser",
+    "snipe_infestor_roach_vs_battlecruiser_scv",
+    "snipe_battlecruiser_marine_vs_corruptor_hydra",
+}
 
 FLYING_LAYERS = [
     "allied_unit_flying",
@@ -139,25 +144,25 @@ def _ensure_layers(text: str, key: str, layers: list[str]) -> tuple[str, bool]:
 
 def main() -> int:
     levels = yaml.safe_load(PIPELINE.read_text(encoding="utf-8"))["levels"]
-    fly_gate = "ctf_level_24"
+    fly_gate = "scenario_queen_vs_battlecruiser"
     mass_gate = "ctf_level_07"
     fly_i = levels.index(fly_gate)
     mass_i = levels.index(mass_gate)
 
-    # 1) Attach flying map channels to the transport intro.
-    path24 = ROOT / f"{fly_gate}.yaml"
-    text24 = path24.read_text(encoding="utf-8")
-    text24, ch_g = _ensure_layers(text24, "active_layers", FLYING_LAYERS)
-    text24, ch_t = _ensure_layers(text24, "active_tactical_layers", FLYING_LAYERS)
+    # 1) Attach flying map channels to the heal-revisit intro.
+    path_fly = ROOT / f"{fly_gate}.yaml"
+    text_fly = path_fly.read_text(encoding="utf-8")
+    text_fly, ch_g = _ensure_layers(text_fly, "active_layers", FLYING_LAYERS)
+    text_fly, ch_t = _ensure_layers(text_fly, "active_tactical_layers", FLYING_LAYERS)
     if ch_g or ch_t:
-        path24.write_text(text24, encoding="utf-8", newline="\n")
+        path_fly.write_text(text_fly, encoding="utf-8", newline="\n")
         print(f"{fly_gate}: added flying / air-DPS-base layers")
     else:
         print(f"{fly_gate}: flying layers already present")
 
     # 2) Strip gated units from earlier levels.
     for name in levels:
-        if not name.startswith(("ctf_", "scenario_", "aoe_")):
+        if not name.startswith(("ctf_", "scenario_", "aoe_", "snipe_")):
             continue
         path = ROOT / f"{name}.yaml"
         if not path.exists():

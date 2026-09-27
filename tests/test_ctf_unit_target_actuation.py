@@ -158,6 +158,7 @@ def test_unit_target_heads_are_registered():
     assert "attack_unit" in UNIT_TARGET_COMMAND_HEADS
     assert "heal_unit" in UNIT_TARGET_COMMAND_HEADS
     assert "load_unit" in UNIT_TARGET_COMMAND_HEADS
+    assert "snipe" in UNIT_TARGET_COMMAND_HEADS
 
 
 def test_attack_unit_focus_fires_the_selected_tag():

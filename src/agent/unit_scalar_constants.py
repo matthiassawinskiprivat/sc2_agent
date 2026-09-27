@@ -75,8 +75,9 @@ class UnitScalarConstants:
     CAN_LOAD         = "can_load"
     CAN_UNLOAD       = "can_unload"
 
-    # === Group L: AoE spell readiness (append-only) ===
+    # === Group L: AoE / snipe spell readiness (append-only) ===
     CAN_AOE = "can_aoe"
+    CAN_SNIPE = "can_snipe"
 
     # --- INDEX MAPPING — never reorder; append new entries at the end ---
     FEATURES = {
@@ -139,6 +140,7 @@ class UnitScalarConstants:
         CAN_UNLOAD:      45,
         # Group L
         CAN_AOE: 46,
+        CAN_SNIPE: 47,
     }
 
     @classmethod

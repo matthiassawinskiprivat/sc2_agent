@@ -68,6 +68,7 @@ def test_zero_masks_have_the_documented_shapes():
         "load_target_mask",
         "attack_actor_mask",
         "aoe_actor_mask",
+        "snipe_actor_mask",
         "unload_actor_mask",
         "cloak_actor_mask",
         "uncloak_actor_mask",
@@ -358,8 +359,77 @@ def test_viper_aoe_actor_requires_tactical_air_enemy():
         _slots(viper), has_tactical_air_enemy=False
     )
     assert not without_air["aoe_actor_mask"].any()
-    with_air = build_squad_target_masks(_slots(viper), has_tactical_air_enemy=True)
+    with_air = build_squad_target_masks(
+        _slots(viper), has_tactical_air_enemy=True
+    )
     assert with_air["aoe_actor_mask"][0] == 1.0
+
+
+def test_snipe_actor_requires_energy_and_neural_tech():
+    from sc2.ids.upgrade_id import UpgradeId
+    from src.agent.squad_target_masks import build_snipe_target_mask
+
+    infestor = _unit(1, UnitTypeId.INFESTOR, energy=100.0)
+    marine = _unit(2, UnitTypeId.MARINE, is_biological=True, owner_id=2)
+    without = build_squad_target_masks(_slots(infestor), upgrades=frozenset())
+    assert not without["snipe_actor_mask"].any()
+
+    with_tech = build_squad_target_masks(
+        _slots(infestor), upgrades=frozenset({UpgradeId.NEURALPARASITE})
+    )
+    assert with_tech["snipe_actor_mask"][0] == 1.0
+
+    enemies = [marine] + [None] * (MAX_SQUAD_ENEMIES - 1)
+    tgt = build_snipe_target_mask(
+        enemies,
+        _slots(infestor),
+        upgrades=frozenset({UpgradeId.NEURALPARASITE}),
+    )
+    assert tgt[0] == 1.0
+
+
+def test_ghost_snipe_target_requires_biological():
+    from src.agent.squad_target_masks import build_snipe_target_mask
+
+    ghost = _unit(1, UnitTypeId.GHOST, energy=50.0)
+    ling = _unit(2, UnitTypeId.ZERGLING, is_biological=True, owner_id=2)
+    stalker = _unit(3, UnitTypeId.STALKER, is_biological=False, owner_id=2)
+    masks = build_squad_target_masks(_slots(ghost))
+    assert masks["snipe_actor_mask"][0] == 1.0
+
+    enemies = [ling, stalker] + [None] * (MAX_SQUAD_ENEMIES - 2)
+    tgt = build_snipe_target_mask(enemies, _slots(ghost))
+    assert tgt[0] == 1.0
+    assert tgt[1] == 0.0
+
+
+def test_feedback_snipe_target_requires_energy_bar():
+    from src.agent.squad_target_masks import build_snipe_target_mask
+
+    ht = _unit(1, UnitTypeId.HIGHTEMPLAR, energy=50.0)
+    ghost = _unit(2, UnitTypeId.GHOST, energy=50.0, owner_id=2)
+    marine = _unit(3, UnitTypeId.MARINE, energy=0.0, owner_id=2)
+    marine.energy_max = 0.0
+    masks = build_squad_target_masks(_slots(ht))
+    assert masks["snipe_actor_mask"][0] == 1.0
+
+    enemies = [ghost, marine] + [None] * (MAX_SQUAD_ENEMIES - 2)
+    tgt = build_snipe_target_mask(enemies, _slots(ht))
+    assert tgt[0] == 1.0
+    assert tgt[1] == 0.0
+
+
+def test_yamato_snipe_actor_requires_yamato_cannon_tech():
+    from sc2.ids.upgrade_id import UpgradeId
+
+    bc = _unit(1, UnitTypeId.BATTLECRUISER, energy=0.0)
+    without = build_squad_target_masks(_slots(bc), upgrades=frozenset())
+    assert not without["snipe_actor_mask"].any()
+
+    with_tech = build_squad_target_masks(
+        _slots(bc), upgrades=frozenset({UpgradeId.YAMATOCANNON})
+    )
+    assert with_tech["snipe_actor_mask"][0] == 1.0
 
 
 def test_move_actor_excludes_immobile_units():

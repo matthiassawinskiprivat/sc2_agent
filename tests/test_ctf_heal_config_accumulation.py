@@ -45,13 +45,18 @@ def test_ctf_level_19_and_20_inherit_heal_without_relisting():
         assert "terrain_creep" in layers
 
 
-def test_damaged_units_only_enabled_on_first_three_heal_levels():
-    """``damaged_units`` is only for the three dedicated heal-introduction scenarios."""
+def test_damaged_units_only_enabled_on_heal_intro_revisit_and_snipe():
+    """``damaged_units`` on heal intros, heal revisit, and the snipe block."""
     cm = ConfigManager("config_universal")
     for level in (
         "ctf_heal_queen_vs_queen",
         "ctf_heal_thor_scv_vs_thor_scv",
         "ctf_heal_queen_vs_battlecruiser_scv",
+        "scenario_queen_vs_battlecruiser",
+        "snipe_ghost_marauder_vs_roach_hydra",
+        "snipe_infestor_roach_vs_battlecruiser_scv",
+        "snipe_high_templar_zealot_vs_ghost_medivac",
+        "snipe_battlecruiser_marine_vs_corruptor_hydra",
     ):
         assert cm.get_level_config(level)["env"].get("damaged_units") is True, level
 
@@ -164,9 +169,9 @@ def test_heal_intro_precedes_ctf_level_18():
 
 
 def test_heal_queen_vs_battlecruiser_follows_flying_layers():
-    """Air heal mix waits until flying / air-DPS map channels exist (from transport intro)."""
+    """Air heal mix waits until flying / air-DPS map channels exist (heal revisit)."""
     cm = ConfigManager("config_universal")
-    flying = cm.levels.index("ctf_level_24")
+    flying = cm.levels.index("scenario_queen_vs_battlecruiser")
     qvbc = cm.levels.index("ctf_heal_queen_vs_battlecruiser_scv")
     assert flying < qvbc
     layers = cm.get_cumulative_active_layers("ctf_heal_queen_vs_battlecruiser_scv")
@@ -174,8 +179,8 @@ def test_heal_queen_vs_battlecruiser_follows_flying_layers():
     assert "allied_a_dps_base" in layers
 
 
-def test_phase1_pre_transport_pools_have_no_flyers_or_massives():
-    """Before flying (ctf_24) / massive (ctf_07) map layers, pools stay ground-sized."""
+def test_phase1_pre_flying_pools_have_no_flyers_or_massives():
+    """Before flying (heal revisit) / massive (ctf_07) map layers, pools stay ground-sized."""
     cm = ConfigManager("config_universal")
     flying = {
         "BATTLECRUISER",
@@ -214,13 +219,22 @@ def test_phase1_pre_transport_pools_have_no_flyers_or_massives():
         "BATTLECRUISER",
         "BROODLORD",
     }
-    fly_i = cm.levels.index("ctf_level_24")
+    fly_i = cm.levels.index("scenario_queen_vs_battlecruiser")
     mass_i = cm.levels.index("ctf_level_07")
+    # Massive overlay attaches at ctf_07; these levels intentionally spawn Thor/BC
+    # earlier for heal/snipe lessons (flying channels already exist at the heal revisit).
+    keep_massive = {
+        "ctf_heal_thor_scv_vs_thor_scv",
+        "scenario_queen_vs_battlecruiser",
+        "snipe_infestor_roach_vs_battlecruiser_scv",
+        "snipe_battlecruiser_marine_vs_corruptor_hydra",
+    }
     for i, level in enumerate(cm.levels):
         if not (
             level.startswith("ctf_")
             or level.startswith("scenario_")
             or level.startswith("aoe_")
+            or level.startswith("snipe_")
         ):
             continue
         if level == "ctf_heal_thor_scv_vs_thor_scv":
@@ -229,7 +243,7 @@ def test_phase1_pre_transport_pools_have_no_flyers_or_massives():
         units = {u for pool in pools for u in pool.get("unit_pool") or []}
         if i < fly_i:
             assert not (units & flying), f"{level}: unexpected flyers {units & flying}"
-        if i < mass_i:
+        if i < mass_i and level not in keep_massive:
             assert not (units & massive), f"{level}: unexpected massives {units & massive}"
 
 
@@ -241,6 +255,7 @@ def test_heal_unit_has_no_click_cells_anywhere():
             level.startswith("ctf_")
             or level.startswith("scenario_")
             or level.startswith("aoe_")
+            or level.startswith("snipe_")
         ):
             continue
         env = cm.get_level_config(level).get("env") or {}

@@ -191,6 +191,7 @@ def test_command_target_modes_table():
         CMD_MODE_AOE,
         CMD_MODE_ATTACK_LOCAL,
         CMD_MODE_CLOAK,
+        CMD_MODE_SNIPE,
         CMD_MODE_UNCLOAK,
         CMD_MODE_UNLOAD,
     )
@@ -203,6 +204,7 @@ def test_command_target_modes_table():
             "heal_unit",
             "load_unit",
             "aoe_local",
+            "snipe",
             "unload_local",
         ],
         ["cloak_burrow", "uncloak_unburrow"],
@@ -213,10 +215,11 @@ def test_command_target_modes_table():
     assert modes[3] == CMD_MODE_ALLY_TARGET
     assert modes[4] == CMD_MODE_LOAD_TARGET
     assert modes[5] == CMD_MODE_AOE
-    assert modes[6] == CMD_MODE_UNLOAD
-    assert modes[7] == CMD_MODE_CLOAK
-    assert modes[8] == CMD_MODE_UNCLOAK
-    assert modes[9] == CMD_MODE_NONE  # padded _unused slot
+    assert modes[6] == CMD_MODE_SNIPE
+    assert modes[7] == CMD_MODE_UNLOAD
+    assert modes[8] == CMD_MODE_CLOAK
+    assert modes[9] == CMD_MODE_UNCLOAK
+    assert modes[10] == CMD_MODE_NONE  # padded _unused slot
 
 
 def test_selected_tags_from_indices():

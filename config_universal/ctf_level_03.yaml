@@ -16,7 +16,7 @@ env:
   alternate_trainee_race: true
   include_race: true
   maps_dir: train/maps/ladder/with_region
-  env_mode: heal,cloak,spellcaster,drop
+  env_mode: heal,cloak,spellcaster
   unit_pools:
   - high_level_command: attack
     race: terran
@@ -25,6 +25,7 @@ env:
     unit_pool:
     - MARAUDER
     - GHOST
+    - MEDIVAC
     region: A
   - agent: true
     high_level_command: defend
@@ -34,6 +35,8 @@ env:
     unit_pool:
     - ROACH
     - INFESTOR
+    - QUEEN
+    - RAVAGER
     region: A
   - high_level_command: defend
     race: terran
@@ -42,6 +45,7 @@ env:
     unit_pool:
     - MARAUDER
     - GHOST
+    - MEDIVAC
     region: B
   - agent: true
     high_level_command: attack
@@ -51,6 +55,8 @@ env:
     unit_pool:
     - ROACH
     - INFESTOR
+    - QUEEN
+    - RAVAGER
     region: B
   active_layers:
   - allied_unit_armored

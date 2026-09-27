@@ -16,7 +16,7 @@ env:
   alternate_trainee_race: false
   include_race: true
   maps_dir: train/maps/ladder/with_region
-  env_mode: heal,cloak,spellcaster,drop
+  env_mode: heal,cloak,spellcaster
   unit_pools:
   - high_level_command: attack
     agent: true

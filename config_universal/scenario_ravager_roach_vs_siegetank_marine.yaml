@@ -16,7 +16,7 @@ env:
   alternate_trainee_race: true
   include_race: true
   maps_dir: train/maps/ladder/with_region
-  env_mode: heal,cloak,spellcaster,drop
+  env_mode: heal,cloak,spellcaster
   unit_pools:
   - high_level_command: attack
     race: zerg
@@ -26,6 +26,7 @@ env:
     - RAVAGER
     - ROACH
     - INFESTOR
+    - QUEEN
     region: A
   - high_level_command: defend
     race: terran
@@ -35,6 +36,8 @@ env:
     - SIEGETANK
     - MARINE
     - GHOST
+    - SCV
+    - MEDIVAC
     region: A
   - high_level_command: defend
     race: zerg
@@ -44,6 +47,7 @@ env:
     - RAVAGER
     - ROACH
     - INFESTOR
+    - QUEEN
     region: B
   - high_level_command: attack
     race: terran
@@ -53,6 +57,8 @@ env:
     - SIEGETANK
     - MARINE
     - GHOST
+    - SCV
+    - MEDIVAC
     region: B
   active_layers:
   - enemy_unit_mechanical

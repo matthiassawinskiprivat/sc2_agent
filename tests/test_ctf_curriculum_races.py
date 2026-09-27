@@ -428,8 +428,9 @@ def test_ctf_pipeline_inserts_two_levels_between_01_and_02():
     idx_i2 = cm.levels.index(inserted_2)
 
     assert idx_01 < idx_i1 < idx_i2
-    # Phase-1 heal / cloak / aoe / transport sit between the melee intros and
-    # the phase-2 detailed-layer block that starts at ctf_level_02.
+    # Phase-1 heal / cloak / aoe / heal-revisit / snipe sit between the melee
+    # intros and the phase-2 detailed-layer block that starts at ctf_level_02.
+    # Transport is deferred to the pipeline end.
     assert idx_i2 < idx_02 < idx_03
 
 
@@ -450,8 +451,10 @@ def test_ctf_level_01_adds_no_map_layers_phase1_defers_detail():
     at_01 = cm.get_cumulative_active_layers("ctf_level_01")
     assert at_01 == prior
 
-    # End of phase 1 (after heal / cloak / aoe / transport channel adds).
-    prior_phase2 = set(cm.get_cumulative_active_layers("ctf_level_26"))
+    # End of phase 1 (last snipe intro; transport channels attach later at ctf_24).
+    prior_phase2 = set(
+        cm.get_cumulative_active_layers("snipe_battlecruiser_marine_vs_corruptor_hydra")
+    )
     at_02 = cm.get_cumulative_active_layers("ctf_level_02")
     added = [layer for layer in at_02 if layer not in prior_phase2]
     assert added == [

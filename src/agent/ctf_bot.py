@@ -25,6 +25,7 @@ from src.utils.unit_feature_helpers import (
     is_force_melee_unit,
     issue_aoe_at_point,
     issue_attack_at_point,
+    issue_snipe_on_unit,
     perspective_unit_groups,
     uses_purification_nova_for_attack,
     uses_spawn_locusts_for_attack,
@@ -34,6 +35,7 @@ from src.agent.squad_constants import (
     ALLY_TARGET_COMMAND_HEADS,
     ENEMY_TARGET_COMMAND_HEADS,
     LOAD_TARGET_COMMAND_HEADS,
+    SNIPE_COMMAND_HEADS,
 )
 from src.agent.ctf_economic_rewards import (
     ROLE_ATTACK,
@@ -57,7 +59,10 @@ EMPTY_ECONOMIC_METRICS: Dict[str, float] = {key: 0.0 for key in ECONOMIC_METRIC_
 
 # Command heads whose terminal target is a unit pointer, not a world cell.
 UNIT_TARGET_COMMAND_HEADS: Tuple[str, ...] = (
-    ALLY_TARGET_COMMAND_HEADS + LOAD_TARGET_COMMAND_HEADS + ENEMY_TARGET_COMMAND_HEADS
+    ALLY_TARGET_COMMAND_HEADS
+    + LOAD_TARGET_COMMAND_HEADS
+    + ENEMY_TARGET_COMMAND_HEADS
+    + SNIPE_COMMAND_HEADS
 )
 
 # Per-step TensorBoard command mix (trainee tags only; see env _record_command_metrics).
@@ -67,6 +72,7 @@ COMMAND_METRIC_KINDS: Tuple[str, ...] = (
     "cloak",
     "uncloak",
     "aoe",
+    "snipe",
     "load",
     "unload",
 )
@@ -591,7 +597,9 @@ class CaptureTheFlagBot(BotAI):
         ``aoe_local`` a mobile *or building* within tactical half-width of any
         living ally (``engage_enemy_mask`` — buildings are not pointer slots but
         spatial attack already hard-targets them), ``aoe_local`` also a ready
-        caster (Viper needs air in that engage fovea),
+        caster (Viper needs air in that engage fovea), ``snipe`` a ready snipe
+        caster *and* an eligible hostile (bio for Ghost, energy unit for
+        Feedback, any mobile for Yamato / Neural),
         ``unload_local`` a loaded transport, ``cloak_burrow`` a unit that can
         conceal, and ``uncloak_unburrow`` a currently concealed unit.
         """
@@ -602,6 +610,7 @@ class CaptureTheFlagBot(BotAI):
             CMD_MODE_CLOAK,
             CMD_MODE_ENEMY_TARGET,
             CMD_MODE_LOAD_TARGET,
+            CMD_MODE_SNIPE,
             CMD_MODE_UNCLOAK,
             CMD_MODE_UNLOAD,
             MAX_SQUAD_UNITS,
@@ -650,6 +659,10 @@ class CaptureTheFlagBot(BotAI):
                 engage = obs.get("tactical_enemy_mask", 0.0)
             has_engage_enemy = bool(np.any(np.asarray(engage) > 0.5))
             has_aoe = bool(np.any(np.asarray(obs.get("aoe_actor_mask", 0.0)) > 0.5))
+            has_snipe = bool(
+                np.any(np.asarray(obs.get("snipe_actor_mask", 0.0)) > 0.5)
+                and np.any(np.asarray(obs.get("snipe_target_mask", 0.0)) > 0.5)
+            )
             has_unload = bool(
                 np.any(np.asarray(obs.get("unload_actor_mask", 0.0)) > 0.5)
             )
@@ -668,6 +681,8 @@ class CaptureTheFlagBot(BotAI):
                 elif mode == CMD_MODE_ENEMY_TARGET and (
                     not has_enemy or not has_attack_ready
                 ):
+                    mask[cmd_start + idx] = False
+                elif mode == CMD_MODE_SNIPE and not has_snipe:
                     mask[cmd_start + idx] = False
                 elif mode == CMD_MODE_ATTACK_LOCAL and (
                     not has_engage_enemy or not has_attack_ready
@@ -702,8 +717,8 @@ class CaptureTheFlagBot(BotAI):
 
         Spatial commands share one decoded world ``Point2`` (agent-faithful: the
         clicked cell is the order target). Unit-pointer commands (``heal_unit``,
-        ``load_unit``, ``attack_unit``) instead take ``target_unit_tag``, the SC2
-        tag the policy selected through the terminal target slot.
+        ``load_unit``, ``attack_unit``, ``snipe``) instead take ``target_unit_tag``,
+        the SC2 tag the policy selected through the terminal target slot.
 
         ``perspective_player_id`` is the env's SC2 owner for this order (trainee
         or opponent). Spatial cells are world-frame for every owner: no 180°
@@ -815,13 +830,14 @@ class CaptureTheFlagBot(BotAI):
         head_name: str,
         target_unit_tag: Optional[int],
     ) -> None:
-        """Issue ``heal_unit`` / ``load_unit`` / ``attack_unit`` against one tag.
+        """Issue ``heal_unit`` / ``load_unit`` / ``attack_unit`` / ``snipe`` against one tag.
 
         The policy already chose *which* unit through the terminal target slot, so
         there is no cell geometry to get wrong and no hidden retargeting: the
         order goes to exactly that tag. Per-caster legality is still re-checked
-        (an SCV cannot repair a Marine; a full Medivac cannot load), because the
-        observation's target masks only guarantee *some* actor in the squad matches.
+        (an SCV cannot repair a Marine; a full Medivac cannot load; Ghost Snipe
+        needs bio), because the observation's target masks only guarantee *some*
+        actor in the squad matches.
         """
         if target_unit_tag is None:
             return
@@ -830,6 +846,7 @@ class CaptureTheFlagBot(BotAI):
             return
         is_heal = head_name in ALLY_TARGET_COMMAND_HEADS
         is_load = head_name in LOAD_TARGET_COMMAND_HEADS
+        is_snipe = head_name in SNIPE_COMMAND_HEADS
         for unit_tag in selected_tags:
             unit = self.all_units.find_by_tag(unit_tag)
             if unit is None or unit.type_id == UnitTypeId.SHIELDBATTERY:
@@ -843,6 +860,10 @@ class CaptureTheFlagBot(BotAI):
             elif is_load:
                 self._mark_command_attempt(unit, "load")
                 self._issue_load_on_unit(unit, target)
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
+            elif is_snipe:
+                self._mark_command_attempt(unit, "snipe")
+                issue_snipe_on_unit(self, unit, target)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             else:
                 self._issue_attack_on_unit(unit, target)

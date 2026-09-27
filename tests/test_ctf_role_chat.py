@@ -82,6 +82,7 @@ def test_spawn_sends_role_chat_after_debug_helpers():
         return _fn
 
     env.unit_pools_config = [{"race": "zerg", "high_level_command": "attack", "region": "A"}]
+    env.training_conf = {"env": {}}
     env.bot = MagicMock()
     grid = MagicMock()
     grid.width = 8
@@ -95,7 +96,7 @@ def test_spawn_sends_role_chat_after_debug_helpers():
 
     env._clear_ctf_map_units = AsyncMock(side_effect=lambda: order.append("debug"))
     env._spawn_from_unit_pools = AsyncMock(
-        side_effect=lambda *_a, **_k: (order.append("debug") or ([], {}, [], []))
+        side_effect=lambda *_a, **_k: (order.append("debug") or ([], {}, [], [], []))
     )
     env._refresh_bot_state = AsyncMock()
     env._apply_cloak_env_mode_upgrades = AsyncMock(side_effect=lambda: order.append("debug"))

@@ -24,6 +24,7 @@ HEADS = [
     "heal_unit",
     "load_unit",
     "aoe_local",
+    "snipe",
     "unload_local",
 ]
 CATS = ["cloak_burrow", "uncloak_unburrow"]
@@ -58,6 +59,8 @@ def _obs(
     engage_enemies=None,
     attack_ready=None,
     aoe=0,
+    snipe=0,
+    snipe_targets=None,
     unload=0,
     cloak=0,
     uncloak=0,
@@ -76,10 +79,14 @@ def _obs(
         # Engage defaults to tactical so older call sites keep their meaning;
         # tests that distinguish hard-anchor vs any-ally set both explicitly.
         engage_enemies = tactical_enemies
+    if snipe_targets is None:
+        snipe_targets = snipe
     tactical = np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32)
     tactical[:tactical_enemies] = 1.0
     engage = np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32)
     engage[:engage_enemies] = 1.0
+    snipe_tgt = np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32)
+    snipe_tgt[:snipe_targets] = 1.0
     if attack_ready is None:
         attack_ready = n_alive
     return {
@@ -90,6 +97,8 @@ def _obs(
         "load_target_mask": ally(load_targets),
         "attack_actor_mask": ally(attack_ready),
         "aoe_actor_mask": ally(aoe),
+        "snipe_actor_mask": ally(snipe),
+        "snipe_target_mask": snipe_tgt,
         "unload_actor_mask": ally(unload),
         "cloak_actor_mask": ally(cloak),
         "uncloak_actor_mask": ally(uncloak),
@@ -242,6 +251,27 @@ def test_aoe_local_open_when_caster_ready():
     assert bool(mask[CMD + HEADS.index("aoe_local")]) is True
 
 
+def test_snipe_masked_without_ready_caster():
+    bot = _bot()
+    obs = _obs(enemies=1, snipe=0, snipe_targets=1)
+    mask = bot.squad_action_masks(obs["unit_mask"], obs)
+    assert bool(mask[CMD + HEADS.index("snipe")]) is False
+
+
+def test_snipe_masked_without_eligible_target():
+    bot = _bot()
+    obs = _obs(enemies=1, snipe=1, snipe_targets=0)
+    mask = bot.squad_action_masks(obs["unit_mask"], obs)
+    assert bool(mask[CMD + HEADS.index("snipe")]) is False
+
+
+def test_snipe_open_when_caster_and_target_ready():
+    bot = _bot()
+    obs = _obs(enemies=1, snipe=1, snipe_targets=1)
+    mask = bot.squad_action_masks(obs["unit_mask"], obs)
+    assert bool(mask[CMD + HEADS.index("snipe")]) is True
+
+
 def test_unload_local_masked_without_loaded_transport():
     bot = _bot()
     obs = _obs(enemies=1, unload=0)
@@ -288,6 +318,7 @@ def test_categorical_heads_are_gated_by_conceal_state():
         ["heal_unit"],
         ["load_unit"],
         ["aoe_local"],
+        ["snipe"],
         ["unload_local"],
         ["attack_local"],
     ],
@@ -303,6 +334,8 @@ def test_command_slice_is_never_fully_masked(heads):
         enemies=0,
         tactical_enemies=0,
         attack_ready=0,
+        snipe=0,
+        snipe_targets=0,
     )
     mask = bot.squad_action_masks(obs["unit_mask"], obs)
     assert mask[CMD : CMD + FIXED_UNIVERSAL_COMMAND_DIM].any()

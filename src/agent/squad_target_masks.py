@@ -21,12 +21,14 @@ from src.agent.squad_constants import MAX_SQUAD_ENEMIES, MAX_SQUAD_UNITS
 from src.utils.unit_feature_helpers import (
     heal_target_is_eligible,
     load_pair_is_eligible,
+    snipe_target_is_eligible,
     unit_can_aoe,
     unit_can_attack,
     unit_can_cast_heal,
     unit_can_conceal,
     unit_can_load,
     unit_can_reveal,
+    unit_can_snipe,
     unit_can_unload,
     unit_in_tactical_fovea,
     unit_is_immobile,
@@ -41,6 +43,7 @@ SQUAD_TARGET_MASK_KEYS = (
     "load_target_mask",
     "attack_actor_mask",
     "aoe_actor_mask",
+    "snipe_actor_mask",
     "unload_actor_mask",
     "cloak_actor_mask",
     "uncloak_actor_mask",
@@ -92,6 +95,10 @@ def build_squad_target_masks(
     Command gating for ``aoe_local`` additionally requires
     ``engage_enemy_mask`` (hostile within fovea of any living ally).
 
+    ``snipe_actor_mask`` marks ready unit-target special casters (Ghost Snipe,
+    Yamato, Neural Parasite, Feedback). Command gating for ``snipe`` also needs
+    ``snipe_target_mask`` (an eligible hostile for *some* ready caster).
+
     ``move_actor_mask`` marks controllable units that can walk (not sieged /
     burrowed immobile). Used to narrow move actors; the move command stays open.
 
@@ -104,6 +111,7 @@ def build_squad_target_masks(
     load_target = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
     attack_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
     aoe_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    snipe_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
     unload_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
     cloak_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
     uncloak_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
@@ -132,6 +140,8 @@ def build_squad_target_masks(
             has_tactical_air_enemy=has_tactical_air_enemy,
         ):
             aoe_actor[slot] = 1.0
+        if controllable and unit_can_snipe(unit, upgrades=upg, bot=bot):
+            snipe_actor[slot] = 1.0
         if controllable and unit_can_unload(unit):
             unload_actor[slot] = 1.0
         if controllable and unit_can_conceal(unit, upg):
@@ -168,6 +178,7 @@ def build_squad_target_masks(
         "load_target_mask": load_target,
         "attack_actor_mask": attack_actor,
         "aoe_actor_mask": aoe_actor,
+        "snipe_actor_mask": snipe_actor,
         "unload_actor_mask": unload_actor,
         "cloak_actor_mask": cloak_actor,
         "uncloak_actor_mask": uncloak_actor,
@@ -182,6 +193,37 @@ def build_enemy_target_mask(enemies: Sequence[Optional[Any]]) -> np.ndarray:
         if unit is None:
             continue
         mask[slot] = 1.0
+    return mask
+
+
+def build_snipe_target_mask(
+    enemies: Sequence[Optional[Any]],
+    allies: Sequence[Optional[Any]],
+    *,
+    bot: Any = None,
+    upgrades: Optional[frozenset] = None,
+) -> np.ndarray:
+    """Enemy slots that **some** ready snipe caster in this squad can legally hit.
+
+    Per-caster biology / energy-bar rules are re-checked at actuation, matching
+    the heal_target_mask pattern for mixed squads.
+    """
+    mask = np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32)
+    upg = upgrades if upgrades is not None else frozenset()
+    casters = [
+        u
+        for u in list(allies)[:MAX_SQUAD_UNITS]
+        if u is not None and _is_controllable(u) and unit_can_snipe(u, upgrades=upg, bot=bot)
+    ]
+    if not casters:
+        return mask
+    for slot, enemy in enumerate(list(enemies)[:MAX_SQUAD_ENEMIES]):
+        if enemy is None:
+            continue
+        for caster in casters:
+            if snipe_target_is_eligible(caster, enemy):
+                mask[slot] = 1.0
+                break
     return mask
 
 

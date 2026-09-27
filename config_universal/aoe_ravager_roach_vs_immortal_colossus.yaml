@@ -16,7 +16,7 @@ env:
   alternate_trainee_race: true
   include_race: true
   include_upgrades: true
-  env_mode: heal,cloak,spellcaster,drop,upgrades
+  env_mode: heal,cloak,spellcaster,upgrades
   maps_dir: train/maps/ladder/with_region
   action_heads:
   - aoe_local
@@ -38,6 +38,7 @@ env:
     - RAVAGER
     - ROACH
     - INFESTOR
+    - QUEEN
     region: A
   - high_level_command: defend
     race: zerg
@@ -47,6 +48,7 @@ env:
     - RAVAGER
     - ROACH
     - INFESTOR
+    - QUEEN
     region: B
   - high_level_command: attack
     race: protoss

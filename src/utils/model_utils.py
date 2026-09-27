@@ -919,6 +919,9 @@ POINTER_COMMAND_ROW_TEMPLATES: Dict[str, str] = {
     # load row exists in the graft. Seed from attack_local so the new head is
     # not a near-zero padded unused logit at first sample.
     "load_unit": "attack_local",
+    # snipe is a unit-targeted special; seed from attack_unit when present,
+    # else attack_local (same enemy-pointer family).
+    "snipe": "attack_unit",
 }
 
 

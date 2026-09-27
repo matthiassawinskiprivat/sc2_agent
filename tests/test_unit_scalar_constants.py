@@ -47,7 +47,7 @@ def test_expected_feature_names_present():
         USC.IS_ATTACKING, USC.IS_MOVING, USC.IS_CONCEALED, USC.IS_DETECTED,
         USC.ROLE_ATTACK, USC.ROLE_DEFEND,
         USC.AIR_DPS_NORM, USC.HAS_SPLASH, USC.ONETIME_UNIT, USC.IS_FRIENDLY_FIRE,
-        USC.IS_TEMPORARY, USC.CAN_AOE,
+        USC.IS_TEMPORARY, USC.CAN_AOE, USC.CAN_SNIPE,
     ]
     for name in required:
         assert name in USC.FEATURES

@@ -1,11 +1,11 @@
-"""Rewrite CTF/scenario/AoE env_mode to accumulate by pipeline intro order.
+"""Rewrite CTF/scenario/AoE/snipe env_mode to accumulate by pipeline intro order.
 
 Modes stick once introduced:
   heal        @ ctf_heal_queen_vs_queen
   cloak       @ ctf_level_21
   spellcaster @ aoe_high_templar_zealot_vs_marine_marauder
-  drop        @ ctf_level_24
   upgrades    @ ctf_level_27
+  drop        @ ctf_level_24  (pipeline end; after upgrades)
 """
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ INTRO = {
     "heal": "ctf_heal_queen_vs_queen",
     "cloak": "ctf_level_21",
     "spellcaster": "aoe_high_templar_zealot_vs_marine_marauder",
-    "drop": "ctf_level_24",
     "upgrades": "ctf_level_27",
+    "drop": "ctf_level_24",
 }
-ORDER = ("heal", "cloak", "spellcaster", "drop", "upgrades")
+ORDER = ("heal", "cloak", "spellcaster", "upgrades", "drop")
 
 
 def _expected_mode(levels: list[str], name: str) -> str | None:
@@ -96,7 +96,10 @@ def main() -> int:
     ctf_start = next(
         i
         for i, l in enumerate(levels)
-        if l.startswith("ctf_") or l.startswith("scenario_") or l.startswith("aoe_")
+        if l.startswith("ctf_")
+        or l.startswith("scenario_")
+        or l.startswith("aoe_")
+        or l.startswith("snipe_")
     )
     changed = 0
     for name in levels[ctf_start:]:

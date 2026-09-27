@@ -36,6 +36,7 @@ env:
     unit_pool:
     - ZERGLING
     - INFESTOR
+    - QUEEN
     region: A
   - high_level_command: defend
     race: zerg
@@ -44,6 +45,7 @@ env:
     unit_pool:
     - ZERGLING
     - INFESTOR
+    - QUEEN
     region: B
   - high_level_command: attack
     race: protoss

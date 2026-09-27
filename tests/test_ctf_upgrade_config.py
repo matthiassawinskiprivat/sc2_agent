@@ -15,7 +15,8 @@ def test_ctf_level_27_29_upgrade_config():
     for level in ("ctf_level_27", "ctf_level_28", "ctf_level_29"):
         cfg = cm.get_level_config(level)
         modes = {p.strip() for p in str(cfg["env"]["env_mode"]).split(",") if p.strip()}
-        assert modes == {"heal", "cloak", "spellcaster", "drop", "upgrades"}, level
+        # Drop is deferred to pipeline-end transport; upgrades intro has no drop yet.
+        assert modes == {"heal", "cloak", "spellcaster", "upgrades"}, level
         assert cfg["env"].get("include_upgrades") is True
 
 

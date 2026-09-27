@@ -29,18 +29,20 @@ _AOE_LEVELS = _PHASE1_AOE + _PHASE2_AOE
 
 
 def test_aoe_scenarios_are_split_across_curriculum_phases():
-    """Phase-1 AoE intros sit before transport (ctf_24); phase-2 revisits finish the pipeline."""
+    """Phase-1 AoE intros sit before the heal revisit; phase-2 revisits precede transport."""
     cm = ConfigManager(str(_CONFIG_DIR))
     idx_cloak = cm.levels.index("ctf_level_23")
-    idx_transport = cm.levels.index("ctf_level_24")
+    idx_heal_revisit = cm.levels.index("scenario_queen_vs_battlecruiser")
     for offset, level in enumerate(_PHASE1_AOE, start=1):
         assert cm.levels.index(level) == idx_cloak + offset, level
-    assert cm.levels.index(_PHASE1_AOE[-1]) == idx_transport - 1
+    assert cm.levels.index(_PHASE1_AOE[-1]) == idx_heal_revisit - 1
 
     idx_liberator = cm.levels.index("scenario_battlecruiser_liberator_vs_corruptor_mutalisk")
     for offset, level in enumerate(_PHASE2_AOE, start=1):
         assert cm.levels.index(level) == idx_liberator + offset, level
-    assert cm.levels[-1] == _PHASE2_AOE[-1]
+    # Pipeline ends with transport after phase-2 AoE revisits.
+    assert cm.levels.index(_PHASE2_AOE[-1]) == cm.levels.index("ctf_level_24") - 1
+    assert cm.levels[-1] == "ctf_level_26"
 
 _AOE_CASTERS = {
     "HIGHTEMPLAR",
@@ -83,9 +85,9 @@ def test_aoe_scenarios_match_reference_except_pools_mode_and_heads():
 
 
 def test_aoe_scenarios_use_spellcaster_mode_and_aoe_local():
-    """Phase-1 AoE: heal+cloak+spellcaster. Phase-2: also drop+upgrades."""
+    """Phase-1 AoE: heal+cloak+spellcaster. Phase-2: also upgrades (drop is pipeline-end)."""
     phase1_modes = {"heal", "cloak", "spellcaster"}
-    phase2_modes = {"heal", "cloak", "spellcaster", "drop", "upgrades"}
+    phase2_modes = {"heal", "cloak", "spellcaster", "upgrades"}
     for level in _PHASE1_AOE:
         env = _load_level(level)["env"]
         modes = {m.strip() for m in str(env["env_mode"]).split(",") if m.strip()}

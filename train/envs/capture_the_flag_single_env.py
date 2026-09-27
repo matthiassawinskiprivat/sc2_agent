@@ -213,6 +213,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             obs_dict["engage_enemy_mask"] = spaces.Box(
                 low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
             )
+            obs_dict["snipe_target_mask"] = spaces.Box(
+                low=0.0, high=1.0, shape=(MAX_SQUAD_ENEMIES,), dtype=np.float32
+            )
             # Command-dependent legality rides in the observation, not the flat
             # action mask: the mask is built before the command is sampled.
             obs_dict["command_modes"] = spaces.Box(
@@ -903,6 +906,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         label_to_defender_pos: Dict = {}
         deferred_battery_cmds: List = []
         deferred_detector_cmds: List = []
+        deferred_transport_cmds: List = []
 
         if self.unit_pools_config:
             (
@@ -910,6 +914,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 label_to_defender_pos,
                 deferred_battery_cmds,
                 deferred_detector_cmds,
+                deferred_transport_cmds,
             ) = await self._spawn_from_unit_pools(
                 get_valid_pos, get_offset_pos, to_id
             )
@@ -948,7 +953,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if deferred_detector_cmds:
             await self._spawn_cloak_mode_detectors(deferred_detector_cmds)
 
-        # Assign commands after detectors exist so they join the nearest squad.
+        # Free drop transports: one per squad, not paid from the pool budget.
+        if deferred_transport_cmds:
+            await self._spawn_drop_mode_transports(deferred_transport_cmds)
+
+        # Assign commands after support units exist so they join the nearest squad.
         if pool_spawn_centers:
             self.label_to_defender_pos = label_to_defender_pos
             self._promoted_pool_index = None
@@ -987,9 +996,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             label_to_defender_pos: arena label → defender center
             deferred_battery_cmds: SHIELDBATTERY create cmds (after pylons power up)
             deferred_detector_cmds: free cloak detectors (after army + upgrades)
+            deferred_transport_cmds: free drop transports (not charged to the pool budget)
         """
         from sc2.ids.unit_typeid import UnitTypeId
         from sc2.position import Point2
+        from train.envs.ctf.drop_transports import drop_transport_name
         from train.envs.ctf.heal_spawn import guaranteed_healer_names
 
         map_path = str(self._resolve_map(self.map_name).path)
@@ -1013,6 +1024,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         deferred_battery_cmds: List = []
         # Free cloak detectors: separate create after army batch (+ upgrades for Overseer).
         deferred_detector_cmds: List = []
+        # Free drop transports: one per squad, outside mineral/vespene budget.
+        deferred_transport_cmds: List = []
         # (player_id, command, spawn_center, arena_label)
         pool_spawn_centers: List[Tuple] = []
         # (kept for debug / future obs; progressive debug_upgrade no longer samples tiers)
@@ -1083,6 +1096,26 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     )
                     deferred_detector_cmds.append([detector, 1, det_pos, player_id])
 
+            # Drop curriculum: one free transport per squad. The budgeted army is
+            # already fixed by unit_pool; this unit is not passed through
+            # calculate_budgeted_spawns, so its cost is not taken from the budget.
+            # Deferred like detectors so a long army create list cannot drop it.
+            if self._has_env_mode("drop"):
+                transport_name = drop_transport_name(pool.get("race", ""))
+                if transport_name is not None:
+                    # Sit one ring slot past the army, and past the cloak detector
+                    # when that mode plants one at the same center.
+                    slot = max(len(mobile_names), 1)
+                    if (
+                        self._has_env_mode("cloak")
+                        and self._cloak_mode_detector_type(pool.get("race", "")) is not None
+                    ):
+                        slot += 1
+                    transport_pos = get_offset_pos(spawn_center, slot, slot + 1)
+                    deferred_transport_cmds.append(
+                        [to_id(transport_name), 1, transport_pos, player_id]
+                    )
+
         # Issue creates per owner. A single mixed-owner list can silently drop the
         # trailing player's units (same failure mode as deferred detectors) — with
         # alternate_trainee_race that made one parity of episodes end on step 1.
@@ -1093,6 +1126,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             label_to_defender_pos,
             deferred_battery_cmds,
             deferred_detector_cmds,
+            deferred_transport_cmds,
         )
 
     async def _debug_create_units_by_player(self, cmds: List) -> None:
@@ -1163,6 +1197,18 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         await spawn_cloak_detectors(
             bot=self.bot,
             detector_cmds=detector_cmds,
+            refresh_state=self._refresh_bot_state,
+        )
+
+    async def _spawn_drop_mode_transports(self, transport_cmds: List) -> None:
+        """Create one free transport per drop-mode squad (not from the pool budget)."""
+        from train.envs.ctf.drop_transports import spawn_drop_transports
+
+        if not transport_cmds or self.bot is None:
+            return
+        await spawn_drop_transports(
+            bot=self.bot,
+            transport_cmds=transport_cmds,
             refresh_state=self._refresh_bot_state,
         )
 
