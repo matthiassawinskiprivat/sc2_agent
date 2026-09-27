@@ -109,7 +109,18 @@ def test_env_modes_accumulate_along_pipeline():
 
 def test_transport_levels_are_at_pipeline_end():
     cm = ConfigManager("config_universal")
-    assert cm.levels[-3:] == ["ctf_level_24", "ctf_level_25", "ctf_level_26"]
+    assert cm.levels[-1] == "ctf_level_26"
+    idx_24 = cm.levels.index("ctf_level_24")
+    idx_25 = cm.levels.index("ctf_level_25")
+    idx_26 = cm.levels.index("ctf_level_26")
+    assert idx_24 < idx_25 < idx_26
+    # Ability-tech conflict on 25 inserts ``ctf_level_25_reversed`` before 26.
+    transport_tail = cm.levels[idx_24:]
+    assert transport_tail[0] == "ctf_level_24"
+    assert "ctf_level_25" in transport_tail
+    assert transport_tail[-1] == "ctf_level_26"
+    if "ctf_level_25_reversed" in cm.levels:
+        assert cm.levels.index("ctf_level_25_reversed") == idx_25 + 1
 
 
 def test_drop_pools_include_transports():

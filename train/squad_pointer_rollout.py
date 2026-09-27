@@ -13,6 +13,12 @@ import numpy as np
 import torch
 from gymnasium import spaces
 
+from train.opponent_peek_ipc import (
+    OpponentPeekSharedMemory,
+    attach_opponent_peek_to_vec,
+    pack_pending_opponent_actions,
+    reconstruct_opponent_peek_obs,
+)
 from train.squad_batch_inference import (
     RolloutResolution,
     VecRolloutBufferRow,
@@ -21,9 +27,51 @@ from train.squad_batch_inference import (
     _scatter_rnn_columns,
     clone_rnn_states,
     normalize_vec_rnn_states,
+    opponent_pointer_vec_predict,
     select_rnn_state_column,
 )
 from sb3_contrib.common.recurrent.type_aliases import RNNStates
+
+
+def stack_info_action_masks(
+    infos: Any, num_envs: int
+) -> Optional[np.ndarray]:
+    """Pull per-env flat masks from ``env.step`` / ``reset`` info dicts."""
+    if infos is None:
+        return None
+    if isinstance(infos, dict):
+        infos = [infos]
+    if not isinstance(infos, (list, tuple)) or len(infos) < num_envs:
+        return None
+    rows: List[np.ndarray] = []
+    for i in range(num_envs):
+        info = infos[i]
+        if not isinstance(info, dict):
+            return None
+        mask = info.get("action_masks")
+        if mask is None:
+            return None
+        rows.append(np.asarray(mask, dtype=bool).reshape(-1))
+    return np.stack(rows, axis=0)
+
+
+def stack_info_requires_policy(
+    infos: Any, num_envs: int
+) -> Optional[np.ndarray]:
+    """Pull per-env ``requires_policy_action`` flags from step/reset infos."""
+    if infos is None:
+        return None
+    if isinstance(infos, dict):
+        infos = [infos]
+    if not isinstance(infos, (list, tuple)) or len(infos) < num_envs:
+        return None
+    flags: List[bool] = []
+    for i in range(num_envs):
+        info = infos[i]
+        if not isinstance(info, dict) or "requires_policy_action" not in info:
+            return None
+        flags.append(bool(info["requires_policy_action"]))
+    return np.asarray(flags, dtype=bool)
 
 
 class SquadPointerRolloutHelper:
@@ -31,6 +79,38 @@ class SquadPointerRolloutHelper:
 
     def __init__(self, num_envs: int):
         self.num_envs = num_envs
+        self._peek_shm: Optional[OpponentPeekSharedMemory] = None
+        self._vec_has_attr: Dict[str, bool] = {}
+
+    def bind_peek_shm(
+        self,
+        shm: Optional[OpponentPeekSharedMemory],
+        vec_env=None,
+        *,
+        attach: bool = True,
+    ) -> None:
+        self._peek_shm = shm
+        self._vec_has_attr.clear()
+        if attach and shm is not None and vec_env is not None:
+            attach_opponent_peek_to_vec(vec_env, shm)
+
+    def _cached_has_attr(self, vec_env, name: str) -> bool:
+        """One Subproc ``has_attr`` pipe per method name (workers do not grow methods)."""
+        cached = self._vec_has_attr.get(name)
+        if cached is not None:
+            return cached
+        if not hasattr(vec_env, "has_attr"):
+            self._vec_has_attr[name] = True
+            return True
+        found = bool(vec_env.has_attr(name))
+        self._vec_has_attr[name] = found
+        return found
+
+    def close_peek_shm(self, *, unlink: bool = True) -> None:
+        shm = self._peek_shm
+        self._peek_shm = None
+        if shm is not None:
+            shm.close(unlink=unlink)
 
     def reset(self) -> None:
         pass
@@ -51,6 +131,7 @@ class SquadPointerRolloutHelper:
         prev_focus_tags: np.ndarray,
         lstm_states: Optional[RNNStates],
         device: torch.device,
+        action_masks: Optional[np.ndarray] = None,
     ) -> RolloutResolution:
         del prev_focus_tags  # squad pointer: no focal-unit LSTM resets
 
@@ -72,7 +153,10 @@ class SquadPointerRolloutHelper:
 
         if need_forward:
             sub_obs = {k: v[need_forward] for k, v in obs.items()}
-            sub_masks = np.array(vec_env.env_method("action_masks"))[need_forward]
+            if action_masks is not None and np.asarray(action_masks).shape[0] >= num_envs:
+                sub_masks = np.asarray(action_masks)[need_forward]
+            else:
+                sub_masks = np.array(vec_env.env_method("action_masks"))[need_forward]
             # Match learner ``sanitize_obs_tensors_inplace`` so collected logπ
             # is scored on the same finite tensors PPO will train on.
             obs_t = _obs_tensor_to_finite(model.policy.obs_to_tensor(sub_obs)[0])
@@ -125,6 +209,8 @@ class SquadPointerRolloutHelper:
             if fe is not None and hasattr(fe, "clear_forward_cache"):
                 fe.clear_forward_cache()
 
+        self._batch_opponent_pointer_actions(vec_env, model, num_envs)
+
         return RolloutResolution(
             step_actions=step_actions,
             squad_batch_actions={},
@@ -132,3 +218,63 @@ class SquadPointerRolloutHelper:
             vec_rows=vec_rows,
             updated_lstm=updated_lstm,
         )
+
+    def _batch_opponent_pointer_actions(self, vec_env, model, num_envs: int) -> None:
+        """Gather opponent obs from workers, one CUDA forward, scatter actions."""
+        if not hasattr(vec_env, "env_method"):
+            return
+        try:
+            if not self._cached_has_attr(vec_env, "peek_opponent_squad_pointer"):
+                return
+            payloads = vec_env.env_method("peek_opponent_squad_pointer")
+        except Exception:
+            return
+        if not payloads:
+            return
+        ready: List[tuple] = []
+        obs_list: List[Dict[str, np.ndarray]] = []
+        for env_idx, payload in enumerate(payloads):
+            if not isinstance(payload, dict) or payload.get("obs") is None:
+                continue
+            obs = reconstruct_opponent_peek_obs(payload, self._peek_shm, env_idx)
+            if obs is None:
+                continue
+            ready.append((env_idx, payload))
+            obs_list.append(obs)
+        if not ready:
+            return
+        mask_list = [p["mask"] for _, p in ready]
+        lstm_list = [p.get("lstm") for _, p in ready]
+        starts = [bool(p.get("episode_start", True)) for _, p in ready]
+        try:
+            actions, new_lstms = opponent_pointer_vec_predict(
+                model,
+                obs_list,
+                mask_list,
+                lstm_states_list=lstm_list,
+                episode_starts=starts,
+                deterministic=False,
+            )
+        except Exception:
+            return
+        packed = pack_pending_opponent_actions(num_envs, ready, actions, new_lstms)
+        try:
+            if self._cached_has_attr(vec_env, "set_pending_opponent_squad_actions"):
+                vec_env.env_method("set_pending_opponent_squad_actions", packed)
+                return
+        except Exception:
+            self._vec_has_attr["set_pending_opponent_squad_actions"] = False
+        for env_idx, item in enumerate(packed):
+            if item is None:
+                continue
+            action, lstm, pool_idx = item
+            try:
+                vec_env.env_method(
+                    "set_pending_opponent_squad_action",
+                    action,
+                    lstm,
+                    pool_idx,
+                    indices=[env_idx],
+                )
+            except Exception:
+                return

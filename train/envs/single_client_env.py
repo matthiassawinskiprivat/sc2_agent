@@ -204,13 +204,23 @@ class SingleClientEnv(gym.Env):
 
     def _startup_timeout_sec(self) -> float:
         env_conf = self.training_conf.get("env", {})
-        base = float(
+        if not isinstance(env_conf, dict):
+            env_conf = {}
+        raw_base = (
             self.training_conf.get("startup_timeout_sec")
-            or env_conf.get("startup_timeout_sec", 60.0)
+            if self.training_conf.get("startup_timeout_sec") is not None
+            else env_conf.get("startup_timeout_sec")
         )
-        # launch_process sleeps worker_index × stagger before SC2 starts; budget must include that
-        # plus join_game and the post-join in_game poll (up to ~30s in CTF).
-        return base + self.worker_index * self._startup_stagger_sec()
+        if raw_base is None:
+            raw_base = self._conf_float("startup_timeout_sec", 90.0)
+        base = float(raw_base if raw_base is not None else 90.0)
+        # launch_process sleeps worker_index × stagger before SC2 starts.
+        # join_game also stretches under parallel DirectX load, and CTF then
+        # polls up to sc2_in_game_wait_sec before spawn/obs. Those must sit
+        # inside this wait_for or later workers raise TimeoutError mid-join.
+        in_game = float(self._conf_float("sc2_in_game_wait_sec", 15.0) or 0.0)
+        join_slack = float(self.worker_index) * 8.0
+        return base + self.worker_index * self._startup_stagger_sec() + in_game + join_slack
 
     async def _startup_session(self):
         """Launch SC2, join the game, and fetch the first observation."""
@@ -244,7 +254,7 @@ class SingleClientEnv(gym.Env):
                 asyncio.set_event_loop(self._loop)
                 self._log(
                     f"Starting SC2 session (attempt {attempt + 1}/{max_retries}, "
-                    f"worker {self.worker_index})..."
+                    f"worker {self.worker_index}, timeout={timeout_sec:.0f}s)..."
                 )
                 obs = self._loop.run_until_complete(
                     asyncio.wait_for(self._startup_session(), timeout=timeout_sec)

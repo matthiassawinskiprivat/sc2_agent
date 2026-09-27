@@ -381,6 +381,240 @@ def test_health_layer_is_one_at_zero_hp():
     assert result["map"][idx].max() == pytest.approx(1.0, abs=1e-6)
 
 
+def test_undamaged_health_layer_stays_zero():
+    """Health is a damage signal — full HP must not stamp (and must stay blank)."""
+    transformer = ObservationTransformer(map_size=(64, 64))
+    unit = create_mock_unit(
+        UnitTypeId.MARINE,
+        Point2((32, 32)),
+        health=100,
+        health_max=100,
+        shield=0,
+        shield_max=0,
+    )
+    raw_obs = {
+        "units": [unit],
+        "enemy_units": [],
+        "effects": [],
+        "game_info": _make_game_info(64, 64),
+        "game_data": None,
+    }
+    result = transformer.transform(raw_obs)
+    idx = LayerConstants.LAYERS[LayerConstants.ALLIED_HEALTH]
+    assert float(result["map"][idx].max()) == 0.0
+
+
+def test_global_postprocess_only_touches_active_layers():
+    """Inactive full-stack channels stay raw zeros after transform post."""
+    transformer = ObservationTransformer(
+        map_size=(64, 64),
+        training_conf={
+            "agent_architecture": "universal",
+            "active_layers": [
+                "allied_unit_density",
+                "enemy_unit_density",
+                "allied_g_dps_base",
+            ],
+        },
+    )
+    # Poison inactive planes before the public API would zero the buffer.
+    layers = transformer._zeroed_layer_buffer(
+        "global", LayerConstants.get_num_layers(), 64, 64
+    )
+    bio_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_BIOLOGICAL]
+    layers[bio_idx, 10, 10] = 3.0
+    den_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_DENSITY]
+    layers[den_idx, 10, 10] = 1.0
+    dps_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
+    layers[dps_idx, 10, 10] = 50.0
+    transformer._postprocess_global_layers(layers)
+    # Active density got log1p; active dps got tanh; inactive bio untouched.
+    assert layers[den_idx, 10, 10] == pytest.approx(np.log1p(1.0), abs=1e-5)
+    assert layers[dps_idx, 10, 10] == pytest.approx(np.tanh(1.0), abs=1e-5)
+    assert layers[bio_idx, 10, 10] == pytest.approx(3.0, abs=1e-6)
+
+
+def test_swap_allied_enemy_layers_exchanges_pairs():
+    layers = np.zeros((LayerConstants.get_num_layers(), 4, 4), dtype=np.float32)
+    a = LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_DENSITY]
+    e = LayerConstants.LAYERS[LayerConstants.ENEMY_UNIT_DENSITY]
+    layers[a, 1, 1] = 0.5
+    layers[e, 2, 2] = 0.9
+    ObservationTransformer.swap_allied_enemy_layers(layers)
+    assert layers[a, 2, 2] == pytest.approx(0.9)
+    assert layers[e, 1, 1] == pytest.approx(0.5)
+    assert layers[a, 1, 1] == pytest.approx(0.0)
+
+
+def test_mobile_density_solid_rect_matches_ones_mask():
+    """Filled-square mobiles stamp density without building a bool mask."""
+    transformer = ObservationTransformer(
+        map_size=(64, 64),
+        training_conf={
+            "agent_architecture": "universal",
+            "active_layers": ["allied_unit_density"],
+        },
+    )
+    transformer.current_layer_map = LayerConstants.LAYERS
+    transformer._update_active_indices()
+    gi = _make_game_info(64, 64, with_grids=True)
+    transformer._cache_pathing_grid(gi)
+    marauder = create_mock_unit(
+        UnitTypeId.MARAUDER,
+        Point2((32.0, 32.0)),
+        radius=0.5625,
+        is_biological=True,
+    )
+    assert transformer._mobile_uses_solid_rect_stamp(marauder)
+    layers = np.zeros((LayerConstants.get_num_layers(), 64, 64), dtype=np.float32)
+    idx = LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_DENSITY]
+    transformer._unit_stamp_cache = None
+    transformer._draw_unit_marker(
+        layers, idx, marauder, 32, 32, 1.0, True, use_footprint=True
+    )
+    assert transformer._unit_stamp_cache is not None
+    assert transformer._unit_stamp_cache[-1] is None  # solid-rect sentinel
+    assert float(layers[idx].max()) > 0.0
+    dens_px = int(np.count_nonzero(layers[idx] > 0))
+    assert dens_px >= 1
+
+
+def test_body_skips_inactive_attribute_layers():
+    transformer = ObservationTransformer(
+        map_size=(64, 64),
+        training_conf={
+            "agent_architecture": "universal",
+            "active_layers": ["allied_unit_density"],
+        },
+    )
+    transformer.current_layer_map = LayerConstants.LAYERS
+    transformer._update_active_indices()
+    marine = create_mock_unit(
+        UnitTypeId.MARINE,
+        Point2((16.0, 16.0)),
+        radius=0.375,
+        is_biological=True,
+        is_light=True,
+    )
+    layers = np.zeros((LayerConstants.get_num_layers(), 64, 64), dtype=np.float32)
+    transformer._draw_unit_body(marine, layers, False, 16, 16)
+    bio = LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_BIOLOGICAL]
+    assert float(layers[bio].max()) == 0.0
+    den = LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_DENSITY]
+    assert float(layers[den].max()) > 0.0
+
+
+def test_obs_sc2_meshgrid_cached_until_geometry_changes():
+    transformer = ObservationTransformer(map_size=(64, 64))
+    transformer.is_tactical_mode = False
+    first = transformer._obs_to_sc2_meshgrid()
+    second = transformer._obs_to_sc2_meshgrid()
+    assert first[0] is second[0]
+    assert first[1] is second[1]
+    transformer.crop_x = 1.0
+    third = transformer._obs_to_sc2_meshgrid()
+    assert third[0] is not first[0]
+
+
+def test_unit_stamp_cache_reuses_footprint_mask():
+    """Two density stamps for one unit must share one footprint mask."""
+    transformer = ObservationTransformer(
+        map_size=(64, 64),
+        training_conf={
+            "agent_architecture": "universal",
+            "active_layers": [
+                "allied_unit_density",
+                "allied_unit_biological",
+            ],
+        },
+    )
+    gi = _make_game_info(64, 64, with_grids=True)
+    # Unpathable under the building so structure density uses the pathing hole.
+    gi.pathing_grid.data_numpy[30:35, 30:35] = 0
+    transformer._cache_pathing_grid(gi)
+    transformer.current_layer_map = LayerConstants.LAYERS
+    transformer._update_active_indices()
+
+    barracks = create_mock_unit(
+        UnitTypeId.BARRACKS,
+        Point2((32.0, 32.0)),
+        is_structure=True,
+        is_biological=True,
+        radius=1.5,
+    )
+    layers = np.zeros((LayerConstants.get_num_layers(), 64, 64), dtype=np.float32)
+    transformer._unit_stamp_cache = None
+    idx_den = LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_DENSITY]
+    transformer._draw_unit_marker(
+        layers, idx_den, barracks, 32, 32, 1.0, True, use_footprint=True
+    )
+    cached = transformer._unit_stamp_cache
+    assert cached is not None
+    mask_ref = cached[-1]
+    # Second density-style stamp reuses the cached hull (attrs do not).
+    transformer._draw_unit_marker(
+        layers, idx_den, barracks, 32, 32, 0.5, True, use_footprint=True
+    )
+    assert transformer._unit_stamp_cache is not None
+    assert transformer._unit_stamp_cache[-1] is mask_ref
+    assert layers[idx_den].max() > 0
+
+
+def test_non_density_layers_are_single_pixel():
+    """Attrs / vitals stamp one pixel; only density uses the unit hull."""
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "agent_architecture": "universal",
+            "active_layers": [
+                "allied_unit_density",
+                "allied_unit_mechanical",
+                "allied_health",
+            ],
+            "active_tactical_layers": [
+                "allied_unit_density",
+                "allied_unit_mechanical",
+                "allied_health",
+            ],
+        },
+    )
+    gi = _make_game_info(128, 128, with_grids=True)
+    # Leave a pathing hole so structure density spans multiple obs pixels.
+    gi.pathing_grid.data_numpy[60:69, 60:69] = 0
+    tank = create_mock_unit(
+        UnitTypeId.BARRACKS,
+        Point2((64.0, 64.0)),
+        is_structure=True,
+        is_mechanical=True,
+        radius=1.5,
+        health=50,
+        health_max=100,
+        shield=0,
+        shield_max=0,
+    )
+    raw_obs = {
+        "units": [tank],
+        "structures": [],
+        "enemy_units": [],
+        "enemy_structures": [],
+        "effects": [],
+        "game_info": gi,
+        "game_data": MagicMock(),
+        "selected_units": [tank],
+    }
+    global_map = transformer.transform(raw_obs)["map"]
+    density = global_map[0]
+    mechanical = global_map[1]
+    health = global_map[2]
+    dens_px = int(np.count_nonzero(density > 0))
+    assert dens_px > 1
+    assert int(np.count_nonzero(mechanical > 0)) == 1
+    assert int(np.count_nonzero(health > 0)) == 1
+    # Point stamps sit inside the density hull.
+    assert np.all(mechanical[density <= 0] == 0)
+    assert np.all(health[density <= 0] == 0)
+
+
 def test_enemy_health_layer_scales_in_global_and_tactical():
     transformer = ObservationTransformer(
         map_size=(128, 128),
@@ -489,6 +723,48 @@ def test_tactical_output_shape_with_active_layers():
     }
     result = transformer.transform_tactical(raw_obs, unit)
     assert result.shape == (3, 32, 32)
+
+
+def test_transform_reuses_draw_buffers_and_returns_copies():
+    """Full-catalog draw buffers stay allocated; returned slices must not alias them."""
+    active_layers = [
+        LayerConstants.ALLIED_UNIT_DENSITY,
+        LayerConstants.ENEMY_UNIT_DENSITY,
+    ]
+    transformer = ObservationTransformer(
+        map_size=(128, 128),
+        training_conf={
+            "active_layers": active_layers,
+            "active_tactical_layers": active_layers,
+        },
+    )
+    unit = create_mock_unit(UnitTypeId.ZERGLING, Point2((64, 64)))
+    raw_obs = {
+        "units": [unit],
+        "enemy_units": [],
+        "effects": [],
+        "game_info": _make_game_info(128, 128, with_grids=True),
+        "game_data": None,
+        "selected_units": [unit],
+        "high_level_command": 0,
+    }
+    first = transformer.transform(raw_obs)
+    buf = transformer._global_layers_buf
+    assert buf is not None
+    first_map = first["map"]
+    assert first_map.base is not buf
+    first_map[0, 0, 0] = 0.42
+    second = transformer.transform(raw_obs)
+    assert transformer._global_layers_buf is buf
+    assert second["map"][0, 0, 0] != pytest.approx(0.42)
+
+    tac_a = transformer.transform_tactical(raw_obs, unit)
+    tac_buf = transformer._tactical_layers_buf
+    assert tac_buf is not None
+    tac_a[0, 0, 0] = 0.37
+    tac_b = transformer.transform_tactical(raw_obs, unit)
+    assert transformer._tactical_layers_buf is tac_buf
+    assert tac_b[0, 0, 0] != pytest.approx(0.37)
 
 
 def test_tactical_preserves_config_order():
@@ -2645,8 +2921,8 @@ def test_tactical_world_positions_stable_while_focal_unit_moves():
     assert max(ys) - min(ys) < 0.01
 
 
-def test_structure_attribute_layers_match_terrain_unpathable():
-    """Structure unit layers must align with terrain unpathable cells and not stack > 1.0."""
+def test_structure_attribute_layers_are_points_inside_density_hull():
+    """Density uses the unpathable hull; attr layers are a single pixel inside it."""
     transformer = ObservationTransformer(map_size=(128, 128))
     pathing = np.ones((128, 128), dtype=np.uint8)
     pathing[62:67, 62:67] = 0
@@ -2676,27 +2952,22 @@ def test_structure_attribute_layers_match_terrain_unpathable():
     full = result["map"]
     terrain_idx = LayerConstants.LAYERS[LayerConstants.TERRAIN_PATHABLE]
     terrain = full[terrain_idx]
+    dens_mask = full[LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_DENSITY]] > 0
+    assert np.any(dens_mask)
+    assert np.all(terrain[dens_mask] <= 0.0)
+    assert int(np.count_nonzero(dens_mask)) > 1
 
     for layer_name in (
-        LayerConstants.ALLIED_UNIT_DENSITY,
         LayerConstants.ALLIED_UNIT_MECHANICAL,
         LayerConstants.ALLIED_UNIT_ARMORED,
         LayerConstants.ALLIED_UNIT_MASSIVE,
     ):
         layer = full[LayerConstants.LAYERS[layer_name]]
         active = layer > 0
-        assert np.any(active), f"{layer_name} should have structure signal"
-        assert np.all(terrain[active] <= 0.0), f"{layer_name} spills onto pathable terrain"
-        assert layer.max() <= 1.0, f"{layer_name} has stacked brightness > 1.0"
-
-    # Attribute layers for the same structure must share identical footprints.
-    density = full[LayerConstants.LAYERS[LayerConstants.ALLIED_UNIT_DENSITY]] > 0
-    for layer_name in (
-        LayerConstants.ALLIED_UNIT_MECHANICAL,
-        LayerConstants.ALLIED_UNIT_ARMORED,
-    ):
-        layer_mask = full[LayerConstants.LAYERS[layer_name]] > 0
-        assert np.array_equal(layer_mask, density), f"{layer_name} footprint mismatch"
+        assert int(np.count_nonzero(active)) == 1, f"{layer_name} should be 1px"
+        assert np.all(dens_mask[active]), f"{layer_name} outside density hull"
+        assert np.all(terrain[active] <= 0.0), f"{layer_name} on pathable terrain"
+        assert layer.max() <= 1.0
 
 
 def test_terrain_height_aligns_with_entity_coordinates_on_inset_map():
@@ -2851,8 +3122,8 @@ def test_playable_area_maps_to_obs_bounds():
     assert 0 <= py1 <= 127
 
 
-def test_command_assignment_footprint_matches_in_tactical_view():
-    """Tactical COMMAND_ASSIGNMENT must use unit footprint (visible on large units)."""
+def test_command_assignment_is_single_pixel_in_tactical_view():
+    """Tactical COMMAND_ASSIGNMENT is a 1px marker; density keeps the hull."""
     conf = {
         "agent_architecture": "universal",
         "active_tactical_layers": ["allied_unit_density", "command_assignment"],
@@ -2872,12 +3143,16 @@ def test_command_assignment_footprint_matches_in_tactical_view():
         "effects": [],
         "game_info": _make_game_info(128, 128, with_grids=True),
         "game_data": MagicMock(),
+        "selected_units": [bc],
     }
     tactical = transformer.transform_tactical(raw_obs, bc)
     density = tactical[0]
     assignment = tactical[1]
-    assert np.count_nonzero(assignment > 0) >= 6
-    assert np.count_nonzero(assignment > 0) == np.count_nonzero(density > 0)
+    dens_px = int(np.count_nonzero(density > 0))
+    assign_px = int(np.count_nonzero(assignment > 0))
+    assert dens_px > 1
+    assert assign_px == 1
+    assert np.all(assignment[density <= 0] == 0)
 
 
 def test_thor_global_density_matches_tactical_on_128_map():
@@ -4164,4 +4439,36 @@ def test_phoenix_air_light_bonus_multiplies_attacks():
     period = 1.10009765625
     light_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_A_DPS_LIGHT]
     assert layers[light_idx].max() == pytest.approx((5.0 * 2) / period, rel=1e-5)
+
+
+def test_draw_unit_dps_skips_when_no_active_dps_layers():
+    transformer = ObservationTransformer(
+        map_size=(64, 64),
+        training_conf={
+            "agent_architecture": "universal",
+            "active_layers": ["allied_unit_density"],
+        },
+    )
+    transformer.current_layer_map = LayerConstants.LAYERS
+    transformer._update_active_indices()
+    layers = np.zeros((LayerConstants.get_num_layers(), 64, 64), dtype=np.float32)
+    marine = create_mock_unit(UnitTypeId.MARINE, Point2((32.0, 32.0)), radius=0.375)
+    transformer._draw_unit_dps(marine, layers, False, 32, 32, MagicMock())
+    assert float(layers.max()) == 0.0
+
+
+def test_catalog_weapon_stats_memoized_by_type_and_upgrade():
+    transformer = ObservationTransformer(
+        map_size=(64, 64),
+        training_conf={
+            "agent_architecture": "universal",
+            "active_layers": ["allied_g_dps_base"],
+        },
+    )
+    marine = create_mock_unit(UnitTypeId.MARINE, Point2((16.0, 16.0)), radius=0.375)
+    first = transformer._catalog_weapon_stats(marine, 0)
+    second = transformer._catalog_weapon_stats(marine, 0)
+    assert first is second
+    upgraded = transformer._catalog_weapon_stats(marine, 2)
+    assert upgraded is not first
 

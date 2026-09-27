@@ -61,11 +61,19 @@ def test_air_vs_air_scenarios_are_in_pipeline_phase2_after_upgrades():
     """Air-vs-air scenarios sit in phase 2 after the upgrades block (27–29)."""
     cm = ConfigManager(str(_CONFIG_DIR))
     idx_prev = cm.levels.index("scenario_queen_vs_banshee")
-    for offset, level in enumerate(_AIR_VS_AIR_LEVELS, start=1):
-        assert cm.levels.index(level) == idx_prev + offset, level
-    assert cm.levels.index(_AIR_VS_AIR_LEVELS[-1]) < cm.levels.index(
-        "aoe_ghost_marauder_vs_high_templar_sentry"
-    )
+    idx_aoe = cm.levels.index("aoe_ghost_marauder_vs_high_templar_sentry")
+    prev = idx_prev
+    for level in _AIR_VS_AIR_LEVELS:
+        idx = cm.levels.index(level)
+        assert idx > prev, level
+        rev = f"{level}_reversed"
+        if rev in cm.levels:
+            assert cm.levels.index(rev) == idx + 1, rev
+            prev = idx + 1
+        else:
+            prev = idx
+        assert idx < idx_aoe, level
+
 
 
 def test_air_vs_air_scenarios_match_reference_config_except_unit_pools():

@@ -1,5 +1,5 @@
 training:
-  training_steps: 250_000
+  training_steps: 125_000
   num_envs: 6
   n_steps: 1024
   batch_size: 256

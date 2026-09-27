@@ -105,6 +105,9 @@ if __name__ == "__main__":
     logger.remove()
     log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
     logger.add(sys.stderr, level=log_level, colorize=True)
+    from train.training_process_logging import configure_process_alert_logging
+
+    configure_process_alert_logging()
 
 class MaskableSubprocVecEnv(SyncVecEnv):
     """

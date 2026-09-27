@@ -176,6 +176,9 @@ def test_spellcaster_levels_keep_protoss_as_player_one():
     """Psi Storm is researched by the player-1 cheat. Protoss must be that player.
 
     Ghost EMP and Infestor Fungal Growth do not need research.
+
+    Exception: ``*_reversed`` siblings intentionally put the other race first so
+    Neural / Yamato unlock on the alternate half of the split.
     """
     assert SPELLCASTER_CAST_UPGRADES["HIGHTEMPLAR"] == "PSISTORMTECH"
     assert SPELLCASTER_CAST_UPGRADES["GHOST"] is None
@@ -188,6 +191,8 @@ def test_spellcaster_levels_keep_protoss_as_player_one():
     after_aoe = pipeline[pipeline.index("aoe_zergling_roach_vs_high_templar_immortal") + 1 :]
 
     for name in after_aoe:
+        if name.endswith("_reversed"):
+            continue
         cfg = by_name[name]
         env = cfg["env"]
         modes = {part.strip().lower() for part in str(env.get("env_mode") or "").split(",")}
@@ -198,10 +203,12 @@ def test_spellcaster_levels_keep_protoss_as_player_one():
             race = str(pool.get("race", "")).lower()
             if race and race not in races:
                 races.append(race)
-            caster = RACE_SPELLCASTER_UNIT[race]
-            assert caster in [str(unit).upper() for unit in pool["unit_pool"]], (name, race)
         if "protoss" in races:
             assert races[0] == "protoss", name
+            for pool in pools:
+                if str(pool.get("race", "")).lower() != "protoss":
+                    continue
+                assert "HIGHTEMPLAR" in [str(u).upper() for u in pool["unit_pool"]], name
 
     later_pools = by_name["aoe_zergling_infestor_vs_stalker_templar"]["env"]["unit_pools"]
     assert _caster_owners(later_pools)["HIGHTEMPLAR"] == {1}

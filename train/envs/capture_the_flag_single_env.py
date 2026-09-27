@@ -3,6 +3,7 @@ import gymnasium as gym
 import asyncio
 import numpy as np
 import re
+import time
 from typing import Tuple, List, Dict, Any, Optional, NamedTuple
 import random
 from gymnasium import spaces
@@ -599,12 +600,36 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
     async def _refresh_bot_state(self):
         from src.utils.sc2_observation_compat import game_state_from_response_observation
-        from src.utils.unit_feature_helpers import refresh_healer_ability_cache
 
+        profile = self._collector_profile_enabled()
+        t0 = time.perf_counter() if profile else None
         obs = await self.bot.client.observation()
+        if t0 is not None:
+            self._profile_add("observation", time.perf_counter() - t0)
         state = game_state_from_response_observation(obs.observation)
         self.bot._prepare_step(state, self.bot._proto_game_info)
-        await refresh_healer_ability_cache(self.bot)
+        # Attack cooldown / retreat / attack_actor_mask read ``weapon_cooldown``
+        # from this observation proto — not the spell-ability RPC below.
+        # Default: skip ``query_available_abilities``. Heal/AoE/snipe masks
+        # then use type + energy + upgrade (plus local heal CD stamps).
+        # Set ``env.query_spell_abilities: true`` to restore cooldown-accurate
+        # spell gating (one extra SC2 RPC per physics step).
+        if self._query_spell_abilities_enabled() and self._needs_ability_refresh():
+            from src.utils.unit_feature_helpers import refresh_healer_ability_cache
+
+            heads = self._squad_action_head_set()
+            t1 = time.perf_counter() if profile else None
+            await refresh_healer_ability_cache(
+                self.bot,
+                include_heal="heal_unit" in heads,
+                include_aoe="aoe_local" in heads,
+                include_snipe="snipe" in heads,
+                units=self._ability_query_units(),
+            )
+            if t1 is not None:
+                self._profile_add("ability_query", time.perf_counter() - t1)
+        elif getattr(self.bot, "_available_abilities_by_tag", None):
+            self.bot._available_abilities_by_tag = {}
         self._note_visible_heal_tumors()
 
     # ------------------------------------------------------------------
@@ -1373,15 +1398,18 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     async def _refresh_unit_lists(self):
         # Refresh all units from the bot's God-Mode perspective.
         # Structures (pylon, shield battery, creep tumor, …) are not squad-selectable.
-        all_units = self.bot.all_units
-        self.player_units[1] = [
-            u.tag for u in all_units
-            if u.owner_id == 1 and self._is_squad_eligible_unit(u)
-        ]
-        self.player_units[2] = [
-            u.tag for u in all_units
-            if u.owner_id == 2 and self._is_squad_eligible_unit(u)
-        ]
+        p1: List[int] = []
+        p2: List[int] = []
+        for u in self.bot.all_units:
+            if not self._is_squad_eligible_unit(u):
+                continue
+            owner = getattr(u, "owner_id", None)
+            if owner == 1:
+                p1.append(u.tag)
+            elif owner == 2:
+                p2.append(u.tag)
+        self.player_units[1] = p1
+        self.player_units[2] = p2
         if self.unit_pool_index and self.unit_pools_config:
             self._prune_dead_pool_membership()
             self._adopt_midgame_summons()
@@ -1632,6 +1660,164 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self._squad_obs_builder = SquadObservationBuilder(self.training_conf)
         return self._squad_obs_builder
 
+    def _squad_action_head_set(self) -> frozenset:
+        cached = getattr(self, "_cached_squad_action_heads", None)
+        if cached is None:
+            cached = frozenset(
+                str(h).lower() for h in (self.training_conf.get("action_heads") or [])
+            )
+            self._cached_squad_action_heads = cached
+        return cached
+
+    def _needs_ability_refresh(self) -> bool:
+        heads = self._squad_action_head_set()
+        return (
+            "heal_unit" in heads
+            or "aoe_local" in heads
+            or "snipe" in heads
+        )
+
+    def _query_spell_abilities_enabled(self) -> bool:
+        """True only when YAML opts into the extra ability RPC."""
+        env = self.training_conf.get("env") if isinstance(self.training_conf, dict) else None
+        raw = None
+        if isinstance(self.training_conf, dict):
+            raw = self.training_conf.get("query_spell_abilities")
+        if raw is None and isinstance(env, dict):
+            raw = env.get("query_spell_abilities")
+        return bool(raw)
+
+    def _all_units_by_tag(self) -> Dict[int, Any]:
+        """One pass over ``bot.all_units``; empty for MagicMock test doubles."""
+        units = getattr(getattr(self, "bot", None), "all_units", None)
+        if units is None:
+            return {}
+        if isinstance(units, (list, tuple)):
+            return {
+                int(u.tag): u
+                for u in units
+                if getattr(u, "tag", None) is not None
+            }
+        module = getattr(type(units), "__module__", "") or ""
+        if not module.startswith("sc2"):
+            return {}
+        return {
+            int(u.tag): u
+            for u in units
+            if getattr(u, "tag", None) is not None
+        }
+
+    def _ability_query_units(self) -> List[Any]:
+        """Living pool units for the ability RPC (not every ``bot.all_units``)."""
+        bot = self.bot
+        if bot is None:
+            return []
+        tags: List[int] = []
+        if self.unit_pools_config:
+            for idx in range(len(self.unit_pools_config)):
+                tags.extend(self._pool_alive_tags(idx))
+        by_tag = self._all_units_by_tag()
+        finder = getattr(getattr(bot, "all_units", None), "find_by_tag", None)
+        if not tags:
+            if by_tag:
+                return list(by_tag.values())
+            try:
+                return list(getattr(bot, "all_units", []) or [])
+            except TypeError:
+                return []
+        units: List[Any] = []
+        seen: set = set()
+        for tag in tags:
+            itag = int(tag)
+            if itag in seen:
+                continue
+            seen.add(itag)
+            unit = by_tag.get(itag) if by_tag else None
+            if unit is None and callable(finder):
+                unit = finder(itag)
+            if unit is not None:
+                units.append(unit)
+        return units
+
+    def _collector_profile_enabled(self) -> bool:
+        flag = getattr(self, "_collector_profile_flag", None)
+        if flag is None:
+            raw = os.environ.get("SC2_COLLECTOR_PROFILE", "").strip().lower()
+            flag = raw in ("1", "true", "yes")
+            self._collector_profile_flag = flag
+        return flag
+
+    def _profile_add(self, key: str, seconds: float) -> None:
+        sums = getattr(self, "_collector_profile_sums", None)
+        if sums is None:
+            sums = {}
+            self._collector_profile_sums = sums
+            self._collector_profile_counts = {}
+        sums[key] = sums.get(key, 0.0) + float(seconds)
+        counts = self._collector_profile_counts
+        counts[key] = counts.get(key, 0) + 1
+
+    def _profile_add_count(self, key: str, n: float) -> None:
+        """Accumulate integer-like cache event counts (not timed phases)."""
+        events = getattr(self, "_collector_profile_event_counts", None)
+        if events is None:
+            events = {}
+            self._collector_profile_event_counts = events
+        events[key] = events.get(key, 0.0) + float(n)
+
+    @staticmethod
+    def _cache_hit_rate(hits: float, misses: float) -> Optional[float]:
+        total = float(hits) + float(misses)
+        if total <= 0.0:
+            return None
+        return float(hits) / total
+
+    def pop_collector_profile_means(self) -> Dict[str, float]:
+        """Mean milliseconds per profiled slice; clears accumulators.
+
+        Cache counters are exported as ``collector/profile_cache_*_n`` totals and
+        ``collector/profile_cache_*_rate`` hit rates (0..1) for the rollout window.
+        """
+        sums = getattr(self, "_collector_profile_sums", None)
+        out: Dict[str, float] = {}
+        if sums:
+            counts = getattr(self, "_collector_profile_counts", {}) or {}
+            out.update(
+                {
+                    f"collector/profile_{key}_ms": 1000.0
+                    * sums[key]
+                    / max(counts.get(key, 1), 1)
+                    for key in sums
+                }
+            )
+        self._collector_profile_sums = {}
+        self._collector_profile_counts = {}
+
+        events = getattr(self, "_collector_profile_event_counts", None) or {}
+        if events:
+            for key, n in events.items():
+                out[f"collector/profile_{key}_n"] = float(n)
+
+            def _rate(name: str, hit: str, miss: str) -> None:
+                rate = self._cache_hit_rate(events.get(hit, 0.0), events.get(miss, 0.0))
+                if rate is not None:
+                    out[f"collector/profile_cache_{name}_rate"] = rate
+
+            _rate("tg", "cache_tg_hit", "cache_tg_miss")
+            _rate("tt", "cache_tt_hit", "cache_tt_miss")
+            _rate("wpn", "cache_wpn_hit", "cache_wpn_miss")
+            gmap_reuse = (
+                float(events.get("cache_gmap_hit", 0.0))
+                + float(events.get("cache_gmap_swap", 0.0))
+                + float(events.get("cache_gmap_cmd", 0.0))
+            )
+            gmap_full = float(events.get("cache_gmap_full", 0.0))
+            gmap_rate = self._cache_hit_rate(gmap_reuse, gmap_full)
+            if gmap_rate is not None:
+                out["collector/profile_cache_gmap_rate"] = gmap_rate
+        self._collector_profile_event_counts = {}
+        return out
+
     def _invalidate_squad_action_mask_cache(self) -> None:
         self._squad_action_mask_cache = None
 
@@ -1641,6 +1827,53 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return
         mask = self.bot.squad_action_masks(obs["unit_mask"], obs)
         self._squad_action_mask_cache = (self.steps_count, int(pool_idx), mask)
+
+    def _attach_action_masks(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        """Ride mask + requires_policy in ``info`` so the collector skips env_method."""
+        out = dict(info)
+        out["requires_policy_action"] = bool(self.requires_policy_action())
+        cached = self._cached_squad_action_masks()
+        if cached is not None:
+            out["action_masks"] = np.asarray(cached, dtype=bool)
+        return out
+
+    def _export_squad_obs(
+        self, obs: Any, info: Dict[str, Any]
+    ) -> tuple:
+        """Write trainee spatial tensors to shared memory for Subproc ``step``/``reset``.
+
+        ``_last_obs`` stays the full in-process dict. The pipe payload keeps the
+        observation-space keys as tiny placeholders so VecEnv can still stack.
+        Single-process (``num_workers<=1``) skips this — there is no pipe.
+        """
+        if not isinstance(obs, dict):
+            return obs, info
+        info = self._attach_action_masks(info if isinstance(info, dict) else {})
+        if int(getattr(self, "num_workers", 1) or 1) <= 1:
+            return obs, info
+        views = getattr(self, "_opponent_peek_views", None)
+        if not isinstance(views, dict) or not views:
+            return obs, info
+        from train.opponent_peek_ipc import compact_step_obs, write_peek_spatial
+
+        try:
+            slot = int(getattr(self, "worker_index", 0) or 0)
+        except (TypeError, ValueError):
+            slot = 0
+        means = write_peek_spatial(views, slot, obs)
+        if means is None:
+            return obs, info
+        info["spatial_shm"] = True
+        info["spatial_shm_slot"] = slot
+        info["spatial_shm_means"] = means
+        return compact_step_obs(obs), info
+
+    def step(self, action: Any):
+        obs, reward, terminated, truncated, info = super().step(action)
+        if self._uses_squad_pointer():
+            obs, info = self._export_squad_obs(obs, info)
+            return obs, reward, terminated, truncated, info
+        return obs, reward, terminated, truncated, info
 
     def _cached_squad_action_masks(self) -> Optional[np.ndarray]:
         cached = getattr(self, "_squad_action_mask_cache", None)
@@ -1655,13 +1888,26 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return None
 
     def _begin_squad_obs_cache(self) -> None:
-        """Per-physics-step cache: at most one full build per pool per step."""
-        self._squad_obs_step_cache: Dict[int, Dict[str, np.ndarray]] = {}
-        builder = getattr(self, "_squad_obs_builder", None)
-        if builder is not None:
-            builder.clear_global_cache()
+        """Per-physics-step cache: at most one full build per pool per step.
+
+        Keep a cache that peek/apply already filled on this pre-physics frame
+        (trainee ``_last_obs``, opponent peek). Do not drop the static type-feat
+        cache — that is episode-scoped.
+        """
+        cache = getattr(self, "_squad_obs_step_cache", None)
+        if cache is None:
+            cache = {}
+            self._squad_obs_step_cache = cache
+        last = getattr(self, "_last_obs", None)
+        idx = getattr(self, "current_trainee_pool_index", None)
+        if last is not None and idx is not None and idx not in cache:
+            cache[int(idx)] = last
 
     def _end_squad_obs_cache(self) -> None:
+        self._squad_obs_step_cache = {}
+
+    def _invalidate_pre_physics_obs_caches(self) -> None:
+        """Drop map/obs caches after ``client.step`` so the next build is post-physics."""
         self._squad_obs_step_cache = {}
         builder = getattr(self, "_squad_obs_builder", None)
         if builder is not None:
@@ -1706,6 +1952,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if cache is not None and pool_idx in cache:
             return cache[pool_idx]
 
+        profile = self._collector_profile_enabled()
+        t0 = time.perf_counter() if profile else None
         builder = self._ensure_squad_obs_builder()
         if not self.unit_pools_config or pool_idx >= len(self.unit_pools_config):
             obs = builder.zero_observation()
@@ -1728,12 +1976,23 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 own_race=own_race,
                 enemy_race=enemy_race,
             )
+        if t0 is not None:
+            self._profile_add("obs_build", time.perf_counter() - t0)
+            try:
+                for key, seconds in builder.pop_obs_profile_means().items():
+                    if str(key).startswith("cache_"):
+                        self._profile_add_count(str(key), float(seconds))
+                    else:
+                        self._profile_add(f"obs_{key}", float(seconds))
+            except Exception:
+                pass
         if cache is not None:
             cache[pool_idx] = obs
         return obs
 
-    async def _advance_trainee_pool_index(self) -> None:
-        await self._refresh_unit_lists()
+    async def _advance_trainee_pool_index(self, *, refresh_units: bool = True) -> None:
+        if refresh_units:
+            await self._refresh_unit_lists()
         indices = self._trainee_pool_indices()
         if not indices:
             return
@@ -2141,6 +2400,92 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         )
         return False
 
+    def attach_opponent_peek_shm(self, meta: Dict[str, Any]) -> bool:
+        """Map collector-owned opponent spatial slots (write)."""
+        from train.opponent_peek_ipc import attach_peek_views
+
+        try:
+            self._opponent_peek_views = attach_peek_views(meta)
+            return True
+        except Exception as exc:
+            self._opponent_peek_views = None
+            self._log(f"Opponent peek shared-memory attach failed: {exc}")
+            return False
+
+    def peek_opponent_squad_pointer(self) -> Optional[Dict[str, Any]]:
+        """Pre-step opponent obs/mask for collector-batched pointer predict.
+
+        Same physics frame as the trainee observation. Builds (or reuses) the
+        opponent pool obs and leaves it in ``_squad_obs_step_cache`` so step
+        does not rebuild it. Large spatial tensors go to shared memory when
+        ``attach_opponent_peek_shm`` succeeded.
+        """
+        if not self._uses_squad_pointer() or self._preview_computer_opponent():
+            return None
+        if self.bot is None:
+            return None
+        trainee_idx = getattr(self, "current_trainee_pool_index", 0)
+        opponent_idx = self._paired_opponent_pool_index(trainee_idx)
+        if opponent_idx is None:
+            return None
+        if not self._pool_alive_tags(opponent_idx):
+            return None
+        if getattr(self, "_squad_obs_step_cache", None) is None:
+            self._squad_obs_step_cache = {}
+        obs = self._get_squad_observation_for_pool(int(opponent_idx))
+        mask = self.bot.squad_action_masks(obs["unit_mask"], obs)
+        pool_lstm = (getattr(self, "_opponent_lstm_states", None) or {}).get(
+            int(opponent_idx)
+        )
+        payload_obs = obs
+        views = getattr(self, "_opponent_peek_views", None)
+        if isinstance(views, dict) and views:
+            from train.opponent_peek_ipc import compact_opponent_peek_obs, write_peek_spatial
+
+            slot = int(getattr(self, "worker_index", 0) or 0)
+            means = write_peek_spatial(views, slot, obs)
+            if means is not None:
+                payload_obs = compact_opponent_peek_obs(obs, slot=slot, sample_means=means)
+        return {
+            "obs": payload_obs,
+            "mask": mask,
+            "pool_idx": int(opponent_idx),
+            "episode_start": pool_lstm is None,
+            "lstm": pool_lstm,
+        }
+
+    def set_pending_opponent_squad_action(
+        self,
+        action: np.ndarray,
+        lstm: Any = None,
+        pool_idx: Optional[int] = None,
+    ) -> None:
+        """Store a collector-batched opponent action for the next pointer step."""
+        self._pending_opponent_squad_action = np.asarray(action, dtype=np.int64).reshape(-1)
+        if pool_idx is not None and lstm is not None:
+            states = getattr(self, "_opponent_lstm_states", None)
+            if states is None:
+                self._opponent_lstm_states = {}
+                states = self._opponent_lstm_states
+            states[int(pool_idx)] = lstm
+
+    def set_pending_opponent_squad_actions(self, packed: Any) -> None:
+        """One-pipe scatter: each worker reads ``packed[worker_index]``."""
+        if not packed:
+            return
+        try:
+            slot = int(getattr(self, "worker_index", 0) or 0)
+        except (TypeError, ValueError):
+            slot = 0
+        try:
+            item = packed[slot]
+        except (TypeError, IndexError):
+            return
+        if item is None:
+            return
+        action, lstm, pool_idx = item
+        self.set_pending_opponent_squad_action(action, lstm, pool_idx)
+
     async def _predict_opponent_squad_pointer(self, pool_idx: int) -> np.ndarray:
         """Single opponent squad forward for paired arena physics step."""
         obs = self._get_squad_observation_for_pool(pool_idx)
@@ -2161,6 +2506,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 self._logged_no_opponent_model = True
             return default
 
+        if getattr(self, "_opponent_lstm_states", None) is None:
+            self._opponent_lstm_states = {}
         if getattr(self, "_opponent_infer_source", None) != source:
             self._opponent_lstm_states = {}
             self._opponent_infer_source = source
@@ -2181,6 +2528,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             deterministic=False,
         )
         import torch as _torch
+        profile = self._collector_profile_enabled()
+        t0 = time.perf_counter() if profile else None
         try:
             with _torch.inference_mode():
                 action, new_lstm = opp_model.predict(
@@ -2197,6 +2546,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         except Exception as exc:
             return self._opponent_predict_fallback(default, exc)
         self._opponent_lstm_states[pool_idx] = new_lstm
+        if t0 is not None:
+            self._profile_add("opp_predict", time.perf_counter() - t0)
         fe = getattr(opp_model.policy, "features_extractor", None)
         if fe is not None and hasattr(fe, "clear_forward_cache"):
             fe.clear_forward_cache()
@@ -2536,13 +2887,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """
         skip_player_ids = skip_player_ids or set()
         all_alive = self.player_units[1] + self.player_units[2]
+        by_tag = self._all_units_by_tag()
+        finder = getattr(getattr(self.bot, "all_units", None), "find_by_tag", None)
         for tag in all_alive:
             if tag in acting_tag_set:
                 continue
             last_order = self.bot._unit_last_order.get(tag)
             if last_order is None:
                 continue
-            unit = self.bot.all_units.find_by_tag(tag)
+            unit = by_tag.get(tag) if by_tag else None
+            if unit is None and callable(finder):
+                unit = finder(tag)
             if unit is None or unit.owner_id in skip_player_ids:
                 continue
             head_name, target = last_order
@@ -2557,7 +2912,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 if callable(set_flags):
                     set_flags(tag, moved=False, attacked=True)
             elif "aoe" in head_name:
-                issue_aoe_at_point(self.bot, unit, target)
+                issue_aoe_at_point(self.bot, unit, target, stamp_cooldown=False)
             elif target is None:
                 continue
             else:
@@ -2625,7 +2980,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         chunk_tag_set = {entry.tag for entry in chunk}
         agent_tags = [entry.tag for entry in chunk if entry.is_agent]
 
-        await self._flush_bot_actions()
         if self._uses_chunk_physics():
             trainee_pid = self._trainee_sc2_player_id()
             reissue_skip = {2 if trainee_pid == 1 else 1}
@@ -2997,7 +3351,6 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self.steps_count += 1
         squad_tag_set = set(squad_tags)
 
-        await self._flush_bot_actions()
         await self._reissue_non_squad_orders(squad_tag_set)
         await self._flush_bot_actions()
 
@@ -3140,13 +3493,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             set(trainee_tags) | set(opponent_tags)
         )
 
-        await self._flush_bot_actions()
         await self._reissue_non_squad_orders(acting_set)
         await self._flush_bot_actions()
 
+        profile = self._collector_profile_enabled()
+        t_step = time.perf_counter() if profile else None
         await self.bot.client.step(
             step_size=self._physics_step_size(len(trainee_tags) + len(opponent_tags))
         )
+        if t_step is not None:
+            self._profile_add("client_step", time.perf_counter() - t_step)
+        self._invalidate_pre_physics_obs_caches()
         await self._refresh_bot_state()
 
         self._maybe_promote_defender_to_attack()
@@ -3211,7 +3568,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             )
 
         if not done and not truncated:
-            await self._advance_trainee_pool_index()
+            # Unit lists were just rebuilt above; do not scan all_units again.
+            await self._advance_trainee_pool_index(refresh_units=False)
 
         obs = await self._get_joint_observation()
 
@@ -3219,7 +3577,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         # trainee's SC2 owner is player 2. Deferring here would drop the real
         # trainee-perspective reward.
         self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
-        return obs, reward, done, truncated, {
+        return obs, reward, done, truncated, self._attach_action_masks({
             "squad_physics_step": True,
             "squad_pointer": True,
             **self._economic_info(step_economic, done, truncated),
@@ -3231,7 +3589,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 step_commands=step_commands,
                 step_cooldown_retreat=step_cooldown_retreat,
             ),
-        }
+        })
 
     async def _async_step_squad_pointer(self, action_p_active):
         self._begin_squad_obs_cache()
@@ -3259,10 +3617,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 await self._advance_trainee_pool_index()
                 self.steps_count += 1
                 obs = await self._get_joint_observation()
-                return obs, 0.0, False, False, {
+                self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
+                return obs, 0.0, False, False, self._attach_action_masks({
                     "squad_physics_step": False,
                     "squad_pointer": True,
-                }
+                })
 
             trainee_player_id = self._pool_player_id(self.unit_pools_config[trainee_idx])
             self.active_player_id = trainee_player_id
@@ -3278,7 +3637,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             if opponent_idx is not None:
                 opponent_tags = self._pool_alive_tags(opponent_idx)
                 if opponent_tags and not self._preview_computer_opponent():
-                    opp_action = await self._predict_opponent_squad_pointer(opponent_idx)
+                    pending = getattr(self, "_pending_opponent_squad_action", None)
+                    self._pending_opponent_squad_action = None
+                    if pending is not None:
+                        opp_action = np.asarray(pending, dtype=np.int64)
+                    else:
+                        opp_action = await self._predict_opponent_squad_pointer(
+                            opponent_idx
+                        )
                     ordered_tags.update(
                         await self._apply_squad_action_for_pool(opponent_idx, opp_action)
                     )
@@ -3346,6 +3712,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._episode_cooldown_retreat = 0.0
         self._episode_economic = {}
         self._invalidate_squad_action_mask_cache()
+        builder = getattr(self, "_squad_obs_builder", None)
+        if builder is not None:
+            builder.clear_global_cache()
+            builder.clear_static_feat_cache()
+            builder.reset_upgrade_cache()
+        self._squad_obs_step_cache = {}
+        self._pending_opponent_squad_action = None
         self.current_unit_index = 0
         self.current_squad_index = 0
         self.active_player_id = 1
@@ -3404,7 +3777,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                             )
                     if self.opponent_model is None:
                         self._ensure_opponent_model_loaded()
-                    return obs, {}
+                    reset_info = (
+                        self._attach_action_masks({})
+                        if self._uses_squad_pointer()
+                        else {}
+                    )
+                    if self._uses_squad_pointer():
+                        obs, reset_info = self._export_squad_obs(obs, reset_info)
+                    return obs, reset_info
                 except Exception as e:
                     import traceback
                     self._log(
@@ -3446,7 +3826,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     f"sc2_procs={count_sc2_processes()}"
                 )
 
-        return super().reset(seed=seed, options=options)
+        obs, info = super().reset(seed=seed, options=options)
+        if self._uses_squad_pointer():
+            self._last_obs = obs
+            self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
+            info = self._attach_action_masks(info if isinstance(info, dict) else {})
+            obs, info = self._export_squad_obs(obs, info)
+        return obs, info
 
     async def _soft_reset_game(self):
         """Reuse the running SC2 session: kill all units, respawn, refresh lists."""

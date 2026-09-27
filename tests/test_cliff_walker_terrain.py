@@ -96,6 +96,14 @@ def _make_transformer(feature_map_size=16):
     transformer._cliff_face_cache = None
     transformer._cliff_face_cache_map = None
     transformer._cliff_display_heights = None
+    transformer._cached_sc2_mesh = None
+    transformer._cached_sc2_mesh_key = None
+    transformer._map_terrain_h_min = None
+    transformer._map_terrain_tier_max = None
+    transformer._map_terrain_h_scale_map = None
+    transformer._obs_profile_flag = False
+    transformer._profiling_now = False
+    transformer._cache_stat_counts = {}
     transformer._grid_x = np.arange(feature_map_size).reshape(1, -1)
     transformer._grid_y = np.arange(feature_map_size).reshape(-1, 1)
     transformer.unit_db = {}
@@ -746,3 +754,58 @@ class TestDetectCliffWalker:
         t = _make_transformer()
         assert t._detect_cliff_walker({"cliff_walker": True}) is True
         assert t._detect_cliff_walker({"cliff_walker": False}) is False
+
+
+def test_tactical_static_terrain_cache_hit_ignores_path_grid(synthetic_map):
+    """Second tactical draw at the same crop must reuse the static plane."""
+    path, height = synthetic_map
+    t = _make_transformer(feature_map_size=MAP_SIZE)
+    t.is_tactical_mode = True
+    t.crop_x, t.crop_y = 2, 3
+    first = _call_draw(t, path, height, cliff_walker=False).copy()
+    assert any(isinstance(k, tuple) and k[0] == "tac" for k in t._terrain_caches)
+
+    wiped = np.zeros_like(path)
+    second = _call_draw(t, wiped, height, cliff_walker=False).copy()
+    np.testing.assert_array_equal(first, second)
+
+
+def test_tactical_terrain_cache_hit_still_overlays_ground(synthetic_map, monkeypatch):
+    """Live ground footprints must run after a static crop cache hit."""
+    path, height = synthetic_map
+    t = _make_transformer(feature_map_size=MAP_SIZE)
+    t.is_tactical_mode = True
+    t.crop_x = t.crop_y = 0
+    calls = []
+
+    def _capture(res, units):
+        calls.append(list(units))
+
+    monkeypatch.setattr(t, "_overlay_tactical_ground_on_terrain", _capture)
+    marine = MagicMock(name="marine")
+    game_info = _make_game_info(path, height)
+    n_layers = LayerConstants.get_num_layers()
+    layers = np.zeros(
+        (n_layers, t.feature_map_height, t.feature_map_width), dtype=np.float32
+    )
+    t._draw_terrain_pathing(
+        game_info, layers, cliff_walker=False, ground_units=[marine]
+    )
+    t._draw_terrain_pathing(
+        game_info, layers, cliff_walker=False, ground_units=[marine]
+    )
+    assert len(calls) == 2
+    assert calls[0] == [marine] and calls[1] == [marine]
+
+
+def test_tactical_terrain_cache_keyed_by_crop(synthetic_map):
+    """Different crop origins must not share a tactical terrain cache entry."""
+    path, height = synthetic_map
+    t = _make_transformer(feature_map_size=MAP_SIZE)
+    t.is_tactical_mode = True
+    t.crop_x, t.crop_y = 0, 0
+    _call_draw(t, path, height, cliff_walker=False)
+    t.crop_x, t.crop_y = 4, 4
+    _call_draw(t, path, height, cliff_walker=False)
+    tac_keys = [k for k in t._terrain_caches if isinstance(k, tuple) and k[0] == "tac"]
+    assert len(tac_keys) == 2

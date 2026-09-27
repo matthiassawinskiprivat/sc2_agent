@@ -121,4 +121,4 @@ def test_opponent_squad_pointer_sets_episode_start_when_state_cleared():
     asyncio.run(env._predict_opponent_squad_pointer(1))
     assert captured.get("episode_start") is not None
     assert bool(np.asarray(captured["episode_start"]).reshape(-1)[0]) is True
-    assert env._opponent_lstm_state == ("new_state",)
+    assert env._opponent_lstm_states[1] == ("new_state",)

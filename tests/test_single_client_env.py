@@ -83,8 +83,10 @@ def test_single_client_env_startup_timeout_scales_with_worker_index():
     env0 = SingleClientEnv(worker_index=0, num_workers=5, training_conf={"env": {}})
     env4 = SingleClientEnv(worker_index=4, num_workers=5, training_conf={"env": {}})
     assert env4._startup_timeout_sec() > env0._startup_timeout_sec()
-    # Default stagger for >=5 workers is 2.5s → worker 4 adds 10s to the budget.
-    assert env4._startup_timeout_sec() - env0._startup_timeout_sec() == pytest.approx(10.0)
+    # Default stagger 2.5s + 8s join-slack per later worker.
+    assert env4._startup_timeout_sec() - env0._startup_timeout_sec() == pytest.approx(42.0)
+    # Base + in_game poll sit in the budget even for worker 0.
+    assert env0._startup_timeout_sec() == pytest.approx(105.0)
 
 
 def test_single_client_env_accepts_faster_startup_knobs():
@@ -104,7 +106,8 @@ def test_single_client_env_accepts_faster_startup_knobs():
     assert env._manager.post_create_delay_sec == pytest.approx(0.25)
     assert env._manager.close_settle_sec == pytest.approx(0.1)
     assert env._manager.process_tree_wait_sec == pytest.approx(0.25)
-    assert env._startup_timeout_sec() - 60.0 == pytest.approx(1.0)
+    # worker 2: 2×0.5s stagger + 2×8s join-slack; 90s base + 15s in_game.
+    assert env._startup_timeout_sec() == pytest.approx(90.0 + 15.0 + 1.0 + 16.0)
 
 
 def test_single_client_env_reads_sc2_timing_from_pipeline_yaml(tmp_path):
@@ -134,8 +137,8 @@ def test_single_client_env_reads_sc2_timing_from_pipeline_yaml(tmp_path):
     assert env._manager.close_settle_sec == pytest.approx(0.2)
     assert env._manager.process_tree_wait_sec == pytest.approx(0.3)
     assert env._conf_float("sc2_retry_backoff_sec", 2.0) == pytest.approx(1.5)
-    # Timeout budget includes worker_index × pipeline stagger.
-    assert env._startup_timeout_sec() - 60.0 == pytest.approx(3.75)
+    # Timeout budget includes worker_index × pipeline stagger + join-slack + in_game.
+    assert env._startup_timeout_sec() == pytest.approx(90.0 + 15.0 + 3.75 + 24.0)
 
 
 def test_single_client_env_reset_raises_after_max_startup_retries(mock_sc2_process, mock_client):

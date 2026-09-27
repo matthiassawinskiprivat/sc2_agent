@@ -10,6 +10,7 @@ from train.squad_batch_inference import (
     agent_squad_batch_forward,
     expand_rnn_state_for_batch,
     normalize_single_env_rnn_states,
+    opponent_pointer_vec_predict,
     opponent_squad_batch_predict,
     stack_env_dict_observations,
 )
@@ -127,6 +128,190 @@ def test_opponent_squad_batch_predict_feedforward():
     assert actions.shape == (2, 2)
     assert state is None
     assert last_tag is None
+
+
+def test_opponent_pointer_vec_predict_one_forward():
+    model = MagicMock()
+    model.device = torch.device("cpu")
+    policy = MagicMock(spec=["obs_to_tensor", "set_training_mode", "forward"])
+    model.policy = policy
+    obs_list = [_dict_obs(1), _dict_obs(2)]
+    masks = [np.ones(8, dtype=bool) for _ in range(2)]
+    stacked = stack_env_dict_observations(obs_list)
+    policy.obs_to_tensor = MagicMock(return_value=(stacked, True))
+    policy.set_training_mode = MagicMock()
+    policy.forward = MagicMock(
+        return_value=(
+            torch.tensor([[1, 0], [0, 1]]),
+            torch.zeros(2, 1),
+            torch.zeros(2),
+        )
+    )
+    actions, states = opponent_pointer_vec_predict(
+        model, obs_list, masks, episode_starts=[True, False]
+    )
+    assert policy.forward.call_count == 1
+    assert actions.shape == (2, 2)
+    assert states == [None, None]
+
+
+def test_pointer_helper_scatters_batched_opponent_actions():
+    from gymnasium import spaces
+    from train.squad_pointer_rollout import SquadPointerRolloutHelper
+
+    helper = SquadPointerRolloutHelper(2)
+    vec_env = MagicMock()
+    vec_env.action_space = spaces.MultiDiscrete([2, 4])
+    vec_env.has_attr = MagicMock(return_value=True)
+    payload = {
+        "obs": _dict_obs(1),
+        "mask": np.ones(8, dtype=bool),
+        "pool_idx": 1,
+        "episode_start": True,
+        "lstm": None,
+    }
+    sets = []
+
+    def _env_method(name, *args, **kwargs):
+        if name == "action_masks":
+            return [payload["mask"], payload["mask"]]
+        if name == "peek_opponent_squad_pointer":
+            return [payload, payload]
+        if name == "set_pending_opponent_squad_actions":
+            sets.append(args[0])
+            return [None, None]
+        if name == "set_pending_opponent_squad_action":
+            sets.append((kwargs.get("indices"), args[0]))
+            return [None]
+        return None
+
+    vec_env.env_method = _env_method
+    model = MagicMock()
+    model.device = torch.device("cpu")
+    model.policy = MagicMock()
+    model.policy.obs_to_tensor = MagicMock(
+        side_effect=lambda batch: (
+            {k: torch.as_tensor(v) for k, v in batch.items()}
+            if isinstance(batch, dict)
+            else batch,
+            True,
+        )
+    )
+    model.policy.set_training_mode = MagicMock()
+    model.policy.forward = MagicMock(
+        return_value=(
+            torch.zeros((2, 2), dtype=torch.int64),
+            torch.zeros(2, 1),
+            torch.zeros(2),
+        )
+    )
+    model.policy.features_extractor = None
+    obs = {
+        "map": np.zeros((2, 2, 4, 4), dtype=np.float32),
+        "command": np.zeros((2, 3), dtype=np.float32),
+    }
+    helper.resolve_rollout(
+        vec_env=vec_env,
+        num_envs=2,
+        obs=obs,
+        requires_policy=np.array([True, True]),
+        model=model,
+        is_recurrent=False,
+        last_dones=np.array([False, False]),
+        prev_focus_tags=np.array([-1, -1]),
+        lstm_states=None,
+        device=torch.device("cpu"),
+    )
+    assert len(sets) == 1
+    packed = sets[0]
+    assert packed[0][0].shape[0] == 2
+    assert packed[1][0].shape[0] == 2
+    helper.resolve_rollout(
+        vec_env=vec_env,
+        num_envs=2,
+        obs=obs,
+        requires_policy=np.array([True, True]),
+        model=model,
+        is_recurrent=False,
+        last_dones=np.array([False, False]),
+        prev_focus_tags=np.array([-1, -1]),
+        lstm_states=None,
+        device=torch.device("cpu"),
+    )
+    assert vec_env.has_attr.call_count == 2
+    vec_env.has_attr.assert_any_call("peek_opponent_squad_pointer")
+    vec_env.has_attr.assert_any_call("set_pending_opponent_squad_actions")
+
+
+def test_stack_info_action_masks_and_resolve_skips_env_method():
+    from train.squad_pointer_rollout import (
+        SquadPointerRolloutHelper,
+        stack_info_action_masks,
+    )
+
+    infos = [
+        {"action_masks": np.ones(8, dtype=bool)},
+        {"action_masks": np.zeros(8, dtype=bool)},
+    ]
+    stacked = stack_info_action_masks(infos, 2)
+    assert stacked.shape == (2, 8)
+    assert stacked[0].all()
+    assert not stacked[1].any()
+    assert stack_info_action_masks([{"reward": 1.0}, {}], 2) is None
+
+    from train.squad_pointer_rollout import stack_info_requires_policy
+
+    req = stack_info_requires_policy(
+        [
+            {"requires_policy_action": True},
+            {"requires_policy_action": False},
+        ],
+        2,
+    )
+    assert req.tolist() == [True, False]
+    assert stack_info_requires_policy([{"action_masks": True}, {}], 2) is None
+
+    helper = SquadPointerRolloutHelper(2)
+    vec_env = MagicMock()
+    vec_env.action_space = spaces.MultiDiscrete([2, 4])
+    vec_env.has_attr = MagicMock(return_value=False)
+    vec_env.env_method = MagicMock(side_effect=AssertionError("should use info masks"))
+    model = MagicMock()
+    model.device = torch.device("cpu")
+    model.policy = MagicMock()
+    model.policy.obs_to_tensor = MagicMock(
+        side_effect=lambda batch: (
+            {k: torch.as_tensor(v) for k, v in batch.items()}
+            if isinstance(batch, dict)
+            else batch,
+            True,
+        )
+    )
+    model.policy.forward = MagicMock(
+        return_value=(
+            torch.zeros((2, 2), dtype=torch.int64),
+            torch.zeros(2, 1),
+            torch.zeros(2),
+        )
+    )
+    model.policy.features_extractor = None
+    helper.resolve_rollout(
+        vec_env=vec_env,
+        num_envs=2,
+        obs={
+            "map": np.zeros((2, 2, 4, 4), dtype=np.float32),
+            "command": np.zeros((2, 3), dtype=np.float32),
+        },
+        requires_policy=np.array([True, True]),
+        model=model,
+        is_recurrent=False,
+        last_dones=np.array([False, False]),
+        prev_focus_tags=np.array([-1, -1]),
+        lstm_states=None,
+        device=torch.device("cpu"),
+        action_masks=stacked,
+    )
+    vec_env.env_method.assert_not_called()
 
 
 def test_opponent_squad_env_uses_batch_predict():

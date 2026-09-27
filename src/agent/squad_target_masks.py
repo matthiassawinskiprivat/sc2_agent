@@ -24,9 +24,11 @@ from src.utils.unit_feature_helpers import (
     snipe_target_is_eligible,
     unit_can_aoe,
     unit_can_attack,
-    unit_can_cast_heal,
-    unit_can_conceal,
+    unit_can_burrow,
+    unit_can_cloak,
+    unit_can_heal,
     unit_can_load,
+    unit_can_repair,
     unit_can_reveal,
     unit_can_snipe,
     unit_can_unload,
@@ -50,6 +52,18 @@ SQUAD_TARGET_MASK_KEYS = (
     "move_actor_mask",
 )
 
+#: Per-slot readiness reused by unit scalars (not part of the obs mask dict).
+SQUAD_ACTOR_READINESS_KEYS = (
+    "can_heal",
+    "can_repair",
+    "can_aoe",
+    "can_snipe",
+    "can_load",
+    "can_unload",
+    "can_cloak",
+    "is_immobile",
+)
+
 
 def _is_controllable(unit: Any) -> bool:
     """Structures and embarked passengers cannot receive their own orders."""
@@ -65,6 +79,153 @@ def zero_target_masks() -> Dict[str, np.ndarray]:
     return {key: np.zeros(MAX_SQUAD_UNITS, dtype=np.float32) for key in SQUAD_TARGET_MASK_KEYS}
 
 
+def zero_actor_readiness() -> Dict[str, np.ndarray]:
+    """All-zero per-slot readiness (mirrors :data:`SQUAD_ACTOR_READINESS_KEYS`)."""
+    return {
+        key: np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+        for key in SQUAD_ACTOR_READINESS_KEYS
+    }
+
+
+def build_squad_legality(
+    allies: Sequence[Optional[Any]],
+    *,
+    bot: Any = None,
+    enemy_race: Optional[str] = None,
+    upgrades: Optional[frozenset] = None,
+    has_tactical_air_enemy: bool = False,
+    compute_heal: bool = True,
+    compute_load: bool = True,
+    compute_attack: bool = True,
+    compute_aoe: bool = True,
+    compute_snipe: bool = True,
+    compute_unload: bool = True,
+    compute_cloak: bool = True,
+    compute_uncloak: bool = True,
+    compute_move: bool = True,
+) -> tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    """Actor/target masks plus per-slot readiness for unit scalars.
+
+    One ``unit_can_*`` pass fills both products so
+    :class:`~src.transformers.squad_observation_builder.SquadObservationBuilder`
+    does not re-run the same readiness helpers when writing ``can_heal`` /
+    ``can_aoe`` / ``can_snipe`` / cargo / cloak scalars.
+    """
+    heal_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    heal_target = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    load_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    load_target = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    attack_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    aoe_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    snipe_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    unload_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    cloak_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    uncloak_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    move_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    readiness = zero_actor_readiness()
+
+    slots: List[Optional[Any]] = list(allies)[:MAX_SQUAD_UNITS]
+    healers: List[Any] = []
+    load_candidates: List[tuple] = []
+    upg = upgrades if upgrades is not None else frozenset()
+    for slot, unit in enumerate(slots):
+        if unit is None:
+            continue
+
+        # Scalar readiness for every living ally slot (structures included).
+        is_immobile = unit_is_immobile(unit, upg)
+        readiness["is_immobile"][slot] = float(is_immobile)
+        can_cloak = unit_can_cloak(unit, upg)
+        readiness["can_cloak"][slot] = float(can_cloak)
+        can_load = unit_can_load(unit)
+        readiness["can_load"][slot] = float(can_load)
+        can_unload = unit_can_unload(unit)
+        readiness["can_unload"][slot] = float(can_unload)
+
+        can_heal = False
+        can_repair = False
+        if compute_heal:
+            can_heal = unit_can_heal(unit, bot)
+            can_repair = unit_can_repair(unit, bot)
+            readiness["can_heal"][slot] = float(can_heal)
+            readiness["can_repair"][slot] = float(can_repair)
+
+        can_aoe = False
+        if compute_aoe:
+            can_aoe = unit_can_aoe(
+                unit,
+                enemy_race=enemy_race,
+                upgrades=upg,
+                bot=bot,
+                has_tactical_air_enemy=has_tactical_air_enemy,
+            )
+            readiness["can_aoe"][slot] = float(can_aoe)
+
+        can_snipe = False
+        if compute_snipe:
+            can_snipe = unit_can_snipe(unit, upgrades=upg, bot=bot)
+            readiness["can_snipe"][slot] = float(can_snipe)
+
+        controllable = _is_controllable(unit)
+        if not controllable:
+            continue
+
+        if compute_heal and (can_heal or can_repair):
+            heal_actor[slot] = 1.0
+            healers.append(unit)
+        if compute_load and can_load:
+            load_candidates.append((slot, unit))
+        if compute_attack and unit_can_attack(unit, upg):
+            attack_actor[slot] = 1.0
+        if compute_aoe and can_aoe:
+            aoe_actor[slot] = 1.0
+        if compute_snipe and can_snipe:
+            snipe_actor[slot] = 1.0
+        if compute_unload and can_unload:
+            unload_actor[slot] = 1.0
+        if compute_cloak and (can_cloak or unit_can_burrow(unit, upg)):
+            cloak_actor[slot] = 1.0
+        if compute_uncloak and unit_can_reveal(unit):
+            uncloak_actor[slot] = 1.0
+        if compute_move and not is_immobile:
+            move_actor[slot] = 1.0
+
+    if compute_heal and healers:
+        for slot, unit in enumerate(slots):
+            if unit is None or not unit_is_wounded(unit):
+                continue
+            unit_tag = getattr(unit, "tag", None)
+            for healer in healers:
+                if getattr(healer, "tag", None) == unit_tag:
+                    continue
+                if heal_target_is_eligible(healer, unit):
+                    heal_target[slot] = 1.0
+                    break
+
+    for actor_slot, actor in load_candidates:
+        for target_slot, target in enumerate(slots):
+            if target is None:
+                continue
+            if load_pair_is_eligible(actor, target):
+                load_actor[actor_slot] = 1.0
+                load_target[target_slot] = 1.0
+
+    masks = {
+        "heal_actor_mask": heal_actor,
+        "heal_target_mask": heal_target,
+        "load_actor_mask": load_actor,
+        "load_target_mask": load_target,
+        "attack_actor_mask": attack_actor,
+        "aoe_actor_mask": aoe_actor,
+        "snipe_actor_mask": snipe_actor,
+        "unload_actor_mask": unload_actor,
+        "cloak_actor_mask": cloak_actor,
+        "uncloak_actor_mask": uncloak_actor,
+        "move_actor_mask": move_actor,
+    }
+    return masks, readiness
+
+
 def build_squad_target_masks(
     allies: Sequence[Optional[Any]],
     *,
@@ -72,6 +233,15 @@ def build_squad_target_masks(
     enemy_race: Optional[str] = None,
     upgrades: Optional[frozenset] = None,
     has_tactical_air_enemy: bool = False,
+    compute_heal: bool = True,
+    compute_load: bool = True,
+    compute_attack: bool = True,
+    compute_aoe: bool = True,
+    compute_snipe: bool = True,
+    compute_unload: bool = True,
+    compute_cloak: bool = True,
+    compute_uncloak: bool = True,
+    compute_move: bool = True,
 ) -> Dict[str, np.ndarray]:
     """Actor/target legality arrays for the allied squad slots.
 
@@ -104,86 +274,27 @@ def build_squad_target_masks(
 
     ``unload_actor_mask`` / ``cloak_actor_mask`` / ``uncloak_actor_mask`` gate
     the matching command heads when no capable unit is present.
+
+    Prefer :func:`build_squad_legality` when unit scalars also need readiness —
+    it returns ``(masks, readiness)`` from the same ``unit_can_*`` pass.
     """
-    heal_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    heal_target = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    load_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    load_target = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    attack_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    aoe_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    snipe_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    unload_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    cloak_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    uncloak_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-    move_actor = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-
-    slots: List[Optional[Any]] = list(allies)[:MAX_SQUAD_UNITS]
-    healers: List[Any] = []
-    load_candidates: List[tuple] = []
-    upg = upgrades if upgrades is not None else frozenset()
-    for slot, unit in enumerate(slots):
-        if unit is None:
-            continue
-        controllable = _is_controllable(unit)
-        if controllable and unit_can_cast_heal(unit, bot):
-            heal_actor[slot] = 1.0
-            healers.append(unit)
-        if controllable and unit_can_load(unit):
-            load_candidates.append((slot, unit))
-        if controllable and unit_can_attack(unit, upg):
-            attack_actor[slot] = 1.0
-        if controllable and unit_can_aoe(
-            unit,
-            enemy_race=enemy_race,
-            upgrades=upg,
-            bot=bot,
-            has_tactical_air_enemy=has_tactical_air_enemy,
-        ):
-            aoe_actor[slot] = 1.0
-        if controllable and unit_can_snipe(unit, upgrades=upg, bot=bot):
-            snipe_actor[slot] = 1.0
-        if controllable and unit_can_unload(unit):
-            unload_actor[slot] = 1.0
-        if controllable and unit_can_conceal(unit, upg):
-            cloak_actor[slot] = 1.0
-        if controllable and unit_can_reveal(unit):
-            uncloak_actor[slot] = 1.0
-        if controllable and not unit_is_immobile(unit, upg):
-            move_actor[slot] = 1.0
-
-    if healers:
-        for slot, unit in enumerate(slots):
-            if unit is None or not unit_is_wounded(unit):
-                continue
-            unit_tag = getattr(unit, "tag", None)
-            for healer in healers:
-                if getattr(healer, "tag", None) == unit_tag:
-                    continue
-                if heal_target_is_eligible(healer, unit):
-                    heal_target[slot] = 1.0
-                    break
-
-    for actor_slot, actor in load_candidates:
-        for target_slot, target in enumerate(slots):
-            if target is None:
-                continue
-            if load_pair_is_eligible(actor, target):
-                load_actor[actor_slot] = 1.0
-                load_target[target_slot] = 1.0
-
-    return {
-        "heal_actor_mask": heal_actor,
-        "heal_target_mask": heal_target,
-        "load_actor_mask": load_actor,
-        "load_target_mask": load_target,
-        "attack_actor_mask": attack_actor,
-        "aoe_actor_mask": aoe_actor,
-        "snipe_actor_mask": snipe_actor,
-        "unload_actor_mask": unload_actor,
-        "cloak_actor_mask": cloak_actor,
-        "uncloak_actor_mask": uncloak_actor,
-        "move_actor_mask": move_actor,
-    }
+    masks, _readiness = build_squad_legality(
+        allies,
+        bot=bot,
+        enemy_race=enemy_race,
+        upgrades=upgrades,
+        has_tactical_air_enemy=has_tactical_air_enemy,
+        compute_heal=compute_heal,
+        compute_load=compute_load,
+        compute_attack=compute_attack,
+        compute_aoe=compute_aoe,
+        compute_snipe=compute_snipe,
+        compute_unload=compute_unload,
+        compute_cloak=compute_cloak,
+        compute_uncloak=compute_uncloak,
+        compute_move=compute_move,
+    )
+    return masks
 
 
 def build_enemy_target_mask(enemies: Sequence[Optional[Any]]) -> np.ndarray:
@@ -202,25 +313,34 @@ def build_snipe_target_mask(
     *,
     bot: Any = None,
     upgrades: Optional[frozenset] = None,
+    casters: Optional[Sequence[Any]] = None,
 ) -> np.ndarray:
     """Enemy slots that **some** ready snipe caster in this squad can legally hit.
 
     Per-caster biology / energy-bar rules are re-checked at actuation, matching
     the heal_target_mask pattern for mixed squads.
+
+    Pass ``casters`` (already-ready units from ``snipe_actor_mask``) to avoid a
+    second ``unit_can_snipe`` pass over the squad.
     """
     mask = np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32)
-    upg = upgrades if upgrades is not None else frozenset()
-    casters = [
-        u
-        for u in list(allies)[:MAX_SQUAD_UNITS]
-        if u is not None and _is_controllable(u) and unit_can_snipe(u, upgrades=upg, bot=bot)
-    ]
-    if not casters:
+    if casters is None:
+        upg = upgrades if upgrades is not None else frozenset()
+        ready = [
+            u
+            for u in list(allies)[:MAX_SQUAD_UNITS]
+            if u is not None
+            and _is_controllable(u)
+            and unit_can_snipe(u, upgrades=upg, bot=bot)
+        ]
+    else:
+        ready = [u for u in casters if u is not None]
+    if not ready:
         return mask
     for slot, enemy in enumerate(list(enemies)[:MAX_SQUAD_ENEMIES]):
         if enemy is None:
             continue
-        for caster in casters:
+        for caster in ready:
             if snipe_target_is_eligible(caster, enemy):
                 mask[slot] = 1.0
                 break
@@ -281,6 +401,35 @@ def build_tactical_enemy_mask(
     return mask
 
 
+def build_engage_enemy_masks(
+    enemies: Sequence[Optional[Any]],
+    allies: Sequence[Optional[Any]],
+    *,
+    extra_hostiles: Sequence[Optional[Any]] | None = None,
+) -> tuple[np.ndarray, bool]:
+    """Engage fovea mask plus whether any **flying mobile** is in that fovea.
+
+    One ally×enemy pass serves both ``engage_enemy_mask`` (command gating) and
+    Viper's ``has_tactical_air_enemy`` flag, avoiding a second fovea scan.
+    """
+    mask = np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32)
+    has_air = False
+    foci = [u for u in list(allies)[:MAX_SQUAD_UNITS] if u is not None]
+    if not foci:
+        return mask, False
+    for slot, enemy in enumerate(list(enemies)[:MAX_SQUAD_ENEMIES]):
+        if enemy is None:
+            continue
+        for ally in foci:
+            if unit_in_tactical_fovea(ally, enemy):
+                mask[slot] = 1.0
+                if bool(getattr(enemy, "is_flying", False)):
+                    has_air = True
+                break
+    _mark_extra_hostile_presence(mask, extra_hostiles or (), foci)
+    return mask, has_air
+
+
 def build_engage_enemy_mask(
     enemies: Sequence[Optional[Any]],
     allies: Sequence[Optional[Any]],
@@ -294,6 +443,11 @@ def build_engage_enemy_mask(
     could become this step's hard-anchor and still see the hostile (mobile or
     building). ``air_only`` stays flying mobiles only.
     """
+    if not air_only:
+        mask, _ = build_engage_enemy_masks(
+            enemies, allies, extra_hostiles=extra_hostiles
+        )
+        return mask
     mask = np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32)
     foci = [u for u in list(allies)[:MAX_SQUAD_UNITS] if u is not None]
     if not foci:
@@ -301,12 +455,10 @@ def build_engage_enemy_mask(
     for slot, enemy in enumerate(list(enemies)[:MAX_SQUAD_ENEMIES]):
         if enemy is None:
             continue
-        if air_only and not bool(getattr(enemy, "is_flying", False)):
+        if not bool(getattr(enemy, "is_flying", False)):
             continue
         for ally in foci:
             if unit_in_tactical_fovea(ally, enemy):
                 mask[slot] = 1.0
                 break
-    if not air_only:
-        _mark_extra_hostile_presence(mask, extra_hostiles or (), foci)
     return mask

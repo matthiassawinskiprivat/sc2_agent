@@ -217,8 +217,10 @@ class CaptureTheFlagBot(BotAI):
         # healer_tag → (patient_tag, expiry_game_loop) while walk-in + cast
         # animation must not be overwritten by attack/move.
         self._heal_lock: Dict[int, Tuple[int, int]] = {}
-        # healer_tag → game_loop when Transfuse/Heal cooldown ends (P2 fallback).
+        # caster_tag → game_loop when a locally stamped spell is ready again.
         self._heal_ability_ready_after_loop: Dict[int, int] = {}
+        self._aoe_ability_ready_after_loop: Dict[int, int] = {}
+        self._snipe_ability_ready_after_loop: Dict[int, int] = {}
         # tag → set(AbilityId) from the latest SC2 ability query.
         self._available_abilities_by_tag: Dict[int, Any] = {}
         
@@ -324,6 +326,8 @@ class CaptureTheFlagBot(BotAI):
         self._step_cooldown_retreat_reward = 0.0
         self._heal_lock = {}
         self._heal_ability_ready_after_loop = {}
+        self._aoe_ability_ready_after_loop = {}
+        self._snipe_ability_ready_after_loop = {}
         self._available_abilities_by_tag = {}
         self.cached_observation = None
         self.frame_count = 0
@@ -639,7 +643,11 @@ class CaptureTheFlagBot(BotAI):
         mask[cmd_start : cmd_start + n_configured] = True
 
         if obs is not None:
-            modes = command_target_modes(action_heads, categorical_heads)
+            modes = obs.get("command_modes")
+            if modes is None:
+                modes = command_target_modes(action_heads, categorical_heads)
+            else:
+                modes = np.asarray(modes)
             has_heal = bool(
                 np.any(np.asarray(obs.get("heal_actor_mask", 0.0)) > 0.5)
                 and np.any(np.asarray(obs.get("heal_target_mask", 0.0)) > 0.5)

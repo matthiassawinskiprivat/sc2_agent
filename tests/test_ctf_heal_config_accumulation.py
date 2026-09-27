@@ -48,7 +48,7 @@ def test_ctf_level_19_and_20_inherit_heal_without_relisting():
 def test_damaged_units_only_enabled_on_heal_intro_revisit_and_snipe():
     """``damaged_units`` on heal intros, heal revisit, and the snipe block."""
     cm = ConfigManager("config_universal")
-    for level in (
+    damaged_on = [
         "ctf_heal_queen_vs_queen",
         "ctf_heal_thor_scv_vs_thor_scv",
         "ctf_heal_queen_vs_battlecruiser_scv",
@@ -57,7 +57,12 @@ def test_damaged_units_only_enabled_on_heal_intro_revisit_and_snipe():
         "snipe_infestor_roach_vs_battlecruiser_scv",
         "snipe_high_templar_zealot_vs_ghost_medivac",
         "snipe_battlecruiser_marine_vs_corruptor_hydra",
-    ):
+    ]
+    for level in list(damaged_on):
+        rev = f"{level}_reversed"
+        if rev in cm.levels:
+            damaged_on.append(rev)
+    for level in damaged_on:
         assert cm.get_level_config(level)["env"].get("damaged_units") is True, level
 
     for level in (
@@ -227,7 +232,9 @@ def test_phase1_pre_flying_pools_have_no_flyers_or_massives():
         "ctf_heal_thor_scv_vs_thor_scv",
         "scenario_queen_vs_battlecruiser",
         "snipe_infestor_roach_vs_battlecruiser_scv",
+        "snipe_infestor_roach_vs_battlecruiser_scv_reversed",
         "snipe_battlecruiser_marine_vs_corruptor_hydra",
+        "snipe_battlecruiser_marine_vs_corruptor_hydra_reversed",
     }
     for i, level in enumerate(cm.levels):
         if not (

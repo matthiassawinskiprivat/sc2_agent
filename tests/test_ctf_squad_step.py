@@ -132,8 +132,14 @@ def test_squad_pointer_step_applies_trainee_and_advances(squad_env):
     squad_env._apply_squad_action_for_pool.assert_awaited_once()
     squad_env.bot.client.step.assert_awaited()
     squad_env._advance_trainee_pool_index.assert_awaited()
+    assert squad_env._advance_trainee_pool_index.await_args.kwargs.get(
+        "refresh_units"
+    ) is False
     assert reward == 0.5
     assert info.get("squad_pointer") is True
+    assert "action_masks" in info
+    assert info["action_masks"].dtype == bool
+    assert info.get("requires_policy_action") is True
 
 
 def test_squad_pointer_step_applies_paired_opponent_action(squad_env):
@@ -266,3 +272,172 @@ def test_empty_trainee_army_forces_physics_terminal(squad_env):
     assert info.get("squad_physics_step") is True
     assert done is True
     assert squad_env.steps_count == 1
+
+
+def test_begin_squad_obs_cache_seeds_last_obs(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    last = {"unit_mask": np.array([1.0], dtype=np.float32)}
+    squad_env._last_obs = last
+    squad_env.current_trainee_pool_index = 0
+    squad_env._squad_obs_step_cache = None
+    squad_env._squad_obs_builder = MagicMock()
+    CaptureTheFlagSingleEnv._begin_squad_obs_cache(squad_env)
+    assert squad_env._squad_obs_step_cache[0] is last
+    squad_env._squad_obs_builder.clear_global_cache.assert_not_called()
+
+
+def test_get_squad_observation_hits_step_cache(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    cached = {"unit_mask": np.ones(24, dtype=np.float32)}
+    squad_env._squad_obs_step_cache = {0: cached}
+    squad_env._ensure_squad_obs_builder = MagicMock(
+        side_effect=AssertionError("must not rebuild")
+    )
+    out = CaptureTheFlagSingleEnv._get_squad_observation_for_pool(squad_env, 0)
+    assert out is cached
+
+
+def test_finalize_invalidates_obs_cache_after_physics(squad_env):
+    squad_env._invalidate_pre_physics_obs_caches = MagicMock()
+    asyncio.run(
+        squad_env._finalize_squad_pointer_physics_step(
+            trainee_tags=[101],
+            opponent_tags=[201],
+            trainee_player_id=1,
+        )
+    )
+    squad_env.bot.client.step.assert_awaited()
+    squad_env._invalidate_pre_physics_obs_caches.assert_called()
+
+
+def test_peek_opponent_none_for_computer_preview(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env._preview_computer_opponent = MagicMock(return_value=True)
+    assert CaptureTheFlagSingleEnv.peek_opponent_squad_pointer(squad_env) is None
+
+
+def test_peek_opponent_reuses_step_cache(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env._preview_computer_opponent = MagicMock(return_value=False)
+    obs = {"unit_mask": np.ones(24, dtype=np.float32)}
+    mask = np.ones(8, dtype=bool)
+    squad_env.bot.squad_action_masks = MagicMock(return_value=mask)
+    squad_env._get_squad_observation_for_pool = MagicMock(return_value=obs)
+    squad_env._squad_obs_step_cache = {}
+    squad_env._opponent_lstm_states = {}
+    payload = CaptureTheFlagSingleEnv.peek_opponent_squad_pointer(squad_env)
+    assert payload["pool_idx"] == 1
+    assert payload["obs"] is obs
+    assert payload["mask"] is mask
+    assert payload["episode_start"] is True
+    squad_env._get_squad_observation_for_pool.assert_called_once_with(1)
+
+
+def test_pending_opponent_action_skips_in_worker_predict(squad_env):
+    squad_env._preview_computer_opponent = MagicMock(return_value=False)
+    squad_env._predict_opponent_squad_pointer = AsyncMock(
+        side_effect=AssertionError("collector already batched opponent")
+    )
+    pending = np.arange(len(squad_action_space_nvec()), dtype=np.int64)
+    squad_env._pending_opponent_squad_action = pending
+    action = np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
+    action[0] = 1
+    asyncio.run(squad_env._async_step_squad_pointer(action))
+    applied_actions = [
+        call.args[1] for call in squad_env._apply_squad_action_for_pool.await_args_list
+    ]
+    assert np.array_equal(applied_actions[1], pending)
+
+
+def test_needs_ability_refresh_false_without_spell_heads(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env._cached_squad_action_heads = None
+    assert CaptureTheFlagSingleEnv._needs_ability_refresh(squad_env) is False
+    squad_env.training_conf["action_heads"] = ["move_global", "snipe"]
+    squad_env._cached_squad_action_heads = None
+    assert CaptureTheFlagSingleEnv._needs_ability_refresh(squad_env) is True
+
+
+def test_query_spell_abilities_off_by_default(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    assert CaptureTheFlagSingleEnv._query_spell_abilities_enabled(squad_env) is False
+    squad_env.training_conf["env"]["query_spell_abilities"] = True
+    assert CaptureTheFlagSingleEnv._query_spell_abilities_enabled(squad_env) is True
+
+
+def test_refresh_bot_state_skips_ability_rpc_by_default(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env.training_conf["action_heads"] = ["snipe", "heal_unit", "aoe_local"]
+    squad_env._cached_squad_action_heads = None
+    squad_env._collector_profile_flag = False
+    obs = MagicMock()
+    obs.observation = MagicMock()
+    squad_env.bot.client.observation = AsyncMock(return_value=obs)
+    squad_env.bot._prepare_step = MagicMock()
+    squad_env.bot._proto_game_info = None
+    squad_env.bot._available_abilities_by_tag = {1: frozenset()}
+    squad_env._note_visible_heal_tumors = MagicMock()
+
+    with patch(
+        "src.utils.sc2_observation_compat.game_state_from_response_observation",
+        return_value=MagicMock(),
+    ), patch(
+        "src.utils.unit_feature_helpers.refresh_healer_ability_cache",
+        new_callable=AsyncMock,
+    ) as mock_query:
+        asyncio.run(CaptureTheFlagSingleEnv._refresh_bot_state(squad_env))
+    mock_query.assert_not_called()
+    assert squad_env.bot._available_abilities_by_tag == {}
+
+
+def test_ability_query_units_uses_pool_tags(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    u101 = MagicMock()
+    u201 = MagicMock()
+    squad_env.bot.all_units.find_by_tag = MagicMock(
+        side_effect=lambda tag: {101: u101, 102: u101, 201: u201, 301: u101, 401: u201}.get(tag)
+    )
+    units = CaptureTheFlagSingleEnv._ability_query_units(squad_env)
+    tags = {id(u) for u in units}
+    assert id(u101) in tags
+    assert id(u201) in tags
+
+
+def test_pop_collector_profile_means(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env._collector_profile_flag = True
+    CaptureTheFlagSingleEnv._profile_add(squad_env, "obs_build", 0.02)
+    CaptureTheFlagSingleEnv._profile_add(squad_env, "obs_build", 0.04)
+    means = CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env)
+    assert means["collector/profile_obs_build_ms"] == pytest.approx(30.0)
+    assert CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env) == {}
+
+
+def test_pop_collector_profile_cache_hit_rates(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    CaptureTheFlagSingleEnv._profile_add_count(squad_env, "cache_tg_hit", 9)
+    CaptureTheFlagSingleEnv._profile_add_count(squad_env, "cache_tg_miss", 1)
+    CaptureTheFlagSingleEnv._profile_add_count(squad_env, "cache_tt_hit", 4)
+    CaptureTheFlagSingleEnv._profile_add_count(squad_env, "cache_tt_miss", 1)
+    CaptureTheFlagSingleEnv._profile_add_count(squad_env, "cache_wpn_hit", 20)
+    CaptureTheFlagSingleEnv._profile_add_count(squad_env, "cache_wpn_miss", 0)
+    CaptureTheFlagSingleEnv._profile_add_count(squad_env, "cache_gmap_hit", 1)
+    CaptureTheFlagSingleEnv._profile_add_count(squad_env, "cache_gmap_swap", 1)
+    CaptureTheFlagSingleEnv._profile_add_count(squad_env, "cache_gmap_full", 1)
+    means = CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env)
+    assert means["collector/profile_cache_tg_hit_n"] == 9.0
+    assert means["collector/profile_cache_tg_rate"] == pytest.approx(0.9)
+    assert means["collector/profile_cache_tt_rate"] == pytest.approx(0.8)
+    assert means["collector/profile_cache_wpn_rate"] == pytest.approx(1.0)
+    assert means["collector/profile_cache_gmap_rate"] == pytest.approx(2.0 / 3.0)
+    assert CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env) == {}

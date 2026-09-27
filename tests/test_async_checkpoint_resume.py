@@ -85,19 +85,18 @@ def test_load_squad_checkpoint_graft_restores_timesteps(tmp_path):
     _write_minimal_sb3_zip(ckpt, 750_000)
 
     grafted_model = MagicMock(num_timesteps=0)
+    grafted_model.policy.load_state_dict.return_value = ([], [])
     with patch(
-        "src.agent.maskable_recurrent_ppo.MaskableRecurrentPPO.load",
-        side_effect=RuntimeError("shape mismatch"),
-    ), patch(
-        "src.agent.maskable_recurrent_ppo.MaskableRecurrentPPO",
-        return_value=grafted_model,
-    ), patch(
+        "src.agent.maskable_recurrent_ppo.MaskableRecurrentPPO"
+    ) as MockAlgo, patch(
         "stable_baselines3.common.save_util.load_from_zip_file",
         return_value=(None, {"policy": {"layer": torch.zeros(1)}}, None),
     ), patch(
         "src.utils.model_utils.graft_squad_policy_from_universal",
         return_value={"layer": torch.zeros(1)},
     ):
+        MockAlgo.load.side_effect = RuntimeError("shape mismatch")
+        MockAlgo.return_value = grafted_model
         from src.utils.model_utils import load_squad_checkpoint
 
         model = load_squad_checkpoint(
@@ -108,7 +107,119 @@ def test_load_squad_checkpoint_graft_restores_timesteps(tmp_path):
             action_space=MagicMock(),
         )
 
+    assert model is grafted_model
     assert model.num_timesteps == 750_000
+
+
+def test_load_squad_checkpoint_direct_load_keeps_self_attention(tmp_path):
+    """Same-arch squad resume must not fall through to universal graft.
+
+    Regression: MaskableRecurrentPPO.load forced UnitControlNetwork, which
+    rejected ``use_self_attention`` and triggered the graft fallback.
+    """
+    import gymnasium as gym
+    import numpy as np
+    from gymnasium import spaces
+
+    from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
+    from src.agent.models.squad_network import SquadNetwork
+    from src.agent.models.squad_policy import SquadRecurrentPolicy
+    from src.agent.squad_constants import SQUAD_UNIT_FEAT_DIM, squad_action_space_nvec
+    from src.utils.model_utils import load_squad_checkpoint
+
+    def _minimal_env(obs_space, action_space):
+        class _Env(gym.Env):
+            metadata = {"render_modes": []}
+
+            def __init__(self):
+                super().__init__()
+                self.observation_space = obs_space
+                self.action_space = action_space
+
+            def reset(self, *, seed=None, options=None):
+                return self.observation_space.sample(), {}
+
+            def step(self, action):
+                return self.observation_space.sample(), 0.0, False, False, {}
+
+        return _Env()
+
+    obs_space = spaces.Dict(
+        {
+            "map": spaces.Box(0, 1, (4, 128, 128), np.float32),
+            "command": spaces.Box(0, 1, (10,), np.float32),
+            "anchor_tactical": spaces.Box(0, 1, (4, 32, 32), np.float32),
+            "unit_scalars": spaces.Box(0, 1, (24, SQUAD_UNIT_FEAT_DIM), np.float32),
+            "unit_mask": spaces.Box(0, 1, (24,), np.float32),
+        }
+    )
+    action_space = spaces.MultiDiscrete(squad_action_space_nvec())
+    policy_kwargs = {
+        "features_extractor_class": SquadNetwork,
+        "features_extractor_kwargs": {
+            "features_dim": 64,
+            "thinking_steps": 1,
+            "use_self_attention": True,
+        },
+        "lstm_hidden_size": 32,
+    }
+    env = _minimal_env(obs_space, action_space)
+    src = MaskableRecurrentPPO(
+        SquadRecurrentPolicy,
+        env,
+        n_steps=64,
+        batch_size=32,
+        policy_kwargs=policy_kwargs,
+        device="cpu",
+        rnn_type="gru",
+    )
+    src.num_timesteps = 12_345
+    marker = src.policy.features_extractor.entity_encoder.self_attn.self_attn.in_proj_weight
+    marker_clone = marker.detach().clone()
+    marker.data.fill_(0.42)
+
+    ckpt = tmp_path / "squad_self_attn.zip"
+    src.save(str(ckpt))
+
+    env2 = _minimal_env(obs_space, action_space)
+    algo_kwargs = {
+        "policy": SquadRecurrentPolicy,
+        "env": env2,
+        "n_steps": 64,
+        "batch_size": 32,
+        "policy_kwargs": policy_kwargs,
+        "device": "cpu",
+        "rnn_type": "gru",
+    }
+    load_kwargs = {
+        "env": env2,
+        "policy": SquadRecurrentPolicy,
+        "policy_kwargs": policy_kwargs,
+        "device": "cpu",
+        "rnn_type": "gru",
+    }
+
+    with patch(
+        "src.utils.model_utils.graft_squad_policy_from_universal"
+    ) as graft_mock:
+        model = load_squad_checkpoint(
+            str(ckpt),
+            algo_kwargs,
+            load_kwargs,
+            observation_space=obs_space,
+            action_space=action_space,
+            restore_optimizer=True,
+        )
+
+    graft_mock.assert_not_called()
+    assert isinstance(model.policy, SquadRecurrentPolicy)
+    fe = model.policy.features_extractor
+    assert isinstance(fe, SquadNetwork)
+    assert fe.entity_encoder.use_self_attention is True
+    loaded = fe.entity_encoder.self_attn.self_attn.in_proj_weight
+    assert torch.allclose(loaded, torch.full_like(loaded, 0.42))
+    assert not torch.allclose(loaded, marker_clone)
+    assert model.num_timesteps == 12_345
 
 
 def test_learner_resume_reads_timesteps_from_initial_model_zip(tmp_path):

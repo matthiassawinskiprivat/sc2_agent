@@ -44,6 +44,9 @@ env:
   sc2_process_tree_wait_sec: 1.0
   sc2_retry_backoff_sec: 2.0
   sc2_in_game_wait_sec: 15.0
+  # Whole-session wait_for around launch+join+first obs. Later Subproc workers
+  # add stagger + join-slack on top (see SingleClientEnv._startup_timeout_sec).
+  startup_timeout_sec: 90
 
 # Curriculum shape (CTF):
 #
@@ -102,6 +105,8 @@ levels:
   - "ctf_level_22"
   - "ctf_level_23"
   # area-of-effect (aoe_local) + energy channels
+  # (No ``*_reversed`` siblings before snipe — mid-curriculum inserts would
+  # block CONTINUE_TRAINING on later completed levels after a restart.)
   - "aoe_high_templar_zealot_vs_marine_marauder"
   - "aoe_infestor_roach_vs_marine_marauder"
   - "aoe_zergling_infestor_vs_stalker_templar"
@@ -110,11 +115,18 @@ levels:
   # heal duty-cycle revisit (damaged_units) + flying / air-DPS-base channels
   - "scenario_queen_vs_battlecruiser"
   # unit-target specials (snipe): Ghost Steady Targeting / Yamato / Neural / Feedback
-  # damaged_units kept on so heal_unit stays open while snipe is learned
+  # damaged_units kept on so heal_unit stays open while snipe is learned.
+  # From snipe onward, levels where both races need a researched cast ability
+  # (or snipe puts Infestor/BC on P2) are split: half steps here, half on the
+  # immediate ``*_reversed`` sibling with the other race as SC2 player 1
+  # (debug_upgrade only reaches the client / P1).
   - "snipe_ghost_marauder_vs_roach_hydra"
+  - "snipe_ghost_marauder_vs_roach_hydra_reversed"
   - "snipe_infestor_roach_vs_battlecruiser_scv"
+  - "snipe_infestor_roach_vs_battlecruiser_scv_reversed"
   - "snipe_high_templar_zealot_vs_ghost_medivac"
   - "snipe_battlecruiser_marine_vs_corruptor_hydra"
+  - "snipe_battlecruiser_marine_vs_corruptor_hydra_reversed"
 
   # ========= CTF phase 2: detailed layers and harder compositions ==========
   # biological / light / mechanical overlays
@@ -125,30 +137,44 @@ levels:
   - "ctf_level_03"
   - "ctf_level_04"
   - "ctf_level_05"
+  - "ctf_level_05_reversed"
   - "ctf_level_06"
   - "scenario_adept_disruptor_vs_marine_marauder"
   # massive
   - "ctf_level_07"
   - "ctf_level_08"
+  - "ctf_level_08_reversed"
   - "scenario_colossus_zealot_vs_swarmhost_hydra"
+  - "scenario_colossus_zealot_vs_swarmhost_hydra_reversed"
   # flying (map channels attached at scenario_queen_vs_battlecruiser)
   - "ctf_level_09"
   # mixed heal vs air
   - "ctf_heal_queen_vs_battlecruiser_scv"
+  - "ctf_heal_queen_vs_battlecruiser_scv_reversed"
   - "ctf_level_10"
+  - "ctf_level_10_reversed"
   - "ctf_level_11"
   - "scenario_stalker_vs_mutalisk"
+  - "scenario_stalker_vs_mutalisk_reversed"
   - "scenario_hydra_vs_tempest"
+  - "scenario_hydra_vs_tempest_reversed"
   - "scenario_swarmhost_vs_zealot"
+  - "scenario_swarmhost_vs_zealot_reversed"
   # air dps non-base
   - "ctf_level_12"
+  - "ctf_level_12_reversed"
   - "ctf_level_13"
+  - "ctf_level_13_reversed"
   - "ctf_level_14"
+  - "ctf_level_14_reversed"
   - "scenario_marine_vs_mutalisk"
   # splash
   - "ctf_level_15"
+  - "ctf_level_15_reversed"
   - "ctf_level_16"
+  - "ctf_level_16_reversed"
   - "ctf_level_17"
+  - "ctf_level_17_reversed"
   - "ctf_level_17_mirror_terran"
   - "ctf_level_17_mirror_zerg"
   - "ctf_level_17_mirror_protoss"
@@ -156,25 +182,34 @@ levels:
   - "scenario_thor_vs_voidray"
   # upgrades
   - "ctf_level_27"
+  - "ctf_level_27_reversed"
   - "ctf_level_28"
+  - "ctf_level_28_reversed"
   - "ctf_level_29"
+  - "ctf_level_29_reversed"
   - "scenario_lurker_vs_thor"
   - "scenario_dt_vs_marauder"
   - "scenario_widowmine_vs_zergling"
   - "scenario_queen_vs_banshee"
   - "scenario_banshee_viking_vs_voidray_carrier"
   - "scenario_battlecruiser_viking_vs_corruptor_mutalisk"
+  - "scenario_battlecruiser_viking_vs_corruptor_mutalisk_reversed"
   - "scenario_tempest_voidray_vs_corruptor_mutalisk"
+  - "scenario_tempest_voidray_vs_corruptor_mutalisk_reversed"
   - "scenario_battlecruiser_liberator_vs_corruptor_mutalisk"
+  - "scenario_battlecruiser_liberator_vs_corruptor_mutalisk_reversed"
   # mixed-action revisits on the full layer set (spellcasters vs flyers /
   # massive / splash compositions — these need the phase-2 channels)
   - "aoe_ghost_marauder_vs_high_templar_sentry"
   - "aoe_marine_ghost_vs_darktemplar_adept"
   - "aoe_viper_hydra_vs_voidray_phoenix"
+  - "aoe_viper_hydra_vs_voidray_phoenix_reversed"
   - "aoe_viper_corruptor_vs_mutalisk"
   - "aoe_ravager_roach_vs_immortal_colossus"
+  - "aoe_ravager_roach_vs_immortal_colossus_reversed"
   # transport (load_unit / unload_local) + cargo channels — end of pipeline so
   # load does not crowd heal/snipe during phase 1 / phase 2 practice
   - "ctf_level_24"
   - "ctf_level_25"
+  - "ctf_level_25_reversed"
   - "ctf_level_26"

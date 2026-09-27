@@ -1,0 +1,99 @@
+training:
+  training_steps: 125000
+  num_envs: 6
+  n_steps: 1024
+  batch_size: 256
+  learning_rate: 0.0003
+  render_beacon: false
+  watchdog_timeout: 3600
+  target_kl: null
+  rollout_buffer: disk
+env:
+  env_class: CaptureTheFlagEnv
+  max_steps: 100
+  headless: true
+  every_k_episodes: 200
+  alternate_trainee_race: true
+  include_race: true
+  maps_dir: train/maps/ladder/with_region
+  env_mode: heal,cloak,spellcaster
+  unit_pools:
+  - high_level_command: attack
+    race: zerg
+    mineral_budget: 1125
+    vespene_budget: 800
+    unit_pool:
+    - SWARMHOSTMP
+    - ROACH
+    - INFESTOR
+    - QUEEN
+    - RAVAGER
+    region: A
+  - high_level_command: defend
+    race: protoss
+    mineral_budget: 850
+    vespene_budget: 600
+    unit_pool:
+    - ZEALOT
+    - IMMORTAL
+    - HIGHTEMPLAR
+    region: A
+  - high_level_command: defend
+    race: zerg
+    mineral_budget: 850
+    vespene_budget: 600
+    unit_pool:
+    - SWARMHOSTMP
+    - ROACH
+    - INFESTOR
+    - QUEEN
+    - RAVAGER
+    region: B
+  - high_level_command: attack
+    race: protoss
+    mineral_budget: 1125
+    vespene_budget: 800
+    unit_pool:
+    - ZEALOT
+    - IMMORTAL
+    - HIGHTEMPLAR
+    region: B
+  rewards:
+    economic_vespene_weight: 1.5
+    economic_value_norm: 100.0
+    attacker_enemy_value_reward: 3.0
+    attacker_own_value_penalty: 1.0
+    defender_enemy_value_reward: 2.5
+    defender_own_value_penalty: 3.0
+    defender_pylon_penalty_scale: 1.5
+    defender_retained_value_bonus: 4.0
+    heal_value_reward: 4.0
+    pylon_damage_reward: 2.0
+    pylon_damage_penalty: 0.9
+    melee_multiplier: 0.5
+    distance_multiplier: 2.0
+    defender_zone_radius: 10.0
+    cooldown_retreat_scale: 0.9
+    win_reward: 15.0
+    loss_penalty: -12.5
+    draw_penalty: -10.0
+    step_penalty: -0.03
+  squad_selection:
+    score_threshold: 0.5
+    min_selected_units: 1
+model:
+  algorithm: MaskableRecurrentPPO
+  policy: CnnLstmPolicy
+  rnn_type: gru
+  policy_kwargs:
+    features_extractor_class: src.agent.models.squad_network.SquadNetwork
+    features_extractor_kwargs:
+      features_dim: 512
+      thinking_steps: 3
+      use_self_attention: true
+    lstm_hidden_size: 512
+    net_arch: []
+  gamma: 0.99
+  ent_coef: 0.01
+  n_epochs: 4
+agent_architecture: squad

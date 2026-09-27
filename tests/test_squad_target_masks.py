@@ -365,27 +365,50 @@ def test_viper_aoe_actor_requires_tactical_air_enemy():
     assert with_air["aoe_actor_mask"][0] == 1.0
 
 
-def test_snipe_actor_requires_energy_and_neural_tech():
-    from sc2.ids.upgrade_id import UpgradeId
+def test_snipe_target_mask_reuses_precomputed_casters():
+    """Obs builder passes snipe_actor units so unit_can_snipe is not re-run."""
     from src.agent.squad_target_masks import build_snipe_target_mask
 
-    infestor = _unit(1, UnitTypeId.INFESTOR, energy=100.0)
-    marine = _unit(2, UnitTypeId.MARINE, is_biological=True, owner_id=2)
-    without = build_squad_target_masks(_slots(infestor), upgrades=frozenset())
-    assert not without["snipe_actor_mask"].any()
+    ghost = _unit(1, UnitTypeId.GHOST, energy=50.0)
+    # Empty energy would fail unit_can_snipe — casters= must skip that check.
+    spent = _unit(99, UnitTypeId.GHOST, energy=0.0)
+    ling = _unit(2, UnitTypeId.ZERGLING, is_biological=True, owner_id=2)
+    enemies = [ling] + [None] * (MAX_SQUAD_ENEMIES - 1)
 
-    with_tech = build_squad_target_masks(
-        _slots(infestor), upgrades=frozenset({UpgradeId.NEURALPARASITE})
-    )
-    assert with_tech["snipe_actor_mask"][0] == 1.0
-
-    enemies = [marine] + [None] * (MAX_SQUAD_ENEMIES - 1)
-    tgt = build_snipe_target_mask(
-        enemies,
-        _slots(infestor),
-        upgrades=frozenset({UpgradeId.NEURALPARASITE}),
-    )
+    # Without casters=, spent Ghost yields an empty mask.
+    assert not build_snipe_target_mask(enemies, _slots(spent)).any()
+    # With casters=[ghost], eligibility uses the precomputed ready caster.
+    tgt = build_snipe_target_mask(enemies, _slots(spent), casters=[ghost])
     assert tgt[0] == 1.0
+
+
+def test_engage_enemy_masks_reports_air_in_one_pass():
+    from src.agent.squad_target_masks import build_engage_enemy_masks
+    from src.utils.unit_feature_helpers import TACTICAL_FOVEA_MAX_DELTA
+
+    focus = _unit(1, UnitTypeId.INFESTOR)
+    focus.position = MagicMock(x=50.0, y=50.0)
+    ground = _unit(2, UnitTypeId.STALKER)
+    ground.position = MagicMock(x=50.0 + TACTICAL_FOVEA_MAX_DELTA * 0.5, y=50.0)
+    ground.is_flying = False
+    air = _unit(3, UnitTypeId.MUTALISK)
+    air.position = MagicMock(x=50.0, y=50.0)
+    air.is_flying = True
+    far_air = _unit(4, UnitTypeId.MUTALISK)
+    far_air.position = MagicMock(x=90.0, y=90.0)
+    far_air.is_flying = True
+
+    mask, has_air = build_engage_enemy_masks(
+        [ground, air, far_air], [focus]
+    )
+    assert mask[0] == 1.0
+    assert mask[1] == 1.0
+    assert mask[2] == 0.0
+    assert has_air is True
+
+    ground_only, has_air2 = build_engage_enemy_masks([ground], [focus])
+    assert ground_only[0] == 1.0
+    assert has_air2 is False
 
 
 def test_ghost_snipe_target_requires_biological():
@@ -484,3 +507,47 @@ def test_cloak_and_uncloak_actor_masks_respect_state_and_upgrades():
     assert with_tech["cloak_actor_mask"][1] == 0.0  # already cloaked
     assert with_tech["cloak_actor_mask"][2] == 1.0  # surface ling with BURROW
     assert with_tech["cloak_actor_mask"][3] == 0.0  # already burrowed
+
+
+def test_build_squad_target_masks_skips_disabled_families():
+    ghost = _unit(1, UnitTypeId.GHOST, energy=75.0)
+    masks = build_squad_target_masks(_slots(ghost), compute_snipe=False)
+    assert not masks["snipe_actor_mask"].any()
+    enabled = build_squad_target_masks(_slots(ghost), compute_snipe=True)
+    assert enabled["snipe_actor_mask"][0] == 1.0
+
+
+def test_build_squad_legality_readiness_matches_actor_masks():
+    """Scalar readiness and actor masks share one unit_can_* pass."""
+    from src.agent.squad_target_masks import build_squad_legality
+
+    medivac = _unit(1, UnitTypeId.MEDIVAC, energy=50.0)
+    ghost = _unit(2, UnitTypeId.GHOST, energy=75.0)
+    marine = _unit(3, UnitTypeId.MARINE, health=10.0, health_max=45.0)
+    masks, readiness = build_squad_legality(
+        _slots(medivac, ghost, marine),
+        enemy_race="protoss",
+    )
+    assert readiness["can_heal"][0] == masks["heal_actor_mask"][0] == 1.0
+    assert readiness["can_snipe"][1] == masks["snipe_actor_mask"][1] == 1.0
+    assert readiness["can_aoe"][1] == masks["aoe_actor_mask"][1]
+    assert readiness["can_heal"][2] == 0.0
+    assert readiness["can_snipe"][2] == 0.0
+    # cargo / cloak / immobile always filled for living slots
+    assert readiness["can_load"].shape == (MAX_SQUAD_UNITS,)
+    assert readiness["can_cloak"].shape == (MAX_SQUAD_UNITS,)
+    assert readiness["is_immobile"].shape == (MAX_SQUAD_UNITS,)
+
+
+def test_build_squad_legality_heal_and_repair_split():
+    from src.agent.squad_target_masks import build_squad_legality
+
+    scv = _unit(1, UnitTypeId.SCV)
+    queen = _unit(2, UnitTypeId.QUEEN, energy=50.0)
+    masks, readiness = build_squad_legality(_slots(scv, queen))
+    assert readiness["can_repair"][0] == 1.0
+    assert readiness["can_heal"][0] == 0.0
+    assert masks["heal_actor_mask"][0] == 1.0  # cast_heal = heal ∨ repair
+    assert readiness["can_heal"][1] == 1.0
+    assert readiness["can_repair"][1] == 0.0
+    assert masks["heal_actor_mask"][1] == 1.0

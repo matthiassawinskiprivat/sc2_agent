@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 from sc2.ids.unit_typeid import UnitTypeId
+from sc2.position import Point2
 
 from src.transformers.squad_observation_builder import SquadObservationBuilder
 from src.agent.squad_constants import (
@@ -294,3 +295,97 @@ def test_p2_trainee_uses_bot_state_upgrades_for_range_scalars(training_conf):
     assert abs(float(obs_p2["unit_scalars"][0, 0]) - expected) < 1e-5
     assert abs(float(obs_p2["unit_scalars"][0, 1]) - expected) < 1e-5
     assert np.allclose(obs_p2["unit_scalars"][0], obs_p1["unit_scalars"][0])
+
+
+def test_gather_active_uses_catalog_index_array():
+    builder = SquadObservationBuilder(
+        {
+            "active_layers": ["allied_unit_biological"],
+            "active_tactical_layers": ["allied_unit_biological"],
+            "active_unit_scalars": [USC.ROLE_ATTACK, USC.ROLE_DEFEND],
+            "agent_architecture": "squad",
+            "include_race": False,
+        }
+    )
+    catalog = np.zeros(USC.get_dim(), dtype=np.float32)
+    catalog[USC.FEATURES[USC.ROLE_ATTACK]] = 1.0
+    catalog[USC.FEATURES[USC.ROLE_DEFEND]] = 0.25
+    out = builder._gather_active(catalog)
+    assert out.shape == (2,)
+    assert out[0] == pytest.approx(1.0)
+    assert out[1] == pytest.approx(0.25)
+
+
+def test_unit_tag_index_from_list_avoids_find_by_tag():
+    from src.transformers.squad_observation_builder import _unit_from_tag, _unit_tag_index
+
+    unit_a = MagicMock()
+    unit_a.tag = 10
+    unit_b = MagicMock()
+    unit_b.tag = 20
+    bot = MagicMock()
+    bot.all_units = [unit_a, unit_b]
+    by_tag = _unit_tag_index(bot)
+    assert by_tag[10] is unit_a
+    assert _unit_from_tag(bot, 20, by_tag) is unit_b
+    assert _unit_from_tag(bot, 99, by_tag) is None
+
+
+def test_opposite_perspective_reuses_world_global_paint():
+    """Second SC2 owner in the same physics step must not re-run transform()."""
+    from tests.test_ctf_perspective_obs_identity import (
+        _combat_unit,
+        _god_mode_bot,
+        _pylon,
+        _training_conf,
+    )
+
+    marine = _combat_unit(UnitTypeId.MARINE, Point2((30.0, 30.0)), owner_id=1, tag=10)
+    zergling = _combat_unit(UnitTypeId.ZERGLING, Point2((90.0, 90.0)), owner_id=2, tag=20)
+    own_pylon = _pylon(Point2((25.0, 25.0)), owner_id=1, tag=101)
+    enemy_pylon = _pylon(Point2((95.0, 95.0)), owner_id=2, tag=201)
+    bot = _god_mode_bot([marine, zergling], [own_pylon, enemy_pylon])
+    bot.unit_target_map = {10: Point2((80.0, 40.0)), 20: Point2((40.0, 80.0))}
+    bot.unit_command_map = {10: "attack", 20: "defend"}
+
+    builder = SquadObservationBuilder(_training_conf())
+    calls = {"n": 0}
+    real = builder._transformer.transform
+
+    def counting_transform(raw_obs):
+        calls["n"] += 1
+        return real(raw_obs)
+
+    builder._transformer.transform = counting_transform
+    obs_p1 = builder.build(
+        bot,
+        perspective_player_id=1,
+        squad_unit_tags=[10],
+        pool_high_level_command="attack",
+        playable_size=(128.0, 128.0),
+        anchor_unit_tag=10,
+        own_race="terran",
+        enemy_race="zerg",
+    )
+    obs_p2 = builder.build(
+        bot,
+        perspective_player_id=2,
+        squad_unit_tags=[20],
+        pool_high_level_command="defend",
+        playable_size=(128.0, 128.0),
+        anchor_unit_tag=20,
+        own_race="zerg",
+        enemy_race="terran",
+    )
+    assert calls["n"] == 1
+    layers = _training_conf()["active_layers"]
+    allied_idx = layers.index("allied_unit_density")
+    enemy_idx = layers.index("enemy_unit_density")
+    # After swap, P2 allied density is where P1 had enemy density (zergling cell).
+    assert float(obs_p1["map"][allied_idx].sum()) > 0.0
+    assert float(obs_p1["map"][enemy_idx].sum()) > 0.0
+    assert float(obs_p2["map"][allied_idx].sum()) > 0.0
+    assert float(obs_p2["map"][enemy_idx].sum()) > 0.0
+    # Cross-check: P2 allied ≈ P1 enemy (same world paint, swapped).
+    assert np.allclose(obs_p2["map"][allied_idx], obs_p1["map"][enemy_idx], atol=1e-5)
+    assert np.allclose(obs_p2["map"][enemy_idx], obs_p1["map"][allied_idx], atol=1e-5)

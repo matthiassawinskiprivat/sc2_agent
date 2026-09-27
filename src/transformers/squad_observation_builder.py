@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import math
+import os
+import time
+from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 from sc2.ids.unit_typeid import UnitTypeId
 from sc2.unit import Unit
+
+_NULL_TIMED_PHASE = nullcontext()
 
 from src.agent.squad_constants import (
     MAX_SQUAD_ENEMIES,
@@ -21,10 +26,11 @@ from src.agent.squad_constants import (
     update_armor_shield_cache,
 )
 from src.agent.squad_target_masks import (
+    SQUAD_ACTOR_READINESS_KEYS,
     build_enemy_target_mask,
-    build_engage_enemy_mask,
+    build_engage_enemy_masks,
     build_snipe_target_mask,
-    build_squad_target_masks,
+    build_squad_legality,
     build_tactical_enemy_mask,
     zero_target_masks,
 )
@@ -64,6 +70,39 @@ _CD_FRAMES = 24.0       # approximate max weapon cooldown (frames)
 _MELEE_RANGE_MAX = 1.5  # matches CaptureTheFlagBot._RANGED_WEAPON_RANGE_MIN
 
 
+def _unit_tag_index(bot) -> Dict[int, Any]:
+    """O(n) tag→unit map for real python-sc2 collections; empty for MagicMock tests."""
+    units = getattr(bot, "all_units", None)
+    if units is None:
+        return {}
+    if isinstance(units, (list, tuple)):
+        out: Dict[int, Any] = {}
+        for unit in units:
+            tag = getattr(unit, "tag", None)
+            if tag is not None:
+                out[int(tag)] = unit
+        return out
+    module = getattr(type(units), "__module__", "") or ""
+    if not module.startswith("sc2"):
+        return {}
+    out = {}
+    for unit in units:
+        tag = getattr(unit, "tag", None)
+        if tag is not None:
+            out[int(tag)] = unit
+    return out
+
+
+def _unit_from_tag(bot, tag: int, by_tag: Dict[int, Any]):
+    itag = int(tag)
+    if by_tag:
+        return by_tag.get(itag)
+    finder = getattr(getattr(bot, "all_units", None), "find_by_tag", None)
+    if callable(finder):
+        return finder(itag)
+    return None
+
+
 def _safe_float(val: Any, default: float = 0.0) -> float:
     """Coerce to float, returning default for None or non-numeric types."""
     try:
@@ -99,6 +138,7 @@ class SquadObservationBuilder:
         self.active_unit_scalars: List[str] = USC.resolve_active_features(
             training_conf.get("active_unit_scalars")
         )
+        self._active_unit_scalar_set = frozenset(self.active_unit_scalars)
         self.unit_feat_dim: int = len(self.active_unit_scalars)
         self._transformer = ObservationTransformer(
             map_size=(128, 128),
@@ -120,14 +160,95 @@ class SquadObservationBuilder:
             1: np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
             2: np.zeros(SQUAD_UPGRADES_DIM, dtype=np.float32),
         }
-        self._global_obs_cache: Dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+        self._global_obs_cache: Dict[Any, Any] = {}
+        # Enable full-stack retain so a second perspective can swap channels
+        # instead of re-painting the whole global map.
+        self._transformer.retain_global_layers = True
         # Static-per-type feature cache: cache_key → full catalog vector (USC.get_dim(),).
         # Active subset is gathered afterward so cache stays valid across configs.
         self._static_feat_cache: Dict[Any, np.ndarray] = {}
+        heads = {
+            str(h).lower()
+            for h in list(training_conf.get("action_heads") or [])
+            + list(training_conf.get("categorical_heads") or [])
+        }
+        # Readiness lookups are gated by command heads, not the scalar catalog
+        # (CTF declares the full catalog at ctf_level_01).
+        self._compute_can_heal = "heal_unit" in heads
+        self._compute_can_load = "load_unit" in heads
+        self._compute_can_attack = (
+            "attack_unit" in heads or "attack_local" in heads
+        )
+        self._compute_can_aoe = "aoe_local" in heads
+        self._compute_can_snipe = "snipe" in heads
+        self._compute_can_unload = "unload_local" in heads
+        self._compute_can_cloak = "cloak_burrow" in heads
+        self._compute_can_uncloak = "uncloak_unburrow" in heads
+        self._compute_can_move = any(
+            str(h).startswith("move") for h in heads
+        ) or not heads
+        self._active_feat_idx = np.array(
+            [_F[name] for name in self.active_unit_scalars], dtype=np.intp
+        )
+        self._obs_profile_flag = None
+        self._obs_profile_sums: Dict[str, float] = {}
+        self._obs_profile_counts: Dict[str, int] = {}
+        self._cache_stat_counts: Dict[str, int] = {}
+
+    def _obs_profile_enabled(self) -> bool:
+        flag = self._obs_profile_flag
+        if flag is None:
+            raw = os.environ.get("SC2_COLLECTOR_PROFILE", "").strip().lower()
+            flag = raw in ("1", "true", "yes")
+            self._obs_profile_flag = flag
+        return flag
+
+    def _obs_profile_add(self, key: str, seconds: float) -> None:
+        sums = self._obs_profile_sums
+        sums[key] = sums.get(key, 0.0) + float(seconds)
+        counts = self._obs_profile_counts
+        counts[key] = counts.get(key, 0) + 1
+
+    def _cache_stat_inc(self, key: str, n: int = 1) -> None:
+        if not self._obs_profile_enabled():
+            return
+        if n == 0:
+            return
+        counts = self._cache_stat_counts
+        counts[key] = counts.get(key, 0) + int(n)
+
+    def _timed_phase(self, key: str):
+        if not self._obs_profile_enabled():
+            return _NULL_TIMED_PHASE
+        return self._timed_phase_active(key)
+
+    @contextmanager
+    def _timed_phase_active(self, key: str):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._obs_profile_add(key, time.perf_counter() - t0)
+
+    def pop_obs_profile_means(self) -> Dict[str, float]:
+        """Total seconds for builder phases + nested transformer draw phases."""
+        out = dict(self._transformer.pop_obs_profile_means())
+        sums = self._obs_profile_sums
+        for key, total in sums.items():
+            out[key] = float(total)
+        for key, count in self._cache_stat_counts.items():
+            out[f"cache_{key}"] = out.get(f"cache_{key}", 0.0) + float(count)
+        self._obs_profile_sums = {}
+        self._obs_profile_counts = {}
+        self._cache_stat_counts = {}
+        return out
 
     def clear_global_cache(self) -> None:
-        """Drop cached global map/command tensors (call once per env physics step)."""
+        """Drop cached global map/command tensors (call after ``client.step``)."""
         self._global_obs_cache.clear()
+
+    def clear_static_feat_cache(self) -> None:
+        """Drop type-level scalar cache (episode reset / upgrade change only)."""
         self._static_feat_cache.clear()
 
     def reset_upgrade_cache(self) -> None:
@@ -221,9 +342,10 @@ class SquadObservationBuilder:
         enemy_race: Optional[str] = None,
     ) -> Dict[str, np.ndarray]:
         sorted_tags = [int(t) for t in sorted(squad_unit_tags)]
+        by_tag = _unit_tag_index(bot)
         alive_tags: List[int] = []
         for tag in sorted_tags[:MAX_SQUAD_UNITS]:
-            if bot.all_units.find_by_tag(tag) is not None:
+            if _unit_from_tag(bot, tag, by_tag) is not None:
                 alive_tags.append(tag)
         resolved_anchor = self.resolve_anchor_tag(
             sorted_tags, alive_tags, preferred_tag=anchor_unit_tag
@@ -234,23 +356,13 @@ class SquadObservationBuilder:
             sorted_tags=sorted_tags,
             pool_high_level_command=pool_high_level_command,
             anchor_unit_tag=resolved_anchor,
+            units_by_tag=by_tag,
         )
-        cache_key = (int(perspective_player_id), str(pool_high_level_command).lower())
-        cached = self._global_obs_cache.get(cache_key)
-        if cached is None:
-            global_result = self._transformer.transform(raw_obs)
-            if not isinstance(global_result, dict):
-                raise TypeError("SquadObservationBuilder requires universal dict transform output")
-            map_obs = np.asarray(global_result["map"], dtype=np.float32)
-            command_obs = np.asarray(global_result["command"], dtype=np.float32)
-            if command_obs.shape[0] != SQUAD_COMMAND_DIM:
-                padded = np.zeros(SQUAD_COMMAND_DIM, dtype=np.float32)
-                n = min(SQUAD_COMMAND_DIM, command_obs.shape[0])
-                padded[:n] = command_obs[:n]
-                command_obs = padded
-            self._global_obs_cache[cache_key] = (map_obs, command_obs)
-        else:
-            map_obs, command_obs = cached
+        map_obs, command_obs = self._resolve_global_map_command(
+            raw_obs,
+            perspective_player_id=int(perspective_player_id),
+            pool_high_level_command=pool_high_level_command,
+        )
 
         pw, ph = playable_size
 
@@ -270,7 +382,7 @@ class SquadObservationBuilder:
         # Allied squad center-of-mass from live unit positions
         squad_positions = []
         for tag in sorted_tags[:MAX_SQUAD_UNITS]:
-            u = bot.all_units.find_by_tag(tag)
+            u = _unit_from_tag(bot, tag, by_tag)
             if u is not None:
                 squad_positions.append((u.position.x, u.position.y))
         allied_com = (
@@ -289,7 +401,7 @@ class SquadObservationBuilder:
         ally_units: List[Optional[Unit]] = [None] * MAX_SQUAD_UNITS
 
         for slot, tag in enumerate(sorted_tags[:MAX_SQUAD_UNITS]):
-            unit = bot.all_units.find_by_tag(tag)
+            unit = _unit_from_tag(bot, tag, by_tag)
             if unit is None:
                 continue
             unit_mask[slot] = 1.0
@@ -300,7 +412,7 @@ class SquadObservationBuilder:
         enemy_scalars = np.zeros((MAX_SQUAD_ENEMIES, self.unit_feat_dim), dtype=np.float32)
         enemy_units: List[Optional[Unit]] = [None] * MAX_SQUAD_ENEMIES
         for slot, tag in enumerate(enemy_tags[:MAX_SQUAD_ENEMIES]):
-            unit = bot.all_units.find_by_tag(tag)
+            unit = _unit_from_tag(bot, tag, by_tag)
             if unit is None:
                 continue
             enemy_units[slot] = unit
@@ -308,75 +420,96 @@ class SquadObservationBuilder:
         # Hard-anchor crop + fovea legality before actor masks / CAN_AOE scalars.
         anchor_unit = None
         if resolved_anchor is not None:
-            anchor_unit = bot.all_units.find_by_tag(resolved_anchor)
+            anchor_unit = _unit_from_tag(bot, resolved_anchor, by_tag)
             if anchor_unit is not None:
-                tactical = self._transformer.transform_tactical(raw_obs, anchor_unit)
+                with self._timed_phase("sb_tac"):
+                    tactical = self._transformer.transform_tactical(raw_obs, anchor_unit)
                 anchor_tactical = np.asarray(tactical, dtype=np.float32)
-        tactical_enemy_mask = build_tactical_enemy_mask(
-            enemy_units, anchor_unit, extra_hostiles=enemy_structures
-        )
-        # Engage fovea = mobile *or building* near *any* ally. Command gating
-        # for attack_local / aoe_local uses this. Viper air stays mobiles only.
-        # Spatial decode this step uses the newly selected anchor, not the
-        # previous hard-anchor crop reflected by tactical_enemy_mask.
-        engage_enemy_mask = build_engage_enemy_mask(
-            enemy_units, ally_units, extra_hostiles=enemy_structures
-        )
-        has_engage_air_enemy = bool(
-            build_engage_enemy_mask(
-                enemy_units, ally_units, air_only=True
-            ).any()
-        )
-        enemy_mask = build_enemy_target_mask(enemy_units)
-        target_masks = build_squad_target_masks(
-            ally_units,
-            bot=bot,
-            enemy_race=enemy_race,
-            upgrades=upgrades,
-            has_tactical_air_enemy=has_engage_air_enemy,
-        )
-        snipe_target_mask = build_snipe_target_mask(
-            enemy_units,
-            ally_units,
-            bot=bot,
-            upgrades=upgrades,
-        )
-
-        for slot, tag in enumerate(sorted_tags[:MAX_SQUAD_UNITS]):
-            unit = ally_units[slot]
-            if unit is None:
-                continue
-            objective = bot.unit_target_map.get(tag)
-            unit_scalars[slot] = self._unit_scalars(
-                unit,
-                pool_high_level_command,
-                bot=bot,
-                playable_w=pw,
-                playable_h=ph,
-                upgrades=upgrades,
-                objective=objective,
-                enemy_com=enemy_com,
-                allied_com=allied_com,
-                enemy_race=enemy_race,
-                has_tactical_air_enemy=has_engage_air_enemy,
+        with self._timed_phase("sb_mask"):
+            tactical_enemy_mask = build_tactical_enemy_mask(
+                enemy_units, anchor_unit, extra_hostiles=enemy_structures
             )
-
-        for slot, unit in enumerate(enemy_units):
-            if unit is None:
-                continue
-            enemy_scalars[slot] = self._unit_scalars(
-                unit,
-                pool_high_level_command,
-                bot=bot,
-                playable_w=pw,
-                playable_h=ph,
-                upgrades=upgrades,
-                objective=None,
-                enemy_com=allied_com,
-                allied_com=enemy_com,
-                enemy_race=enemy_race,
-                has_tactical_air_enemy=has_engage_air_enemy,
+            # Engage fovea = mobile *or building* near *any* ally. Command gating
+            # for attack_local / aoe_local uses this. Viper air stays mobiles only.
+            # Spatial decode this step uses the newly selected anchor, not the
+            # previous hard-anchor crop reflected by tactical_enemy_mask.
+            # One pass yields both the engage mask and the air-presence flag.
+            engage_enemy_mask, has_engage_air_enemy = build_engage_enemy_masks(
+                enemy_units, ally_units, extra_hostiles=enemy_structures
             )
+            enemy_mask = build_enemy_target_mask(enemy_units)
+            target_masks, actor_readiness = build_squad_legality(
+                ally_units,
+                bot=bot,
+                enemy_race=enemy_race,
+                upgrades=upgrades,
+                has_tactical_air_enemy=has_engage_air_enemy,
+                compute_heal=self._compute_can_heal,
+                compute_load=self._compute_can_load,
+                compute_attack=self._compute_can_attack,
+                compute_aoe=self._compute_can_aoe,
+                compute_snipe=self._compute_can_snipe,
+                compute_unload=self._compute_can_unload,
+                compute_cloak=self._compute_can_cloak,
+                compute_uncloak=self._compute_can_uncloak,
+                compute_move=self._compute_can_move,
+            )
+            # Reuse ready casters from snipe_actor_mask — do not re-run unit_can_snipe.
+            if self._compute_can_snipe:
+                snipe_casters = [
+                    ally_units[slot]
+                    for slot, flag in enumerate(target_masks["snipe_actor_mask"])
+                    if flag > 0.5 and ally_units[slot] is not None
+                ]
+                snipe_target_mask = build_snipe_target_mask(
+                    enemy_units,
+                    ally_units,
+                    casters=snipe_casters,
+                )
+            else:
+                snipe_target_mask = np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32)
+
+        with self._timed_phase("sb_sc"):
+            for slot, tag in enumerate(sorted_tags[:MAX_SQUAD_UNITS]):
+                unit = ally_units[slot]
+                if unit is None:
+                    continue
+                objective = bot.unit_target_map.get(tag)
+                unit_scalars[slot] = self._unit_scalars(
+                    unit,
+                    pool_high_level_command,
+                    bot=bot,
+                    playable_w=pw,
+                    playable_h=ph,
+                    upgrades=upgrades,
+                    objective=objective,
+                    enemy_com=enemy_com,
+                    allied_com=allied_com,
+                    enemy_race=enemy_race,
+                    has_tactical_air_enemy=has_engage_air_enemy,
+                    readiness={
+                        key: float(actor_readiness[key][slot])
+                        for key in SQUAD_ACTOR_READINESS_KEYS
+                    },
+                )
+
+            for slot, unit in enumerate(enemy_units):
+                if unit is None:
+                    continue
+                enemy_scalars[slot] = self._unit_scalars(
+                    unit,
+                    pool_high_level_command,
+                    bot=bot,
+                    playable_w=pw,
+                    playable_h=ph,
+                    upgrades=upgrades,
+                    objective=None,
+                    enemy_com=allied_com,
+                    allied_com=enemy_com,
+                    enemy_race=enemy_race,
+                    has_tactical_air_enemy=has_engage_air_enemy,
+                    for_enemy=True,
+                )
 
         obs = {
             "map": map_obs,
@@ -436,8 +569,8 @@ class SquadObservationBuilder:
         """Compute Groups C+D features that are constant per unit type within an episode.
 
         Cached by (type_id, upgrades_hash) so the lookup is O(1) after the first call
-        for each unit type.  Cache is cleared at the start of each physics step via
-        clear_global_cache().
+        for each unit type. Cache lives across physics steps; clear on episode reset
+        via ``clear_static_feat_cache()``.
         """
         type_key = getattr(unit.type_id, "value", unit.type_id)
         cache_key = (type_key, upgrades)
@@ -499,6 +632,8 @@ class SquadObservationBuilder:
         allied_com,
         enemy_race: Optional[str] = None,
         has_tactical_air_enemy: bool = False,
+        for_enemy: bool = False,
+        readiness: Optional[Dict[str, float]] = None,
     ) -> np.ndarray:
         # Fill the full catalog buffer (catalog index order), then gather into
         # active_unit_scalars config order — same pattern as active_layers slicing.
@@ -575,34 +710,56 @@ class SquadObservationBuilder:
         catalog[_F[USC.IS_DETECTED]]  = float(bool(getattr(unit, "is_detected", False)))
 
         # --- Group I: Immobility / cloak readiness ---
-        catalog[_F[USC.IS_IMMOBILE]] = float(unit_is_immobile(unit, upgrades))
-        catalog[_F[USC.CAN_CLOAK]] = float(unit_can_cloak(unit, upgrades))
+        # Prefer values from build_squad_legality (same unit_can_* pass as masks).
+        if readiness is not None:
+            catalog[_F[USC.IS_IMMOBILE]] = float(readiness.get("is_immobile", 0.0))
+            catalog[_F[USC.CAN_CLOAK]] = float(readiness.get("can_cloak", 0.0))
+        else:
+            catalog[_F[USC.IS_IMMOBILE]] = float(unit_is_immobile(unit, upgrades))
+            catalog[_F[USC.CAN_CLOAK]] = float(unit_can_cloak(unit, upgrades))
 
-        # --- Group J: Heal / repair readiness ---
-        catalog[_F[USC.CAN_HEAL]] = float(unit_can_heal(unit, bot))
-        catalog[_F[USC.CAN_REPAIR]] = float(unit_can_repair(unit, bot))
-
-        # --- Group L: AoE / snipe spell readiness ---
-        catalog[_F[USC.CAN_AOE]] = float(
-            unit_can_aoe(
-                unit,
-                enemy_race=enemy_race,
-                upgrades=upgrades,
-                bot=bot,
-                has_tactical_air_enemy=has_tactical_air_enemy,
-            )
-        )
-        catalog[_F[USC.CAN_SNIPE]] = float(
-            unit_can_snipe(unit, upgrades=upgrades, bot=bot)
-        )
+        # --- Group J / L: Heal / repair / AoE / snipe readiness ---
+        # Enemies are not actuators. Allies skip lookups until the matching
+        # command head exists (full CTF catalog still lists these features).
+        if not for_enemy:
+            if readiness is not None:
+                if self._compute_can_heal:
+                    catalog[_F[USC.CAN_HEAL]] = float(readiness.get("can_heal", 0.0))
+                    catalog[_F[USC.CAN_REPAIR]] = float(readiness.get("can_repair", 0.0))
+                if self._compute_can_aoe:
+                    catalog[_F[USC.CAN_AOE]] = float(readiness.get("can_aoe", 0.0))
+                if self._compute_can_snipe:
+                    catalog[_F[USC.CAN_SNIPE]] = float(readiness.get("can_snipe", 0.0))
+            else:
+                if self._compute_can_heal:
+                    catalog[_F[USC.CAN_HEAL]] = float(unit_can_heal(unit, bot))
+                    catalog[_F[USC.CAN_REPAIR]] = float(unit_can_repair(unit, bot))
+                if self._compute_can_aoe:
+                    catalog[_F[USC.CAN_AOE]] = float(
+                        unit_can_aoe(
+                            unit,
+                            enemy_race=enemy_race,
+                            upgrades=upgrades,
+                            bot=bot,
+                            has_tactical_air_enemy=has_tactical_air_enemy,
+                        )
+                    )
+                if self._compute_can_snipe:
+                    catalog[_F[USC.CAN_SNIPE]] = float(
+                        unit_can_snipe(unit, upgrades=upgrades, bot=bot)
+                    )
 
         # --- Group K: Transport / cargo ---
         catalog[_F[USC.IS_TRANSPORT]] = float(unit_is_transport(unit))
         catalog[_F[USC.CARGO_USED_NORM]] = float(unit_cargo_used_norm(unit))
         catalog[_F[USC.CARGO_FREE_NORM]] = float(unit_cargo_free_norm(unit))
         catalog[_F[USC.CARGO_SIZE_NORM]] = float(unit_cargo_size_norm(unit))
-        catalog[_F[USC.CAN_LOAD]] = float(unit_can_load(unit))
-        catalog[_F[USC.CAN_UNLOAD]] = float(unit_can_unload(unit))
+        if readiness is not None:
+            catalog[_F[USC.CAN_LOAD]] = float(readiness.get("can_load", 0.0))
+            catalog[_F[USC.CAN_UNLOAD]] = float(readiness.get("can_unload", 0.0))
+        else:
+            catalog[_F[USC.CAN_LOAD]] = float(unit_can_load(unit))
+            catalog[_F[USC.CAN_UNLOAD]] = float(unit_can_unload(unit))
 
         # --- Group G: Role ---
         role = str(pool_command).lower()
@@ -613,14 +770,90 @@ class SquadObservationBuilder:
 
     def _gather_active(self, catalog: np.ndarray) -> np.ndarray:
         """Slice the full catalog into active_unit_scalars config order."""
-        out = np.zeros(self.unit_feat_dim, dtype=np.float32)
-        for i, name in enumerate(self.active_unit_scalars):
-            out[i] = catalog[_F[name]]
-        return out
+        return catalog[self._active_feat_idx].astype(np.float32, copy=True)
 
     # ------------------------------------------------------------------
     # Raw obs assembly
     # ------------------------------------------------------------------
+
+    _WORLD_CACHE_KEY = ("__world__",)
+
+    def _pad_command_vector(self, command_obs: np.ndarray) -> np.ndarray:
+        command_obs = np.asarray(command_obs, dtype=np.float32)
+        if command_obs.shape[0] == SQUAD_COMMAND_DIM:
+            return command_obs
+        padded = np.zeros(SQUAD_COMMAND_DIM, dtype=np.float32)
+        n = min(SQUAD_COMMAND_DIM, int(command_obs.shape[0]))
+        padded[:n] = command_obs[:n]
+        return padded
+
+    def _command_vector_from_hlc(self, pool_high_level_command: str) -> np.ndarray:
+        from src.utils.command_constants import CommandConstants
+
+        command_obs = np.zeros(SQUAD_COMMAND_DIM, dtype=np.float32)
+        cmd_idx = CommandConstants.get_index(pool_high_level_command)
+        if 0 <= int(cmd_idx) < min(10, SQUAD_COMMAND_DIM):
+            command_obs[int(cmd_idx)] = 1.0
+        return command_obs
+
+    def _slice_global_map(self, full_layers: np.ndarray) -> np.ndarray:
+        idx = getattr(self._transformer, "_global_slice_idx", None)
+        if idx is not None:
+            return np.asarray(full_layers[idx], dtype=np.float32)
+        return np.asarray(full_layers, dtype=np.float32).copy()
+
+    def _resolve_global_map_command(
+        self,
+        raw_obs: Dict[str, Any],
+        *,
+        perspective_player_id: int,
+        pool_high_level_command: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return ``(map, command)``, reusing a prior world paint when possible.
+
+        First perspective in a physics step runs a full ``transform``. The opposite
+        SC2 owner reuses that stack via allied↔enemy channel swap + command restamp
+        (terrain / unit / DPS paint is shared). Exact ``(pid, hlc)`` hits skip work.
+        """
+        pid = int(perspective_player_id)
+        hlc = str(pool_high_level_command).lower()
+        cache_key = (pid, hlc)
+        cached = self._global_obs_cache.get(cache_key)
+        if cached is not None:
+            self._cache_stat_inc("gmap_hit")
+            if self._obs_profile_enabled():
+                self._obs_profile_add("sb_ghit", 0.0)
+            return cached
+
+        world = self._global_obs_cache.get(self._WORLD_CACHE_KEY)
+        if world is not None:
+            src_pid = int(world["pid"])
+            self._cache_stat_inc("gmap_swap" if src_pid != pid else "gmap_cmd")
+            with self._timed_phase("sb_gswap" if src_pid != pid else "sb_gcmd"):
+                full = np.array(world["layers"], copy=True, dtype=np.float32)
+                if src_pid != pid:
+                    ObservationTransformer.swap_allied_enemy_layers(full)
+                self._transformer.restamp_global_command_layers(full, raw_obs)
+                map_obs = self._slice_global_map(full)
+                command_obs = self._command_vector_from_hlc(pool_high_level_command)
+            self._global_obs_cache[cache_key] = (map_obs, command_obs)
+            return map_obs, command_obs
+
+        self._cache_stat_inc("gmap_full")
+        with self._timed_phase("sb_glob"):
+            global_result = self._transformer.transform(raw_obs)
+        if not isinstance(global_result, dict):
+            raise TypeError("SquadObservationBuilder requires universal dict transform output")
+        map_obs = np.asarray(global_result["map"], dtype=np.float32)
+        command_obs = self._pad_command_vector(global_result["command"])
+        retained = getattr(self._transformer, "_retained_global_layers", None)
+        if retained is not None:
+            self._global_obs_cache[self._WORLD_CACHE_KEY] = {
+                "pid": pid,
+                "layers": retained,
+            }
+        self._global_obs_cache[cache_key] = (map_obs, command_obs)
+        return map_obs, command_obs
 
     def _build_raw_obs(
         self,
@@ -630,21 +863,23 @@ class SquadObservationBuilder:
         sorted_tags: List[int],
         pool_high_level_command: str,
         anchor_unit_tag: Optional[int] = None,
+        units_by_tag: Optional[Dict[int, Any]] = None,
     ) -> Dict[str, Any]:
         p_id = perspective_player_id
         units, enemy_units, structures, enemy_structures = perspective_unit_groups(
             bot, p_id
         )
+        by_tag = units_by_tag if units_by_tag is not None else _unit_tag_index(bot)
 
         active_unit: Optional[Unit] = None
         selected_units: List[Unit] = []
         for tag in sorted_tags[:MAX_SQUAD_UNITS]:
-            unit = bot.all_units.find_by_tag(tag)
+            unit = _unit_from_tag(bot, tag, by_tag)
             if unit is None:
                 continue
             selected_units.append(unit)
         if anchor_unit_tag is not None:
-            active_unit = bot.all_units.find_by_tag(int(anchor_unit_tag))
+            active_unit = _unit_from_tag(bot, int(anchor_unit_tag), by_tag)
         if active_unit is None and selected_units:
             active_unit = selected_units[0]
         if active_unit is None:

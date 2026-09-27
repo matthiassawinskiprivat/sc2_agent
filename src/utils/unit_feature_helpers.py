@@ -6,7 +6,7 @@ without importing the full transformer.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any, FrozenSet, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, FrozenSet, List, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
     from sc2.position import Point2
@@ -418,8 +418,8 @@ def unit_can_snipe(
     Energy-gated for Ghost / Infestor / High Templar. Battlecruiser Yamato is
     cooldown-only but requires ``YAMATOCANNON`` research. Infestor Neural
     Parasite requires ``NEURALPARASITE``. When ``bot._available_abilities_by_tag``
-    is present, the spell ability must appear there (CD only — energy is checked
-    above; same pattern as AoE).
+    is present (opt-in ``query_spell_abilities``), the spell ability must appear
+    there (CD only — energy is checked above). CTF skips that RPC by default.
     """
     if not _SC2_AVAILABLE or unit is None:
         return False
@@ -438,6 +438,8 @@ def unit_can_snipe(
         abilities = _available_abilities_for_unit(unit, bot)
         if abilities is not None:
             return ability in abilities
+        if _spell_ability_on_cooldown(unit, bot, "snipe"):
+            return False
         if _unit_is_using_any_ability(unit, frozenset({ability})):
             return False
     return True
@@ -468,8 +470,14 @@ def snipe_target_is_eligible(caster: "Unit", target: "Unit") -> bool:
     return False
 
 
-def issue_snipe_on_unit(bot: Any, unit: "Unit", target: "Unit") -> bool:
-    """Issue the caster's ``snipe`` ability on *target*. Returns True if issued."""
+def issue_snipe_on_unit(
+    bot: Any, unit: "Unit", target: "Unit", *, stamp_cooldown: bool = True
+) -> bool:
+    """Issue the caster's ``snipe`` ability on *target*. Returns True if issued.
+
+    ``stamp_cooldown`` records a local ready-at loop (Yamato / Snipe CD). Pass
+    ``False`` on reissue so the timer is not reset every physics step.
+    """
     if bot is None or unit is None or target is None:
         return False
     if int(getattr(target, "owner_id", 0) or 0) == int(
@@ -483,6 +491,8 @@ def issue_snipe_on_unit(bot: Any, unit: "Unit", target: "Unit") -> bool:
     if ability is None:
         return False
     bot.do(unit(ability, target))
+    if stamp_cooldown:
+        mark_spell_ability_cooldown(bot, unit, "snipe")
     return True
 
 
@@ -501,8 +511,9 @@ def unit_can_aoe(
     flagged vs Protoss. High Templar Psi Storm requires ``PSISTORMTECH``.
     Viper Parasitic Bomb needs a flying hostile within engage fovea of any ally
     (``has_tactical_air_enemy``). When ``bot._available_abilities_by_tag`` is
-    present, the spell ability must appear there (CD only for AoE casters —
-    energy is checked above; see ``refresh_healer_ability_cache``).
+    present (opt-in ``query_spell_abilities``), the spell ability must appear
+    there (CD only for AoE casters — energy is checked above). CTF skips that
+    RPC by default.
     """
     if not _SC2_AVAILABLE or unit is None:
         return False
@@ -526,6 +537,8 @@ def unit_can_aoe(
         abilities = _available_abilities_for_unit(unit, bot)
         if abilities is not None:
             return ability in abilities
+        if _spell_ability_on_cooldown(unit, bot, "aoe"):
+            return False
         if _unit_is_using_any_ability(unit, frozenset({ability})):
             return False
     return True
@@ -1069,7 +1082,9 @@ def resolve_air_hostile_at_point(
     return best
 
 
-def issue_aoe_at_point(bot: Any, unit: "Unit", target: "Point2") -> Optional[Any]:
+def issue_aoe_at_point(
+    bot: Any, unit: "Unit", target: "Point2", *, stamp_cooldown: bool = True
+) -> Optional[Any]:
     """Issue the caster's splash spell at *target* (``aoe_local``).
 
     Infestor / burrowed Infestor → Fungal Growth at the point;
@@ -1080,6 +1095,9 @@ def issue_aoe_at_point(bot: Any, unit: "Unit", target: "Point2") -> Optional[Any
     all other units no-op (do not convert to move).
 
     Returns the bomb hard-target when Parasitic Bomb was issued; otherwise ``None``.
+
+    ``stamp_cooldown`` records a local ready-at loop (bile / storm / bomb CD).
+    Pass ``False`` on leftover-order reissue so the timer is not reset.
     """
     tid = getattr(unit, "type_id", None)
     air_ability = _AOE_AIR_UNIT_ABILITIES.get(tid)
@@ -1088,10 +1106,14 @@ def issue_aoe_at_point(bot: Any, unit: "Unit", target: "Point2") -> Optional[Any
         if enemy is None:
             return None
         bot.do(unit(air_ability, enemy))
+        if stamp_cooldown:
+            mark_spell_ability_cooldown(bot, unit, "aoe")
         return enemy
     point_ability = _AOE_POINT_ABILITIES.get(tid)
     if point_ability is not None:
         bot.do(unit(point_ability, target))
+        if stamp_cooldown:
+            mark_spell_ability_cooldown(bot, unit, "aoe")
     return None
 
 
@@ -1251,6 +1273,41 @@ HEAL_ABILITY_COOLDOWN_SECONDS: dict = (
     if _SC2_AVAILABLE
     else {}
 )
+# LotV Faster seconds. Energy-only spells get a 1s lockout so the mask does
+# not reopen before the next observation shows the energy drop.
+AOE_ABILITY_COOLDOWN_SECONDS: dict = (
+    {
+        UnitTypeId.RAVAGER: 7.14,
+        UnitTypeId.HIGHTEMPLAR: 1.79,
+        UnitTypeId.VIPER: 7.14,
+        UnitTypeId.INFESTOR: 1.0,
+        UnitTypeId.INFESTORBURROWED: 1.0,
+        UnitTypeId.GHOST: 1.0,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+SNIPE_ABILITY_COOLDOWN_SECONDS: dict = (
+    {
+        UnitTypeId.GHOST: 14.3,
+        UnitTypeId.BATTLECRUISER: 71.4,
+        UnitTypeId.INFESTOR: 1.0,
+        UnitTypeId.INFESTORBURROWED: 1.0,
+        UnitTypeId.HIGHTEMPLAR: 1.0,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+_SPELL_CD_SECONDS = {
+    "heal": HEAL_ABILITY_COOLDOWN_SECONDS,
+    "aoe": AOE_ABILITY_COOLDOWN_SECONDS,
+    "snipe": SNIPE_ABILITY_COOLDOWN_SECONDS,
+}
+_SPELL_CD_ATTR = {
+    "heal": "_heal_ability_ready_after_loop",
+    "aoe": "_aoe_ability_ready_after_loop",
+    "snipe": "_snipe_ability_ready_after_loop",
+}
 _HEAL_ENERGY_MIN: dict = (
     {
         UnitTypeId.MEDIVAC: 5.0,
@@ -1326,6 +1383,22 @@ def _unit_game_loop(bot: Any, unit: "Unit") -> int:
         return 0
 
 
+def _freeze_ability_map(raw_cache: dict) -> dict:
+    """Convert query results to frozensets once (hot path reads these many times)."""
+    frozen: dict = {}
+    for tag, raw in raw_cache.items():
+        if raw is None:
+            frozen[tag] = frozenset()
+        elif isinstance(raw, frozenset):
+            frozen[tag] = raw
+        else:
+            try:
+                frozen[tag] = frozenset(raw)
+            except TypeError:
+                frozen[tag] = frozenset()
+    return frozen
+
+
 def _available_abilities_for_unit(unit: "Unit", bot: Any) -> Optional[FrozenSet]:
     if bot is None or unit is None:
         return None
@@ -1338,6 +1411,9 @@ def _available_abilities_for_unit(unit: "Unit", bot: Any) -> Optional[FrozenSet]
     raw = cache.get(tag)
     if raw is None:
         return frozenset()
+    if isinstance(raw, frozenset):
+        return raw
+    # Tests / callers may stash a plain set; freeze on read as a fallback.
     try:
         return frozenset(raw)
     except TypeError:
@@ -1372,14 +1448,25 @@ def _unit_is_using_any_ability(unit: "Unit", abilities: FrozenSet) -> bool:
         return False
 
 
-def _heal_ability_on_cooldown(unit: "Unit", bot: Any) -> bool:
+def _spell_store(bot: Any, family: str) -> Optional[dict]:
+    attr = _SPELL_CD_ATTR.get(family)
+    if bot is None or attr is None:
+        return None
+    store = getattr(bot, attr, None)
+    return store if isinstance(store, dict) else None
+
+
+def _spell_ability_on_cooldown(unit: "Unit", bot: Any, family: str) -> bool:
     if bot is None or unit is None:
         return False
-    tag = int(getattr(unit, "tag", 0) or 0)
+    try:
+        tag = int(getattr(unit, "tag", 0) or 0)
+    except (TypeError, ValueError):
+        return False
     if tag <= 0:
         return False
-    ready_after = getattr(bot, "_heal_ability_ready_after_loop", None)
-    if not isinstance(ready_after, dict):
+    ready_after = _spell_store(bot, family)
+    if ready_after is None:
         return False
     try:
         until = int(ready_after.get(tag, 0) or 0)
@@ -1390,24 +1477,46 @@ def _heal_ability_on_cooldown(unit: "Unit", bot: Any) -> bool:
     return _unit_game_loop(bot, unit) < until
 
 
-def mark_heal_ability_cooldown(bot: Any, unit: "Unit") -> None:
-    """Best-effort Transfuse/Heal cooldown stamp when SC2 ability query is unavailable."""
+def mark_spell_ability_cooldown(bot: Any, unit: "Unit", family: str) -> None:
+    """Stamp a local ready-at game loop after we issue a spell.
+
+    Used when ``query_spell_abilities`` is off (the CTF default). Seconds come
+    from the Faster-speed table for that family; energy-only spells use 1s so
+    the mask stays closed until energy updates. Reissue must pass
+    ``stamp_cooldown=False`` so leftover orders do not reset the timer.
+    """
     if not _SC2_AVAILABLE or bot is None or unit is None:
         return
-    tid = getattr(unit, "type_id", None)
-    if tid not in HEAL_ABILITY_COOLDOWN_SECONDS:
+    table = _SPELL_CD_SECONDS.get(family)
+    attr = _SPELL_CD_ATTR.get(family)
+    if not table or attr is None:
         return
-    tag = int(getattr(unit, "tag", 0) or 0)
+    tid = getattr(unit, "type_id", None)
+    if tid not in table:
+        return
+    try:
+        tag = int(getattr(unit, "tag", 0) or 0)
+    except (TypeError, ValueError):
+        return
     if tag <= 0:
         return
-    secs = float(HEAL_ABILITY_COOLDOWN_SECONDS.get(tid, 1.0))
+    secs = float(table.get(tid, 1.0))
     loops = int(math.ceil(secs * GAME_LOOPS_PER_SECOND))
     ready = _unit_game_loop(bot, unit) + max(loops, 1)
-    store = getattr(bot, "_heal_ability_ready_after_loop", None)
+    store = getattr(bot, attr, None)
     if not isinstance(store, dict):
-        bot._heal_ability_ready_after_loop = {}
-        store = bot._heal_ability_ready_after_loop
+        setattr(bot, attr, {})
+        store = getattr(bot, attr)
     store[tag] = ready
+
+
+def _heal_ability_on_cooldown(unit: "Unit", bot: Any) -> bool:
+    return _spell_ability_on_cooldown(unit, bot, "heal")
+
+
+def mark_heal_ability_cooldown(bot: Any, unit: "Unit") -> None:
+    """Best-effort Transfuse/Heal cooldown stamp when SC2 ability query is unavailable."""
+    mark_spell_ability_cooldown(bot, unit, "heal")
 
 
 def _owner_can_afford_repair(bot: Any, unit: "Unit") -> bool:
@@ -1427,50 +1536,70 @@ def _owner_can_afford_repair(bot: Any, unit: "Unit") -> bool:
     return True
 
 
-async def refresh_healer_ability_cache(bot: Any) -> None:
+async def refresh_healer_ability_cache(
+    bot: Any,
+    *,
+    include_heal: bool = True,
+    include_aoe: bool = True,
+    include_snipe: bool = True,
+    units: Optional[Sequence[Any]] = None,
+) -> None:
     """Refresh ``bot._available_abilities_by_tag`` for healers / SCVs / AoE / snipe.
 
-    Healers / SCVs are queried with ``ignore_resource_requirements=False`` so
-    mineral cost and energy are visible to ``unit_can_heal`` / ``unit_can_repair``.
+    One SC2 ``query_available_abilities_with_tag`` with
+    ``ignore_resource_requirements=True`` (cooldown only). Energy, minerals, and
+    local cooldown stamps stay in ``unit_can_heal`` / ``unit_can_repair`` /
+    ``unit_can_aoe`` / ``unit_can_snipe``. Double-gating energy through SC2 caused
+    false negatives (AoE permanently closed while cloak stayed open).
 
-    AoE and snipe casters are queried with ``ignore_resource_requirements=True``
-    so the cache reflects **cooldown only**. Energy for Fungal / Storm / EMP /
-    Bomb / Snipe / Neural / Feedback is gated separately in ``unit_can_aoe`` /
-    ``unit_can_snipe``; double-gating energy through SC2 caused false negatives
-    (AoE permanently closed while cloak stayed open).
+    CTF does **not** call this every step by default (see
+    ``env.query_spell_abilities``). When skipped, ``unit_can_*`` uses type +
+    energy + upgrade only. Attack ``weapon_cooldown`` is unrelated — it comes
+    from the observation proto.
+
+    ``include_heal`` / ``include_aoe`` / ``include_snipe`` skip matching unit
+    types when those command heads are not configured. Overlap types (Ghost,
+    Infestor, HT) are queried when any relevant flag is true. Pass ``units``
+    (living pool combat units) to avoid scanning every ``bot.all_units`` entry.
+    Results are stored as frozensets so mask hot paths do not re-freeze every
+    ``unit_can_*`` call.
     """
     if bot is None or not _SC2_AVAILABLE:
+        return
+    if not (include_heal or include_aoe or include_snipe):
+        bot._available_abilities_by_tag = {}
         return
     client = getattr(bot, "client", None)
     query = getattr(client, "query_available_abilities_with_tag", None)
     if client is None or not callable(query):
         return
-    heal_units = []
-    spell_units = []
+    source = units if units is not None else (getattr(bot, "all_units", []) or [])
+    query_units = []
     seen_tags: set = set()
-    for unit in getattr(bot, "all_units", []) or []:
+    for unit in source:
+        if unit is None:
+            continue
         tid = getattr(unit, "type_id", None)
-        if tid in _HEAL_ABILITIES_BY_TYPE or tid == UnitTypeId.SCV:
-            heal_units.append(unit)
-        if tid in _AOE_ENERGY_COST or tid in _SNIPE_ENERGY_COST:
-            tag = int(getattr(unit, "tag", 0) or 0)
-            if tag and tag not in seen_tags:
-                seen_tags.add(tag)
-                spell_units.append(unit)
-    if not heal_units and not spell_units:
+        need = False
+        if include_heal and (tid in _HEAL_ABILITIES_BY_TYPE or tid == UnitTypeId.SCV):
+            need = True
+        if include_aoe and tid in _AOE_ENERGY_COST:
+            need = True
+        if include_snipe and tid in _SNIPE_ENERGY_COST:
+            need = True
+        if not need:
+            continue
+        tag = int(getattr(unit, "tag", 0) or 0)
+        if tag and tag not in seen_tags:
+            seen_tags.add(tag)
+            query_units.append(unit)
+    if not query_units:
         bot._available_abilities_by_tag = {}
         return
-    cache: dict = {}
     try:
-        if heal_units:
-            heal_cache = await query(heal_units, ignore_resource_requirements=False)
-            if isinstance(heal_cache, dict):
-                cache.update(heal_cache)
-        if spell_units:
-            spell_cache = await query(spell_units, ignore_resource_requirements=True)
-            if isinstance(spell_cache, dict):
-                cache.update(spell_cache)
-        bot._available_abilities_by_tag = cache
+        raw = await query(query_units, ignore_resource_requirements=True)
+        cache = raw if isinstance(raw, dict) else {}
+        bot._available_abilities_by_tag = _freeze_ability_map(cache)
     except Exception:
         return
 
@@ -1589,9 +1718,9 @@ def unit_can_heal(unit: "Unit", bot: Any = None) -> bool:
     """True when a non-SCV healer can cast heal this step.
 
     Medivac / Queen / Shield Battery. SCV uses ``unit_can_repair`` instead.
-    Requires sufficient energy, Transfuse/Heal off cooldown, and not already
-    channeling the heal ability. Uses ``bot._available_abilities_by_tag`` when
-    present (SC2 query includes energy + cooldown).
+    Requires sufficient energy, the local Transfuse/Heal stamp, and not already
+    channeling. Uses ``bot._available_abilities_by_tag`` only when the env
+    opted into ``query_spell_abilities``.
     """
     if not _SC2_AVAILABLE or unit is None:
         return False

@@ -28,20 +28,36 @@ _PHASE2_AOE = (
 _AOE_LEVELS = _PHASE1_AOE + _PHASE2_AOE
 
 
+def _expand_with_reversed(cm: ConfigManager, levels: tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    for level in levels:
+        out.append(level)
+        rev = f"{level}_reversed"
+        if rev in cm.levels:
+            out.append(rev)
+    return out
+
+
 def test_aoe_scenarios_are_split_across_curriculum_phases():
     """Phase-1 AoE intros sit before the heal revisit; phase-2 revisits precede transport."""
     cm = ConfigManager(str(_CONFIG_DIR))
     idx_cloak = cm.levels.index("ctf_level_23")
     idx_heal_revisit = cm.levels.index("scenario_queen_vs_battlecruiser")
-    for offset, level in enumerate(_PHASE1_AOE, start=1):
+    phase1_block = _expand_with_reversed(cm, _PHASE1_AOE)
+    for offset, level in enumerate(phase1_block, start=1):
         assert cm.levels.index(level) == idx_cloak + offset, level
-    assert cm.levels.index(_PHASE1_AOE[-1]) == idx_heal_revisit - 1
+    assert cm.levels.index(phase1_block[-1]) == idx_heal_revisit - 1
 
+    # Liberator may have a `_reversed` sibling before phase-2 AoE starts.
     idx_liberator = cm.levels.index("scenario_battlecruiser_liberator_vs_corruptor_mutalisk")
-    for offset, level in enumerate(_PHASE2_AOE, start=1):
-        assert cm.levels.index(level) == idx_liberator + offset, level
+    phase2_start = idx_liberator + 1
+    if "scenario_battlecruiser_liberator_vs_corruptor_mutalisk_reversed" in cm.levels:
+        phase2_start += 1
+    phase2_block = _expand_with_reversed(cm, _PHASE2_AOE)
+    for offset, level in enumerate(phase2_block):
+        assert cm.levels.index(level) == phase2_start + offset, level
     # Pipeline ends with transport after phase-2 AoE revisits.
-    assert cm.levels.index(_PHASE2_AOE[-1]) == cm.levels.index("ctf_level_24") - 1
+    assert cm.levels.index(phase2_block[-1]) == cm.levels.index("ctf_level_24") - 1
     assert cm.levels[-1] == "ctf_level_26"
 
 _AOE_CASTERS = {

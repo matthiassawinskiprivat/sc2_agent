@@ -13,9 +13,15 @@ import numpy as np
 import json
 import os
 import math
+import time
+from contextlib import contextmanager, nullcontext
 from typing import Dict, Any, List, Optional, Union, Tuple
 import cv2
 from scipy.ndimage import binary_dilation
+
+# Cheap no-op for ``with self._timed_phase(...)`` when profiling is off.
+_NULL_TIMED_PHASE = nullcontext()
+
 
 # SC2 Dependencies
 from sc2.unit import Unit
@@ -362,11 +368,25 @@ class ObservationTransformer:
         from loguru import logger
         logger.debug(f"ObservationTransformer init: Arch={arch}, ActiveLayers={len(self.active_layers)}, TacticalLayers={len(self.active_tactical_layers)}")
 
-        self._update_active_indices()
+        # Draw caches / additive index set — must exist before _update_active_indices.
+        self._cached_sc2_mesh: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._cached_sc2_mesh_key: Optional[Tuple[Any, ...]] = None
+        self._unit_stamp_cache: Optional[
+            Tuple[bool, int, int, int, int, Optional[np.ndarray]]
+        ] = None
+        self._additive_indices: set = set()
+        self._idx_to_layer_name: Dict[int, str] = {}
 
-        # Terrain caching — keyed by traversal type: "standard" or "cliff_walker"
-        self._terrain_caches: Dict[str, Optional[np.ndarray]] = {}
+        self._update_active_indices()
+        self._cache_slice_indices()
+
+        # Terrain caching — global: (mode, map, geometry); tactical static crops: ("tac", ...)
+        self._terrain_caches: Dict[Tuple[Any, ...], np.ndarray] = {}
         self._last_map_name = None
+        # Memoized catalog weapon discs: (type_id value, attack_upgrade_level) → stats list.
+        self._weapon_stats_cache: Dict[Tuple[Any, int], List[Dict[str, Any]]] = {}
+        # Opt-in cache hit/miss counters (SC2_COLLECTOR_PROFILE); flushed via pop_obs_profile_means.
+        self._cache_stat_counts: Dict[str, int] = {}
         self._map_terrain_h_min: Optional[float] = None
         self._map_terrain_tier_max: Optional[float] = None
         self._map_terrain_h_scale_map: Optional[str] = None
@@ -392,6 +412,9 @@ class ObservationTransformer:
         self._allied_detector_discs: List[Tuple[float, float, float]] = []
         self._cached_path_data: Optional[np.ndarray] = None
         self._current_game_data: Optional[GameData] = None
+        # Reused per-call draw buffers (zeroed in place). Returned slices are copies.
+        self._global_layers_buf: Optional[np.ndarray] = None
+        self._tactical_layers_buf: Optional[np.ndarray] = None
 
         # Load DB
         if unit_data_file is None:
@@ -402,6 +425,19 @@ class ObservationTransformer:
         self._display_radius_db = dict(_get_unit_display_radius())
         self._merge_json_display_radii()
         self._display_radius_by_type_id = self._build_display_radius_by_type_id()
+
+        # Opt-in draw profiling (SC2_COLLECTOR_PROFILE / SC2_OBS_LAYER_PROFILE).
+        self._obs_profile_flag = None
+        self._obs_layer_profile_flag = None
+        self._obs_profile_sums: Dict[str, float] = {}
+        self._obs_profile_counts: Dict[str, int] = {}
+        # Cached for the current transform() / transform_tactical() call.
+        self._profiling_now = False
+        # When True, transform() keeps a post-processed full-stack copy for
+        # squad perspective reuse (allied↔enemy channel swap).
+        self.retain_global_layers = False
+        self._retained_global_layers: Optional[np.ndarray] = None
+        self._refresh_idx_to_layer_name()
 
     def _build_display_radius_by_type_id(self) -> Dict[int, float]:
         """Map UnitTypeId values to display radii when ``type_id.name`` is missing."""
@@ -821,6 +857,117 @@ class ObservationTransformer:
             self.active_indices = {self.current_layer_map[ln.lower()] for ln in names if ln.lower() in self.current_layer_map}
         else:
             self.active_indices = set(range(len(self.current_layer_map)))
+        self._refresh_idx_to_layer_name()
+
+    def _refresh_idx_to_layer_name(self) -> None:
+        layer_map = getattr(self, "current_layer_map", None) or {}
+        self._idx_to_layer_name = {int(idx): str(name) for name, idx in layer_map.items()}
+        self._additive_indices = {
+            int(idx)
+            for name, idx in layer_map.items()
+            if name in _ADDITIVE_UNIT_COUNTER_LAYERS
+        }
+
+    def _obs_profile_enabled(self) -> bool:
+        flag = getattr(self, "_obs_profile_flag", None)
+        if flag is None:
+            raw = os.environ.get("SC2_COLLECTOR_PROFILE", "").strip().lower()
+            flag = raw in ("1", "true", "yes")
+            self._obs_profile_flag = flag
+        return flag
+
+    def _obs_layer_profile_enabled(self) -> bool:
+        """Per-destination-layer attribution (extra overhead; opt-in)."""
+        flag = self._obs_layer_profile_flag
+        if flag is None:
+            raw = os.environ.get("SC2_OBS_LAYER_PROFILE", "").strip().lower()
+            flag = raw in ("1", "true", "yes")
+            self._obs_layer_profile_flag = flag
+        return flag
+
+    def _obs_profile_add(self, key: str, seconds: float) -> None:
+        sums = self._obs_profile_sums
+        sums[key] = sums.get(key, 0.0) + float(seconds)
+        counts = self._obs_profile_counts
+        counts[key] = counts.get(key, 0) + 1
+
+    def _cache_stat_inc(self, key: str, n: int = 1) -> None:
+        """Count cache hits/misses when collector profiling is on."""
+        profiling_now = bool(getattr(self, "_profiling_now", False))
+        if not (profiling_now or self._obs_profile_enabled()):
+            return
+        if n == 0:
+            return
+        counts = getattr(self, "_cache_stat_counts", None)
+        if counts is None:
+            counts = {}
+            self._cache_stat_counts = counts
+        counts[key] = counts.get(key, 0) + int(n)
+
+    def pop_obs_profile_means(self) -> Dict[str, float]:
+        """Total seconds per key since last pop (one transform / tactical call window).
+
+        Caller averages across obs builds; using totals (not per-unit means) keeps
+        ``u_dps`` comparable to ``g_creep`` as "ms per observation build".
+
+        Cache counters are exported as ``cache_<name>`` with raw event counts (not
+        seconds) so the env can log hit rates without the ``_ms`` conversion.
+        """
+        sums = self._obs_profile_sums
+        out: Dict[str, float] = {key: float(sums[key]) for key in sums} if sums else {}
+        for key, count in self._cache_stat_counts.items():
+            out[f"cache_{key}"] = float(count)
+        self._obs_profile_sums = {}
+        self._obs_profile_counts = {}
+        self._cache_stat_counts = {}
+        return out
+
+    def _timed_phase(self, key: str):
+        """Return a context manager; no generator work when profiling is off."""
+        # Prefer the per-transform cache; fall back to env for direct callers/tests.
+        if not (self._profiling_now or self._obs_profile_enabled()):
+            return _NULL_TIMED_PHASE
+        return self._timed_phase_active(key)
+
+    @contextmanager
+    def _timed_phase_active(self, key: str):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._obs_profile_add(key, time.perf_counter() - t0)
+
+    def _profile_layer_draw(self, idx: int, seconds: float) -> None:
+        if seconds <= 0.0 or not self._obs_layer_profile_enabled():
+            return
+        # Short keys only — SB3 HumanOutputFormat truncates ~36 chars and
+        # ``collector/profile_obs_L_allied_health_ms`` collides with other allied_*.
+        self._obs_profile_add(f"L{int(idx):02d}", seconds)
+
+    def _cache_slice_indices(self) -> None:
+        """Precompute fancy-index arrays so each transform does not rebuild lists."""
+        if self.active_layers:
+            self._global_slice_idx = np.array(
+                [
+                    LayerConstants.LAYERS[ln.lower()]
+                    for ln in self.active_layers
+                    if ln.lower() in LayerConstants.LAYERS
+                ],
+                dtype=np.intp,
+            )
+        else:
+            self._global_slice_idx = None
+        if self.active_tactical_layers:
+            self._tactical_slice_idx = np.array(
+                [
+                    LayerConstants.TACTICAL_LAYERS[ln.lower()]
+                    for ln in self.active_tactical_layers
+                    if ln.lower() in LayerConstants.TACTICAL_LAYERS
+                ],
+                dtype=np.intp,
+            )
+        else:
+            self._tactical_slice_idx = None
 
     def _load_fallback_db(self, path: str) -> Dict:
         try:
@@ -837,6 +984,18 @@ class ObservationTransformer:
             return grid_obj.data_numpy
         return grid_obj
 
+    def _zeroed_layer_buffer(self, kind: str, num_layers: int, height: int, width: int) -> np.ndarray:
+        """Reuse a draw buffer instead of allocating ``num_layers×H×W`` every call."""
+        attr = "_global_layers_buf" if kind == "global" else "_tactical_layers_buf"
+        buf = getattr(self, attr, None)
+        shape = (num_layers, height, width)
+        if buf is None or buf.shape != shape:
+            buf = np.zeros(shape, dtype=np.float32)
+            setattr(self, attr, buf)
+        else:
+            buf.fill(0)
+        return buf
+
     def transform_tactical(self, raw_obs: Dict[str, Any], active_unit: Unit) -> np.ndarray:
         """
         Creates a 32x32 tactical zoom centered on active_unit.
@@ -851,7 +1010,8 @@ class ObservationTransformer:
             return np.zeros((num_channels, 32, 32), dtype=np.float32)
 
         total_layers = LayerConstants.get_num_tactical_layers()
-        layers = np.zeros((total_layers, 32, 32), dtype=np.float32)
+        layers = self._zeroed_layer_buffer("tactical", total_layers, 32, 32)
+        self._profiling_now = self._obs_profile_enabled()
         
         # Save original state
         old_state = (self.scale, self.offset_x, self.offset_y, self.crop_x, self.crop_y, 
@@ -905,88 +1065,95 @@ class ObservationTransformer:
                     or not self._unit_is_burrowed(u)
                 )
             ]
-            self._draw_terrain_pathing(
-                game_info, layers, cliff_walker=cliff_walker, ground_units=blocking_ground
-            )
-            self._apply_map_blocker_terrain(layers, raw_obs)
-            self._draw_terrain_creep(raw_obs, layers)
-            self._draw_terrain_buildable(raw_obs, layers)
+            prefix = "t_"
+            with self._timed_phase(f"{prefix}path"):
+                self._draw_terrain_pathing(
+                    game_info, layers, cliff_walker=cliff_walker, ground_units=blocking_ground
+                )
+                self._apply_map_blocker_terrain(layers, raw_obs)
+            with self._timed_phase(f"{prefix}creep"):
+                self._draw_terrain_creep(raw_obs, layers)
+            with self._timed_phase(f"{prefix}build"):
+                self._draw_terrain_buildable(raw_obs, layers)
 
             # Allied / enemy bodies (and in-fovea DPS) — skip units outside the fovea.
-            for unit in list(allied_units) + list(allied_structures):
-                if not self._tactical_body_inside_fovea(unit, active_unit):
-                    continue
-                self._process_single_unit(unit, layers, False, TACTICAL_OBS_SIZE, TACTICAL_OBS_SIZE, game_data)
+            with self._timed_phase(f"{prefix}ually"):
+                for unit in list(allied_units) + list(allied_structures):
+                    if not self._tactical_body_inside_fovea(unit, active_unit):
+                        continue
+                    self._process_single_unit(unit, layers, False, TACTICAL_OBS_SIZE, TACTICAL_OBS_SIZE, game_data)
 
-            for unit in list(enemy_units) + list(enemy_structures):
-                if not self._tactical_body_inside_fovea(unit, active_unit):
-                    continue
-                self._process_single_unit(unit, layers, True, TACTICAL_OBS_SIZE, TACTICAL_OBS_SIZE, game_data)
+            with self._timed_phase(f"{prefix}uenemy"):
+                for unit in list(enemy_units) + list(enemy_structures):
+                    if not self._tactical_body_inside_fovea(unit, active_unit):
+                        continue
+                    self._process_single_unit(unit, layers, True, TACTICAL_OBS_SIZE, TACTICAL_OBS_SIZE, game_data)
 
             # Weapon rings from off-fovea units whose reach still overlaps the tactical window.
-            self._draw_tactical_reach_in_dps(
-                layers,
-                active_unit,
-                allied_units,
-                allied_structures,
-                enemy_units,
-                enemy_structures,
-                game_data,
-            )
+            with self._timed_phase(f"{prefix}reach"):
+                self._draw_tactical_reach_in_dps(
+                    layers,
+                    active_unit,
+                    allied_units,
+                    allied_structures,
+                    enemy_units,
+                    enemy_structures,
+                    game_data,
+                )
 
             # Draw Command Info (High-priority markers). Keep client selection when
             # present (debug UI multi-select); always include the focal unit.
-            tactical_raw_obs = raw_obs.copy()
-            selected = list(raw_obs.get("selected_units") or [])
-            if active_unit is not None:
-                active_tag = getattr(active_unit, "tag", None)
-                if not any(getattr(u, "tag", None) == active_tag for u in selected):
-                    selected.append(active_unit)
-            if not selected and active_unit is not None:
-                selected = [active_unit]
-            tactical_raw_obs["selected_units"] = selected
-            self._draw_command_info(tactical_raw_obs, layers)
-            self._draw_transport_info(raw_obs, layers)
+            with self._timed_phase(f"{prefix}fxcmd"):
+                tactical_raw_obs = raw_obs.copy()
+                selected = list(raw_obs.get("selected_units") or [])
+                if active_unit is not None:
+                    active_tag = getattr(active_unit, "tag", None)
+                    if not any(getattr(u, "tag", None) == active_tag for u in selected):
+                        selected.append(active_unit)
+                if not selected and active_unit is not None:
+                    selected = [active_unit]
+                tactical_raw_obs["selected_units"] = selected
+                self._draw_command_info(tactical_raw_obs, layers)
+                self._draw_transport_info(raw_obs, layers)
 
-            self._collect_liberator_positions(
-                allied_units, allied_structures, enemy_units, enemy_structures
-            )
-            if effects:
-                self._draw_effects(effects, layers)
+                self._collect_liberator_positions(
+                    allied_units, allied_structures, enemy_units, enemy_structures
+                )
+                if effects:
+                    self._draw_effects(effects, layers)
 
             # Normalize all DPS channels with tanh (matches global transform)
-            for dps_layer_name in [
-                LayerConstants.ALLIED_G_DPS_BASE, LayerConstants.ENEMY_G_DPS_BASE,
-                LayerConstants.ALLIED_G_DPS_LIGHT, LayerConstants.ENEMY_G_DPS_LIGHT,
-                LayerConstants.ALLIED_G_DPS_ARMOR, LayerConstants.ENEMY_G_DPS_ARMOR,
-                LayerConstants.ALLIED_G_DPS_MASSIVE, LayerConstants.ENEMY_G_DPS_MASSIVE,
-                LayerConstants.ALLIED_A_DPS_BASE, LayerConstants.ENEMY_A_DPS_BASE,
-                LayerConstants.ALLIED_A_DPS_LIGHT, LayerConstants.ENEMY_A_DPS_LIGHT,
-                LayerConstants.ALLIED_A_DPS_ARMOR, LayerConstants.ENEMY_A_DPS_ARMOR,
-                LayerConstants.ALLIED_A_DPS_MASSIVE, LayerConstants.ENEMY_A_DPS_MASSIVE,
-                LayerConstants.ALLIED_HPS_FIELD, LayerConstants.ENEMY_HPS_FIELD,
-            ]:
-                dps_layer_idx = LayerConstants.TACTICAL_LAYERS.get(dps_layer_name)
-                if dps_layer_idx is not None:
-                    layers[dps_layer_idx] = np.tanh(layers[dps_layer_idx] / 50.0)
+            with self._timed_phase(f"{prefix}post"):
+                for dps_layer_name in [
+                    LayerConstants.ALLIED_G_DPS_BASE, LayerConstants.ENEMY_G_DPS_BASE,
+                    LayerConstants.ALLIED_G_DPS_LIGHT, LayerConstants.ENEMY_G_DPS_LIGHT,
+                    LayerConstants.ALLIED_G_DPS_ARMOR, LayerConstants.ENEMY_G_DPS_ARMOR,
+                    LayerConstants.ALLIED_G_DPS_MASSIVE, LayerConstants.ENEMY_G_DPS_MASSIVE,
+                    LayerConstants.ALLIED_A_DPS_BASE, LayerConstants.ENEMY_A_DPS_BASE,
+                    LayerConstants.ALLIED_A_DPS_LIGHT, LayerConstants.ENEMY_A_DPS_LIGHT,
+                    LayerConstants.ALLIED_A_DPS_ARMOR, LayerConstants.ENEMY_A_DPS_ARMOR,
+                    LayerConstants.ALLIED_A_DPS_MASSIVE, LayerConstants.ENEMY_A_DPS_MASSIVE,
+                    LayerConstants.ALLIED_HPS_FIELD, LayerConstants.ENEMY_HPS_FIELD,
+                ]:
+                    dps_layer_idx = LayerConstants.TACTICAL_LAYERS.get(dps_layer_name)
+                    if dps_layer_idx is not None:
+                        layers[dps_layer_idx] = np.tanh(layers[dps_layer_idx] / 50.0)
 
-            # Count layers: log1p accumulation (matches global transform pre-clip).
-            for layer_name in _ADDITIVE_UNIT_COUNTER_LAYERS:
-                layer_idx = self.current_layer_map.get(layer_name)
-                if layer_idx is not None:
-                    layers[layer_idx] = np.log1p(layers[layer_idx])
+                # Count layers: log1p accumulation (matches global transform pre-clip).
+                for layer_name in _ADDITIVE_UNIT_COUNTER_LAYERS:
+                    layer_idx = self.current_layer_map.get(layer_name)
+                    if layer_idx is not None:
+                        layers[layer_idx] = np.log1p(layers[layer_idx])
 
-            # Clip
-            layers = np.clip(layers, 0.0, 1.0).astype(np.float32)
+                # Clip in place so the reused draw buffer is not reallocated.
+                np.clip(layers, 0.0, 1.0, out=layers)
 
-            # Slice to active tactical layers (preserving config order)
-            if self.active_tactical_layers:
-                indices = [LayerConstants.TACTICAL_LAYERS[ln.lower()]
-                           for ln in self.active_tactical_layers
-                           if ln.lower() in LayerConstants.TACTICAL_LAYERS]
-                tactical_data = layers[indices]
-            else:
-                tactical_data = layers
+                # Slice to active tactical layers (preserving config order)
+                idx = getattr(self, "_tactical_slice_idx", None)
+                if idx is not None:
+                    tactical_data = layers[idx]
+                else:
+                    tactical_data = layers.copy()
         finally:
             # Restore state
             (self.scale, self.offset_x, self.offset_y, self.crop_x, self.crop_y, 
@@ -1000,8 +1167,11 @@ class ObservationTransformer:
 
     def transform(self, raw_obs: Dict[str, Any]) -> Dict[str, Any]:
         """Global transformation (128x128)."""
+        self._profiling_now = self._obs_profile_enabled()
         total_layers = LayerConstants.get_num_layers()
-        layers = np.zeros((total_layers, self.feature_map_height, self.feature_map_width), dtype=np.float32)
+        layers = self._zeroed_layer_buffer(
+            "global", total_layers, self.feature_map_height, self.feature_map_width
+        )
 
         # Setup Command Vector
         raw_cmd = raw_obs.get('high_level_command', 0)
@@ -1054,10 +1224,14 @@ class ObservationTransformer:
 
         # 2. Draw — global terrain is static map pathing only (cached; no live unit stamps).
         cliff_walker = self._detect_cliff_walker(raw_obs)
-        self._draw_terrain_pathing(game_info, layers, cliff_walker=cliff_walker)
-        self._apply_map_blocker_terrain(layers, raw_obs)
-        self._draw_terrain_creep(raw_obs, layers)
-        self._draw_terrain_buildable(raw_obs, layers)
+        prefix = "g_"
+        with self._timed_phase(f"{prefix}path"):
+            self._draw_terrain_pathing(game_info, layers, cliff_walker=cliff_walker)
+            self._apply_map_blocker_terrain(layers, raw_obs)
+        with self._timed_phase(f"{prefix}creep"):
+            self._draw_terrain_creep(raw_obs, layers)
+        with self._timed_phase(f"{prefix}build"):
+            self._draw_terrain_buildable(raw_obs, layers)
 
         self._collect_liberator_positions(
             allied_units, allied_structures, enemy_units, enemy_structures
@@ -1066,40 +1240,108 @@ class ObservationTransformer:
         self._refresh_attached_addon_tags(allied_structures, enemy_structures)
         self._collect_allied_detector_discs(allied_units, allied_structures)
 
-        for unit in list(allied_units) + list(allied_structures):
-            if "MINERAL" in getattr(unit.type_id, "name", "").upper(): continue
-            self._process_single_unit(unit, layers, False, mw, mh, game_data)
+        with self._timed_phase(f"{prefix}ually"):
+            for unit in list(allied_units) + list(allied_structures):
+                if "MINERAL" in getattr(unit.type_id, "name", "").upper(): continue
+                self._process_single_unit(unit, layers, False, mw, mh, game_data)
 
-        for unit in list(enemy_units) + list(enemy_structures):
-            if "MINERAL" in getattr(unit.type_id, "name", "").upper(): continue
-            self._process_single_unit(unit, layers, True, mw, mh, game_data)
+        with self._timed_phase(f"{prefix}uenemy"):
+            for unit in list(enemy_units) + list(enemy_structures):
+                if "MINERAL" in getattr(unit.type_id, "name", "").upper(): continue
+                self._process_single_unit(unit, layers, True, mw, mh, game_data)
 
-        if effects: self._draw_effects(effects, layers)
-        self._draw_command_info(raw_obs, layers)
-        self._draw_transport_info(raw_obs, layers)
+        with self._timed_phase(f"{prefix}fxcmd"):
+            if effects: self._draw_effects(effects, layers)
+            self._draw_command_info(raw_obs, layers)
+            self._draw_transport_info(raw_obs, layers)
 
-        # 3. Post-processing
+        # 3. Post-processing (active layers only — skip unused full-stack channels).
+        with self._timed_phase(f"{prefix}post"):
+            self._postprocess_global_layers(layers)
+            if self.retain_global_layers:
+                self._retained_global_layers = layers.copy()
+            else:
+                self._retained_global_layers = None
+
+            idx = getattr(self, "_global_slice_idx", None)
+            if idx is not None:
+                map_data = layers[idx]
+            else:
+                map_data = layers.copy()
+
+        # ALWAYS return Dict to match the gymnasium.spaces.Dict in Level0Env
+        return {"map": map_data, "command": command_vector}
+
+    def _postprocess_global_layers(self, layers: np.ndarray) -> None:
+        """log1p / tanh / clip on configured channels only (not the full C×H×W stack)."""
         dps_start = LayerConstants.LAYERS[LayerConstants.ALLIED_G_DPS_BASE]
         hps_end = LayerConstants.LAYERS[LayerConstants.ENEMY_HPS_FIELD] + 1
         allied_hp_idx = LayerConstants.LAYERS[LayerConstants.ALLIED_HEALTH]
         enemy_hp_idx = LayerConstants.LAYERS[LayerConstants.ENEMY_HEALTH]
-        allied_hp = layers[allied_hp_idx].copy()
-        enemy_hp = layers[enemy_hp_idx].copy()
+        health_skip = {allied_hp_idx, enemy_hp_idx}
 
-        layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
-        layers[0:dps_start] = np.log1p(layers[0:dps_start])
-        layers[allied_hp_idx] = allied_hp
-        layers[enemy_hp_idx] = enemy_hp
-        np.clip(layers, 0.0, 1.0, out=layers)
+        active = self.active_indices
+        if not self.active_layers:
+            # No pruning configured — keep the historical bulk path.
+            allied_hp = layers[allied_hp_idx].copy()
+            enemy_hp = layers[enemy_hp_idx].copy()
+            layers[dps_start:hps_end] = np.tanh(layers[dps_start:hps_end] / 50.0)
+            layers[0:dps_start] = np.log1p(layers[0:dps_start])
+            layers[allied_hp_idx] = allied_hp
+            layers[enemy_hp_idx] = enemy_hp
+            np.clip(layers, 0.0, 1.0, out=layers)
+            return
 
-        if self.active_layers:
-            indices = [LayerConstants.LAYERS[layer_name.lower()] for layer_name in self.active_layers if layer_name.lower() in LayerConstants.LAYERS]
-            map_data = layers[indices]
-        else:
-            map_data = layers
+        for idx in active:
+            plane = layers[idx]
+            if idx in health_skip:
+                np.clip(plane, 0.0, 1.0, out=plane)
+            elif idx < dps_start:
+                np.log1p(plane, out=plane)
+                np.clip(plane, 0.0, 1.0, out=plane)
+            elif dps_start <= idx < hps_end:
+                np.tanh(plane / 50.0, out=plane)
+                np.clip(plane, 0.0, 1.0, out=plane)
+            else:
+                np.clip(plane, 0.0, 1.0, out=plane)
 
-        # ALWAYS return Dict to match the gymnasium.spaces.Dict in Level0Env
-        return {"map": map_data, "command": command_vector}
+    @staticmethod
+    def swap_allied_enemy_layers(layers: np.ndarray) -> None:
+        """In-place swap of every ``allied_*`` ↔ ``enemy_*`` pair (world paint reuse)."""
+        for name, idx in LayerConstants.LAYERS.items():
+            if not str(name).startswith("allied_"):
+                continue
+            enemy_name = "enemy_" + str(name)[len("allied_") :]
+            enemy_idx = LayerConstants.LAYERS.get(enemy_name)
+            if enemy_idx is None:
+                continue
+            # Only swap each pair once (allied_* iteration).
+            tmp = layers[idx].copy()
+            layers[idx] = layers[enemy_idx]
+            layers[enemy_idx] = tmp
+
+    def restamp_global_command_layers(
+        self, layers: np.ndarray, raw_obs: Dict[str, Any]
+    ) -> None:
+        """Clear + redraw COMMAND_ASSIGNMENT / COMMAND_OBJECTIVE after a perspective swap."""
+        self.current_layer_map = LayerConstants.LAYERS
+        self.is_tactical_mode = False
+        self._update_active_indices()
+        for key in (
+            LayerConstants.COMMAND_ASSIGNMENT,
+            LayerConstants.COMMAND_OBJECTIVE,
+        ):
+            idx = LayerConstants.LAYERS.get(key)
+            if idx is not None and idx in self.active_indices:
+                layers[idx].fill(0.0)
+        self._draw_command_info(raw_obs, layers)
+        for key in (
+            LayerConstants.COMMAND_ASSIGNMENT,
+            LayerConstants.COMMAND_OBJECTIVE,
+        ):
+            idx = LayerConstants.LAYERS.get(key)
+            if idx is not None and idx in self.active_indices:
+                np.clip(layers[idx], 0.0, 1.0, out=layers[idx])
 
     def _terrain_geometry_key(self) -> Tuple[Any, ...]:
         return (
@@ -1163,7 +1405,19 @@ class ObservationTransformer:
         return np.logical_and.outer(valid_y, valid_x)
 
     def _obs_to_sc2_meshgrid(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Map each observation pixel to SC2 pathing grid indices."""
+        """Map each observation pixel to SC2 pathing grid indices.
+
+        Cached for the current crop/scale/letterbox; stamp loops hit this often.
+        """
+        key = (
+            self.is_tactical_mode,
+            round(float(self.offset_x), 6),
+            round(float(self.offset_y), 6),
+            self._terrain_geometry_key(),
+        )
+        cached = self._cached_sc2_mesh
+        if cached is not None and self._cached_sc2_mesh_key == key:
+            return cached
         x_idx = np.arange(self.feature_map_width, dtype=np.float64)
         y_idx = np.arange(self.feature_map_height, dtype=np.float64)
         if self.is_tactical_mode:
@@ -1177,7 +1431,10 @@ class ObservationTransformer:
             sc2_y = np.round(
                 ((self.feature_map_height - 1 - y_idx - self.offset_y) / scale_y) + self.crop_y
             ).astype(int)
-        return np.meshgrid(sc2_x, sc2_y)
+        mesh = np.meshgrid(sc2_x, sc2_y)
+        self._cached_sc2_mesh = mesh
+        self._cached_sc2_mesh_key = key
+        return mesh
 
     def _get_pixel_coords(self, position) -> tuple:
         if position is None:
@@ -1267,19 +1524,31 @@ class ObservationTransformer:
             if idx_d is not None: self._draw_circle_vectorized(layers, idx_d, px, py, 0, 0, 1.0, True)
             return
 
-        self._draw_unit_body(unit, layers, is_enemy, px, py)
-        if not self.is_tactical_mode:
-            self._draw_unit_vitals(unit, layers, is_enemy, px, py)
-            self._draw_unit_detection(unit, layers, is_enemy, px, py)
-            self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
-            self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
-            self._draw_unit_splash(unit, layers, is_enemy, px, py)
-        else:
-            self._draw_unit_vitals(unit, layers, is_enemy, px, py)
-            self._draw_unit_detection(unit, layers, is_enemy, px, py)
-            self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
-            self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
-            self._draw_unit_splash(unit, layers, is_enemy, px, py)
+        self._unit_stamp_cache = None
+        try:
+            # Per-unit contextmanagers are expensive; only wrap when profiling.
+            if self._profiling_now:
+                with self._timed_phase("u_body"):
+                    self._draw_unit_body(unit, layers, is_enemy, px, py)
+                with self._timed_phase("u_vit"):
+                    self._draw_unit_vitals(unit, layers, is_enemy, px, py)
+                with self._timed_phase("u_det"):
+                    self._draw_unit_detection(unit, layers, is_enemy, px, py)
+                with self._timed_phase("u_heal"):
+                    self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
+                with self._timed_phase("u_dps"):
+                    self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
+                with self._timed_phase("u_spl"):
+                    self._draw_unit_splash(unit, layers, is_enemy, px, py)
+            else:
+                self._draw_unit_body(unit, layers, is_enemy, px, py)
+                self._draw_unit_vitals(unit, layers, is_enemy, px, py)
+                self._draw_unit_detection(unit, layers, is_enemy, px, py)
+                self._draw_unit_healing(unit, layers, is_enemy, px, py, game_data)
+                self._draw_unit_dps(unit, layers, is_enemy, px, py, game_data)
+                self._draw_unit_splash(unit, layers, is_enemy, px, py)
+        finally:
+            self._unit_stamp_cache = None
 
     def _unit_is_detector_structure(self, unit: Unit) -> bool:
         type_id = getattr(unit, "type_id", None)
@@ -1839,10 +2108,29 @@ class ObservationTransformer:
         return max(half_x, half_y)
 
     def _uses_additive_accumulation(self, idx: int) -> bool:
-        for name, layer_idx in self.current_layer_map.items():
-            if layer_idx == idx:
-                return name in _ADDITIVE_UNIT_COUNTER_LAYERS
-        return False
+        return idx in self._additive_indices
+
+    def _stamp_obs_rect(
+        self,
+        layers: np.ndarray,
+        idx: int,
+        x0: int,
+        x1: int,
+        y0: int,
+        y1: int,
+        value: float,
+        accumulate: bool,
+        additive: bool,
+    ) -> None:
+        """Filled axis-aligned stamp — no boolean mask allocation."""
+        region = layers[idx, y0 : y1 + 1, x0 : x1 + 1]
+        if accumulate:
+            if additive:
+                region += value
+            else:
+                np.maximum(region, value, out=region)
+        else:
+            region[...] = value
 
     def _accumulate_region(
         self,
@@ -1860,6 +2148,20 @@ class ObservationTransformer:
         else:
             region[mask] = value
 
+    def _mobile_uses_solid_rect_stamp(self, unit: Unit) -> bool:
+        """True when the mobile hull is a filled obs rectangle (not a circle mask)."""
+        if self._unit_fixed_footprint_cells(unit) is not None:
+            return True
+        if self._unit_game_radius(unit) < 0.5:
+            return True
+        u_name = self._resolve_unit_type_name(unit)
+        if u_name and u_name in _TACTICAL_SINGLE_PIXEL_UNITS:
+            return True
+        if self._unit_uses_circular_body(unit):
+            # Global siege keeps a circular hull; tactical uses a solid 2×2.
+            return bool(self.is_tactical_mode)
+        return True
+
     def _draw_entity_footprint(
         self,
         layers: np.ndarray,
@@ -1871,33 +2173,83 @@ class ObservationTransformer:
     ) -> None:
         if idx not in self.active_indices:
             return
-
-        x0, x1, y0, y1 = self._unit_draw_obs_bounds(unit)
-        if x0 > x1 or y0 > y1:
+        # Zero stamps are no-ops for additive / max accumulation (marker path).
+        if value == 0.0 and accumulate:
             return
 
-        if require_unpathable and not self.is_tactical_mode:
-            mask = self._density_footprint_mask(unit, x0, x1, y0, y1)
-            if not np.any(mask) and getattr(unit, "is_structure", False):
-                # Pylons and other buildings on pathable tiles still need a density stamp.
-                mask = self._game_footprint_mask_in_rect(unit, x0, x1, y0, y1)
-        elif getattr(unit, "is_structure", False) and self.is_tactical_mode:
-            mask = self._density_footprint_mask(unit, x0, x1, y0, y1)
-            if not np.any(mask):
-                mask = self._game_footprint_mask_in_rect(unit, x0, x1, y0, y1)
+        layer_prof = self._obs_layer_profile_enabled()
+        t0 = time.perf_counter() if layer_prof else None
+        try:
+            cache = self._unit_stamp_cache
+            solid = False
+            mask: Optional[np.ndarray] = None
+            if cache is not None and cache[0] == require_unpathable:
+                _, x0, x1, y0, y1, mask = cache
+                solid = mask is None
+            else:
+                x0, x1, y0, y1 = self._unit_draw_obs_bounds(unit)
+                if x0 > x1 or y0 > y1:
+                    return
+
+                if require_unpathable and not self.is_tactical_mode:
+                    mask = self._density_footprint_mask(unit, x0, x1, y0, y1)
+                    if not np.any(mask) and getattr(unit, "is_structure", False):
+                        # Pylons and other buildings on pathable tiles still need a density stamp.
+                        mask = self._game_footprint_mask_in_rect(unit, x0, x1, y0, y1)
+                elif getattr(unit, "is_structure", False) and self.is_tactical_mode:
+                    mask = self._density_footprint_mask(unit, x0, x1, y0, y1)
+                    if not np.any(mask):
+                        mask = self._game_footprint_mask_in_rect(unit, x0, x1, y0, y1)
+                elif self._mobile_uses_solid_rect_stamp(unit):
+                    solid = True
+                    mask = None
+                else:
+                    mask = self._mobile_unit_footprint_mask(unit, x0, x1, y0, y1)
+                if not solid and (mask is None or not np.any(mask)):
+                    return
+                # mask=None means solid rect (reuse across stamps for this unit).
+                self._unit_stamp_cache = (require_unpathable, x0, x1, y0, y1, mask)
+
+            additive = self._uses_additive_accumulation(idx)
+            if solid:
+                self._stamp_obs_rect(
+                    layers, idx, x0, x1, y0, y1, value, accumulate, additive
+                )
+            else:
+                region = layers[idx, y0 : y1 + 1, x0 : x1 + 1]
+                self._accumulate_region(region, mask, value, accumulate, additive)
+        finally:
+            if t0 is not None:
+                self._profile_layer_draw(idx, time.perf_counter() - t0)
+
+    def _draw_unit_point(
+        self,
+        layers: np.ndarray,
+        idx: int,
+        px: int,
+        py: int,
+        value: float,
+        accumulate: bool = True,
+    ) -> None:
+        """Single obs-pixel stamp — direct write, not ``_draw_circle_vectorized``.
+
+        Attr / vital / assignment markers must stay cheap. Routing through the
+        circle helper added Python + DPS-setup overhead on every stamp and made
+        the density-only-hull change *slower* than reusing a cached footprint.
+        """
+        if idx not in self.active_indices:
+            return
+        if value == 0.0 and accumulate:
+            return
+        if accumulate:
+            if idx in self._additive_indices:
+                layers[idx, py, px] += value
+            else:
+                v = layers[idx, py, px]
+                if value > v:
+                    layers[idx, py, px] = value
         else:
-            mask = self._mobile_unit_footprint_mask(unit, x0, x1, y0, y1)
-        if not np.any(mask):
-            return
-
-        region = layers[idx, y0:y1 + 1, x0:x1 + 1]
-        self._accumulate_region(
-            region,
-            mask,
-            value,
-            accumulate,
-            self._uses_additive_accumulation(idx),
-        )
+            layers[idx, py, px] = value
 
     def _draw_unit_marker(
         self,
@@ -1908,10 +2260,28 @@ class ObservationTransformer:
         py: int,
         value: float,
         accumulate: bool = True,
+        *,
+        use_footprint: bool = False,
     ) -> None:
+        """Stamp a unit onto a layer.
+
+        ``use_footprint=True`` (density only): pathing / display hull.
+        Default: one obs pixel at ``(px, py)`` for attribute / vital layers.
+        """
         if idx is None:
             return
-        additive = self._uses_additive_accumulation(idx)
+        # Undamaged health / empty energy / zero cooldown: nothing to paint.
+        if value == 0.0 and accumulate:
+            return
+        if not use_footprint:
+            self._draw_unit_point(layers, idx, px, py, value, accumulate)
+            return
+        # Tiny structures (creep tumors) and flying support: 1×1 on the tactical fovea.
+        if self.is_tactical_mode:
+            u_name = self._resolve_unit_type_name(unit)
+            if u_name and u_name in _TACTICAL_SINGLE_PIXEL_UNITS:
+                self._draw_unit_point(layers, idx, px, py, value, accumulate)
+                return
         if unit.is_structure:
             self._draw_entity_footprint(
                 layers,
@@ -1924,17 +2294,11 @@ class ObservationTransformer:
             return
         # Sub-half-tile units: one obs pixel at the position sample.
         if self._unit_game_radius(unit) < 0.5:
-            self._draw_circle_vectorized(
-                layers, idx, px, py, 0, 0, value, accumulate,
-                additive_accumulation=additive,
-            )
+            self._draw_unit_point(layers, idx, px, py, value, accumulate)
             return
         x0, x1, y0, y1 = self._unit_draw_obs_bounds(unit)
         if x0 > x1 or y0 > y1:
-            self._draw_circle_vectorized(
-                layers, idx, px, py, 0, 0, value, accumulate,
-                additive_accumulation=additive,
-            )
+            self._draw_unit_point(layers, idx, px, py, value, accumulate)
             return
         self._draw_entity_footprint(
             layers,
@@ -1947,20 +2311,24 @@ class ObservationTransformer:
 
     def _draw_unit_body(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int):
         prefix = "enemy" if is_enemy else "allied"
+        active = self.active_indices
         idx_den = self.current_layer_map.get(f"{prefix}_unit_density")
-        if idx_den is None:
-            return
+        density_active = idx_den is not None and idx_den in active
 
-        val = 1.0
         cd = float(getattr(unit, "weapon_cooldown", 0.0))
         cd_norm = min(cd, 60.0) / 60.0
-        if not is_enemy:
-            if self.is_tactical_mode:
-                val = 1.0
-            else:
-                val = 1.0 - (0.7 * cd_norm)
 
-        self._draw_unit_marker(layers, idx_den, unit, px, py, val, True)
+        if density_active:
+            val = 1.0
+            if not is_enemy:
+                if self.is_tactical_mode:
+                    val = 1.0
+                else:
+                    val = 1.0 - (0.7 * cd_norm)
+            # Hull / pathing footprint is density-only; other channels are 1px markers.
+            self._draw_unit_marker(
+                layers, idx_den, unit, px, py, val, True, use_footprint=True
+            )
 
         # Sensor blips reveal position only — no unit-type attribute channels.
         if getattr(unit, "is_blip", False):
@@ -1970,16 +2338,24 @@ class ObservationTransformer:
             idx_cd = self.current_layer_map.get(
                 LayerConstants.ENEMY_WEAPON_COOLDOWN if is_enemy else LayerConstants.ALLIED_WEAPON_COOLDOWN
             )
-            if idx_cd is not None:
+            if idx_cd is not None and idx_cd in active:
                 self._draw_unit_marker(layers, idx_cd, unit, px, py, cd_norm, True)
 
         for attr in ["biological", "mechanical", "armored", "massive", "flying"]:
             idx = self.current_layer_map.get(f"{prefix}_unit_{attr}")
-            if idx is not None and getattr(unit, f"is_{attr}", False):
+            if (
+                idx is not None
+                and idx in active
+                and getattr(unit, f"is_{attr}", False)
+            ):
                 self._draw_unit_marker(layers, idx, unit, px, py, 1.0, True)
 
         idx_cloak = self.current_layer_map.get(f"{prefix}_unit_cloak")
-        if idx_cloak is not None and self._unit_on_cloak_layer(unit):
+        if (
+            idx_cloak is not None
+            and idx_cloak in active
+            and self._unit_on_cloak_layer(unit)
+        ):
             self._draw_unit_marker(layers, idx_cloak, unit, px, py, 1.0, True)
 
     def _command_objective_obs_radius_px(self) -> int:
@@ -2388,6 +2764,51 @@ class ObservationTransformer:
             region = terrain[y0:y1 + 1, x0:x1 + 1]
             region[mask] = 0.0
 
+    # Tactical static pathing is keyed by integer crop origin; fights visit many
+    # crops and also revisit them (kite / dual perspectives). 64 + drop-half
+    # eviction thrashed (tt_rate ~0.35). Each plane is 32×32 float32 (~4 KiB).
+    _TAC_TERRAIN_CACHE_MAX = 512
+
+    def _store_terrain_cache(self, key: Tuple[Any, ...], arr: np.ndarray) -> None:
+        """Insert a terrain plane; bound only tactical crop entries."""
+        is_tac = isinstance(key, tuple) and bool(key) and key[0] == "tac"
+        if is_tac and key not in self._terrain_caches:
+            tac_keys = [
+                k for k in self._terrain_caches
+                if isinstance(k, tuple) and k and k[0] == "tac"
+            ]
+            if len(tac_keys) >= self._TAC_TERRAIN_CACHE_MAX:
+                # Drop oldest ~25% of tac entries (dict insertion order).
+                drop_n = max(1, len(tac_keys) // 4)
+                for k in tac_keys[:drop_n]:
+                    self._terrain_caches.pop(k, None)
+        self._terrain_caches[key] = arr
+
+    def _tactical_static_terrain_cache_key(
+        self, mode: str, map_name: str
+    ) -> Tuple[Any, ...]:
+        return (
+            "tac",
+            mode,
+            map_name,
+            int(self.crop_x),
+            int(self.crop_y),
+            int(self.feature_map_width),
+            int(self.feature_map_height),
+            round(self.scale, 6),
+        )
+
+    def _overlay_tactical_ground_on_terrain(
+        self, res: np.ndarray, ground_units: List[Unit]
+    ) -> None:
+        if not ground_units:
+            return
+        visible_ground = [
+            u for u in ground_units
+            if self._tactical_footprint_intersects_fovea(u)
+        ]
+        self._overlay_ground_unit_terrain_blocks(res, visible_ground)
+
     def _draw_terrain_pathing(
         self,
         game_info,
@@ -2412,7 +2833,22 @@ class ObservationTransformer:
             )
             if terrain_cache_key in self._terrain_caches:
                 layers[layer_idx] = self._terrain_caches[terrain_cache_key].copy()
+                self._cache_stat_inc("tg_hit")
                 return
+            self._cache_stat_inc("tg_miss")
+        else:
+            # Tactical: reuse static crop pathing; live ground footprints overlay after.
+            tac_key = self._tactical_static_terrain_cache_key(
+                cache_key, current_map_name
+            )
+            cached = self._terrain_caches.get(tac_key)
+            if cached is not None:
+                res = cached.copy()
+                self._overlay_tactical_ground_on_terrain(res, ground_units)
+                layers[layer_idx] = res
+                self._cache_stat_inc("tt_hit")
+                return
+            self._cache_stat_inc("tt_miss")
 
         if not hasattr(game_info, 'pathing_grid') or not hasattr(game_info, 'terrain_height'):
             return
@@ -2488,23 +2924,25 @@ class ObservationTransformer:
             else:
                 res[valid_mask] = norm_height * (sampled_path > 0).astype(np.float32)
 
-        if self.is_tactical_mode and ground_units:
-            visible_ground = [
-                u for u in ground_units
-                if self._tactical_footprint_intersects_fovea(u)
-            ]
-            self._overlay_ground_unit_terrain_blocks(res, visible_ground)
+        if self.is_tactical_mode:
+            tac_key = self._tactical_static_terrain_cache_key(
+                cache_key, current_map_name
+            )
+            self._store_terrain_cache(tac_key, res.copy())
+            self._overlay_tactical_ground_on_terrain(res, ground_units)
+            layers[layer_idx] = res
+            self._last_map_name = current_map_name
+            return
 
         layers[layer_idx] = res
-
-        if not self.is_tactical_mode:
-            self._terrain_caches[terrain_cache_key] = res.copy()
-            self._last_map_name = current_map_name
+        self._store_terrain_cache(terrain_cache_key, res.copy())
+        self._last_map_name = current_map_name
 
     def _draw_terrain_creep(self, raw_obs, layers):
         idx = self.current_layer_map.get(LayerConstants.TERRAIN_CREEP)
         creep_map = raw_obs.get('creep')
-        if idx is None or not creep_map: return
+        if idx is None or idx not in self.active_indices or not creep_map:
+            return
         data = self._get_numpy_data(creep_map)
         game_info = raw_obs.get('game_info')
         creep_h, creep_w = data.shape
@@ -2649,9 +3087,13 @@ class ObservationTransformer:
             if outer <= inner:
                 return
             center_gx, center_gy = self._circle_center_game(cx, cy, unit)
-            # Off-fovea tactical DPS must not anchor draw rects to clamped edge pixels —
-            # scan the full 32×32 window in game space so rings stay world-fixed as the fovea pans.
-            if self.is_tactical_mode and unit is not None:
+            # Off-fovea tactical DPS (reach-in) uses unclamped centers outside the
+            # 32×32 window — scan the full crop. In-fovea units use a tight bbox.
+            center_in_fovea = (
+                0 <= int(cx) < self.feature_map_width
+                and 0 <= int(cy) < self.feature_map_height
+            )
+            if self.is_tactical_mode and unit is not None and not center_in_fovea:
                 x_min, y_min = 0, 0
                 x_max = self.feature_map_width
                 y_max = self.feature_map_height
@@ -2744,12 +3186,19 @@ class ObservationTransformer:
     def _draw_unit_vitals(self, unit, layers, is_enemy, px, py):
         prefix = "enemy" if is_enemy else "allied"
         idx_hp = self.current_layer_map.get(f"{prefix}_health")
+        idx_nrg = self.current_layer_map.get(f"{prefix}_energy")
+        want_nrg = idx_nrg is not None and float(getattr(unit, "energy_max", 0) or 0) > 0
+        if idx_hp is None and not want_nrg:
+            return
         if idx_hp is not None:
             hp_signal = self._health_damage_signal(unit)
-            self._draw_unit_marker(layers, idx_hp, unit, px, py, hp_signal, True)
-        idx_nrg = self.current_layer_map.get(f"{prefix}_energy")
-        if idx_nrg is not None and unit.energy_max > 0:
-            self._draw_unit_marker(layers, idx_nrg, unit, px, py, unit.energy / unit.energy_max, True)
+            if hp_signal != 0.0:
+                self._draw_unit_marker(layers, idx_hp, unit, px, py, hp_signal, True)
+        if want_nrg:
+            energy_max = float(unit.energy_max)
+            nrg = float(unit.energy) / energy_max
+            if nrg != 0.0:
+                self._draw_unit_marker(layers, idx_nrg, unit, px, py, nrg, True)
 
     def _draw_unit_detection(self, unit, layers, is_enemy, px, py):
         detect_range = self._unit_detection_range(unit)
@@ -2843,7 +3292,47 @@ class ObservationTransformer:
             min_radius_game=float(min_range_gu), unit=unit,
         )
 
+    def _catalog_weapon_stats(
+        self, unit: Unit, atk_lvl: int
+    ) -> List[Dict[str, Any]]:
+        """Catalog DPS discs for ``(type_id, attack_upgrade_level)`` (memoized)."""
+        type_id = getattr(unit, "type_id", None)
+        type_val = getattr(type_id, "value", type_id)
+        cache_key = (type_val, int(atk_lvl))
+        cached = self._weapon_stats_cache.get(cache_key)
+        if cached is not None:
+            self._cache_stat_inc("wpn_hit")
+            return cached
+
+        self._cache_stat_inc("wpn_miss")
+        weapon_stats: List[Dict[str, Any]] = []
+        u_name = getattr(type_id, "name", None)
+        if u_name:
+            db = self._get_unit_data_from_json(u_name)
+            if db:
+                for w in db.get("weapons", []):
+                    period = w.get("period") or 1.0
+                    attacks = float(w.get("attacks", 1) or 1)
+                    upgrade_bonus = float(w.get("upgrade_bonus", 0) or 0)
+                    dps = (w["damage"] * attacks) / period
+                    dps += (upgrade_bonus * atk_lvl) / period
+                    weapon_stats.append(
+                        {
+                            "base": dps,
+                            "range": float(w["range"]),
+                            "min_range": float(w.get("min_range", 0.0)),
+                            "typ": w["type"],
+                            "period": period,
+                            "attacks": attacks,
+                            "bonuses": w.get("bonuses", []),
+                        }
+                    )
+        self._weapon_stats_cache[cache_key] = weapon_stats
+        return weapon_stats
+
     def _draw_unit_dps(self, unit: Unit, layers: np.ndarray, is_enemy: bool, px: int, py: int, game_data: GameData):
+        if not self._has_active_dps_layers(is_enemy):
+            return
         if not self._unit_is_combat_ready(unit):
             return
         if unit.type_id in [UnitTypeId.LIBERATORAG, UnitTypeId.CARRIER, UnitTypeId.LURKERMP,
@@ -2864,26 +3353,8 @@ class ObservationTransformer:
         elif uid == UnitTypeId.ORACLE and unit.energy >= 25:
             weapon_stats = [{'base': 24.6, 'range': 4.0, 'typ': 1}]
         else:
-            u_name = getattr(unit.type_id, "name", None)
-            if u_name:
-                db = self._get_unit_data_from_json(u_name)
-                if db:
-                    atk_lvl = int(getattr(unit, "attack_upgrade_level", 0) or 0)
-                    for w in db.get('weapons', []):
-                        period = w.get('period') or 1.0
-                        attacks = float(w.get('attacks', 1) or 1)
-                        upgrade_bonus = float(w.get('upgrade_bonus', 0) or 0)
-                        dps = (w['damage'] * attacks) / period
-                        dps += (upgrade_bonus * atk_lvl) / period
-                        weapon_stats.append({
-                            'base': dps,
-                            'range': float(w['range']),
-                            'min_range': float(w.get('min_range', 0.0)),
-                            'typ': w['type'],
-                            'period': period,
-                            'attacks': attacks,
-                            'bonuses': w.get('bonuses', []),
-                        })
+            atk_lvl = int(getattr(unit, "attack_upgrade_level", 0) or 0)
+            weapon_stats = self._catalog_weapon_stats(unit, atk_lvl)
 
         # Weapon bonus type → typed-DPS layer suffix.
         # Values confirmed from unit_data.json samples:

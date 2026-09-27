@@ -711,8 +711,23 @@ def load_squad_checkpoint(
     """Load squad policy, grafting from universal checkpoint on shape mismatch."""
     from stable_baselines3.common.save_util import load_from_zip_file
     from src.agent.maskable_recurrent_ppo import MaskableRecurrentPPO
+    from src.agent.models.squad_network import SquadNetwork
+    from src.agent.models.squad_policy import SquadRecurrentPolicy
 
     load_kwargs = dict(load_kwargs or {})
+    # MaskableRecurrentPPO.load historically defaulted to UniversalRecurrentPolicy /
+    # UnitControlNetwork; force the squad classes so self-attention kwargs apply.
+    co = dict(load_kwargs.get("custom_objects") or {})
+    co.setdefault("policy_class", SquadRecurrentPolicy)
+    load_kwargs["custom_objects"] = co
+    pk = dict(load_kwargs.get("policy_kwargs") or {})
+    pk.setdefault("features_extractor_class", SquadNetwork)
+    load_kwargs["policy_kwargs"] = pk
+    if "policy" not in load_kwargs and "policy" in (algo_kwargs or {}):
+        load_kwargs["policy"] = algo_kwargs["policy"]
+    elif "policy" not in load_kwargs:
+        load_kwargs["policy"] = SquadRecurrentPolicy
+
     AlgoClass = MaskableRecurrentPPO
     try:
         model = AlgoClass.load(model_path, **load_kwargs)

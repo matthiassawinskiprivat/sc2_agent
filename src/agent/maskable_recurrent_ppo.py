@@ -50,6 +50,28 @@ def _multi_discrete_nvec_tuple(space: gym.spaces.Space) -> Optional[Tuple[int, .
     return None
 
 
+def _class_name(obj: Any) -> str:
+    if obj is None:
+        return ""
+    if isinstance(obj, type):
+        return obj.__name__
+    return getattr(obj, "__name__", None) or type(obj).__name__
+
+
+def _is_squad_features_extractor(features_extractor_class: Any) -> bool:
+    name = _class_name(features_extractor_class)
+    if name == "SquadNetwork":
+        return True
+    return "squad_network.SquadNetwork" in str(features_extractor_class)
+
+
+def _is_squad_policy_class(policy_class: Any) -> bool:
+    name = _class_name(policy_class)
+    if name == "SquadRecurrentPolicy":
+        return True
+    return "squad_policy.SquadRecurrentPolicy" in str(policy_class)
+
+
 def sanitize_obs_tensors_inplace(obs):
     """Replace NaN/Inf in rollout obs without allocating a second GPU copy of maps."""
     if isinstance(obs, dict):
@@ -1432,10 +1454,21 @@ class MaskableRecurrentPPO(RecurrentPPO):
             **kwargs,
         )
 
-        if isinstance(model.observation_space, gym.spaces.Dict):
-            from src.agent.models.unit_control_network import UnitControlNetwork
+        # Never overwrite a squad FE (e.g. SquadNetwork + use_self_attention) with
+        # UnitControlNetwork — that was the load-failure → graft fallback bug.
+        pk = data.setdefault("policy_kwargs", {})
+        if (
+            "features_extractor_class" not in pk
+            and isinstance(model.observation_space, gym.spaces.Dict)
+        ):
+            if _is_squad_policy_class(data.get("policy_class")):
+                from src.agent.models.squad_network import SquadNetwork
 
-            data.get("policy_kwargs", {})["features_extractor_class"] = UnitControlNetwork
+                pk["features_extractor_class"] = SquadNetwork
+            else:
+                from src.agent.models.unit_control_network import UnitControlNetwork
+
+                pk["features_extractor_class"] = UnitControlNetwork
 
         # Checkpoint ``data`` includes observation_space / action_space from training time.
         # For curriculum transfer those are *smaller* than the current ``env``; if we merge
@@ -1546,18 +1579,56 @@ class MaskableRecurrentPPO(RecurrentPPO):
         return model
 
     @classmethod
+    def _default_policy_class_for_load(
+        cls,
+        path: str,
+        custom_objects: Dict[str, Any],
+    ) -> Type[BasePolicy]:
+        """Pick squad vs universal policy when the caller did not set ``policy_class``."""
+        pk = custom_objects.get("policy_kwargs") or {}
+        if _is_squad_features_extractor(pk.get("features_extractor_class")):
+            from src.agent.models.squad_policy import SquadRecurrentPolicy
+
+            return SquadRecurrentPolicy
+        try:
+            from stable_baselines3.common.save_util import load_from_zip_file
+
+            data, _, _ = load_from_zip_file(path, device="cpu", load_data=True)
+            saved_pk = data.get("policy_kwargs") or {}
+            if _is_squad_features_extractor(saved_pk.get("features_extractor_class")):
+                from src.agent.models.squad_policy import SquadRecurrentPolicy
+
+                return SquadRecurrentPolicy
+            if _is_squad_policy_class(data.get("policy_class")):
+                from src.agent.models.squad_policy import SquadRecurrentPolicy
+
+                return SquadRecurrentPolicy
+        except Exception as exc:
+            logger.debug(f"Could not peek checkpoint policy class ({path}): {exc}")
+        from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
+
+        return UniversalRecurrentPolicy
+
+    @classmethod
     def load(cls, path, env=None, device="auto", custom_objects=None, **kwargs):
         if custom_objects is None:
             custom_objects = {}
-        from src.agent.models.universal_recurrent_policy import UniversalRecurrentPolicy
-
-        custom_objects.setdefault("policy_class", UniversalRecurrentPolicy)
 
         pk_override = kwargs.pop("policy_kwargs", {})
         if pk_override:
             if "policy_kwargs" not in custom_objects:
                 custom_objects["policy_kwargs"] = {}
             custom_objects["policy_kwargs"].update(pk_override)
+
+        # Constructor-style ``policy=`` override (async squad load passes this).
+        policy_override = kwargs.pop("policy", None)
+        if policy_override is not None:
+            custom_objects["policy_class"] = policy_override
+
+        if "policy_class" not in custom_objects:
+            custom_objects["policy_class"] = cls._default_policy_class_for_load(
+                path, custom_objects
+            )
 
         custom_objects.setdefault("policy_kwargs", {}).setdefault("lstm_hidden_size", 512)
 

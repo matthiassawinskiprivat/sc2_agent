@@ -392,12 +392,20 @@ def test_static_feat_cache_used(training_conf):
     assert len(builder._static_feat_cache) == 1
 
 
-def test_clear_global_cache_clears_static_cache(training_conf):
+def test_clear_global_cache_keeps_static_cache(training_conf):
     builder = SquadObservationBuilder(training_conf)
     unit = _make_unit()
     _ = builder._unit_static_feats(unit, frozenset())
     assert len(builder._static_feat_cache) == 1
     builder.clear_global_cache()
+    assert len(builder._static_feat_cache) == 1
+
+
+def test_clear_static_feat_cache(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    unit = _make_unit()
+    _ = builder._unit_static_feats(unit, frozenset())
+    builder.clear_static_feat_cache()
     assert len(builder._static_feat_cache) == 0
 
 
@@ -439,6 +447,7 @@ def test_zero_observation_respects_active_subset(training_conf):
 
 
 def test_can_aoe_ghost_only_vs_protoss(training_conf):
+    training_conf = {**training_conf, "action_heads": ["aoe_local"]}
     builder = SquadObservationBuilder(training_conf)
     ghost = _make_unit(type_id=UnitTypeId.GHOST, energy=200.0)
     feats_p = builder._unit_scalars(
@@ -454,10 +463,166 @@ def test_can_aoe_ghost_only_vs_protoss(training_conf):
     assert feats_p[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(1.0)
     assert feats_z[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(0.0)
 
+    from sc2.ids.upgrade_id import UpgradeId
+
     templar = _make_unit(type_id=UnitTypeId.HIGHTEMPLAR, energy=200.0)
     feats_ht = builder._unit_scalars(
         templar, "attack", playable_w=128.0, playable_h=128.0,
-        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+        upgrades=frozenset({UpgradeId.PSISTORMTECH}),
+        objective=None, enemy_com=None, allied_com=None,
         enemy_race="terran",
     )
     assert feats_ht[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(1.0)
+
+
+def test_readiness_scalars_gated_by_action_heads(training_conf):
+    """Without heal/aoe/snipe heads, readiness lookups stay zero."""
+    from src.utils.unit_feature_helpers import unit_can_heal
+
+    ghost = _make_unit(type_id=UnitTypeId.GHOST, energy=200.0)
+    builder = SquadObservationBuilder(training_conf)
+    with patch(
+        "src.transformers.squad_observation_builder.unit_can_heal",
+        wraps=unit_can_heal,
+    ) as heal:
+        feats = builder._unit_scalars(
+            ghost, "attack", playable_w=128.0, playable_h=128.0,
+            upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+            enemy_race="protoss",
+        )
+    heal.assert_not_called()
+    assert feats[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(0.0)
+    assert feats[USC.FEATURES[USC.CAN_SNIPE]] == pytest.approx(0.0)
+    assert feats[USC.FEATURES[USC.CAN_HEAL]] == pytest.approx(0.0)
+
+
+def test_enemy_rows_skip_readiness_lookups(training_conf):
+    training_conf = {
+        **training_conf,
+        "action_heads": ["heal_unit", "aoe_local", "snipe"],
+    }
+    builder = SquadObservationBuilder(training_conf)
+    ghost = _make_unit(type_id=UnitTypeId.GHOST, energy=200.0)
+    with patch(
+        "src.transformers.squad_observation_builder.unit_can_snipe",
+        return_value=True,
+    ) as snipe:
+        ally = builder._unit_scalars(
+            ghost, "attack", playable_w=128.0, playable_h=128.0,
+            upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+        )
+        enemy = builder._unit_scalars(
+            ghost, "attack", playable_w=128.0, playable_h=128.0,
+            upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+            for_enemy=True,
+        )
+    assert snipe.call_count == 1
+    assert ally[USC.FEATURES[USC.CAN_SNIPE]] == pytest.approx(1.0)
+    assert enemy[USC.FEATURES[USC.CAN_SNIPE]] == pytest.approx(0.0)
+
+
+def test_unit_scalars_accepts_precomputed_readiness(training_conf):
+    training_conf = {
+        **training_conf,
+        "action_heads": ["heal_unit", "aoe_local", "snipe"],
+    }
+    builder = SquadObservationBuilder(training_conf)
+    ghost = _make_unit(type_id=UnitTypeId.GHOST, energy=200.0)
+    with patch(
+        "src.transformers.squad_observation_builder.unit_can_snipe",
+        return_value=True,
+    ) as snipe:
+        feats = builder._unit_scalars(
+            ghost,
+            "attack",
+            playable_w=128.0,
+            playable_h=128.0,
+            upgrades=frozenset(),
+            objective=None,
+            enemy_com=None,
+            allied_com=None,
+            readiness={
+                "can_heal": 0.0,
+                "can_repair": 0.0,
+                "can_aoe": 1.0,
+                "can_snipe": 1.0,
+                "can_load": 0.0,
+                "can_unload": 0.0,
+                "can_cloak": 0.0,
+                "is_immobile": 0.0,
+            },
+        )
+    snipe.assert_not_called()
+    assert feats[USC.FEATURES[USC.CAN_SNIPE]] == pytest.approx(1.0)
+    assert feats[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(1.0)
+
+
+def test_build_reuses_legality_readiness_without_second_unit_can_pass(training_conf):
+    """Ally scalars must not re-call unit_can_* after build_squad_legality."""
+    training_conf = {
+        **training_conf,
+        "action_heads": ["heal_unit", "aoe_local", "snipe", "move_local"],
+        "active_unit_scalars": [
+            USC.CAN_HEAL,
+            USC.CAN_AOE,
+            USC.CAN_SNIPE,
+            USC.CAN_LOAD,
+            USC.CAN_CLOAK,
+            USC.IS_IMMOBILE,
+        ],
+    }
+    builder = SquadObservationBuilder(training_conf)
+    ghost = _make_unit(tag=10, type_id=UnitTypeId.GHOST, energy=200.0)
+    ghost.is_structure = False
+    bot = MagicMock()
+    bot.player_id = 1
+    bot.units = MagicMock()
+    bot.units.exists = True
+    bot.units.first = ghost
+    bot.enemy_units = MagicMock()
+    bot.structures = MagicMock()
+    bot.enemy_structures = MagicMock()
+    bot.state = MagicMock()
+    bot.state.effects = []
+    bot.state.creep = None
+    bot.state.upgrades = frozenset()
+    bot.game_info = MagicMock()
+    bot.game_data = MagicMock()
+    bot.unit_target_map = {}
+    bot.unit_command_map = {10: "attack"}
+    bot.enemy_pylon_pos = {}
+    bot.all_units.find_by_tag = lambda tag: ghost if tag == 10 else None
+
+    fake_map = {
+        "map": np.zeros((2, 128, 128), dtype=np.float32),
+        "command": np.zeros(10, dtype=np.float32),
+    }
+    fake_tactical = np.zeros((2, 32, 32), dtype=np.float32)
+
+    with patch(
+        "src.agent.squad_target_masks.unit_can_snipe", return_value=True
+    ) as snipe_mask, patch(
+        "src.transformers.squad_observation_builder.unit_can_snipe", return_value=True
+    ) as snipe_scalar, patch(
+        "src.transformers.squad_observation_builder.perspective_unit_groups",
+        return_value=([ghost], [], [], []),
+    ), patch.object(
+        builder._transformer, "transform", return_value=fake_map
+    ), patch.object(
+        builder._transformer, "transform_tactical", return_value=fake_tactical
+    ):
+        obs = builder.build(
+            bot,
+            perspective_player_id=1,
+            squad_unit_tags=[10],
+            pool_high_level_command="attack",
+            playable_size=(128.0, 128.0),
+            anchor_unit_tag=10,
+            enemy_race="protoss",
+        )
+
+    assert snipe_mask.call_count == 1
+    snipe_scalar.assert_not_called()
+    assert obs["snipe_actor_mask"][0] == pytest.approx(1.0)
+    # active list: CAN_HEAL, CAN_AOE, CAN_SNIPE, ...
+    assert obs["unit_scalars"][0, 2] == pytest.approx(1.0)

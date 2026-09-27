@@ -48,6 +48,9 @@ class GameProcess(multiprocessing.Process):
         logger.remove()
         log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
         logger.add(sys.stderr, level=log_level, colorize=False)
+        from train.training_process_logging import configure_process_alert_logging
+
+        configure_process_alert_logging()
 
         logger.info(f"GameProcess ({self.pid}) started. Args: {self.game_config}")
         

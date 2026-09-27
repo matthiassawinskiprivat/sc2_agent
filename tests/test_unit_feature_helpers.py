@@ -819,6 +819,25 @@ def _armed(uid, *, ground_dps=10.0, is_burrowed=False, weapon_ready=True):
     return unit
 
 
+def test_weapon_ready_ignores_ability_cache():
+    """Attack cooldown / retreat read proto weapon_cooldown, not spell abilities."""
+    from src.utils.unit_feature_helpers import unit_can_attack, unit_weapon_ready
+
+    cooling = _armed(UnitTypeId.MARINE, weapon_ready=False)
+    cooling.weapon_cooldown = 8.0
+    cooling.tag = 1
+    bot = MagicMock()
+    bot._available_abilities_by_tag = {1: frozenset()}
+    cooling._bot = bot
+    assert unit_weapon_ready(cooling) is False
+    assert unit_can_attack(cooling) is False
+    ready = _armed(UnitTypeId.MARINE, weapon_ready=True)
+    ready.weapon_cooldown = 0.0
+    ready.tag = 1
+    assert unit_weapon_ready(ready) is True
+    assert unit_can_attack(ready) is True
+
+
 def test_unit_can_attack_excludes_burrowed_non_lurkers():
     from sc2.ids.upgrade_id import UpgradeId
 
@@ -943,6 +962,88 @@ def test_unit_can_snipe_energy_upgrade_and_types():
     assert snipe_target_is_eligible(ht, no_energy) is False
 
 
+def _bot_at_loop(game_loop: int) -> MagicMock:
+    bot = MagicMock()
+    bot.state = MagicMock()
+    bot.state.game_loop = game_loop
+    return bot
+
+
+def test_local_snipe_stamp_gates_until_ready():
+    import math
+    from sc2.ids.upgrade_id import UpgradeId
+    from src.utils.unit_feature_helpers import (
+        GAME_LOOPS_PER_SECOND,
+        SNIPE_ABILITY_COOLDOWN_SECONDS,
+        mark_spell_ability_cooldown,
+        unit_can_snipe,
+    )
+
+    yamato = frozenset({UpgradeId.YAMATOCANNON})
+    bc = _caster(UnitTypeId.BATTLECRUISER, 0.0)
+    bc.tag = 31
+    bot = _bot_at_loop(100)
+    assert unit_can_snipe(bc, upgrades=yamato, bot=bot) is True
+
+    mark_spell_ability_cooldown(bot, bc, "snipe")
+    assert unit_can_snipe(bc, upgrades=yamato, bot=bot) is False
+
+    loops = int(math.ceil(SNIPE_ABILITY_COOLDOWN_SECONDS[UnitTypeId.BATTLECRUISER] * GAME_LOOPS_PER_SECOND))
+    bot.state.game_loop = 100 + loops
+    assert unit_can_snipe(bc, upgrades=yamato, bot=bot) is True
+
+
+def test_local_aoe_stamp_is_separate_from_snipe():
+    from src.utils.unit_feature_helpers import mark_spell_ability_cooldown, unit_can_snipe
+
+    ghost = _caster(UnitTypeId.GHOST, 75.0)
+    ghost.tag = 32
+    bot = _bot_at_loop(50)
+    mark_spell_ability_cooldown(bot, ghost, "snipe")
+    assert unit_can_snipe(ghost, bot=bot) is False
+    assert unit_can_aoe(ghost, enemy_race="protoss", bot=bot) is True
+
+    mark_spell_ability_cooldown(bot, ghost, "aoe")
+    assert unit_can_aoe(ghost, enemy_race="protoss", bot=bot) is False
+
+
+def test_issue_snipe_stamps_cooldown_by_default():
+    from src.utils.unit_feature_helpers import issue_snipe_on_unit, unit_can_snipe
+
+    ghost = _caster(UnitTypeId.GHOST, 50.0)
+    ghost.tag = 33
+    ghost.owner_id = 1
+    target = MagicMock()
+    target.owner_id = 2
+    target.is_structure = False
+    target.is_biological = True
+    bot = _bot_at_loop(20)
+
+    assert issue_snipe_on_unit(bot, ghost, target) is True
+    assert 33 in bot._snipe_ability_ready_after_loop
+    assert unit_can_snipe(ghost, bot=bot) is False
+
+
+def test_issue_aoe_reissue_does_not_restamp():
+    from sc2.position import Point2
+    from src.utils.unit_feature_helpers import unit_can_aoe
+
+    ravager = _caster(UnitTypeId.RAVAGER, 0.0)
+    ravager.tag = 34
+    ravager.owner_id = 1
+    bot = _bot_at_loop(20)
+    target = Point2((8.0, 9.0))
+
+    assert issue_aoe_at_point(bot, ravager, target, stamp_cooldown=False) is None
+    store = getattr(bot, "_aoe_ability_ready_after_loop", None)
+    assert not isinstance(store, dict) or 34 not in store
+    assert unit_can_aoe(ravager, bot=bot) is True
+
+    assert issue_aoe_at_point(bot, ravager, target) is None
+    assert 34 in bot._aoe_ability_ready_after_loop
+    assert unit_can_aoe(ravager, bot=bot) is False
+
+
 def test_refresh_ability_cache_queries_aoe_with_resources_ignored():
     """AoE CD query must not double-gate energy (cloak stayed open, AoE closed)."""
     import asyncio
@@ -955,13 +1056,12 @@ def test_refresh_ability_cache_queries_aoe_with_resources_ignored():
     medivac.tag = 8
 
     async def query(units, ignore_resource_requirements=False):
+        assert ignore_resource_requirements is True
         out = {}
         for u in units:
             if u.type_id == UnitTypeId.INFESTOR:
-                assert ignore_resource_requirements is True
                 out[u.tag] = {AbilityId.FUNGALGROWTH_FUNGALGROWTH}
             else:
-                assert ignore_resource_requirements is False
                 out[u.tag] = {AbilityId.MEDIVACHEAL_HEAL}
         return out
 
@@ -971,8 +1071,133 @@ def test_refresh_ability_cache_queries_aoe_with_resources_ignored():
     bot.client.query_available_abilities_with_tag = query
 
     asyncio.run(refresh_healer_ability_cache(bot))
+    assert isinstance(bot._available_abilities_by_tag[7], frozenset)
+    assert isinstance(bot._available_abilities_by_tag[8], frozenset)
     assert AbilityId.FUNGALGROWTH_FUNGALGROWTH in bot._available_abilities_by_tag[7]
     assert AbilityId.MEDIVACHEAL_HEAL in bot._available_abilities_by_tag[8]
+
+
+def test_refresh_ability_cache_skips_snipe_only_when_flag_off():
+    """Battlecruiser is snipe-only — do not query it before the snipe head exists."""
+    import asyncio
+    from sc2.ids.ability_id import AbilityId
+    from src.utils.unit_feature_helpers import refresh_healer_ability_cache
+
+    bc = _caster(UnitTypeId.BATTLECRUISER, 0.0)
+    bc.tag = 9
+    ravager = _caster(UnitTypeId.RAVAGER, 0.0)
+    ravager.tag = 10
+    queried = []
+
+    async def query(units, ignore_resource_requirements=False):
+        queried.extend(list(units))
+        return {u.tag: {AbilityId.EFFECT_CORROSIVEBILE} for u in units}
+
+    bot = MagicMock()
+    bot.all_units = [bc, ravager]
+    bot.client = MagicMock()
+    bot.client.query_available_abilities_with_tag = query
+
+    asyncio.run(
+        refresh_healer_ability_cache(bot, include_aoe=True, include_snipe=False)
+    )
+    assert ravager in queried
+    assert bc not in queried
+    assert 9 not in bot._available_abilities_by_tag
+    assert 10 in bot._available_abilities_by_tag
+
+
+def test_refresh_ability_cache_skips_aoe_only_when_flag_off():
+    import asyncio
+    from src.utils.unit_feature_helpers import refresh_healer_ability_cache
+
+    ravager = _caster(UnitTypeId.RAVAGER, 0.0)
+    ravager.tag = 11
+    bc = _caster(UnitTypeId.BATTLECRUISER, 0.0)
+    bc.tag = 12
+    queried = []
+
+    async def query(units, ignore_resource_requirements=False):
+        queried.extend(list(units))
+        return {u.tag: set() for u in units}
+
+    bot = MagicMock()
+    bot.all_units = [ravager, bc]
+    bot.client = MagicMock()
+    bot.client.query_available_abilities_with_tag = query
+
+    asyncio.run(
+        refresh_healer_ability_cache(bot, include_aoe=False, include_snipe=True)
+    )
+    assert bc in queried
+    assert ravager not in queried
+    assert 12 in bot._available_abilities_by_tag
+    assert 11 not in bot._available_abilities_by_tag
+
+
+def test_refresh_ability_cache_skips_heal_when_flag_off():
+    import asyncio
+    from src.utils.unit_feature_helpers import refresh_healer_ability_cache
+
+    medivac = _caster(UnitTypeId.MEDIVAC, 50.0)
+    medivac.tag = 13
+    ravager = _caster(UnitTypeId.RAVAGER, 0.0)
+    ravager.tag = 14
+    queried = []
+
+    async def query(units, ignore_resource_requirements=False):
+        queried.extend(list(units))
+        return {u.tag: set() for u in units}
+
+    bot = MagicMock()
+    bot.all_units = [medivac, ravager]
+    bot.client = MagicMock()
+    bot.client.query_available_abilities_with_tag = query
+
+    asyncio.run(
+        refresh_healer_ability_cache(
+            bot, include_heal=False, include_aoe=True, include_snipe=False
+        )
+    )
+    assert ravager in queried
+    assert medivac not in queried
+    assert 14 in bot._available_abilities_by_tag
+    assert 13 not in bot._available_abilities_by_tag
+
+
+def test_refresh_ability_cache_single_rpc_and_units_arg():
+    import asyncio
+    from src.utils.unit_feature_helpers import refresh_healer_ability_cache
+
+    medivac = _caster(UnitTypeId.MEDIVAC, 50.0)
+    medivac.tag = 15
+    ghost = _caster(UnitTypeId.GHOST, 75.0)
+    ghost.tag = 16
+    leftover = _caster(UnitTypeId.INFESTOR, 75.0)
+    leftover.tag = 17
+    calls = []
+
+    async def query(units, ignore_resource_requirements=False):
+        calls.append(list(units))
+        return {u.tag: set() for u in units}
+
+    bot = MagicMock()
+    bot.all_units = [medivac, ghost, leftover]
+    bot.client = MagicMock()
+    bot.client.query_available_abilities_with_tag = query
+
+    asyncio.run(
+        refresh_healer_ability_cache(
+            bot,
+            include_heal=True,
+            include_aoe=True,
+            include_snipe=True,
+            units=[medivac, ghost],
+        )
+    )
+    assert len(calls) == 1
+    assert leftover not in calls[0]
+    assert {u.tag for u in calls[0]} == {15, 16}
 
 
 def test_issue_aoe_at_point_ravager_bile():
@@ -1039,6 +1264,33 @@ def test_issue_aoe_at_point_viper_opponent_uses_bot_units():
 
     assert issue_aoe_at_point(bot, unit, target) is muta
     unit.assert_called_once_with(AbilityId.PARASITICBOMB_PARASITICBOMB, muta)
+
+
+def test_refresh_ability_cache_skips_rpc_when_all_families_off():
+    import asyncio
+    from src.utils.unit_feature_helpers import refresh_healer_ability_cache
+
+    ghost = _caster(UnitTypeId.GHOST, 75.0)
+    ghost.tag = 99
+    queried = []
+
+    async def query(units, ignore_resource_requirements=False):
+        queried.extend(list(units))
+        return {u.tag: set() for u in units}
+
+    bot = MagicMock()
+    bot.all_units = [ghost]
+    bot.client = MagicMock()
+    bot.client.query_available_abilities_with_tag = query
+    bot._available_abilities_by_tag = {99: frozenset()}
+
+    asyncio.run(
+        refresh_healer_ability_cache(
+            bot, include_heal=False, include_aoe=False, include_snipe=False
+        )
+    )
+    assert queried == []
+    assert bot._available_abilities_by_tag == {}
 
 
 def test_issue_aoe_at_point_marine_noop():

@@ -43,10 +43,15 @@ def sanitize_flat_action_mask(mask: np.ndarray, command_dim: int = 64) -> np.nda
     return out
 
 
+def _as_finite_tensor(value):
+    tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+    return torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=0.0)
+
+
 def _obs_tensor_to_finite(obs_t):
     if isinstance(obs_t, dict):
-        return {k: torch.nan_to_num(v, nan=0.0, posinf=1.0, neginf=0.0) for k, v in obs_t.items()}
-    return torch.nan_to_num(obs_t, nan=0.0, posinf=1.0, neginf=0.0)
+        return {k: _as_finite_tensor(v) for k, v in obs_t.items()}
+    return _as_finite_tensor(obs_t)
 
 
 def _rnn_layers_hidden(policy) -> Tuple[int, int]:
@@ -386,6 +391,93 @@ def opponent_squad_batch_predict(
             new_state = (pi_np, pi_np)
         new_last = focus_tags[-1] if focus_tags else last_focus_tag
         return actions_t.cpu().numpy(), new_state, new_last
+
+
+def rnn_states_to_numpy(lstm_states: Optional[Any]) -> Optional[Any]:
+    """Pickle-friendly (pi_tuple, vf_tuple) of numpy arrays."""
+    if lstm_states is None:
+        return None
+    if isinstance(lstm_states, RNNStates):
+        def _np(state_tuple: Tuple[Any, ...]) -> Tuple[np.ndarray, ...]:
+            out = []
+            for t in state_tuple:
+                if isinstance(t, torch.Tensor):
+                    out.append(t.detach().cpu().numpy())
+                else:
+                    out.append(np.asarray(t))
+            return tuple(out)
+
+        return (_np(lstm_states.pi), _np(lstm_states.vf))
+    return lstm_states
+
+
+def stack_pointer_lstm_states(
+    lstm_states_list: List[Optional[Any]],
+    policy,
+    device: torch.device,
+) -> RNNStates:
+    """Stack per-env opponent RNN carries into one vec-shaped ``RNNStates``."""
+    cols = [
+        normalize_single_env_rnn_states(state, policy, device)
+        for state in lstm_states_list
+    ]
+
+    def _cat(attr: str) -> Tuple[torch.Tensor, ...]:
+        parts = [getattr(col, attr) for col in cols]
+        return tuple(torch.cat([p[i] for p in parts], dim=1) for i in range(len(parts[0])))
+
+    return RNNStates(_cat("pi"), _cat("vf"))
+
+
+def opponent_pointer_vec_predict(
+    model,
+    obs_list: List[Dict[str, np.ndarray]],
+    masks_list: List[np.ndarray],
+    *,
+    lstm_states_list: Optional[List[Optional[Any]]] = None,
+    episode_starts: Optional[List[bool]] = None,
+    deterministic: bool = False,
+) -> Tuple[np.ndarray, List[Optional[Any]]]:
+    """One batched squad-pointer forward for many env opponent payloads."""
+    policy = model.policy
+    policy.set_training_mode(False)
+    device = model.device
+    n = len(obs_list)
+    if n == 0:
+        return np.zeros((0,), dtype=np.int64), []
+
+    starts = (
+        [bool(s) for s in episode_starts]
+        if episode_starts is not None
+        else [True] * n
+    )
+    states = list(lstm_states_list) if lstm_states_list is not None else [None] * n
+    if len(states) != n:
+        raise ValueError(f"lstm_states_list length {len(states)} != obs batch {n}")
+
+    with torch.no_grad():
+        batch_obs = stack_env_dict_observations(obs_list)
+        obs_t = _obs_tensor_to_finite(policy.obs_to_tensor(batch_obs)[0])
+        masks_t = torch.as_tensor(stack_action_masks(masks_list)).to(device)
+        is_recurrent = isinstance(getattr(policy, "lstm_actor", None), torch.nn.Module)
+        if not is_recurrent:
+            actions, _, _ = policy.forward(
+                obs_t, deterministic=deterministic, action_masks=masks_t
+            )
+            return actions.cpu().numpy(), [None] * n
+
+        starts_t = torch.as_tensor(
+            np.asarray(starts, dtype=np.float32), device=device
+        )
+        vec_lstm = stack_pointer_lstm_states(states, policy, device)
+        actions, _, _, new_lstm = policy.forward(
+            obs_t, vec_lstm, starts_t, action_masks=masks_t, deterministic=deterministic
+        )
+        new_states = [
+            rnn_states_to_numpy(select_rnn_state_column(new_lstm, i))
+            for i in range(n)
+        ]
+        return actions.cpu().numpy(), new_states
 
 
 @dataclass

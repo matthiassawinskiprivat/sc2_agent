@@ -493,7 +493,10 @@ def recover_collector_vec_env(vec_env, model, env_fns, num_envs, is_recurrent):
         else SquadBatchRolloutHelper(num_envs)
     )
     last_dones = np.ones(num_envs, dtype=bool)
-    prev_focus_tags = vec_env_obs_focus_tags(new_vec, num_envs)
+    if is_squad_pointer_action_space(new_vec.action_space):
+        prev_focus_tags = np.full((num_envs,), -1, dtype=np.int64)
+    else:
+        prev_focus_tags = vec_env_obs_focus_tags(new_vec, num_envs)
     return new_vec, obs, squad_helper, last_dones, prev_focus_tags
 
 
@@ -888,6 +891,9 @@ class AsyncCollector(mp.Process):
 
     def run(self):
         try:
+            from train.training_process_logging import configure_process_alert_logging
+
+            configure_process_alert_logging()
             self._run_inner()
         except Exception:
             import traceback
@@ -928,7 +934,15 @@ class AsyncCollector(mp.Process):
             ensure_collector_lstm_states,
             write_rollout_rows_to_buffer,
         )
-        from train.squad_pointer_rollout import SquadPointerRolloutHelper
+        from train.opponent_peek_ipc import (
+            OpponentPeekSharedMemory,
+            hydrate_vec_spatial_obs,
+        )
+        from train.squad_pointer_rollout import (
+            SquadPointerRolloutHelper,
+            stack_info_action_masks,
+            stack_info_requires_policy,
+        )
         from train.train_pipeline import ENV_REGISTRY
         
         EnvClass = ENV_REGISTRY.get(env_params.get("env_class", "Level0Env"))
@@ -1025,8 +1039,10 @@ class AsyncCollector(mp.Process):
             _emit_collector_status(f"loading checkpoint {self.model_path!r}")
             load_kwargs = {
                 "env": vec_env,
+                "policy": PolicyClass,
                 "policy_kwargs": policy_kwargs,
                 "device": train_device,
+                "custom_objects": {"policy_class": PolicyClass},
             }
             if is_recurrent_algo:
                 load_kwargs["rnn_type"] = rnn_type
@@ -1155,13 +1171,36 @@ class AsyncCollector(mp.Process):
             raise
         logger.info("Collector: SC2 environments ready. Entering main loop...")
         obs = _reset_out[0] if isinstance(_reset_out, tuple) else _reset_out
-        self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
+        reset_infos = (
+            _reset_out[1]
+            if isinstance(_reset_out, tuple) and len(_reset_out) > 1
+            else None
+        )
         squad_batch_helper = (
             SquadPointerRolloutHelper(num_envs)
             if is_squad_pointer_action_space(vec_env.action_space)
             else SquadBatchRolloutHelper(num_envs)
         )
         is_squad_pointer_rollout = isinstance(squad_batch_helper, SquadPointerRolloutHelper)
+        if is_squad_pointer_rollout:
+            self._prev_obs_focus_tags = np.full((num_envs,), -1, dtype=np.int64)
+        else:
+            self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
+        last_action_masks = stack_info_action_masks(reset_infos, num_envs)
+        last_requires_policy = stack_info_requires_policy(reset_infos, num_envs)
+        peek_shm = None
+        if is_squad_pointer_rollout:
+            try:
+                peek_shm = OpponentPeekSharedMemory(
+                    num_envs, vec_env.observation_space
+                )
+                squad_batch_helper.bind_peek_shm(peek_shm, vec_env)
+            except Exception as peek_exc:
+                logger.warning(
+                    f"Collector: opponent peek shared memory unavailable "
+                    f"({peek_exc}); falling back to pickled peek."
+                )
+                peek_shm = None
 
         from src.utils.watchdog import Watchdog
         step_timeout = resolve_collector_step_timeout(training_params)
@@ -1179,14 +1218,30 @@ class AsyncCollector(mp.Process):
 
         stall_watchdog.callback = _on_collector_step_stall
 
+        def _hydrate_obs(obs, infos, dones=None):
+            if peek_shm is None:
+                return obs
+            return hydrate_vec_spatial_obs(
+                obs,
+                infos,
+                peek_shm,
+                num_envs,
+                reset_infos=getattr(vec_env_ref, "reset_infos", None),
+                dones=dones,
+            )
+
         def _recover_vec_env(vec_env, model):
-            nonlocal vec_env_ref
+            nonlocal vec_env_ref, last_action_masks, last_requires_policy, peek_shm
             new_vec, new_obs, new_helper, new_dones, new_focus = recover_collector_vec_env(
                 vec_env, model, env_fns, num_envs, is_recurrent_algo
             )
             vec_env_ref = new_vec
             self.last_dones = new_dones
             self._prev_obs_focus_tags = new_focus
+            last_action_masks = None
+            last_requires_policy = None
+            if peek_shm is not None and isinstance(new_helper, SquadPointerRolloutHelper):
+                new_helper.bind_peek_shm(peek_shm, new_vec)
             return new_vec, new_obs, new_helper
         
         # Track metrics manually to avoid wrapper attribute errors
@@ -1197,7 +1252,8 @@ class AsyncCollector(mp.Process):
         weight_sync = CollectorWeightSync()
 
         rollout_idx = 0
-        while not self.stop_event.is_set():
+        try:
+          while not self.stop_event.is_set():
             current_buffer = buffers[buffer_idx % 2]
             t_rollout_start = time.perf_counter()
 
@@ -1275,10 +1331,20 @@ class AsyncCollector(mp.Process):
                         unblock_stuck_collector_vec_env(vec_env_ref)
                         last_unblock_ts = now_fill
                     try:
-                        requires_policy = vec_env_requires_policy_action(vec_env, num_envs)
+                        if last_requires_policy is not None:
+                            requires_policy = last_requires_policy
+                        else:
+                            requires_policy = vec_env_requires_policy_action(vec_env, num_envs)
 
                         if not requires_policy.any():
                             new_obs, rewards, dones, infos = vec_env.step(dummy_actions)
+                            new_obs = _hydrate_obs(new_obs, infos, dones)
+                            from_info = stack_info_action_masks(infos, num_envs)
+                            if from_info is not None:
+                                last_action_masks = from_info
+                            from_req = stack_info_requires_policy(infos, num_envs)
+                            if from_req is not None:
+                                last_requires_policy = from_req
                             # Non-trainee squad steps (legacy cycling / chunk) are
                             # skipped for the training buffer (requires_policy=False).
                             # Their rewards are the acting owner's perspective and
@@ -1316,6 +1382,7 @@ class AsyncCollector(mp.Process):
                                 prev_focus_tags=self._prev_obs_focus_tags,
                                 lstm_states=model._last_lstm_states if is_recurrent else None,
                                 device=model.device,
+                                action_masks=last_action_masks,
                             )
 
                         for env_idx, batch in resolution.squad_batch_actions.items():
@@ -1324,6 +1391,13 @@ class AsyncCollector(mp.Process):
                             )
 
                         new_obs, rewards, dones, infos = vec_env.step(resolution.step_actions)
+                        new_obs = _hydrate_obs(new_obs, infos, dones)
+                        from_info = stack_info_action_masks(infos, num_envs)
+                        if from_info is not None:
+                            last_action_masks = from_info
+                        from_req = stack_info_requires_policy(infos, num_envs)
+                        if from_req is not None:
+                            last_requires_policy = from_req
                     except COLLECTOR_VEC_PIPE_ERRORS as pipe_exc:
                         logger.error(
                             f"Collector: vec_env worker pipe error during rollout "
@@ -1372,7 +1446,10 @@ class AsyncCollector(mp.Process):
                     self.last_dones = dones
                     if is_recurrent:
                         model._last_lstm_states = resolution.updated_lstm
-                        self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
+                        if not is_squad_pointer_rollout:
+                            self._prev_obs_focus_tags = vec_env_obs_focus_tags(
+                                vec_env, num_envs
+                            )
                     filled += rows_written
                     if rows_written > 0:
                         stall_watchdog.reset()
@@ -1382,7 +1459,10 @@ class AsyncCollector(mp.Process):
                 # We need the value of the LAST observation to bootstrap
                 with torch.no_grad():
                     try:
-                        masks = np.array(vec_env.env_method("action_masks"))
+                        if last_action_masks is not None:
+                            masks = last_action_masks
+                        else:
+                            masks = np.array(vec_env.env_method("action_masks"))
                     except COLLECTOR_VEC_PIPE_ERRORS as pipe_exc:
                         logger.error(
                             f"Collector: vec_env worker pipe error before GAE "
@@ -1390,7 +1470,10 @@ class AsyncCollector(mp.Process):
                         )
                         vec_env, obs, squad_batch_helper = _recover_vec_env(vec_env, model)
                         stall_watchdog.reset()
-                        masks = np.array(vec_env.env_method("action_masks"))
+                        if last_action_masks is not None:
+                            masks = last_action_masks
+                        else:
+                            masks = np.array(vec_env.env_method("action_masks"))
                     obs_tensor = model.policy.obs_to_tensor(obs)[0]
                     masks_tensor = torch.as_tensor(masks).to(model.device)
 
@@ -1442,9 +1525,85 @@ class AsyncCollector(mp.Process):
             filled_steps = int(current_buffer.pos)
             total_env_steps = filled_steps * training_params.get("num_envs", 1)
             instant_fps = total_env_steps / rollout_wall_sec if rollout_wall_sec > 0 else 0
+            profile_note = ""
+            if os.environ.get("SC2_COLLECTOR_PROFILE", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            ) and hasattr(
+                vec_env, "has_attr"
+            ):
+                try:
+                    if vec_env.has_attr("pop_collector_profile_means"):
+                        profiles = vec_env.env_method("pop_collector_profile_means")
+                        merged: dict = {}
+                        counts: dict = {}
+                        for row in profiles or []:
+                            if not isinstance(row, dict):
+                                continue
+                            for key, val in row.items():
+                                merged[key] = merged.get(key, 0.0) + float(val)
+                                counts[key] = counts.get(key, 0) + 1
+                        means = {
+                            key: merged[key] / max(counts[key], 1) for key in merged
+                        }
+                        if means:
+                            # Largest first so creep/dps spikes are visible in the console.
+                            timed = {
+                                k: v
+                                for k, v in means.items()
+                                if k.endswith("_ms")
+                            }
+                            ranked = sorted(
+                                timed.items(), key=lambda kv: kv[1], reverse=True
+                            )
+                            # Keep the line readable; full set still goes to TensorBoard.
+                            top = ranked[:18]
+
+                            def _fmt_profile_kv(k: str, v: float) -> str:
+                                short = k.split("profile_", 1)[-1]
+                                if short.endswith("_rate"):
+                                    return f"{short}={v:.2f}"
+                                if short.endswith("_n"):
+                                    return f"{short}={v:.0f}"
+                                return f"{short}={v:.1f}ms"
+
+                            profile_note = "  " + " ".join(
+                                _fmt_profile_kv(k, v) for k, v in top
+                            )
+                            if len(ranked) > len(top):
+                                profile_note += f"  (+{len(ranked) - len(top)} more)"
+                            cache_bits = []
+                            for label, key in (
+                                ("tg", "collector/profile_cache_tg_rate"),
+                                ("tt", "collector/profile_cache_tt_rate"),
+                                ("wpn", "collector/profile_cache_wpn_rate"),
+                                ("gmap", "collector/profile_cache_gmap_rate"),
+                            ):
+                                if key in means:
+                                    cache_bits.append(f"{label}={means[key]:.2f}")
+                            if cache_bits:
+                                profile_note += "  cache_hit[" + " ".join(cache_bits) + "]"
+                            # SB3 HumanOutputFormat truncates keys (~36 chars). Long
+                            # ``obs_L_allied_health`` tags collide → ValueError on dump.
+                            signal_profile = {
+                                k: v
+                                for k, v in means.items()
+                                if len(k) <= 40
+                                and "/profile_obs_L_" not in k
+                            }
+                        else:
+                            signal_profile = {}
+                    else:
+                        signal_profile = {}
+                except Exception:
+                    signal_profile = {}
+            else:
+                signal_profile = {}
             _emit_collector_status(
                 f"Rollout #{rollout_idx} done: {total_env_steps} env-steps in "
                 f"{rollout_wall_sec:.1f}s  ({instant_fps:.0f} fps this rollout)"
+                f"{profile_note}"
             )
             rollout_idx += 1
 
@@ -1457,6 +1616,7 @@ class AsyncCollector(mp.Process):
                 "collector/instant_fps": instant_fps,
                 "rollout_policy_checksum": saved_checksum,
             }
+            signal_meta.update(signal_profile)
             
             if recent_ep_rewards:
                 signal_meta["rollout/ep_rew_mean"] = np.mean(recent_ep_rewards)
@@ -1494,8 +1654,10 @@ class AsyncCollector(mp.Process):
                     _vram_log(f"COLLECTOR after-empty_cache buffer={buffer_idx}")
 
             buffer_idx += 1
-
-        vec_env.close()
+        finally:
+            if isinstance(squad_batch_helper, SquadPointerRolloutHelper):
+                squad_batch_helper.close_peek_shm(unlink=True)
+            vec_env.close()
 
 class AsyncLearner:
     """
@@ -2252,6 +2414,9 @@ def run_single_async_training_session(
 
 def main():
     from train.train_pipeline import cleanup_worker_logs
+    from train.training_process_logging import configure_process_alert_logging
+
+    configure_process_alert_logging()
 
     config_dir = "config_universal"
     manager = UniversalPipelineManager(config_dir=config_dir)
