@@ -61,6 +61,43 @@ def test_load_optimizer_state_from_zip_restores_adam_moments(tmp_path):
         )
 
 
+def test_load_optimizer_pads_grown_input_columns_so_step_succeeds(tmp_path):
+    """Adam moments from a 48-wide encoder must pad to 49 before step()."""
+    old = nn.Linear(48, 8)
+    opt = torch.optim.Adam(old.parameters(), lr=1e-3)
+    for param in old.parameters():
+        param.grad = torch.ones_like(param)
+    opt.step()
+    old_exp = opt.state[old.weight]["exp_avg"].clone()
+    old_sq = opt.state[old.weight]["exp_avg_sq"].clone()
+    old_bias_exp = opt.state[old.bias]["exp_avg"].clone()
+
+    ckpt = tmp_path / "wide.zip"
+    _write_sb3_like_zip(ckpt, old.state_dict(), opt.state_dict())
+
+    fresh = nn.Linear(49, 8)
+    with torch.no_grad():
+        fresh.weight[:, :48] = old.weight
+        fresh.bias.copy_(old.bias)
+    fresh.optimizer = torch.optim.Adam(fresh.parameters(), lr=1e-3)
+
+    ok, reason = load_optimizer_state_from_zip(
+        MagicMock(policy=fresh), str(ckpt), "cpu"
+    )
+    assert ok, reason
+    exp = fresh.optimizer.state[fresh.weight]["exp_avg"]
+    sq = fresh.optimizer.state[fresh.weight]["exp_avg_sq"]
+    assert exp.shape == (8, 49)
+    assert torch.allclose(exp[:, :48], old_exp)
+    assert torch.allclose(sq[:, :48], old_sq)
+    assert torch.count_nonzero(exp[:, 48]) == 0
+    assert torch.count_nonzero(sq[:, 48]) == 0
+    assert torch.allclose(fresh.optimizer.state[fresh.bias]["exp_avg"], old_bias_exp)
+
+    fresh(torch.randn(2, 49)).sum().backward()
+    fresh.optimizer.step()
+
+
 def test_async_learner_restore_optimizer_only_on_same_level_resume():
     """Curriculum transfer loads weights but must not carry Adam from the prior level."""
     from train.async_train_universal import AsyncLearner

@@ -47,7 +47,7 @@ def test_expected_feature_names_present():
         USC.IS_ATTACKING, USC.IS_MOVING, USC.IS_CONCEALED, USC.IS_DETECTED,
         USC.ROLE_ATTACK, USC.ROLE_DEFEND,
         USC.AIR_DPS_NORM, USC.HAS_SPLASH, USC.ONETIME_UNIT, USC.IS_FRIENDLY_FIRE,
-        USC.IS_TEMPORARY, USC.CAN_AOE, USC.CAN_SNIPE,
+        USC.IS_TEMPORARY, USC.CAN_AOE, USC.CAN_SNIPE, USC.IS_NEURALED,
     ]
     for name in required:
         assert name in USC.FEATURES
@@ -64,6 +64,30 @@ def test_default_active_features_matches_catalog_order():
     names = USC.default_active_features()
     assert names == [n for n, _ in sorted(USC.FEATURES.items(), key=lambda kv: kv[1])]
     assert len(names) == USC.get_dim()
+
+
+def test_is_neuraled_starts_at_reversed_colossus_scenario():
+    """Earlier checkpoints keep the ctf_level_01 width. A repeated name is one channel."""
+    from pathlib import Path
+
+    from src.utils.config_manager import ConfigManager
+
+    config_dir = Path(__file__).resolve().parents[1] / "config_universal"
+    cm = ConfigManager(str(config_dir))
+    early = cm.get_cumulative_active_unit_scalars("ctf_level_01")
+    parent = cm.get_cumulative_active_unit_scalars(
+        "scenario_colossus_zealot_vs_swarmhost_hydra"
+    )
+    introduced = cm.get_cumulative_active_unit_scalars(
+        "scenario_colossus_zealot_vs_swarmhost_hydra_reversed"
+    )
+    later = cm.get_cumulative_active_unit_scalars("ctf_level_09")
+    assert USC.IS_NEURALED not in early
+    assert USC.IS_NEURALED not in parent
+    assert introduced.count(USC.IS_NEURALED) == 1
+    assert introduced[-1] == USC.IS_NEURALED
+    assert later.count(USC.IS_NEURALED) == 1
+    assert early == introduced[:-1]
 
 
 def test_resolve_active_features_empty_falls_back_to_catalog():

@@ -1529,6 +1529,24 @@ class MaskableRecurrentPPO(RecurrentPPO):
                     exp[:, : v.shape[1], :, :] = v
                     new_sd[tk] = exp
                 elif (
+                    tk.endswith("encoder.0.weight")
+                    and len(v.shape) == 2
+                    and len(c_sd[tk].shape) == 2
+                    and v.shape[0] == c_sd[tk].shape[0]
+                    and v.shape[1] < c_sd[tk].shape[1]
+                ):
+                    # Entity/enemy encoders are Sequential linears, so the key
+                    # does not contain "linear". A new trailing unit scalar
+                    # (is_neuraled) widens the input. Zero the new column so
+                    # the resumed policy matches the checkpoint.
+                    from src.utils.model_utils import expand_linear_input_columns
+
+                    logger.info(
+                        f"Zero-filling appended encoder inputs for {tk}: "
+                        f"{v.shape[1]} -> {c_sd[tk].shape[1]}"
+                    )
+                    new_sd[tk] = expand_linear_input_columns(v, c_sd[tk])
+                elif (
                     len(v.shape) == 2
                     and v.shape[1] < c_sd[tk].shape[1]
                     and v.shape[0] == c_sd[tk].shape[0]

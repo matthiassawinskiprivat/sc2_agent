@@ -9,6 +9,7 @@ from sc2.ids.unit_typeid import UnitTypeId
 from src.agent.squad_constants import MAX_SQUAD_ENEMIES, MAX_SQUAD_UNITS
 from src.agent.squad_target_masks import (
     build_enemy_target_mask,
+    build_squad_legality,
     build_squad_target_masks,
     zero_target_masks,
 )
@@ -551,3 +552,83 @@ def test_build_squad_legality_heal_and_repair_split():
     assert readiness["can_heal"][1] == 1.0
     assert readiness["can_repair"][1] == 0.0
     assert masks["heal_actor_mask"][1] == 1.0
+
+
+def _neuralled(unit, owner_id):
+    from sc2.ids.buff_id import BuffId
+
+    unit.buffs = {BuffId.NEURALPARASITE}
+    unit.owner_id = owner_id
+    return unit
+
+
+def test_borrowed_spellcaster_can_aoe_and_snipe_only():
+    """The neural owner may cast with the stolen body, not move or shoot it."""
+    ghost = _neuralled(
+        _unit(4, UnitTypeId.GHOST, energy=75.0, owner_id=1), 1
+    )
+    masks, readiness = build_squad_legality(
+        _slots(ghost),
+        enemy_race="protoss",
+        perspective_player_id=1,
+    )
+    assert masks["aoe_actor_mask"][0] == 1.0
+    assert masks["snipe_actor_mask"][0] == 1.0
+    assert readiness["can_aoe"][0] == 1.0
+    assert readiness["can_snipe"][0] == 1.0
+    assert masks["move_actor_mask"][0] == 0.0
+    assert masks["attack_actor_mask"][0] == 0.0
+
+
+def test_original_squad_cannot_cast_with_a_stolen_spellcaster():
+    ghost = _neuralled(
+        _unit(4, UnitTypeId.GHOST, energy=75.0, owner_id=2), 2
+    )
+    masks, readiness = build_squad_legality(
+        _slots(ghost),
+        enemy_race="protoss",
+        perspective_player_id=1,
+    )
+    assert masks["aoe_actor_mask"][0] == 0.0
+    assert masks["snipe_actor_mask"][0] == 0.0
+    assert readiness["can_aoe"][0] == 0.0
+    assert readiness["can_snipe"][0] == 0.0
+    assert masks["move_actor_mask"][0] == 1.0
+
+
+def test_borrowed_snipe_does_not_target_the_stolen_body():
+    from src.agent.squad_target_masks import build_snipe_target_mask
+
+    caster = _neuralled(
+        _unit(4, UnitTypeId.HIGHTEMPLAR, energy=50.0, owner_id=1), 1
+    )
+    body = _neuralled(
+        _unit(4, UnitTypeId.HIGHTEMPLAR, energy=50.0, owner_id=1), 1
+    )
+    other = _unit(8, UnitTypeId.HIGHTEMPLAR, energy=50.0, owner_id=2)
+    enemies = [body, other] + [None] * (MAX_SQUAD_ENEMIES - 2)
+    mask = build_snipe_target_mask(enemies, _slots(caster), casters=[caster])
+    assert mask[0] == 0.0
+    assert mask[1] == 1.0
+
+
+def test_two_stolen_battlecruisers_can_yamato_each_other():
+    """A neuralled body is a legal snipe target. A real friendly is not."""
+    from src.agent.squad_target_masks import build_snipe_target_mask
+
+    first = _neuralled(_unit(1, UnitTypeId.BATTLECRUISER, owner_id=1), 1)
+    second = _neuralled(_unit(2, UnitTypeId.BATTLECRUISER, owner_id=1), 1)
+    friendly = _unit(3, UnitTypeId.HYDRALISK, owner_id=1)
+    terran = _unit(4, UnitTypeId.BATTLECRUISER, owner_id=2)
+    enemies = [first, second, friendly, terran] + [None] * (MAX_SQUAD_ENEMIES - 4)
+    mask = build_snipe_target_mask(
+        enemies, _slots(first, second), casters=[first, second]
+    )
+    assert mask[0] == 1.0  # the other stolen ship can Yamato this one
+    assert mask[1] == 1.0
+    assert mask[2] == 0.0  # own army, not stolen
+    assert mask[3] == 1.0
+
+    alone = build_snipe_target_mask(enemies, _slots(first), casters=[first])
+    assert alone[0] == 0.0  # a caster does not Yamato itself
+    assert alone[1] == 1.0

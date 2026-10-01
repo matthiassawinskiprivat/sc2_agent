@@ -452,6 +452,36 @@ def test_issue_attack_at_point_p2_caster_targets_trainee_not_allies():
     unit.attack.assert_called_once_with(trainee)
 
 
+def test_issue_attack_at_point_hard_targets_neuraled_same_owner():
+    """Controller and original owner can both hard-target a neuralled body."""
+    from sc2.ids.buff_id import BuffId
+    from sc2.position import Point2
+
+    stolen = MagicMock()
+    stolen.tag = 7
+    stolen.owner_id = 1
+    stolen.position = Point2((12.05, 34.0))
+    stolen.is_alive = True
+    stolen.is_structure = False
+    stolen.buffs = {BuffId.NEURALPARASITE}
+
+    bot = MagicMock()
+    bot.all_units = [stolen]
+    bot.units = [stolen]
+    bot.enemy_units = []
+    bot.structures = []
+    bot.enemy_structures = []
+
+    caster = MagicMock()
+    caster.tag = 1
+    caster.type_id = UnitTypeId.ROACH
+    caster.owner_id = 1
+    target = Point2((12.0, 34.0))
+
+    assert issue_attack_at_point(bot, caster, target) is stolen
+    caster.attack.assert_called_once_with(stolen)
+
+
 def test_issue_attack_at_point_p1_ignores_allies_leaked_into_enemy_units():
     """P1 must not hard-target owner-1 units even if they appear in enemy_units."""
     from sc2.position import Point2
@@ -920,6 +950,60 @@ def test_unit_can_aoe_respects_ability_cooldown_cache():
     assert unit_can_aoe(ravager, bot=bot) is False
 
 
+def test_unit_is_neuraled_is_the_control_buff_only():
+    from sc2.ids.buff_id import BuffId
+    from src.utils.unit_feature_helpers import unit_is_neuraled
+
+    stolen = MagicMock()
+    stolen.buffs = {BuffId.NEURALPARASITE}
+    caster = MagicMock()
+    caster.buffs = {BuffId.NEURALPARASITECHILDREN}
+    windup = MagicMock()
+    windup.buffs = [BuffId.NEURALPARASITEWAIT]
+    raw = MagicMock()
+    raw.buffs = [BuffId.NEURALPARASITE.value]
+    plain = MagicMock()
+    plain.buffs = []
+
+    assert unit_is_neuraled(stolen) is True
+    assert unit_is_neuraled(raw) is True
+    assert unit_is_neuraled(caster) is False
+    assert unit_is_neuraled(windup) is False
+    assert unit_is_neuraled(plain) is False
+    assert unit_is_neuraled(MagicMock()) is False
+    assert unit_is_neuraled(None) is False
+
+
+def test_unit_neural_remaining_tracks_the_visible_timer():
+    from sc2.ids.buff_id import BuffId
+    from src.utils.unit_feature_helpers import unit_neural_remaining
+
+    stolen = MagicMock()
+    stolen.buffs = {BuffId.NEURALPARASITE}
+    stolen.buff_duration_remain = 336
+    stolen.buff_duration_max = 336
+    assert unit_neural_remaining(stolen) == pytest.approx(1.0)
+
+    stolen.buff_duration_remain = 84
+    assert unit_neural_remaining(stolen) == pytest.approx(0.25)
+
+    stolen.buff_duration_remain = 0
+    assert unit_neural_remaining(stolen) == pytest.approx(0.0)
+
+    # Buff still up, client reported no timer bar: stay at 1 until it drops.
+    stolen.buff_duration_remain = 0
+    stolen.buff_duration_max = 0
+    assert unit_neural_remaining(stolen) == pytest.approx(1.0)
+
+    # A stim timer on a unit that is not neuralled must not fill the channel.
+    marine = MagicMock()
+    marine.buffs = []
+    marine.buff_duration_remain = 50
+    marine.buff_duration_max = 100
+    assert unit_neural_remaining(marine) == pytest.approx(0.0)
+    assert unit_neural_remaining(None) == pytest.approx(0.0)
+
+
 def test_unit_can_snipe_energy_upgrade_and_types():
     from sc2.ids.upgrade_id import UpgradeId
     from src.utils.unit_feature_helpers import (
@@ -1022,6 +1106,34 @@ def test_issue_snipe_stamps_cooldown_by_default():
     assert issue_snipe_on_unit(bot, ghost, target) is True
     assert 33 in bot._snipe_ability_ready_after_loop
     assert unit_can_snipe(ghost, bot=bot) is False
+
+
+def test_stolen_battlecruisers_can_yamato_each_other_but_not_real_friendlies():
+    from sc2.ids.buff_id import BuffId
+    from src.utils.unit_feature_helpers import issue_snipe_on_unit
+
+    def _bc(tag):
+        unit = MagicMock()
+        unit.tag = tag
+        unit.type_id = UnitTypeId.BATTLECRUISER
+        unit.owner_id = 1
+        unit.is_structure = False
+        unit.buffs = {BuffId.NEURALPARASITE}
+        return unit
+
+    first = _bc(1)
+    second = _bc(2)
+    friendly = MagicMock()
+    friendly.tag = 3
+    friendly.type_id = UnitTypeId.MARINE
+    friendly.owner_id = 1
+    friendly.is_structure = False
+    friendly.buffs = set()
+    bot = MagicMock()
+
+    assert issue_snipe_on_unit(bot, first, second, stamp_cooldown=False) is True
+    assert issue_snipe_on_unit(bot, first, friendly, stamp_cooldown=False) is False
+    assert issue_snipe_on_unit(bot, first, first, stamp_cooldown=False) is False
 
 
 def test_issue_aoe_reissue_does_not_restamp():
@@ -1305,3 +1417,43 @@ def test_issue_aoe_at_point_marine_noop():
     bot.do.assert_not_called()
     unit.attack.assert_not_called()
     unit.move.assert_not_called()
+
+
+def test_borrowed_spellcaster_tags_and_command_gate():
+    from sc2.ids.buff_id import BuffId
+    from src.agent.squad_constants import MAX_SQUAD_UNITS
+    from src.utils.unit_feature_helpers import (
+        borrowed_neural_spellcaster_tags,
+        neural_command_allowed,
+        squad_pointer_tags,
+    )
+
+    templar = MagicMock()
+    templar.tag = 20
+    templar.type_id = UnitTypeId.HIGHTEMPLAR
+    templar.owner_id = 1
+    templar.is_structure = False
+    templar.buffs = {BuffId.NEURALPARASITE}
+    zealot = MagicMock()
+    zealot.tag = 21
+    zealot.type_id = UnitTypeId.ZEALOT
+    zealot.owner_id = 1
+    zealot.is_structure = False
+    zealot.buffs = {BuffId.NEURALPARASITE}
+
+    assert borrowed_neural_spellcaster_tags([templar, zealot], 1, [10]) == [20]
+    assert borrowed_neural_spellcaster_tags([templar], 2, [10]) == []
+    assert borrowed_neural_spellcaster_tags([templar], 1, [20]) == []
+
+    tags = squad_pointer_tags([30, 10], [20])
+    assert tags == [10, 30, 20]
+    full = squad_pointer_tags(list(range(MAX_SQUAD_UNITS)), [99])
+    assert 99 not in full
+    assert len(full) == MAX_SQUAD_UNITS
+
+    assert neural_command_allowed(templar, 1, "aoe_local") is True
+    assert neural_command_allowed(templar, 1, "snipe") is True
+    assert neural_command_allowed(templar, 1, "move") is False
+    assert neural_command_allowed(templar, 1, "attack_unit") is False
+    assert neural_command_allowed(templar, 2, "aoe_local") is False
+    assert neural_command_allowed(templar, 2, "move") is True

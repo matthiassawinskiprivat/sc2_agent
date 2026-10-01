@@ -83,3 +83,26 @@ def test_graft_model_weights_new_action_bias_is_neutral():
     new_bias = new_state_dict["action_net.bias"]
     assert torch.allclose(new_bias[:2], old_bias)
     assert torch.allclose(new_bias[2:], torch.zeros(2))
+
+
+def test_graft_model_weights_zero_fills_new_unit_scalar_column():
+    """A trailing unit scalar (is_neuraled, 48 → 49) must not disturb old columns."""
+    old = torch.arange(8 * 48, dtype=torch.float32).reshape(8, 48)
+    keys = (
+        "features_extractor.entity_encoder.encoder.0.weight",
+        "features_extractor.enemy_encoder.encoder.0.weight",
+    )
+    state_dict = {key: old.clone() for key in keys}
+    target_state = {key: torch.randn(8, 49) for key in keys}
+
+    grafted = graft_model_weights(
+        state_dict,
+        new_in_channels=1,
+        target_state_dict=target_state,
+    )
+
+    for key in keys:
+        weight = grafted[key]
+        assert weight.shape == (8, 49)
+        assert torch.equal(weight[:, :48], old)
+        assert torch.equal(weight[:, 48], torch.zeros(8))

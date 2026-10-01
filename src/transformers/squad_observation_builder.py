@@ -51,6 +51,8 @@ from src.utils.unit_feature_helpers import (
     unit_cargo_size_norm,
     unit_cargo_used_norm,
     unit_is_immobile,
+    unit_is_neuraled,
+    unit_neural_remaining,
     unit_is_transport,
     weapon_range_upgrade_deltas,
 )
@@ -327,6 +329,16 @@ class SquadObservationBuilder:
             tag = getattr(unit, "tag", None)
             if tag is not None:
                 tags.append(int(tag))
+        # Neural Parasite flips live owner onto the controller, which would hide
+        # the body from that player's enemy pointer. Both sides still attack it.
+        for unit in _unit_tag_index(bot).values():
+            if unit is None or getattr(unit, "is_structure", False):
+                continue
+            if not unit_is_neuraled(unit):
+                continue
+            tag = getattr(unit, "tag", None)
+            if tag is not None:
+                tags.append(int(tag))
         return sorted(set(tags))[:MAX_SQUAD_ENEMIES]
 
     def build(
@@ -453,6 +465,7 @@ class SquadObservationBuilder:
                 compute_cloak=self._compute_can_cloak,
                 compute_uncloak=self._compute_can_uncloak,
                 compute_move=self._compute_can_move,
+                perspective_player_id=int(perspective_player_id),
             )
             # Reuse ready casters from snipe_actor_mask — do not re-run unit_can_snipe.
             if self._compute_can_snipe:
@@ -674,6 +687,9 @@ class SquadObservationBuilder:
 
         # Timed-lifetime / hallucination flag (per-instance; not type-cacheable).
         catalog[_F[USC.IS_TEMPORARY]] = float(unit_is_temporary(unit))
+        # Stolen body vs real own army. 1 when Neural Parasite lands, falling to 0
+        # as the visible timer runs out. Same value on enemy rows.
+        catalog[_F[USC.IS_NEURALED]] = unit_neural_remaining(unit)
 
         # --- Group E: Positional / relational ---
         px = float(unit.position.x)

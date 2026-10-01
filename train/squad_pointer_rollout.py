@@ -7,6 +7,8 @@ Recurrent state resets on episode done only — not on focal-unit change.
 
 from __future__ import annotations
 
+import os
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -118,6 +120,39 @@ class SquadPointerRolloutHelper:
     def clear_env(self, env_idx: int) -> None:
         pass
 
+    def collector_profile_enabled(self) -> bool:
+        """Opt-in wall timers for the collector process (``SC2_COLLECTOR_PROFILE``)."""
+        flag = getattr(self, "_profile_flag", None)
+        if flag is None:
+            raw = os.environ.get("SC2_COLLECTOR_PROFILE", "").strip().lower()
+            flag = raw in ("1", "true", "yes")
+            self._profile_flag = flag
+        return bool(flag)
+
+    def profile_add(self, key: str, seconds: float) -> None:
+        if not self.collector_profile_enabled():
+            return
+        sums = getattr(self, "_profile_sums", None)
+        if sums is None:
+            sums = {}
+            self._profile_sums = sums
+            self._profile_counts = {}
+        sums[key] = sums.get(key, 0.0) + float(seconds)
+        counts = self._profile_counts
+        counts[key] = counts.get(key, 0) + 1
+
+    def pop_collector_profile_means(self) -> Dict[str, float]:
+        """Mean milliseconds per collector-side slice since the last pop."""
+        sums = getattr(self, "_profile_sums", None) or {}
+        counts = getattr(self, "_profile_counts", None) or {}
+        out = {
+            f"collector/profile_{key}_ms": 1000.0 * float(sums[key]) / max(counts.get(key, 1), 1)
+            for key in sums
+        }
+        self._profile_sums = {}
+        self._profile_counts = {}
+        return out
+
     def resolve_rollout(
         self,
         *,
@@ -167,6 +202,8 @@ class SquadPointerRolloutHelper:
                 lstm_starts[j] = float(last_dones[env_idx])
 
             pre_lstm_by_env: Dict[int, Optional[RNNStates]] = {}
+            # Include ``.cpu()`` so the sample waits for the GPU forward to finish.
+            t_fwd = time.perf_counter() if self.collector_profile_enabled() else None
             if is_recurrent:
                 sub_starts = torch.as_tensor(lstm_starts, dtype=torch.float32, device=device)
                 sub_lstm = (
@@ -191,6 +228,8 @@ class SquadPointerRolloutHelper:
                 )
 
             act_np = act_t.cpu().numpy()
+            if t_fwd is not None:
+                self.profile_add("policy_fwd", time.perf_counter() - t_fwd)
             for j, env_idx in enumerate(need_forward):
                 step_actions[env_idx] = act_np[j]
 
@@ -223,12 +262,17 @@ class SquadPointerRolloutHelper:
         """Gather opponent obs from workers, one CUDA forward, scatter actions."""
         if not hasattr(vec_env, "env_method"):
             return
+        t_peek = time.perf_counter() if self.collector_profile_enabled() else None
         try:
             if not self._cached_has_attr(vec_env, "peek_opponent_squad_pointer"):
                 return
             payloads = vec_env.env_method("peek_opponent_squad_pointer")
         except Exception:
+            if t_peek is not None:
+                self.profile_add("peek", time.perf_counter() - t_peek)
             return
+        if t_peek is not None:
+            self.profile_add("peek", time.perf_counter() - t_peek)
         if not payloads:
             return
         ready: List[tuple] = []
@@ -246,6 +290,7 @@ class SquadPointerRolloutHelper:
         mask_list = [p["mask"] for _, p in ready]
         lstm_list = [p.get("lstm") for _, p in ready]
         starts = [bool(p.get("episode_start", True)) for _, p in ready]
+        t_opp = time.perf_counter() if self.collector_profile_enabled() else None
         try:
             actions, new_lstms = opponent_pointer_vec_predict(
                 model,
@@ -256,25 +301,34 @@ class SquadPointerRolloutHelper:
                 deterministic=False,
             )
         except Exception:
+            if t_opp is not None:
+                self.profile_add("opp_fwd", time.perf_counter() - t_opp)
             return
+        if t_opp is not None:
+            self.profile_add("opp_fwd", time.perf_counter() - t_opp)
         packed = pack_pending_opponent_actions(num_envs, ready, actions, new_lstms)
+        t_send = time.perf_counter() if self.collector_profile_enabled() else None
         try:
-            if self._cached_has_attr(vec_env, "set_pending_opponent_squad_actions"):
-                vec_env.env_method("set_pending_opponent_squad_actions", packed)
-                return
-        except Exception:
-            self._vec_has_attr["set_pending_opponent_squad_actions"] = False
-        for env_idx, item in enumerate(packed):
-            if item is None:
-                continue
-            action, lstm, pool_idx = item
             try:
-                vec_env.env_method(
-                    "set_pending_opponent_squad_action",
-                    action,
-                    lstm,
-                    pool_idx,
-                    indices=[env_idx],
-                )
+                if self._cached_has_attr(vec_env, "set_pending_opponent_squad_actions"):
+                    vec_env.env_method("set_pending_opponent_squad_actions", packed)
+                    return
             except Exception:
-                return
+                self._vec_has_attr["set_pending_opponent_squad_actions"] = False
+            for env_idx, item in enumerate(packed):
+                if item is None:
+                    continue
+                action, lstm, pool_idx = item
+                try:
+                    vec_env.env_method(
+                        "set_pending_opponent_squad_action",
+                        action,
+                        lstm,
+                        pool_idx,
+                        indices=[env_idx],
+                    )
+                except Exception:
+                    return
+        finally:
+            if t_send is not None:
+                self.profile_add("peek_send", time.perf_counter() - t_send)

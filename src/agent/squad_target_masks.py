@@ -34,6 +34,8 @@ from src.utils.unit_feature_helpers import (
     unit_can_unload,
     unit_in_tactical_fovea,
     unit_is_immobile,
+    neural_spell_role,
+    snipe_same_owner_blocked,
     unit_is_wounded,
 )
 
@@ -103,6 +105,7 @@ def build_squad_legality(
     compute_cloak: bool = True,
     compute_uncloak: bool = True,
     compute_move: bool = True,
+    perspective_player_id: Optional[int] = None,
 ) -> tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """Actor/target masks plus per-slot readiness for unit scalars.
 
@@ -166,29 +169,39 @@ def build_squad_legality(
             can_snipe = unit_can_snipe(unit, upgrades=upg, bot=bot)
             readiness["can_snipe"][slot] = float(can_snipe)
 
+        # Neural Parasite: the live owner borrows aoe/snipe only. The original
+        # squad keeps the slot for move/attack but must not spend the spell.
+        spell_role = neural_spell_role(unit, perspective_player_id)
+        if spell_role == "stolen_away":
+            readiness["can_aoe"][slot] = 0.0
+            readiness["can_snipe"][slot] = 0.0
+
         controllable = _is_controllable(unit)
         if not controllable:
             continue
 
-        if compute_heal and (can_heal or can_repair):
-            heal_actor[slot] = 1.0
-            healers.append(unit)
-        if compute_load and can_load:
-            load_candidates.append((slot, unit))
-        if compute_attack and unit_can_attack(unit, upg):
-            attack_actor[slot] = 1.0
-        if compute_aoe and can_aoe:
-            aoe_actor[slot] = 1.0
-        if compute_snipe and can_snipe:
-            snipe_actor[slot] = 1.0
-        if compute_unload and can_unload:
-            unload_actor[slot] = 1.0
-        if compute_cloak and (can_cloak or unit_can_burrow(unit, upg)):
-            cloak_actor[slot] = 1.0
-        if compute_uncloak and unit_can_reveal(unit):
-            uncloak_actor[slot] = 1.0
-        if compute_move and not is_immobile:
-            move_actor[slot] = 1.0
+        borrowed = spell_role == "borrowed"
+        if not borrowed:
+            if compute_heal and (can_heal or can_repair):
+                heal_actor[slot] = 1.0
+                healers.append(unit)
+            if compute_load and can_load:
+                load_candidates.append((slot, unit))
+            if compute_attack and unit_can_attack(unit, upg):
+                attack_actor[slot] = 1.0
+            if compute_unload and can_unload:
+                unload_actor[slot] = 1.0
+            if compute_cloak and (can_cloak or unit_can_burrow(unit, upg)):
+                cloak_actor[slot] = 1.0
+            if compute_uncloak and unit_can_reveal(unit):
+                uncloak_actor[slot] = 1.0
+            if compute_move and not is_immobile:
+                move_actor[slot] = 1.0
+        if spell_role != "stolen_away":
+            if compute_aoe and can_aoe:
+                aoe_actor[slot] = 1.0
+            if compute_snipe and can_snipe:
+                snipe_actor[slot] = 1.0
 
     if compute_heal and healers:
         for slot, unit in enumerate(slots):
@@ -242,6 +255,7 @@ def build_squad_target_masks(
     compute_cloak: bool = True,
     compute_uncloak: bool = True,
     compute_move: bool = True,
+    perspective_player_id: Optional[int] = None,
 ) -> Dict[str, np.ndarray]:
     """Actor/target legality arrays for the allied squad slots.
 
@@ -293,6 +307,7 @@ def build_squad_target_masks(
         compute_cloak=compute_cloak,
         compute_uncloak=compute_uncloak,
         compute_move=compute_move,
+        perspective_player_id=perspective_player_id,
     )
     return masks
 
@@ -341,9 +356,12 @@ def build_snipe_target_mask(
         if enemy is None:
             continue
         for caster in ready:
-            if snipe_target_is_eligible(caster, enemy):
-                mask[slot] = 1.0
-                break
+            if not snipe_target_is_eligible(caster, enemy):
+                continue
+            if snipe_same_owner_blocked(caster, enemy):
+                continue
+            mask[slot] = 1.0
+            break
     return mask
 
 

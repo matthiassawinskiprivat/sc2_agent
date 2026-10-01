@@ -411,6 +411,50 @@ def test_ability_query_units_uses_pool_tags(squad_env):
     assert id(u201) in tags
 
 
+def test_refresh_bot_state_profiles_gamestate(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env._collector_profile_flag = True
+    obs = MagicMock()
+    obs.observation = MagicMock()
+    squad_env.bot.client.observation = AsyncMock(return_value=obs)
+    squad_env.bot._prepare_step = MagicMock()
+    squad_env.bot._proto_game_info = None
+    squad_env.bot._available_abilities_by_tag = {}
+    squad_env._note_visible_heal_tumors = MagicMock()
+
+    with patch(
+        "src.utils.sc2_observation_compat.game_state_from_response_observation",
+        return_value=MagicMock(),
+    ):
+        asyncio.run(CaptureTheFlagSingleEnv._refresh_bot_state(squad_env))
+    means = CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env)
+    assert "collector/profile_observation_ms" in means
+    assert "collector/profile_gamestate_ms" in means
+    assert means["collector/profile_gamestate_ms"] >= 0.0
+
+
+def test_flush_and_reissue_profile_order_path(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env._collector_profile_flag = True
+    squad_env.bot.actions = [MagicMock()]
+    squad_env.bot.client.actions = AsyncMock()
+    squad_env.player_units = {1: [], 2: []}
+    squad_env.bot._unit_last_order = {}
+
+    async def _run():
+        await CaptureTheFlagSingleEnv._reissue_non_squad_orders(squad_env, set())
+        await CaptureTheFlagSingleEnv._flush_bot_actions(squad_env)
+
+    asyncio.run(_run())
+    means = CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env)
+    assert "collector/profile_reissue_ms" in means
+    assert "collector/profile_action_flush_ms" in means
+    assert squad_env.bot.actions == []
+    squad_env.bot.client.actions.assert_awaited()
+
+
 def test_pop_collector_profile_means(squad_env):
     from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
 
@@ -441,3 +485,63 @@ def test_pop_collector_profile_cache_hit_rates(squad_env):
     assert means["collector/profile_cache_wpn_rate"] == pytest.approx(1.0)
     assert means["collector/profile_cache_gmap_rate"] == pytest.approx(2.0 / 3.0)
     assert CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env) == {}
+
+
+def test_controller_pointer_appends_stolen_spellcaster_after_native_tags():
+    from sc2.ids.buff_id import BuffId
+    from sc2.ids.unit_typeid import UnitTypeId
+
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env.unit_pools_config = [{"race": "zerg"}]
+    env._pool_alive_tags = lambda idx: [30, 10]
+    env._pool_player_id = lambda pool: 1
+    templar = MagicMock()
+    templar.tag = 20
+    templar.type_id = UnitTypeId.HIGHTEMPLAR
+    templar.owner_id = 1
+    templar.is_structure = False
+    templar.buffs = {BuffId.NEURALPARASITE}
+    zealot = MagicMock()
+    zealot.tag = 21
+    zealot.type_id = UnitTypeId.ZEALOT
+    zealot.owner_id = 1
+    zealot.is_structure = False
+    zealot.buffs = {BuffId.NEURALPARASITE}
+    env._all_units_by_tag = lambda: {20: templar, 21: zealot}
+    assert CaptureTheFlagSingleEnv._squad_pointer_tags(env, 0) == [10, 30, 20]
+
+
+def test_stolen_caster_snipe_is_issued_only_for_the_controller():
+    from sc2.ids.buff_id import BuffId
+    from sc2.ids.unit_typeid import UnitTypeId
+
+    from src.agent.ctf_bot import CaptureTheFlagBot
+
+    stolen = MagicMock()
+    stolen.tag = 7
+    stolen.type_id = UnitTypeId.HIGHTEMPLAR
+    stolen.owner_id = 1
+    stolen.buffs = {BuffId.NEURALPARASITE}
+    stolen.position = MagicMock()
+    enemy = MagicMock()
+    enemy.tag = 8
+    enemy.owner_id = 2
+    enemy.energy_max = 200.0
+    enemy.is_structure = False
+    enemy.is_biological = False
+    enemy.position = MagicMock()
+    bot = MagicMock()
+    bot.all_units.find_by_tag.side_effect = lambda tag: {7: stolen, 8: enemy}[int(tag)]
+    bot._unit_last_order = {}
+
+    CaptureTheFlagBot._apply_unit_target_command(
+        bot, [7], head_name="snipe", target_unit_tag=8, perspective_player_id=1
+    )
+    bot.do.assert_called()
+    bot.do.reset_mock()
+    CaptureTheFlagBot._apply_unit_target_command(
+        bot, [7], head_name="snipe", target_unit_tag=8, perspective_player_id=2
+    )
+    bot.do.assert_not_called()

@@ -606,8 +606,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         obs = await self.bot.client.observation()
         if t0 is not None:
             self._profile_add("observation", time.perf_counter() - t0)
+        t_gs = time.perf_counter() if profile else None
         state = game_state_from_response_observation(obs.observation)
         self.bot._prepare_step(state, self.bot._proto_game_info)
+        if t_gs is not None:
+            self._profile_add("gamestate", time.perf_counter() - t_gs)
         # Attack cooldown / retreat / attack_actor_mask read ``weapon_cooldown``
         # from this observation proto — not the spell-ability RPC below.
         # Default: skip ``query_available_abilities``. Heal/AoE/snipe masks
@@ -1718,6 +1721,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 tags.extend(self._pool_alive_tags(idx))
         by_tag = self._all_units_by_tag()
         finder = getattr(getattr(bot, "all_units", None), "find_by_tag", None)
+        if self.unit_pools_config and by_tag:
+            from src.utils.unit_feature_helpers import borrowed_neural_spellcaster_tags
+
+            for idx in range(len(self.unit_pools_config)):
+                native = self._pool_alive_tags(idx)
+                player_id = self._pool_player_id(self.unit_pools_config[idx])
+                tags.extend(
+                    borrowed_neural_spellcaster_tags(
+                        by_tag.values(), player_id, native
+                    )
+                )
         if not tags:
             if by_tag:
                 return list(by_tag.values())
@@ -1913,11 +1927,38 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         if builder is not None:
             builder.clear_global_cache()
 
+    def _squad_pointer_tags(self, pool_idx: int) -> List[int]:
+        """Pool tags plus spellcasters this player holds under Neural Parasite.
+
+        Borrowed casters are appended after the native tags so existing slot
+        indices do not shift when the link starts. They are not added to
+        ``unit_pool_index``; win checks and the other squad stay on spawn pools.
+        """
+        from src.utils.unit_feature_helpers import (
+            borrowed_neural_spellcaster_tags,
+            squad_pointer_tags,
+        )
+
+        native = self._pool_alive_tags(pool_idx)
+        if (
+            not self.unit_pools_config
+            or pool_idx < 0
+            or pool_idx >= len(self.unit_pools_config)
+        ):
+            return squad_pointer_tags(native, [])
+        player_id = self._pool_player_id(self.unit_pools_config[pool_idx])
+        borrowed = borrowed_neural_spellcaster_tags(
+            self._all_units_by_tag().values(), player_id, native
+        )
+        return squad_pointer_tags(native, borrowed)
+
     def _squad_unit_mask_for_pool(self, pool_idx: int) -> np.ndarray:
         from src.agent.squad_constants import MAX_SQUAD_UNITS
 
         mask = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
-        for slot, _tag in enumerate(sorted(self._pool_alive_tags(pool_idx))[:MAX_SQUAD_UNITS]):
+        for slot, _tag in enumerate(self._squad_pointer_tags(pool_idx)):
+            if slot >= MAX_SQUAD_UNITS:
+                break
             mask[slot] = 1.0
         return mask
 
@@ -1959,7 +2000,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             obs = builder.zero_observation()
         else:
             pool = self.unit_pools_config[pool_idx]
-            tags = self._pool_alive_tags(pool_idx)
+            tags = self._squad_pointer_tags(pool_idx)
             player_id = self._pool_player_id(pool)
             hlc = pool.get("high_level_command", "attack")
             playable = (256.0, 256.0)
@@ -2622,13 +2663,15 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         unit_mask = self._squad_unit_mask_for_pool(pool_idx)
         obs = self._get_squad_observation_for_pool(pool_idx)
+        profile = self._collector_profile_enabled()
+        t_apply = time.perf_counter() if profile else None
         decoded = decode_squad_action(
             action,
             unit_mask,
             config=self._squad_selection_config(),
             obs=obs,
         )
-        sorted_tags = sorted(self._pool_alive_tags(pool_idx))
+        sorted_tags = self._squad_pointer_tags(pool_idx)
         selected = selected_tags_from_indices(
             sorted_tags, decoded.selection.selected_indices
         )
@@ -2650,6 +2693,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             perspective_player_id=player_id,
             target_unit_tag=target_unit_tag,
         )
+        if t_apply is not None:
+            self._profile_add("orders_apply", time.perf_counter() - t_apply)
         return list(selected)
 
     async def _predict_opponent_squad_batch(self, tags: List[int]) -> List[np.ndarray]:
@@ -2885,6 +2930,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         Cloak/burrow categoricals are one-shot toggles — do not reissue them
         (they store ``target=None`` and would otherwise become ``move(None)``).
         """
+        t_reissue = (
+            time.perf_counter() if self._collector_profile_enabled() else None
+        )
         skip_player_ids = skip_player_ids or set()
         all_alive = self.player_units[1] + self.player_units[2]
         by_tag = self._all_units_by_tag()
@@ -2920,10 +2968,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 set_flags = getattr(self.bot, "_set_last_order_flags", None)
                 if callable(set_flags):
                     set_flags(tag, moved=True, attacked=False)
+        if t_reissue is not None:
+            self._profile_add("reissue", time.perf_counter() - t_reissue)
 
     async def _flush_bot_actions(self) -> None:
         if hasattr(self.bot, "actions") and self.bot.actions:
+            t_flush = (
+                time.perf_counter() if self._collector_profile_enabled() else None
+            )
             await self.bot.client.actions(self.bot.actions)
+            if t_flush is not None:
+                self._profile_add("action_flush", time.perf_counter() - t_flush)
             self.bot.actions = []
 
     async def _advance_squad_index(self) -> None:

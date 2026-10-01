@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 try:
     from sc2.ids.ability_id import AbilityId
+    from sc2.ids.buff_id import BuffId
     from sc2.ids.unit_typeid import UnitTypeId
     from sc2.ids.upgrade_id import UpgradeId
     _SC2_AVAILABLE = True
@@ -402,6 +403,173 @@ def uses_aoe_spell(unit: "Unit") -> bool:
     return tid in _AOE_POINT_ABILITIES or tid in _AOE_AIR_UNIT_ABILITIES
 
 
+# Control buff on the stolen body. The caster carries NEURALPARASITECHILDREN
+# while the link is up, and NEURALPARASITEWAIT is only the cast windup.
+_NEURAL_CONTROL_BUFF = BuffId.NEURALPARASITE if _SC2_AVAILABLE else None
+
+
+def unit_is_neuraled(unit: "Unit") -> bool:
+    """True when *unit* is the body under Infestor Neural Parasite control.
+
+    Own army units stay 0, including the Infestor that cast it. The cast-windup
+    buff and the caster's child buff are not this flag.
+    """
+    if unit is None or _NEURAL_CONTROL_BUFF is None:
+        return False
+    buffs = getattr(unit, "buffs", None)
+    # python-sc2 exposes a set of BuffId. MagicMock units have no real buff list.
+    if not isinstance(buffs, (list, tuple, set, frozenset)):
+        return False
+    control = _NEURAL_CONTROL_BUFF
+    control_value = getattr(control, "value", None)
+    for buff in buffs:
+        if buff == control:
+            return True
+        if (
+            isinstance(buff, int)
+            and not isinstance(buff, bool)
+            and buff == control_value
+        ):
+            return True
+        value = getattr(buff, "value", None)
+        if isinstance(value, int) and not isinstance(value, bool) and value == control_value:
+            return True
+    return False
+
+
+def neural_spell_role(unit: "Unit", perspective_player_id: Optional[int]) -> str:
+    """Who may cast with a Neural Parasite body from this squad's point of view.
+
+    ``own`` — not neuralled, or the caller did not pass a perspective.
+    ``borrowed`` — live owner is this squad, so it may cast the stolen spells.
+    ``stolen_away`` — the body still sits in the original squad, which must not cast.
+    """
+    if perspective_player_id is None or not unit_is_neuraled(unit):
+        return "own"
+    try:
+        owner = int(getattr(unit, "owner_id", 0) or 0)
+    except (TypeError, ValueError):
+        return "own"
+    if owner == int(perspective_player_id):
+        return "borrowed"
+    return "stolen_away"
+
+
+def neural_command_allowed(
+    unit: "Unit", perspective_player_id: Optional[int], head_name: str
+) -> bool:
+    """Spell orders follow the live neural owner; other orders do not.
+
+    The controller may issue ``aoe_local`` / ``snipe`` on the stolen caster and
+    nothing else. The original squad keeps move and attack, but not those spells.
+    """
+    role = neural_spell_role(unit, perspective_player_id)
+    if role == "own":
+        return True
+    is_spell = "aoe" in str(head_name) or "snipe" in str(head_name)
+    if role == "borrowed":
+        return is_spell
+    return not is_spell
+
+
+def unit_is_squad_spellcaster(unit: "Unit") -> bool:
+    """True when this type has an ``aoe_local`` or ``snipe`` ability."""
+    tid = getattr(unit, "type_id", None)
+    return tid in _AOE_ENERGY_COST or tid in _SNIPE_ENERGY_COST
+
+
+def borrowed_neural_spellcaster_tags(
+    units: Sequence[Any],
+    perspective_player_id: int,
+    native_tags: Sequence[int],
+) -> List[int]:
+    """Tags of spellcasters this player controls via Neural Parasite.
+
+    Native pool tags are excluded. Non-casters (a neuralled Zealot) are excluded
+    so they do not take a pointer slot the policy cannot cast with.
+    """
+    native = {int(tag) for tag in native_tags}
+    found: List[int] = []
+    for unit in units:
+        if unit is None or not unit_is_neuraled(unit):
+            continue
+        if getattr(unit, "is_structure", False):
+            continue
+        if not unit_is_squad_spellcaster(unit):
+            continue
+        if neural_spell_role(unit, perspective_player_id) != "borrowed":
+            continue
+        tag = getattr(unit, "tag", None)
+        if tag is None:
+            continue
+        tag_i = int(tag)
+        if tag_i in native or tag_i in found:
+            continue
+        found.append(tag_i)
+    found.sort()
+    return found
+
+
+def squad_pointer_tags(
+    native_tags: Sequence[int],
+    borrowed_tags: Sequence[int],
+    *,
+    limit: Optional[int] = None,
+) -> List[int]:
+    """Native squad tags first, then borrowed spellcasters in the leftover slots.
+
+    Appending keeps existing slot indices stable when a neural link starts.
+    A full squad does not drop a native unit to make room.
+    """
+    if limit is None:
+        from src.agent.squad_constants import MAX_SQUAD_UNITS
+
+        limit = MAX_SQUAD_UNITS
+    native: List[int] = []
+    seen = set()
+    for tag in sorted(int(t) for t in native_tags):
+        if tag in seen:
+            continue
+        seen.add(tag)
+        native.append(tag)
+        if len(native) >= limit:
+            return native
+    extra: List[int] = []
+    for tag in sorted(int(t) for t in borrowed_tags):
+        if tag in seen:
+            continue
+        seen.add(tag)
+        extra.append(tag)
+    room = limit - len(native)
+    return native + extra[:room]
+
+
+def unit_neural_remaining(unit: "Unit") -> float:
+    """Fraction of Neural Parasite still left, in ``[0, 1]``.
+
+    The client exposes one visible timer bar, ``buff_duration_remain`` over
+    ``buff_duration_max``, in game steps. It is not a duration per buff. The
+    ratio is read only while the control buff is on the body, so a different
+    timer (stim, a shield) cannot fill this channel. A fresh cast is 1; the
+    bar reaching 0 is 0. If the buff is present but the client reports no
+    timer, the value stays 1 until the buff drops.
+    """
+    if not unit_is_neuraled(unit):
+        return 0.0
+    remain = getattr(unit, "buff_duration_remain", None)
+    maximum = getattr(unit, "buff_duration_max", None)
+    if (
+        isinstance(remain, bool)
+        or isinstance(maximum, bool)
+        or not isinstance(remain, (int, float))
+        or not isinstance(maximum, (int, float))
+    ):
+        return 1.0
+    if float(maximum) <= 0.0:
+        return 1.0
+    return min(1.0, max(0.0, float(remain) / float(maximum)))
+
+
 def uses_snipe_spell(unit: "Unit") -> bool:
     """True when policy ``snipe`` should cast a unit-targeted special for this type."""
     tid = getattr(unit, "type_id", None)
@@ -470,6 +638,34 @@ def snipe_target_is_eligible(caster: "Unit", target: "Unit") -> bool:
     return False
 
 
+def snipe_same_owner_blocked(caster: "Unit", target: "Unit") -> bool:
+    """True when ``snipe`` must not hit this target because it is a real friendly.
+
+    Same owner is refused for the agent's own army. A different body under
+    Neural Parasite stays legal, so two stolen Battlecruisers can Yamato each
+    other on later steps. A caster never snipes its own tag.
+    """
+    if caster is None or target is None:
+        return True
+    try:
+        same_owner = int(getattr(target, "owner_id", 0) or 0) == int(
+            getattr(caster, "owner_id", 0) or 0
+        )
+    except (TypeError, ValueError):
+        return False
+    if not same_owner:
+        return False
+    caster_tag = getattr(caster, "tag", None)
+    target_tag = getattr(target, "tag", None)
+    if (
+        caster_tag is not None
+        and target_tag is not None
+        and int(caster_tag) == int(target_tag)
+    ):
+        return True
+    return not unit_is_neuraled(target)
+
+
 def issue_snipe_on_unit(
     bot: Any, unit: "Unit", target: "Unit", *, stamp_cooldown: bool = True
 ) -> bool:
@@ -480,9 +676,7 @@ def issue_snipe_on_unit(
     """
     if bot is None or unit is None or target is None:
         return False
-    if int(getattr(target, "owner_id", 0) or 0) == int(
-        getattr(unit, "owner_id", 0) or 0
-    ):
+    if snipe_same_owner_blocked(unit, target):
         return False
     if not snipe_target_is_eligible(unit, target):
         return False
@@ -807,15 +1001,32 @@ def _dedupe_units(units: List[Any]) -> List[Any]:
 def _hostile_candidates(bot: Any, caster: Any) -> List[Any]:
     """Hostiles relative to *caster* owner, across God-mode alliance buckets."""
     caster_owner = _player_owner_id(caster)
+    caster_tag = getattr(caster, "tag", None)
     if caster_owner is None:
         return _candidates_from_attrs(bot, ("enemy_units", "enemy_structures"))
     return _dedupe_units(
         [
             unit
             for unit in _candidates_from_attrs(bot, _GOD_MODE_UNIT_ATTRS)
-            if (other := _player_owner_id(unit)) is not None and other != caster_owner
+            if _counts_as_attack_hostile(unit, caster_owner, caster_tag)
         ]
     )
+
+
+def _counts_as_attack_hostile(unit: Any, caster_owner: int, caster_tag: Any) -> bool:
+    """True when *unit* is a legal hard-target for this caster.
+
+    Different ``owner_id`` is the normal hostile test. A body under Neural
+    Parasite is hostile to both players, including the controller, so either
+    side can choose to kill it. The caster is never its own target.
+    """
+    tag = getattr(unit, "tag", None)
+    if caster_tag is not None and tag is not None and int(tag) == int(caster_tag):
+        return False
+    if unit_is_neuraled(unit):
+        return True
+    other = _player_owner_id(unit)
+    return other is not None and other != caster_owner
 
 
 def allied_candidates_for_owner(bot: Any, owner_id: int) -> List[Any]:
@@ -931,6 +1142,7 @@ def _issue_weapon_order(
         hard_target is not None
         and target_owner is not None
         and target_owner == caster_owner
+        and not unit_is_neuraled(hard_target)
     ):
         hard_target = None
     if hard_target is not None:

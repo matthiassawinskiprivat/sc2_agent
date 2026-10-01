@@ -71,8 +71,10 @@ env:
 # command slice, so it can no longer crowd out attacking (the failure mode that
 # made `attack_local` usage collapse when spatial healing was introduced).
 #
-# The full per-unit scalar catalog is declared once at `ctf_level_01` so pointer
-# identity and checkpoint shapes stay stable across the whole CTF run.
+# Per-unit scalars are declared once at `ctf_level_01` so pointer identity stays
+# stable. `is_neuraled` is appended later, at
+# `scenario_colossus_zealot_vs_swarmhost_hydra_reversed`. A repeated name is
+# skipped, so listing it again does not add a second channel.
 levels:
   - "level_move_single_0"
   - "level_move_single_1"

@@ -42,9 +42,11 @@ env:
   # attack_local at the universal->squad graft (see POINTER_COMMAND_ROW_TEMPLATES).
   action_heads:
   - attack_unit
-  # The FULL per-unit scalar catalog is declared once, here, so pointer identity
-  # and every checkpoint shape stay fixed for the whole CTF curriculum. Features
-  # a level's units cannot use simply read zero.
+  # Per-unit scalars are declared once, here, so earlier channels never shift.
+  # ``is_neuraled`` is appended at
+  # scenario_colossus_zealot_vs_swarmhost_hydra_reversed so checkpoints
+  # before that level keep this width. A repeated name is skipped.
+  # Features a level's units cannot use simply read zero.
   active_unit_scalars:
   - health_pct
   - shield_pct

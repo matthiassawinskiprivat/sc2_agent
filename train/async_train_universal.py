@@ -1218,6 +1218,18 @@ class AsyncCollector(mp.Process):
 
         stall_watchdog.callback = _on_collector_step_stall
 
+        def _timed_vec_step(actions):
+            """Wall time of one parallel ``step`` (all workers), including the pipe."""
+            profiling = (
+                isinstance(squad_batch_helper, SquadPointerRolloutHelper)
+                and squad_batch_helper.collector_profile_enabled()
+            )
+            t0 = time.perf_counter() if profiling else None
+            stepped = vec_env.step(actions)
+            if t0 is not None:
+                squad_batch_helper.profile_add("step", time.perf_counter() - t0)
+            return stepped
+
         def _hydrate_obs(obs, infos, dones=None):
             if peek_shm is None:
                 return obs
@@ -1337,7 +1349,7 @@ class AsyncCollector(mp.Process):
                             requires_policy = vec_env_requires_policy_action(vec_env, num_envs)
 
                         if not requires_policy.any():
-                            new_obs, rewards, dones, infos = vec_env.step(dummy_actions)
+                            new_obs, rewards, dones, infos = _timed_vec_step(dummy_actions)
                             new_obs = _hydrate_obs(new_obs, infos, dones)
                             from_info = stack_info_action_masks(infos, num_envs)
                             if from_info is not None:
@@ -1390,7 +1402,7 @@ class AsyncCollector(mp.Process):
                                 "set_squad_batch_actions", batch, indices=[env_idx]
                             )
 
-                        new_obs, rewards, dones, infos = vec_env.step(resolution.step_actions)
+                        new_obs, rewards, dones, infos = _timed_vec_step(resolution.step_actions)
                         new_obs = _hydrate_obs(new_obs, infos, dones)
                         from_info = stack_info_action_masks(infos, num_envs)
                         if from_info is not None:
@@ -1526,13 +1538,13 @@ class AsyncCollector(mp.Process):
             total_env_steps = filled_steps * training_params.get("num_envs", 1)
             instant_fps = total_env_steps / rollout_wall_sec if rollout_wall_sec > 0 else 0
             profile_note = ""
-            if os.environ.get("SC2_COLLECTOR_PROFILE", "").strip().lower() in (
+            profile_on = os.environ.get("SC2_COLLECTOR_PROFILE", "").strip().lower() in (
                 "1",
                 "true",
                 "yes",
-            ) and hasattr(
-                vec_env, "has_attr"
-            ):
+            )
+            means: dict = {}
+            if profile_on and hasattr(vec_env, "has_attr"):
                 try:
                     if vec_env.has_attr("pop_collector_profile_means"):
                         profiles = vec_env.env_method("pop_collector_profile_means")
@@ -1547,57 +1559,58 @@ class AsyncCollector(mp.Process):
                         means = {
                             key: merged[key] / max(counts[key], 1) for key in merged
                         }
-                        if means:
-                            # Largest first so creep/dps spikes are visible in the console.
-                            timed = {
-                                k: v
-                                for k, v in means.items()
-                                if k.endswith("_ms")
-                            }
-                            ranked = sorted(
-                                timed.items(), key=lambda kv: kv[1], reverse=True
-                            )
-                            # Keep the line readable; full set still goes to TensorBoard.
-                            top = ranked[:18]
-
-                            def _fmt_profile_kv(k: str, v: float) -> str:
-                                short = k.split("profile_", 1)[-1]
-                                if short.endswith("_rate"):
-                                    return f"{short}={v:.2f}"
-                                if short.endswith("_n"):
-                                    return f"{short}={v:.0f}"
-                                return f"{short}={v:.1f}ms"
-
-                            profile_note = "  " + " ".join(
-                                _fmt_profile_kv(k, v) for k, v in top
-                            )
-                            if len(ranked) > len(top):
-                                profile_note += f"  (+{len(ranked) - len(top)} more)"
-                            cache_bits = []
-                            for label, key in (
-                                ("tg", "collector/profile_cache_tg_rate"),
-                                ("tt", "collector/profile_cache_tt_rate"),
-                                ("wpn", "collector/profile_cache_wpn_rate"),
-                                ("gmap", "collector/profile_cache_gmap_rate"),
-                            ):
-                                if key in means:
-                                    cache_bits.append(f"{label}={means[key]:.2f}")
-                            if cache_bits:
-                                profile_note += "  cache_hit[" + " ".join(cache_bits) + "]"
-                            # SB3 HumanOutputFormat truncates keys (~36 chars). Long
-                            # ``obs_L_allied_health`` tags collide → ValueError on dump.
-                            signal_profile = {
-                                k: v
-                                for k, v in means.items()
-                                if len(k) <= 40
-                                and "/profile_obs_L_" not in k
-                            }
-                        else:
-                            signal_profile = {}
-                    else:
-                        signal_profile = {}
                 except Exception:
-                    signal_profile = {}
+                    means = {}
+            if profile_on and isinstance(squad_batch_helper, SquadPointerRolloutHelper):
+                try:
+                    means.update(squad_batch_helper.pop_collector_profile_means())
+                except Exception:
+                    pass
+            if means:
+                # Largest first so creep/dps spikes are visible in the console.
+                timed = {
+                    k: v
+                    for k, v in means.items()
+                    if k.endswith("_ms")
+                }
+                ranked = sorted(
+                    timed.items(), key=lambda kv: kv[1], reverse=True
+                )
+                # Keep the line readable; full set still goes to TensorBoard.
+                top = ranked[:18]
+
+                def _fmt_profile_kv(k: str, v: float) -> str:
+                    short = k.split("profile_", 1)[-1]
+                    if short.endswith("_rate"):
+                        return f"{short}={v:.2f}"
+                    if short.endswith("_n"):
+                        return f"{short}={v:.0f}"
+                    return f"{short}={v:.1f}ms"
+
+                profile_note = "  " + " ".join(
+                    _fmt_profile_kv(k, v) for k, v in top
+                )
+                if len(ranked) > len(top):
+                    profile_note += f"  (+{len(ranked) - len(top)} more)"
+                cache_bits = []
+                for label, key in (
+                    ("tg", "collector/profile_cache_tg_rate"),
+                    ("tt", "collector/profile_cache_tt_rate"),
+                    ("wpn", "collector/profile_cache_wpn_rate"),
+                    ("gmap", "collector/profile_cache_gmap_rate"),
+                ):
+                    if key in means:
+                        cache_bits.append(f"{label}={means[key]:.2f}")
+                if cache_bits:
+                    profile_note += "  cache_hit[" + " ".join(cache_bits) + "]"
+                # SB3 HumanOutputFormat truncates keys (~36 chars). Long
+                # ``obs_L_allied_health`` tags collide → ValueError on dump.
+                signal_profile = {
+                    k: v
+                    for k, v in means.items()
+                    if len(k) <= 40
+                    and "/profile_obs_L_" not in k
+                }
             else:
                 signal_profile = {}
             _emit_collector_status(

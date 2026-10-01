@@ -17,6 +17,10 @@ env:
   include_race: true
   maps_dir: train/maps/ladder/with_region
   env_mode: heal,cloak,spellcaster
+  # First level that widens the unit vector with is_neuraled. Earlier levels
+  # stay on the ctf_level_01 width. A duplicate name would be skipped.
+  active_unit_scalars:
+  - is_neuraled
   unit_pools:
   - high_level_command: defend
     race: zerg

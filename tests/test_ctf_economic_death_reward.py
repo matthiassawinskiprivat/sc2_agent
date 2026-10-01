@@ -412,6 +412,56 @@ def test_sieged_tank_damage_is_priced_like_a_siege_tank():
     assert reward == pytest.approx(ENEMY_COEFF * 0.5 * SIEGETANK)
 
 
+def test_neural_owner_is_paid_for_damage_to_the_controlled_unit():
+    from sc2.ids.buff_id import BuffId
+
+    own = _make_unit(1, type_id=UnitTypeId.HYDRALISK)
+    stolen = _make_unit(99, hp=200.0, max_hp=200.0, type_id=UnitTypeId.CORRUPTOR)
+    stolen.buffs = {BuffId.NEURALPARASITE}
+    bot = _make_bot()
+    _seed(bot, [own, stolen], [], trainee_pid=1)
+
+    stolen.health = 100.0
+    stolen.buffs = {BuffId.NEURALPARASITE}
+    _wire(bot, [own, stolen], [], trainee_pid=1)
+    reward = bot.calculate_reward(perspective_player_id=1)
+
+    assert reward == pytest.approx(ENEMY_COEFF * 0.5 * CORRUPTOR)
+
+
+def test_original_owner_is_not_charged_while_the_body_is_neuraled():
+    from sc2.ids.buff_id import BuffId
+
+    keeper = _make_unit(1, type_id=UnitTypeId.HYDRALISK)
+    stolen = _make_unit(99, hp=200.0, max_hp=200.0, type_id=UnitTypeId.CORRUPTOR)
+    bot = _make_bot()
+    _seed(bot, [keeper, stolen], [], trainee_pid=1)
+
+    stolen.health = 100.0
+    stolen.buffs = {BuffId.NEURALPARASITE}
+    _wire(bot, [keeper], [stolen], trainee_pid=1)
+    reward = bot.calculate_reward(perspective_player_id=1)
+
+    assert reward == pytest.approx(0.0)
+
+
+def test_damage_dealt_by_neuraled_unit_credits_the_controller():
+    from sc2.ids.buff_id import BuffId
+
+    own = _make_unit(1, type_id=UnitTypeId.HYDRALISK)
+    stolen = _make_unit(99, hp=200.0, max_hp=200.0, type_id=UnitTypeId.CORRUPTOR)
+    victim = _make_unit(98, hp=100.0, max_hp=100.0, type_id=UnitTypeId.HYDRALISK)
+    bot = _make_bot()
+    _seed(bot, [own], [stolen, victim], trainee_pid=1)
+
+    stolen.buffs = {BuffId.NEURALPARASITE}
+    victim.health = 50.0
+    _wire(bot, [own, stolen], [victim], trainee_pid=1)
+    reward = bot.calculate_reward(perspective_player_id=1)
+
+    assert reward == pytest.approx(ENEMY_COEFF * 0.5 * HYDRALISK)
+
+
 def test_unpriced_type_falls_back_to_a_nonzero_value():
     bot = _make_bot()
     own = _make_unit(1, type_id=UnitTypeId.HYDRALISK)

@@ -235,7 +235,73 @@ def graft_model_weights(state_dict: Dict[str, Any], new_in_channels: int, new_ac
                 logger.info(f"Initializing brand new component '{key}'")
                 new_state_dict[key] = target_state_dict[key]
 
+    # --- 5. Unit/enemy scalar encoders (appended input columns, e.g. is_neuraled) ---
+    # First Linear is (hidden, feat). A new trailing scalar widens dim 1 only.
+    # New columns stay zero so a resumed policy matches the checkpoint until
+    # that feature is used.
+    if target_state_dict:
+        for key, old_weight in state_dict.items():
+            if not key.endswith("encoder.0.weight") or key not in target_state_dict:
+                continue
+            target_weight = target_state_dict[key]
+            if not _linear_input_grew(old_weight, target_weight):
+                continue
+            logger.info(
+                f"Zero-filling appended encoder inputs for '{key}': "
+                f"{tuple(old_weight.shape)} -> {tuple(target_weight.shape)}"
+            )
+            new_state_dict[key] = expand_linear_input_columns(old_weight, target_weight)
+
     return new_state_dict
+
+
+def _linear_input_grew(old: torch.Tensor, target: torch.Tensor) -> bool:
+    """True when a Linear weight kept its outputs and gained input columns."""
+    return (
+        isinstance(old, torch.Tensor)
+        and isinstance(target, torch.Tensor)
+        and old.ndim == 2
+        and target.ndim == 2
+        and old.shape[0] == target.shape[0]
+        and old.shape[1] < target.shape[1]
+    )
+
+
+def expand_linear_input_columns(old: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Copy ``old`` into ``target``'s shape and zero the new input columns."""
+    expanded = torch.zeros_like(target)
+    expanded[:, : old.shape[1]] = old.to(dtype=expanded.dtype, device=expanded.device)
+    return expanded
+
+
+def align_optimizer_moments_to_params(optimizer: Any) -> int:
+    """
+    Zero-pad Adam moments that are a prefix of the current parameter.
+
+    ``optimizer.load_state_dict`` copies ``exp_avg`` / ``exp_avg_sq`` without
+    checking shape. A widened Linear (48 → 49 input columns) then crashes in
+    ``optimizer.step`` when the moment and the gradient disagree.
+    """
+    resized = 0
+    for group in optimizer.param_groups:
+        for param in group["params"]:
+            state = optimizer.state.get(param)
+            if not state:
+                continue
+            for key, moment in list(state.items()):
+                if not isinstance(moment, torch.Tensor) or moment.ndim == 0:
+                    continue
+                if moment.shape == param.shape or moment.ndim != param.ndim:
+                    continue
+                if any(m > p for m, p in zip(moment.shape, param.shape)):
+                    continue
+                padded = torch.zeros_like(param)
+                slices = tuple(slice(0, int(size)) for size in moment.shape)
+                padded[slices] = moment.to(dtype=padded.dtype, device=padded.device)
+                state[key] = padded
+                resized += 1
+    return resized
+
 
 def non_finite_state_dict_keys(
     state_dict: Dict[str, Any], *, max_keys: int = 8
@@ -401,6 +467,11 @@ def load_optimizer_state_from_zip(
 
     try:
         model.policy.optimizer.load_state_dict(opt_sd)
+        resized = align_optimizer_moments_to_params(model.policy.optimizer)
+        if resized:
+            logger.info(
+                f"Padded {resized} Adam moment tensor(s) to match grown parameters"
+            )
         return True, "ok"
     except Exception as exc:
         return False, f"load_state_dict_failed:{exc}"

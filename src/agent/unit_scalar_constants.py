@@ -79,6 +79,10 @@ class UnitScalarConstants:
     CAN_AOE = "can_aoe"
     CAN_SNIPE = "can_snipe"
 
+    # === Group M: Neural Parasite control (append-only) ===
+    # Remaining fraction of the control buff: 1 when it lands, 0 when it expires.
+    IS_NEURALED = "is_neuraled"
+
     # --- INDEX MAPPING — never reorder; append new entries at the end ---
     FEATURES = {
         # Group A
@@ -141,6 +145,8 @@ class UnitScalarConstants:
         # Group L
         CAN_AOE: 46,
         CAN_SNIPE: 47,
+        # Group M
+        IS_NEURALED: 48,
     }
 
     @classmethod

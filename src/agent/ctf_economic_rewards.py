@@ -245,18 +245,88 @@ def build_value_snapshot(
     return snapshot
 
 
+def apply_neural_reward_buckets(
+    own_units: Iterable[Any],
+    enemy_units: Iterable[Any],
+    perspective_player_id: int,
+) -> Tuple[list, list, set]:
+    """Place a neuralled body on the controller's enemy ledger only.
+
+    The live owner of a Neural Parasite body is the controller. That player is
+    paid for hit points the body loses, and is not charged an own-army penalty.
+    The original owner is charged nothing for that body while the buff is up:
+    the tag is left out of both ledgers, and returned in the suspended set so a
+    disappearance is not booked as a death.
+
+    Damage the body deals to units that are still on the other player stays on
+    that player's enemy ledger, which is the controller's reward.
+    """
+    from src.utils.unit_feature_helpers import unit_is_neuraled
+
+    p_id = int(perspective_player_id)
+    own_out: list = []
+    enemy_out: list = []
+    suspended: set = set()
+    seen_enemy: set = set()
+
+    def _tag(unit: Any) -> Optional[int]:
+        tag = getattr(unit, "tag", None)
+        return None if tag is None else int(tag)
+
+    def _owner(unit: Any) -> int:
+        return int(getattr(unit, "owner_id", 0) or 0)
+
+    def _as_enemy(unit: Any) -> None:
+        tag = _tag(unit)
+        if tag is not None:
+            if tag in seen_enemy:
+                return
+            seen_enemy.add(tag)
+        enemy_out.append(unit)
+
+    for unit in own_units or []:
+        if unit is None:
+            continue
+        if unit_is_neuraled(unit):
+            if _owner(unit) == p_id:
+                _as_enemy(unit)
+            else:
+                tag = _tag(unit)
+                if tag is not None:
+                    suspended.add(tag)
+            continue
+        own_out.append(unit)
+
+    for unit in enemy_units or []:
+        if unit is None:
+            continue
+        if unit_is_neuraled(unit):
+            if _owner(unit) == p_id:
+                _as_enemy(unit)
+            else:
+                tag = _tag(unit)
+                if tag is not None:
+                    suspended.add(tag)
+            continue
+        enemy_out.append(unit)
+    return own_out, enemy_out, suspended
+
+
 def value_delta(
     previous: Dict[int, UnitValue],
     current: Dict[int, UnitValue],
     *,
     position_filter: Optional[Callable[[Any], bool]] = None,
     role_filter: Optional[Callable[[str], bool]] = None,
+    ignore_missing_tags: Optional[set] = None,
 ) -> ValueDelta:
     """Damaged / destroyed / restored economic value between two snapshots.
 
     ``position_filter`` gates credit by where the change happened (defender zone).
     ``role_filter`` gates by the unit's own high-level role (attacker vs defender
-    loss accounting). A unit that dies contributes only the value it still had,
+    loss accounting). ``ignore_missing_tags`` drops a disappearance so a body
+    that left the ledger because it is neuralled is not booked as a death.
+    A unit that dies contributes only the value it still had,
     so per-step damage credit and the death credit sum to exactly its full value.
     """
     damaged = 0.0
@@ -273,6 +343,8 @@ def value_delta(
         if position_filter is not None and not position_filter(position):
             continue
         if after is None:
+            if ignore_missing_tags is not None and int(tag) in ignore_missing_tags:
+                continue
             destroyed += before.standing_value
             kills += 1
             continue

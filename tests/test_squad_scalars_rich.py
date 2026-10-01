@@ -275,6 +275,76 @@ def test_nova_is_onetime_and_temporary(training_conf):
     assert feats[USC.FEATURES[USC.IS_TEMPORARY]] == pytest.approx(1.0)
 
 
+def test_neuraled_scalar_marks_stolen_body_only(training_conf):
+    """Control buff is 1 on ally and enemy rows; caster and windup buffs stay 0."""
+    from sc2.ids.buff_id import BuffId
+
+    builder = SquadObservationBuilder(training_conf)
+    stolen = _make_unit(type_id=UnitTypeId.BATTLECRUISER)
+    stolen.buffs = {BuffId.NEURALPARASITE}
+    own = _make_unit(type_id=UnitTypeId.INFESTOR)
+    own.buffs = {BuffId.NEURALPARASITECHILDREN}
+    windup = _make_unit(type_id=UnitTypeId.BATTLECRUISER)
+    windup.buffs = {BuffId.NEURALPARASITEWAIT}
+    plain = _make_unit(type_id=UnitTypeId.ROACH)
+
+    kwargs = dict(
+        playable_w=128.0, playable_h=128.0, upgrades=frozenset(),
+        objective=None, enemy_com=None, allied_com=None,
+    )
+    stolen_ally = builder._unit_scalars(stolen, "attack", **kwargs)
+    stolen_enemy = builder._unit_scalars(stolen, "attack", for_enemy=True, **kwargs)
+    own_feats = builder._unit_scalars(own, "attack", **kwargs)
+    windup_feats = builder._unit_scalars(windup, "attack", **kwargs)
+    plain_feats = builder._unit_scalars(plain, "attack", **kwargs)
+
+    idx = USC.FEATURES[USC.IS_NEURALED]
+    assert stolen_ally[idx] == pytest.approx(1.0)
+    assert stolen_enemy[idx] == pytest.approx(1.0)
+    assert own_feats[idx] == pytest.approx(0.0)
+    assert windup_feats[idx] == pytest.approx(0.0)
+    assert plain_feats[idx] == pytest.approx(0.0)
+
+    half = _make_unit(type_id=UnitTypeId.BATTLECRUISER)
+    half.buffs = {BuffId.NEURALPARASITE}
+    half.buff_duration_remain = 50
+    half.buff_duration_max = 200
+    half_feats = builder._unit_scalars(half, "attack", for_enemy=True, **kwargs)
+    assert half_feats[idx] == pytest.approx(0.25)
+
+    stim = _make_unit(type_id=UnitTypeId.MARINE)
+    stim.buffs = []
+    stim.buff_duration_remain = 10
+    stim.buff_duration_max = 10
+    stim_feats = builder._unit_scalars(stim, "attack", **kwargs)
+    assert stim_feats[idx] == pytest.approx(0.0)
+
+
+def test_both_perspectives_list_a_neuraled_unit_as_an_attack_target(training_conf):
+    from sc2.ids.buff_id import BuffId
+
+    infestor = _make_unit(tag=1, type_id=UnitTypeId.INFESTOR)
+    infestor.owner_id = 1
+    infestor.is_structure = False
+    infestor.buffs = []
+    stolen = _make_unit(tag=2, type_id=UnitTypeId.COLOSSUS)
+    stolen.owner_id = 1
+    stolen.is_structure = False
+    stolen.buffs = {BuffId.NEURALPARASITE}
+    bot = MagicMock()
+    bot.all_units = [infestor, stolen]
+    bot.units = [infestor, stolen]
+    bot.enemy_units = []
+    bot.structures = []
+    bot.enemy_structures = []
+
+    zerg_targets = SquadObservationBuilder.resolve_enemy_target_tags(bot, 1)
+    other_targets = SquadObservationBuilder.resolve_enemy_target_tags(bot, 2)
+    assert zerg_targets == [2]
+    assert 2 in other_targets
+    assert 1 in other_targets
+
+
 def test_hallucination_is_temporary(training_conf):
     builder = SquadObservationBuilder(training_conf)
     unit = _make_unit(type_id=UnitTypeId.ZEALOT)

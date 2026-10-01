@@ -27,6 +27,8 @@ from src.utils.unit_feature_helpers import (
     issue_attack_at_point,
     issue_snipe_on_unit,
     perspective_unit_groups,
+    neural_command_allowed,
+    unit_is_neuraled,
     uses_purification_nova_for_attack,
     uses_spawn_locusts_for_attack,
 )
@@ -43,6 +45,7 @@ from src.agent.ctf_economic_rewards import (
     EconomicRewardConfig,
     UnitValue,
     build_value_snapshot,
+    apply_neural_reward_buckets,
     retained_value_fraction,
     value_delta,
 )
@@ -350,6 +353,9 @@ class CaptureTheFlagBot(BotAI):
         for p_id in (1, 2):
             own_units, enemy_units, own_structs, enemy_structs = self._perspective_unit_groups(
                 p_id
+            )
+            own_units, enemy_units, _suspended = apply_neural_reward_buckets(
+                own_units, enemy_units, p_id
             )
             self.prev_own_value_snapshot[p_id] = build_value_snapshot(
                 own_units,
@@ -770,6 +776,8 @@ class CaptureTheFlagBot(BotAI):
                 unit = self.all_units.find_by_tag(unit_tag)
                 if unit is None or unit.type_id == UnitTypeId.SHIELDBATTERY:
                     continue
+                if not neural_command_allowed(unit, perspective_player_id, head_name):
+                    continue
                 self._mark_command_attempt(unit, metric_kind)
                 self._issue_cloak_burrow(unit, conceal=conceal)
                 self._unit_last_order[int(unit_tag)] = (head_name, None)
@@ -781,7 +789,10 @@ class CaptureTheFlagBot(BotAI):
 
         if head_name in UNIT_TARGET_COMMAND_HEADS:
             self._apply_unit_target_command(
-                selected_tags, head_name=head_name, target_unit_tag=target_unit_tag
+                selected_tags,
+                head_name=head_name,
+                target_unit_tag=target_unit_tag,
+                perspective_player_id=perspective_player_id,
             )
             return
 
@@ -799,6 +810,8 @@ class CaptureTheFlagBot(BotAI):
                 continue
             if unit.type_id == UnitTypeId.SHIELDBATTERY:
                 # Auto-heals; never issue move/attack/heal orders.
+                continue
+            if not neural_command_allowed(unit, perspective_player_id, head_name):
                 continue
             if "heal" in head_name:
                 self._mark_heal_command_attempt(unit)
@@ -837,6 +850,7 @@ class CaptureTheFlagBot(BotAI):
         *,
         head_name: str,
         target_unit_tag: Optional[int],
+        perspective_player_id: Optional[int] = None,
     ) -> None:
         """Issue ``heal_unit`` / ``load_unit`` / ``attack_unit`` / ``snipe`` against one tag.
 
@@ -858,6 +872,8 @@ class CaptureTheFlagBot(BotAI):
         for unit_tag in selected_tags:
             unit = self.all_units.find_by_tag(unit_tag)
             if unit is None or unit.type_id == UnitTypeId.SHIELDBATTERY:
+                continue
+            if not neural_command_allowed(unit, perspective_player_id, head_name):
                 continue
             if int(getattr(unit, "tag", 0) or 0) == int(target_unit_tag):
                 continue  # never order a unit onto itself
@@ -885,6 +901,7 @@ class CaptureTheFlagBot(BotAI):
         Both armies look allied to the P1 client after ``debug_control_enemy``, so
         hostility must be decided by ``owner_id`` — an alliance-bucket check would
         happily let the opponent shoot its own army and inflate damage rewards.
+        A body under Neural Parasite stays a legal target for both owners.
 
         Weaponless casters whose spatial attack already remaps (Swarm Host →
         Spawn Locusts, Disruptor → Purification Nova) cast at ``target.position``
@@ -892,7 +909,7 @@ class CaptureTheFlagBot(BotAI):
         """
         if int(getattr(target, "owner_id", 0) or 0) == int(
             getattr(unit, "owner_id", 0) or 0
-        ):
+        ) and not unit_is_neuraled(target):
             return
         if uses_spawn_locusts_for_attack(unit):
             self.do(unit(AbilityId.EFFECT_SPAWNLOCUSTS, target.position))
@@ -1821,6 +1838,9 @@ class CaptureTheFlagBot(BotAI):
         own_units, enemy_units, own_structs, enemy_structs = self._perspective_unit_groups(
             p_id
         )
+        own_units, enemy_units, neural_suspended = apply_neural_reward_buckets(
+            own_units, enemy_units, p_id
+        )
         own_pylon = self._first_pylon(own_structs)
         enemy_pylon = self._first_pylon(enemy_structs)
         if own_pylon is None or enemy_pylon is None:
@@ -1955,6 +1975,7 @@ class CaptureTheFlagBot(BotAI):
                 prev_own_values,
                 curr_own_values,
                 role_filter=lambda unit_role, want=role: unit_role == want,
+                ignore_missing_tags=neural_suspended,
             )
             metrics[metric] = flow.lost
             if not own_baseline_ready:
