@@ -34,6 +34,11 @@
 
 agent_architecture: universal
 
+# Squad levels only (see apply_pipeline_rollout_steps). 1024 steps × 6 games
+# of float32 maps is two rollout copies that exceed 32 GB and get paged.
+training:
+  n_steps: 256
+
 # SC2 process timing (applies to every level via pipeline root ``env``).
 # Parallel workers still stagger launches to avoid DirectX access-violation races;
 # these are the shortened defaults (override per-level YAML only if needed).
@@ -44,6 +49,14 @@ env:
   sc2_process_tree_wait_sec: 1.0
   sc2_retry_backoff_sec: 2.0
   sc2_in_game_wait_sec: 15.0
+  # Squad pointer: game frames simulated after one joint squad order.
+  # Independent of army size (about three decisions per game second at 22.4 fps).
+  # Per-level YAML can override. Per-unit / chunk turns still use step_mul_per_unit.
+  squad_pointer_step_size: 8
+  # Opponent samples a new squad order every N trainee decisions and keeps
+  # that order in between (last orders are reissued, no extra network pass).
+  # 1 = decide every step. Per-level YAML can override.
+  opponent_decision_interval: 4
   # Whole-session wait_for around launch+join+first obs. Later Subproc workers
   # add stagger + join-slack on top (see SingleClientEnv._startup_timeout_sec).
   startup_timeout_sec: 90

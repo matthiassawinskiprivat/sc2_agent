@@ -201,6 +201,25 @@ def _tensorboard_preflight() -> None:
     import tensorboard  # noqa: F401
 
 
+def apply_pipeline_rollout_steps(cfg: dict, pipeline_config: dict) -> dict:
+    """Override squad ``n_steps`` from the pipeline root.
+
+    CTF observations are large float maps. ``n_steps: 1024`` with 6 games
+    allocates two rollout copies that do not fit in 32 GB, so Windows pages
+    them to disk on every step. A pipeline ``training.n_steps`` replaces the
+    per-level value for squad levels only.
+    """
+    if cfg.get("agent_architecture") != "squad":
+        return cfg
+    pipe_training = pipeline_config.get("training") if isinstance(pipeline_config, dict) else None
+    if not isinstance(pipe_training, dict) or "n_steps" not in pipe_training:
+        return cfg
+    training = cfg.setdefault("training", {})
+    if isinstance(training, dict):
+        training["n_steps"] = int(pipe_training["n_steps"])
+    return cfg
+
+
 def resolve_async_log_dir(level_name: str, training_params: dict) -> str:
     """
     TensorBoard/SB3 log directory for one async level.
@@ -2464,6 +2483,7 @@ def main():
         cfg["categorical_heads"] = cm.get_cumulative_categorical_heads(level_name)
         cfg["agent_architecture"] = cm.get_agent_architecture(level_name)
         cfg["config_dir"] = config_dir
+        apply_pipeline_rollout_steps(cfg, pipeline_config)
         return cfg
 
     if override_level:

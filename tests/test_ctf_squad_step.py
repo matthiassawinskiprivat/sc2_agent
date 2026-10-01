@@ -143,7 +143,7 @@ def test_squad_pointer_step_applies_trainee_and_advances(squad_env):
 
 
 def test_squad_pointer_step_applies_paired_opponent_action(squad_env):
-    """Policy opponent (not Computer preview) must get a squad order each physics step."""
+    """A due step (step 0) still gives the policy opponent a fresh squad order."""
     squad_env._preview_computer_opponent = MagicMock(return_value=False)
     squad_env._predict_opponent_squad_pointer = AsyncMock(
         return_value=np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
@@ -299,6 +299,32 @@ def test_get_squad_observation_hits_step_cache(squad_env):
     assert out is cached
 
 
+def test_squad_pointer_step_size_is_fixed_not_army_size(squad_env):
+    """A 12-vs-12 decision advances 8 frames, not one frame per living unit."""
+    from train.envs.capture_the_flag_single_env import DEFAULT_SQUAD_POINTER_STEP_SIZE
+
+    assert squad_env._squad_pointer_step_size() == DEFAULT_SQUAD_POINTER_STEP_SIZE
+    asyncio.run(
+        squad_env._finalize_squad_pointer_physics_step(
+            trainee_tags=list(range(12)),
+            opponent_tags=list(range(100, 112)),
+            trainee_player_id=1,
+        )
+    )
+    assert (
+        squad_env.bot.client.step.await_args.kwargs.get("step_size")
+        == DEFAULT_SQUAD_POINTER_STEP_SIZE
+    )
+    squad_env._physics_step_size.assert_not_called()
+
+
+def test_squad_pointer_step_size_yaml_override(squad_env):
+    squad_env.training_conf["env"]["squad_pointer_step_size"] = 4
+    assert squad_env._squad_pointer_step_size() == 4
+    squad_env.training_conf["env"]["squad_pointer_step_size"] = 0
+    assert squad_env._squad_pointer_step_size() == 1
+
+
 def test_finalize_invalidates_obs_cache_after_physics(squad_env):
     squad_env._invalidate_pre_physics_obs_caches = MagicMock()
     asyncio.run(
@@ -310,6 +336,62 @@ def test_finalize_invalidates_obs_cache_after_physics(squad_env):
     )
     squad_env.bot.client.step.assert_awaited()
     squad_env._invalidate_pre_physics_obs_caches.assert_called()
+
+
+def test_opponent_decision_holds_between_samples(squad_env):
+    """Steps 1–3 reuse the last order: no obs build, no forward, no new apply."""
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env._preview_computer_opponent = MagicMock(return_value=False)
+    squad_env.steps_count = 1
+    squad_env._predict_opponent_squad_pointer = AsyncMock(
+        side_effect=AssertionError("hold step must not run the opponent network")
+    )
+    squad_env._apply_squad_action_for_pool = AsyncMock(return_value=[101])
+    assert CaptureTheFlagSingleEnv.peek_opponent_squad_pointer(squad_env) is None
+    squad_env._get_squad_observation_for_pool.assert_not_called()
+
+    action = np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
+    action[0] = 1
+    asyncio.run(squad_env._async_step_squad_pointer(action))
+    squad_env._predict_opponent_squad_pointer.assert_not_awaited()
+    assert squad_env._apply_squad_action_for_pool.await_count == 1
+    assert squad_env._apply_squad_action_for_pool.await_args.args[0] == 0
+    reissued = squad_env._reissue_non_squad_orders.await_args.args[0]
+    assert 201 not in reissued
+
+
+def test_opponent_decision_due_every_fourth_step(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env._preview_computer_opponent = MagicMock(return_value=False)
+    squad_env._squad_obs_step_cache = {}
+    squad_env._opponent_lstm_states = {}
+    squad_env.bot.squad_action_masks = MagicMock(return_value=np.ones(8, dtype=bool))
+    for step, due in ((0, True), (1, False), (3, False), (4, True)):
+        squad_env.steps_count = step
+        squad_env._get_squad_observation_for_pool.reset_mock()
+        payload = CaptureTheFlagSingleEnv.peek_opponent_squad_pointer(squad_env)
+        if due:
+            assert payload is not None
+            squad_env._get_squad_observation_for_pool.assert_called_once()
+        else:
+            assert payload is None
+            squad_env._get_squad_observation_for_pool.assert_not_called()
+
+
+def test_opponent_decision_interval_one_samples_every_step(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    squad_env.training_conf["opponent_decision_interval"] = 1
+    squad_env._preview_computer_opponent = MagicMock(return_value=False)
+    squad_env.steps_count = 2
+    squad_env._squad_obs_step_cache = {}
+    squad_env._opponent_lstm_states = {}
+    squad_env.bot.squad_action_masks = MagicMock(return_value=np.ones(8, dtype=bool))
+    payload = CaptureTheFlagSingleEnv.peek_opponent_squad_pointer(squad_env)
+    assert payload is not None
+    squad_env._get_squad_observation_for_pool.assert_called_once()
 
 
 def test_peek_opponent_none_for_computer_preview(squad_env):
@@ -432,6 +514,55 @@ def test_refresh_bot_state_profiles_gamestate(squad_env):
     assert "collector/profile_observation_ms" in means
     assert "collector/profile_gamestate_ms" in means
     assert means["collector/profile_gamestate_ms"] >= 0.0
+
+
+def test_squad_pointer_step_profiles_reward_bookkeeping_and_unit_lists(squad_env):
+    """Unwrapped step work shows up under SC2_COLLECTOR_PROFILE, and stays quiet when off."""
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    action = np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
+    action[0] = 1
+    squad_env._collector_profile_flag = False
+    asyncio.run(squad_env._async_step_squad_pointer(action))
+    assert CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env) == {}
+
+    squad_env._collector_profile_flag = True
+    asyncio.run(squad_env._async_step_squad_pointer(action))
+    means = CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env)
+    expected = (
+        "collector/profile_reward_ms",
+        "collector/profile_econ_ms",
+        "collector/profile_heal_rec_ms",
+        "collector/profile_cmd_rec_ms",
+        "collector/profile_cd_retreat_ms",
+        "collector/profile_unit_lists_ms",
+    )
+    for key in expected:
+        assert len(key) <= 40
+        assert key in means
+        assert means[key] >= 0.0
+
+
+def test_step_profiles_worker_and_shm_export(squad_env):
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+    from train.envs.single_client_env import SingleClientEnv
+
+    squad_env._collector_profile_flag = True
+    obs = {"map": np.zeros((1,), dtype=np.float32)}
+    info = {}
+    with patch.object(
+        SingleClientEnv, "step", return_value=(obs, 0.0, False, False, info)
+    ):
+        returned = CaptureTheFlagSingleEnv.step(squad_env, np.zeros(1))
+    assert returned[0] is obs
+    means = CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env)
+    for key in (
+        "collector/profile_worker_step_ms",
+        "collector/profile_shm_export_ms",
+    ):
+        assert len(key) <= 40
+        assert key in means
+        assert means[key] >= 0.0
 
 
 def test_flush_and_reissue_profile_order_path(squad_env):

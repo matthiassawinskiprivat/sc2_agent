@@ -47,6 +47,10 @@ _PAIR_RE = re.compile(r"^(\d+)_(a|d)$")
 # Squad micro: one policy unit per physics step; no cross-squad chunk batching.
 DEFAULT_STEP_MUL_PER_UNIT = 1
 DEFAULT_UNITS_PER_PHYSICS_STEP = 0
+# Squad pointer issues one order for the whole squad, then simulates this many
+# game frames (~8/22.4 s, about three decisions per game second). Headcount
+# must not multiply it — that factor belonged to per-unit turns.
+DEFAULT_SQUAD_POINTER_STEP_SIZE = 8
 
 
 class _ChunkEntry(NamedTuple):
@@ -54,6 +58,38 @@ class _ChunkEntry(NamedTuple):
     player_id: int
     tag: int
     is_agent: bool
+
+
+class _NullProfileSpan:
+    """No-op stand-in so a profiled ``with`` block stays cheap when the flag is off."""
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+_NULL_PROFILE_SPAN = _NullProfileSpan()
+
+
+class _ProfileSpan:
+    """Record one named slice into the collector profile (milliseconds at pop)."""
+
+    __slots__ = ("_env", "_key", "_t0")
+
+    def __init__(self, env, key: str):
+        self._env = env
+        self._key = key
+        self._t0 = 0.0
+
+    def __enter__(self):
+        self._t0 = time.perf_counter()
+        return None
+
+    def __exit__(self, exc_type, exc, tb):
+        self._env._profile_add(self._key, time.perf_counter() - self._t0)
+        return False
 
 
 class CaptureTheFlagSingleEnv(SingleClientEnv):
@@ -1753,6 +1789,16 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 units.append(unit)
         return units
 
+    def _profile_span(self, key: str):
+        """Time ``key`` only when ``SC2_COLLECTOR_PROFILE`` is on.
+
+        Exported as ``collector/profile_{key}_ms``. The collector drops keys
+        longer than 40 characters, so ``key`` must stay short.
+        """
+        if not self._collector_profile_enabled():
+            return _NULL_PROFILE_SPAN
+        return _ProfileSpan(self, key)
+
     def _collector_profile_enabled(self) -> bool:
         flag = getattr(self, "_collector_profile_flag", None)
         if flag is None:
@@ -1883,10 +1929,15 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return compact_step_obs(obs), info
 
     def step(self, action: Any):
-        obs, reward, terminated, truncated, info = super().step(action)
-        if self._uses_squad_pointer():
-            obs, info = self._export_squad_obs(obs, info)
-            return obs, reward, terminated, truncated, info
+        # ``worker_step`` is the whole worker, including the shared-memory copy.
+        # The collector's ``step`` timer also waits on the pipe and the slowest
+        # game, so ``step`` minus ``worker_step`` is that leftover.
+        with self._profile_span("worker_step"):
+            obs, reward, terminated, truncated, info = super().step(action)
+            if self._uses_squad_pointer():
+                with self._profile_span("shm_export"):
+                    obs, info = self._export_squad_obs(obs, info)
+                return obs, reward, terminated, truncated, info
         return obs, reward, terminated, truncated, info
 
     def _cached_squad_action_masks(self) -> Optional[np.ndarray]:
@@ -2471,6 +2522,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return None
         if not self._pool_alive_tags(opponent_idx):
             return None
+        # Hold steps skip the observation build. The collector then skips the
+        # opponent forward; step() reissues the last order instead.
+        if not self._opponent_decision_due():
+            return None
         if getattr(self, "_squad_obs_step_cache", None) is None:
             self._squad_obs_step_cache = {}
         obs = self._get_squad_observation_for_pool(int(opponent_idx))
@@ -3020,12 +3075,51 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return await self._finalize_squad_physics_step(tags, acting_player_id)
 
     def _physics_step_size(self, acting_unit_count: int) -> int:
+        """Frames for a per-unit or chunk turn: ``step_mul_per_unit`` per actor.
+
+        Squad-pointer decisions use :meth:`_squad_pointer_step_size` instead.
+        """
         env_conf = self.training_conf.get("env", {})
         per_unit = int(
             self.training_conf.get("step_mul_per_unit")
             or env_conf.get("step_mul_per_unit", DEFAULT_STEP_MUL_PER_UNIT)
         )
         return max(1, per_unit * max(1, acting_unit_count))
+
+    def _squad_pointer_step_size(self) -> int:
+        """Fixed frames after one paired trainee+opponent squad order.
+
+        Read from ``squad_pointer_step_size`` (level YAML, then pipeline ``env``).
+        Falls back to :data:`DEFAULT_SQUAD_POINTER_STEP_SIZE`.
+        """
+        raw = self._conf_float(
+            "squad_pointer_step_size", float(DEFAULT_SQUAD_POINTER_STEP_SIZE)
+        )
+        if raw is None:
+            return DEFAULT_SQUAD_POINTER_STEP_SIZE
+        return max(1, int(raw))
+
+    def _opponent_decision_interval(self) -> int:
+        """Trainee steps between opponent squad decisions.
+
+        ``1`` keeps the old every-step opponent. ``4`` samples on steps
+        0, 4, 8, … and holds the last order in between. Read from
+        ``opponent_decision_interval`` (level YAML, then pipeline ``env``).
+        """
+        if not hasattr(self, "training_conf"):
+            return 4
+        raw = self._conf_float("opponent_decision_interval", 4.0)
+        if raw is None:
+            return 4
+        return max(1, int(raw))
+
+    def _opponent_decision_due(self) -> bool:
+        """True when this step should build an opponent obs and sample an order."""
+        interval = self._opponent_decision_interval()
+        if interval <= 1:
+            return True
+        step = int(getattr(self, "steps_count", 0) or 0)
+        return step % interval == 0
 
     async def _finalize_chunk_physics_step(
         self, chunk: List[_ChunkEntry], acting_player_id: int
@@ -3553,9 +3647,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         profile = self._collector_profile_enabled()
         t_step = time.perf_counter() if profile else None
-        await self.bot.client.step(
-            step_size=self._physics_step_size(len(trainee_tags) + len(opponent_tags))
-        )
+        await self.bot.client.step(step_size=self._squad_pointer_step_size())
         if t_step is not None:
             self._profile_add("client_step", time.perf_counter() - t_step)
         self._invalidate_pre_physics_obs_caches()
@@ -3563,15 +3655,20 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         self._maybe_promote_defender_to_attack()
 
-        heal_casts, heal_attempts = self._record_heal_metrics(trainee_tags)
-        step_commands = self._record_command_metrics(trainee_tags)
-        reward = self.bot.calculate_squad_step_reward(
-            trainee_tags, perspective_player_id=trainee_player_id
-        )
-        step_economic = self._record_economic_metrics(credit_trainee=True)
-        step_cooldown_retreat = self._record_cooldown_retreat_metrics(
-            credit_trainee=True
-        )
+        with self._profile_span("heal_rec"):
+            heal_casts, heal_attempts = self._record_heal_metrics(trainee_tags)
+        with self._profile_span("cmd_rec"):
+            step_commands = self._record_command_metrics(trainee_tags)
+        with self._profile_span("reward"):
+            reward = self.bot.calculate_squad_step_reward(
+                trainee_tags, perspective_player_id=trainee_player_id
+            )
+        with self._profile_span("econ"):
+            step_economic = self._record_economic_metrics(credit_trainee=True)
+        with self._profile_span("cd_retreat"):
+            step_cooldown_retreat = self._record_cooldown_retreat_metrics(
+                credit_trainee=True
+            )
 
         p1_lost, p2_lost = self._pylon_loss_flags()
         p1_army_lost = not self._has_combat_units(owner_id=1)
@@ -3596,7 +3693,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             done = True
             reward += term_delta
 
-        await self._refresh_unit_lists()
+        with self._profile_span("unit_lists"):
+            await self._refresh_unit_lists()
         p1_units_count = len(self.player_units[1])
         p2_units_count = len(self.player_units[2])
 
@@ -3696,13 +3794,20 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     self._pending_opponent_squad_action = None
                     if pending is not None:
                         opp_action = np.asarray(pending, dtype=np.int64)
-                    else:
+                    elif self._opponent_decision_due():
+                        # Collector missed the batch (no pending action). Fall back
+                        # to an in-worker forward so a due step still gets an order.
                         opp_action = await self._predict_opponent_squad_pointer(
                             opponent_idx
                         )
-                    ordered_tags.update(
-                        await self._apply_squad_action_for_pool(opponent_idx, opp_action)
-                    )
+                    else:
+                        opp_action = None
+                    if opp_action is not None:
+                        ordered_tags.update(
+                            await self._apply_squad_action_for_pool(
+                                opponent_idx, opp_action
+                            )
+                        )
 
             return await self._finalize_squad_pointer_physics_step(
                 trainee_tags,
