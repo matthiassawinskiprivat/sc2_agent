@@ -202,21 +202,28 @@ def _tensorboard_preflight() -> None:
 
 
 def apply_pipeline_rollout_steps(cfg: dict, pipeline_config: dict) -> dict:
-    """Override squad ``n_steps`` from the pipeline root.
+    """Override squad rollout length and KL fuse from the pipeline root.
 
     CTF observations are large float maps. ``n_steps: 1024`` with 6 games
     allocates two rollout copies that do not fit in 32 GB, so Windows pages
     them to disk on every step. A pipeline ``training.n_steps`` replaces the
     per-level value for squad levels only.
+
+    ``training.target_kl`` is applied the same way. Per-level files set
+    ``target_kl: null``, which would otherwise leave the fuse off.
     """
     if cfg.get("agent_architecture") != "squad":
         return cfg
     pipe_training = pipeline_config.get("training") if isinstance(pipeline_config, dict) else None
-    if not isinstance(pipe_training, dict) or "n_steps" not in pipe_training:
+    if not isinstance(pipe_training, dict):
         return cfg
     training = cfg.setdefault("training", {})
-    if isinstance(training, dict):
+    if not isinstance(training, dict):
+        return cfg
+    if "n_steps" in pipe_training:
         training["n_steps"] = int(pipe_training["n_steps"])
+    if pipe_training.get("target_kl") is not None:
+        training["target_kl"] = float(pipe_training["target_kl"])
     return cfg
 
 
@@ -2205,7 +2212,13 @@ class AsyncLearner:
 
                     policy_sd = model.policy.state_dict()
                     weights_ok = policy_state_dict_finite(policy_sd)
-                    if not weights_ok:
+                    replay_refused = bool(getattr(model, "rollout_replay_skipped", False))
+                    if replay_refused:
+                        logger.error(
+                            "Learner: replay mismatch — weights were not stepped "
+                            "and will not be republished"
+                        )
+                    elif not weights_ok:
                         bad_keys = non_finite_state_dict_keys(policy_sd)
                         logger.error(
                             "Learner: non-finite policy weights after train(); "
@@ -2231,7 +2244,7 @@ class AsyncLearner:
                                     "Learner: could not restore last good weights; "
                                     "policy may stay non-finite until restart"
                                 )
-                    else:
+                    elif weights_ok:
                         tmp_save = self.latest_model_path + ".tmp"
                         model.save(tmp_save)
                         # os.replace overwrites dst; retries handle WinError 32 if collector
@@ -2242,10 +2255,15 @@ class AsyncLearner:
                     # 4. Save Checkpoint (Permanent Storage)
                     steps_before = total_steps_trained - num_steps
                     did_ckpt = (total_steps_trained // self.save_freq) > (steps_before // self.save_freq)
-                    if did_ckpt and weights_ok:
+                    if did_ckpt and weights_ok and not replay_refused:
                         ckpt_path = os.path.join(self.model_dir, f"universal_{total_steps_trained}_steps.zip")
                         model.save(ckpt_path)
                         logger.info(f"Saved checkpoint: {ckpt_path}")
+                    elif did_ckpt and replay_refused:
+                        logger.warning(
+                            "Learner: skipped periodic checkpoint save "
+                            "(replay mismatch, weights unchanged)"
+                        )
                     elif did_ckpt:
                         logger.warning(
                             "Learner: skipped periodic checkpoint save (non-finite policy weights)"
@@ -2269,7 +2287,7 @@ class AsyncLearner:
                             logger.warning(f"Could not remove hot-swap file {self.latest_model_path}: {e}")
                         return
 
-                    if weights_ok:
+                    if weights_ok and not replay_refused:
                         from src.utils.model_utils import read_checkpoint_timesteps
 
                         published_ts = read_checkpoint_timesteps(self.latest_model_path)
@@ -2282,6 +2300,11 @@ class AsyncLearner:
                             "Learner: Update complete. Trainee checkpoint published "
                             f"({os.path.basename(self.latest_model_path)}{ts_suffix}). "
                             "Collector hot-reload runs after the in-flight rollout finishes."
+                        )
+                    elif replay_refused:
+                        logger.warning(
+                            "Learner: Update skipped after replay mismatch; "
+                            "collector keeps the previous checkpoint."
                         )
                     else:
                         logger.warning(

@@ -107,6 +107,54 @@ def test_disk_obs_fingerprint_in_signal_and_attach_mismatch(tmp_path):
         AsyncDiskBuffer.attach_disk_observations(learner, str(instance_dir), bad)
 
 
+def test_fingerprint_slots_cover_first_and_last_frame():
+    from src.agent.utils.disk_buffer import obs_fingerprint_means, obs_fingerprint_slots
+
+    slots = obs_fingerprint_slots(256, 6)
+    assert slots[0] == (0, 0)
+    assert (255, 5) in slots
+    arr = np.zeros((256, 6, 2, 4, 4), dtype=np.float32)
+    arr[0].fill(0.2)
+    arr[-1].fill(0.8)
+    means = obs_fingerprint_means(arr)
+    assert means[0] == pytest.approx(0.2)
+    assert means[-1] == pytest.approx(0.8)
+
+
+def test_disk_fingerprint_catches_stale_later_frame(tmp_path):
+    """A fresh first frame must not hide a stale frame later in the memmap."""
+    collector = _buffer(tmp_path)
+    instance_dir = tmp_path / "buffer_tail"
+    instance_dir.mkdir()
+    collector.instance_dir = str(instance_dir)
+    collector.disk_files = {}
+    collector._owns_disk_files = True
+    subspace = collector.observation_space.spaces["map"]
+    shape = (4, 1, *subspace.shape)
+    path = instance_dir / "obs_map.bin"
+    collector.observations["map"] = np.memmap(
+        path, dtype=np.float32, mode="w+", shape=shape
+    )
+    collector.disk_files["map"] = str(path)
+    collector.observations["map"][0].fill(0.1)
+    collector.observations["map"][-1].fill(0.9)
+    collector.observations["map"].flush()
+
+    collector.signal_ready({"buffer_size": 4, "n_envs": 1})
+    meta = collector.check_ready()
+    means = meta["disk_obs"]["map"]["sample_means"]
+    assert len(means) >= 2
+    assert means[0] == pytest.approx(0.1)
+    assert means[-1] == pytest.approx(0.9)
+
+    collector.observations["map"][-1].fill(0.0)
+    collector.observations["map"].flush()
+
+    learner = _buffer(tmp_path / "learner_tail")
+    with pytest.raises(RuntimeError, match="sample_means"):
+        AsyncDiskBuffer.attach_disk_observations(learner, str(instance_dir), meta)
+
+
 def test_learner_del_does_not_delete_collector_disk_files(tmp_path):
     instance_dir = tmp_path / "buffer_0"
     instance_dir.mkdir()

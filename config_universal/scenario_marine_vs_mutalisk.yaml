@@ -35,7 +35,6 @@ env:
     - MUTALISK
     - INFESTOR
     - QUEEN
-    - VIPER
     region: A
   - high_level_command: defend
     race: terran
@@ -54,7 +53,6 @@ env:
     - MUTALISK
     - INFESTOR
     - QUEEN
-    - VIPER
     region: B
   rewards:
     economic_vespene_weight: 1.5

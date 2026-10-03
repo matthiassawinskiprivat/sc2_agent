@@ -26,6 +26,94 @@ def obs_sample_mean(arr: np.ndarray) -> float:
     return float(np.mean(head))
 
 
+def obs_fingerprint_slots(n_time: int, n_env: int) -> list:
+    """A few ``(time, env)`` slots spread across a rollout buffer.
+
+    Slot ``(0, 0)`` is always included. Later slots catch a memmap whose first
+    frame was refreshed while the rest of the file is still the previous fill.
+    """
+    if n_time <= 0 or n_env <= 0:
+        return []
+    candidates = (
+        (0, 0),
+        (n_time // 2, min(n_env // 2, n_env - 1)),
+        (n_time - 1, n_env - 1),
+    )
+    slots = []
+    seen = set()
+    for t, e in candidates:
+        pair = (int(t), int(e))
+        if pair in seen:
+            continue
+        if 0 <= pair[0] < n_time and 0 <= pair[1] < n_env:
+            seen.add(pair)
+            slots.append(pair)
+    return slots
+
+
+def obs_fingerprint_means(arr: np.ndarray) -> list:
+    """Means of a few spread-out frames. Empty / scalar arrays return one mean."""
+    if arr is None or getattr(arr, "size", 0) == 0:
+        return [0.0]
+    if getattr(arr, "ndim", 0) < 2:
+        return [float(np.mean(arr))]
+    n_time, n_env = int(arr.shape[0]), int(arr.shape[1])
+    return [float(np.mean(arr[t, e])) for t, e in obs_fingerprint_slots(n_time, n_env)]
+
+
+def obs_fingerprint_payload(arr: np.ndarray) -> dict:
+    """JSON-ready fingerprint stored next to a map/tactical buffer."""
+    means = obs_fingerprint_means(arr)
+    return {
+        "sample_mean": means[0] if means else 0.0,
+        "sample_means": means,
+        "shape": list(getattr(arr, "shape", ())),
+    }
+
+
+def fingerprint_mean_mismatch(expected: float, got: float) -> bool:
+    """True when two frame-means disagree beyond a relative tolerance."""
+    try:
+        expected_f = float(expected)
+        got_f = float(got)
+    except (TypeError, ValueError):
+        return True
+    if not np.isfinite(expected_f) or not np.isfinite(got_f):
+        return True
+    tol = max(1e-4, 1e-3 * abs(expected_f))
+    return abs(got_f - expected_f) > tol
+
+
+def assert_obs_fingerprint_matches(key: str, mapped: np.ndarray, info: dict, *, kind: str) -> None:
+    """Raise when the opened buffer does not match the collector's fingerprint.
+
+    ``sample_means`` covers several frames. ``sample_mean`` is still checked so a
+    signal that only rewrites the first-frame scalar cannot sneak through.
+    """
+    info = info or {}
+    expected_means = info.get("sample_means")
+    if expected_means:
+        got_means = obs_fingerprint_means(mapped)
+        if len(got_means) != len(list(expected_means)) or any(
+            fingerprint_mean_mismatch(exp, got)
+            for exp, got in zip(expected_means, got_means)
+        ):
+            raise RuntimeError(
+                f"{kind} obs {key!r} attach mismatch: collector "
+                f"sample_means={list(expected_means)} learner={got_means}. "
+                "Stale or partial view — PPO would train with obs≠old_log_prob."
+            )
+    expected = info.get("sample_mean")
+    if expected is not None:
+        got = obs_sample_mean(mapped)
+        if fingerprint_mean_mismatch(expected, got):
+            raise RuntimeError(
+                f"{kind} obs {key!r} attach mismatch: collector "
+                f"sample_mean={expected} learner={got}. Stale/empty "
+                "view — PPO would train with obs≠old_log_prob."
+            )
+
+
 DEFAULT_RNN_MAX_SEQ_LEN = 32
 
 

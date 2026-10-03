@@ -72,6 +72,26 @@ def _is_squad_policy_class(policy_class: Any) -> bool:
     return "squad_policy.SquadRecurrentPolicy" in str(policy_class)
 
 
+# Flat replay abs-error above this means the saved decision does not match a
+# fresh score of the same observation, action, and memory. Healthy CTF updates
+# sit near 1e-4. The broken run was above 1. Skip the weight step; do not
+# tighten this toward the sequence-packed error, which can sit near 0.1 while
+# the flat replay still matches.
+ROLLOUT_REPLAY_ABS_ERR_SKIP = 0.05
+
+
+def rollout_replay_should_skip(
+    flat_abs_err: float,
+    limit: float = ROLLOUT_REPLAY_ABS_ERR_SKIP,
+) -> bool:
+    """True when the single-step replay miss is large enough to refuse the update."""
+    try:
+        err = float(flat_abs_err)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(err) and err > float(limit))
+
+
 def sanitize_obs_tensors_inplace(obs):
     """Replace NaN/Inf in rollout obs without allocating a second GPU copy of maps."""
     if isinstance(obs, dict):
@@ -1085,6 +1105,8 @@ class MaskableRecurrentPPO(RecurrentPPO):
         import gc as _gc
 
         continue_training = True
+        replay_skipped = False
+        self.rollout_replay_skipped = False
         logged_logp_check = False
         logged_first_batch = False
         skipped_nonfinite_batches = 0
@@ -1146,6 +1168,19 @@ class MaskableRecurrentPPO(RecurrentPPO):
                             self._flat_rollout_log_prob_abs_err(n_probe=32)
                         )
                     logged_logp_check = True
+                    if rollout_replay_should_skip(self._log_prob_abs_err_flat):
+                        logger.error(
+                            "PPO train: skipping weight update — flat replay abs err "
+                            f"{self._log_prob_abs_err_flat:.4g} > {ROLLOUT_REPLAY_ABS_ERR_SKIP} "
+                            "(saved decisions do not match this policy)"
+                        )
+                        replay_skipped = True
+                        self.rollout_replay_skipped = True
+                        continue_training = False
+                        _fe = getattr(self.policy, "features_extractor", None)
+                        if _fe is not None and hasattr(_fe, "clear_forward_cache"):
+                            _fe.clear_forward_cache()
+                        break
                 adv = r_data.advantages.reshape(-1)
                 if self.normalize_advantage:
                     adv_sel = adv[mask]
@@ -1355,7 +1390,8 @@ class MaskableRecurrentPPO(RecurrentPPO):
             in ("1", "true", "True"),
             reset_peak=True,
         )
-        self._n_updates += self.n_epochs
+        if not replay_skipped:
+            self._n_updates += self.n_epochs
         
         # Calculate explained variance (only for valid steps)
         v_true = np.asarray(self.rollout_buffer.returns.flatten(), dtype=np.float64)
@@ -1385,10 +1421,11 @@ class MaskableRecurrentPPO(RecurrentPPO):
             np.mean(value_losses) if value_losses else float("nan"),
         )
         self.logger.record("train/approx_kl", np.mean(approx_kls) if approx_kls else 0.0)
-        if approx_kls and hasattr(self, "_log_prob_abs_err"):
+        self.logger.record("train/rollout_replay_skipped", 1.0 if replay_skipped else 0.0)
+        if hasattr(self, "_log_prob_abs_err"):
             self.logger.record("train/rollout_log_prob_abs_err", self._log_prob_abs_err)
             del self._log_prob_abs_err
-        if approx_kls and hasattr(self, "_log_prob_abs_err_flat"):
+        if hasattr(self, "_log_prob_abs_err_flat"):
             self.logger.record(
                 "train/rollout_log_prob_abs_err_flat", self._log_prob_abs_err_flat
             )

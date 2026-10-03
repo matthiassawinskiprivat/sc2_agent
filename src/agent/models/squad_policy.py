@@ -471,16 +471,25 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
             bits = (actor_logits > 0.0) & actor_mask
         else:
             bits = (torch.rand_like(actor_logits) < torch.sigmoid(actor_logits)) & actor_mask
-        # Joint actor log-prob is always summed over *alive* slots (padding
-        # contract), not the command-conditioned subset. Command conditioning
-        # only constrains which bits may be 1. Using ``actor_mask`` as the
-        # weight made collect (healers only) disagree with evaluate whenever
-        # ``heal_actor_mask`` was missing/zero and fell back to ``alive`` —
-        # a multi-nat ``rollout_log_prob_abs_err`` with matching weights.
-        actor_weight = alive.to(actor_logits.dtype)
+        # Sampling does ``bernoulli & actor_mask``, so a slot the command
+        # forbids is bit 0 with probability 1. Charging ``log(1-sigmoid)``
+        # there is wrong: a strong pointer (logit ~ +20) makes that term ~-20
+        # per forbidden alive unit, the stored log-prob falls to about -150,
+        # and a tiny float difference between collector and learner exceeds
+        # the replay threshold so every PPO update is skipped.
+        stochastic = alive & actor_mask
+        if given:
+            # A stored ON bit that this row's mask dropped was not deterministic.
+            scored = stochastic | bits
+        else:
+            scored = stochastic
+        actor_weight = scored.to(actor_logits.dtype)
         slot_logp = torch.where(bits, logp_on, logp_off) * actor_weight
         p_on = torch.sigmoid(actor_logits)
-        slot_entropy = -(p_on * logp_on + (1.0 - p_on) * logp_off) * actor_weight
+        slot_entropy = (
+            -(p_on * logp_on + (1.0 - p_on) * logp_off)
+            * stochastic.to(actor_logits.dtype)
+        )
         log_prob = log_prob + slot_logp.sum(dim=-1)
         entropy = entropy + slot_entropy.sum(dim=-1)
 

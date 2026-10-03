@@ -914,7 +914,7 @@ def test_unit_can_attack_keeps_lurker_and_planted_forms():
     ) is True
 
 
-def test_unit_can_aoe_energy_and_ghost_vs_protoss():
+def test_unit_can_aoe_energy_and_ghost_vs_protoss_and_zerg():
     from sc2.ids.upgrade_id import UpgradeId
 
     storm = frozenset({UpgradeId.PSISTORMTECH})
@@ -931,9 +931,11 @@ def test_unit_can_aoe_energy_and_ghost_vs_protoss():
 
     ghost = _caster(UnitTypeId.GHOST, 75.0)
     assert unit_can_aoe(ghost, enemy_race="protoss") is True
-    assert unit_can_aoe(ghost, enemy_race="zerg") is False
+    assert unit_can_aoe(ghost, enemy_race="zerg") is True
+    assert unit_can_aoe(ghost, enemy_race="Zerg") is True
     assert unit_can_aoe(ghost, enemy_race="terran") is False
     assert unit_can_aoe(ghost) is False
+    assert unit_can_aoe(_caster(UnitTypeId.GHOST, 74.0), enemy_race="zerg") is False
     assert unit_can_aoe(_caster(UnitTypeId.GHOST, 74.0), enemy_race="protoss") is False
 
 

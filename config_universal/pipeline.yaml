@@ -38,6 +38,11 @@ agent_architecture: universal
 # of float32 maps is two rollout copies that exceed 32 GB and get paged.
 training:
   n_steps: 256
+  # Squad levels only (see apply_pipeline_rollout_steps). A PPO batch whose
+  # jump exceeds 1.5 * this is dropped before the weight step. 2 keeps the
+  # occasional on-policy jump of ~2–3 seen on finished CTF levels. A disconnected
+  # notebook is refused separately by the flat replay check.
+  target_kl: 2.0
 
 # SC2 process timing (applies to every level via pipeline root ``env``).
 # Parallel workers still stagger launches to avoid DirectX access-violation races;

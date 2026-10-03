@@ -161,6 +161,9 @@ _AOE_REQUIRED_UPGRADE: dict = (
     {UnitTypeId.HIGHTEMPLAR: UpgradeId.PSISTORMTECH} if _SC2_AVAILABLE else {}
 )
 
+# Ghost EMP drains Protoss shields and Zerg caster energy (Queen, Infestor, Viper).
+_GHOST_EMP_ENEMY_RACES: FrozenSet[str] = frozenset({"protoss", "zerg"})
+
 # Ability id used for cooldown / availability checks (same as actuation).
 _AOE_ABILITY_BY_TYPE: dict = (
     {
@@ -701,8 +704,8 @@ def unit_can_aoe(
     """True when this unit can usefully issue ``aoe_local`` this step.
 
     Energy-gated for Infestor / High Templar / Ghost / Viper. Ravager bile has
-    no energy cost but still needs the ability off cooldown. Ghost EMP is only
-    flagged vs Protoss. High Templar Psi Storm requires ``PSISTORMTECH``.
+    no energy cost but still needs the ability off cooldown. Ghost EMP is
+    flagged vs Protoss and Zerg. High Templar Psi Storm requires ``PSISTORMTECH``.
     Viper Parasitic Bomb needs a flying hostile within engage fovea of any ally
     (``has_tactical_air_enemy``). When ``bot._available_abilities_by_tag`` is
     present (opt-in ``query_spell_abilities``), the spell ability must appear
@@ -719,7 +722,8 @@ def unit_can_aoe(
         if required not in (upgrades or frozenset()):
             return False
     if tid == UnitTypeId.GHOST:
-        if str(enemy_race or "").lower().strip() != "protoss":
+        race = str(enemy_race or "").lower().strip()
+        if race not in _GHOST_EMP_ENEMY_RACES:
             return False
     if tid == UnitTypeId.VIPER and not has_tactical_air_enemy:
         return False

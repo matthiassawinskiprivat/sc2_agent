@@ -366,6 +366,16 @@ def test_viper_aoe_actor_requires_tactical_air_enemy():
     assert with_air["aoe_actor_mask"][0] == 1.0
 
 
+def test_ghost_emp_actor_opens_vs_protoss_and_zerg():
+    ghost = _unit(1, UnitTypeId.GHOST, energy=75.0)
+    vs_zerg = build_squad_target_masks(_slots(ghost), enemy_race="zerg")
+    vs_protoss = build_squad_target_masks(_slots(ghost), enemy_race="protoss")
+    vs_terran = build_squad_target_masks(_slots(ghost), enemy_race="terran")
+    assert vs_zerg["aoe_actor_mask"][0] == 1.0
+    assert vs_protoss["aoe_actor_mask"][0] == 1.0
+    assert vs_terran["aoe_actor_mask"][0] == 0.0
+
+
 def test_snipe_target_mask_reuses_precomputed_casters():
     """Obs builder passes snipe_actor units so unit_can_snipe is not re-run."""
     from src.agent.squad_target_masks import build_snipe_target_mask

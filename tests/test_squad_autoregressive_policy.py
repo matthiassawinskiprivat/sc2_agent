@@ -259,8 +259,7 @@ def test_heal_actor_weight_uses_alive_not_heal_mask_alone():
     """Collect and evaluate must agree when heal_actor_mask is present.
 
     Regression for the multi-nat ``rollout_log_prob_abs_err`` after the
-    autoregressive heal refactor: actor logπ must sum over alive slots on
-    both paths.
+    autoregressive heal refactor: both paths must score the same actor bits.
     """
     batch = 8
     policy = _make_policy()
@@ -278,6 +277,48 @@ def test_heal_actor_weight_uses_alive_not_heal_mask_alone():
         )
     err = (eval_log_prob - log_prob).abs().max().item()
     assert err < 1e-4, f"heal collect/eval logπ drift = {err}"
+
+
+def test_forbidden_alive_slots_do_not_dominate_actor_log_prob():
+    """Units the command forces off must not add log(1-sigmoid).
+
+    A strong pointer on an alive but ineligible slot used to contribute about
+    -20 per unit. The stored log-prob fell near -150, and the collector and
+    learner disagreed by a few nats, which skipped every update.
+    """
+    batch = 4
+    n_alive = 4
+    policy = _make_policy()
+    obs = _obs(batch, n_alive=n_alive, healer_slots=(0,), wounded_slots=(1,), seed=3)
+    mask = _flat_mask(batch, n_alive=n_alive, legal_commands=[2])
+    real_forward = policy.features_extractor.forward
+
+    def _strong_pointer(observations):
+        out = real_forward(observations)
+        n = observations["map"].shape[0]
+        policy.features_extractor._pointer_logits = torch.full(
+            (n, MAX_SQUAD_UNITS), 20.0, device=out.device
+        )
+        return out
+
+    policy.features_extractor.forward = _strong_pointer
+    obs_t = policy.obs_to_tensor(obs)[0]
+    with torch.no_grad():
+        actions, _, log_prob, _ = _run(policy, obs, mask, batch)
+        _, eval_log_prob, _ = policy.evaluate_actions(
+            obs_t,
+            actions,
+            _zero_states(policy, batch),
+            torch.ones(batch),
+            action_masks=torch.as_tensor(mask),
+        )
+    # Only the healer slot may be selected. The other alive slots are forced off.
+    assert (actions[:, 1:n_alive] == 0).all()
+    err = (eval_log_prob - log_prob).abs().max().item()
+    assert err < 1e-4, f"forbidden-slot collect/eval drift = {err}"
+    # One stochastic slot at logit 20 is at worst ~-20. Three forced slots
+    # would add another ~-60 if they were still charged.
+    assert float(log_prob.min()) > -40.0, f"actor logπ collapsed to {float(log_prob.min())}"
 
 
 def test_spatial_command_forces_null_target_and_free_cell():

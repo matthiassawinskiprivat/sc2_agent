@@ -8,8 +8,9 @@ from gymnasium import spaces
 from loguru import logger
 from src.agent.utils.disk_buffer import (
     DiskDictRolloutBuffer,
+    assert_obs_fingerprint_matches,
     is_disk_offloaded_obs_key,
-    obs_sample_mean,
+    obs_fingerprint_payload,
 )
 
 class AsyncDiskBuffer(DiskDictRolloutBuffer):
@@ -79,10 +80,7 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
         disk_obs = {}
         for key, obs in self.observations.items():
             if is_disk_offloaded_obs_key(key) and isinstance(obs, np.memmap):
-                disk_obs[key] = {
-                    "sample_mean": obs_sample_mean(obs),
-                    "shape": list(obs.shape),
-                }
+                disk_obs[key] = obs_fingerprint_payload(obs)
         if disk_obs:
             metadata["disk_obs"] = disk_obs
 
@@ -157,17 +155,9 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
             mapped = np.memmap(
                 filename, dtype=np.float32, mode="r+", shape=shape
             )
-            expected_info = disk_meta.get(key) or {}
-            expected = expected_info.get("sample_mean")
-            if expected is not None:
-                got = obs_sample_mean(mapped)
-                tol = max(1e-4, 1e-3 * abs(float(expected)))
-                if not np.isfinite(got) or abs(got - float(expected)) > tol:
-                    raise RuntimeError(
-                        f"Disk obs {key!r} attach mismatch: collector "
-                        f"sample_mean={expected} learner={got}. Stale/empty "
-                        f"memmap — PPO would train with obs≠old_log_prob."
-                    )
+            assert_obs_fingerprint_matches(
+                key, mapped, disk_meta.get(key) or {}, kind="Disk"
+            )
             buffer.observations[key] = mapped
             buffer.disk_files[key] = filename
 

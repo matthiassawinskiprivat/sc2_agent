@@ -15,7 +15,11 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from loguru import logger
 
-from src.agent.utils.disk_buffer import is_disk_offloaded_obs_key
+from src.agent.utils.disk_buffer import (
+    assert_obs_fingerprint_matches,
+    is_disk_offloaded_obs_key,
+    obs_fingerprint_payload,
+)
 from src.agent.utils.async_disk_buffer import AsyncDiskBuffer
 
 
@@ -134,14 +138,6 @@ def observation_buffer_nbytes(shape) -> int:
     return int(nbytes)
 
 
-def _obs_sample_mean(arr: np.ndarray) -> float:
-    """Cheap fingerprint: mean of first timestep, first env."""
-    if arr.size == 0:
-        return 0.0
-    head = arr[0, 0] if arr.ndim >= 2 else arr
-    return float(np.mean(head))
-
-
 def _create_shm_segment(name: str, nbytes: int) -> SharedMemory:
     nbytes = int(nbytes)
     if nbytes <= 0:
@@ -234,16 +230,7 @@ class AsyncSharedRamBuffer(AsyncDiskBuffer):
                 raise
             handles[key] = shm
             mapped = np.ndarray(shape, dtype=np.float32, buffer=shm.buf)
-            expected = info.get("sample_mean")
-            if expected is not None:
-                got = _obs_sample_mean(mapped)
-                tol = max(1e-4, 1e-3 * abs(float(expected)))
-                if not np.isfinite(got) or abs(got - float(expected)) > tol:
-                    raise RuntimeError(
-                        f"Shared obs {key!r} attach mismatch: collector "
-                        f"sample_mean={expected} learner={got}. Mapped a different "
-                        f"(likely empty) segment — PPO would train on zeros."
-                    )
+            assert_obs_fingerprint_matches(key, mapped, info, kind="Shared")
             buffer.observations[key] = mapped
         buffer._shm_handles = handles
 
@@ -296,15 +283,14 @@ class AsyncSharedRamBuffer(AsyncDiskBuffer):
             k: v.shape for k, v in self.observation_space.spaces.items()
         }
         metadata["ipc_backend"] = "shared_memory"
-        metadata["shared_obs"] = {
-            key: {
+        metadata["shared_obs"] = {}
+        for key in self.shared_observation_keys():
+            obs = self.observations[key]
+            metadata["shared_obs"][key] = {
                 "name": self.shm_segment_name(key),
-                "shape": list(self.observations[key].shape),
-                "nbytes": observation_buffer_nbytes(self.observations[key].shape),
-                "sample_mean": _obs_sample_mean(self.observations[key]),
+                "nbytes": observation_buffer_nbytes(obs.shape),
+                **obs_fingerprint_payload(obs),
             }
-            for key in self.shared_observation_keys()
-        }
 
         tmp_signal = self.signal_file + ".tmp"
         with open(tmp_signal, "w") as f:

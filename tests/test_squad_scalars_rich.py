@@ -516,7 +516,7 @@ def test_zero_observation_respects_active_subset(training_conf):
     assert obs["unit_scalars"].shape == (MAX_SQUAD_UNITS, 2)
 
 
-def test_can_aoe_ghost_only_vs_protoss(training_conf):
+def test_can_aoe_ghost_vs_protoss_and_zerg(training_conf):
     training_conf = {**training_conf, "action_heads": ["aoe_local"]}
     builder = SquadObservationBuilder(training_conf)
     ghost = _make_unit(type_id=UnitTypeId.GHOST, energy=200.0)
@@ -530,8 +530,14 @@ def test_can_aoe_ghost_only_vs_protoss(training_conf):
         upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
         enemy_race="zerg",
     )
+    feats_t = builder._unit_scalars(
+        ghost, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+        enemy_race="terran",
+    )
     assert feats_p[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(1.0)
-    assert feats_z[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(0.0)
+    assert feats_z[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(1.0)
+    assert feats_t[USC.FEATURES[USC.CAN_AOE]] == pytest.approx(0.0)
 
     from sc2.ids.upgrade_id import UpgradeId
 
