@@ -116,6 +116,28 @@ def assert_obs_fingerprint_matches(key: str, mapped: np.ndarray, info: dict, *, 
 
 DEFAULT_RNN_MAX_SEQ_LEN = 32
 
+def span_timesteps(span: tuple) -> np.ndarray:
+    """Buffer rows that form one RNN sequence, in collector order."""
+    if len(span) == 2:
+        return np.asarray(span[1], dtype=np.int64).reshape(-1)
+    _env_idx, start_step, length = span[0], int(span[1]), int(span[2])
+    return np.arange(start_step, start_step + length, dtype=np.int64)
+
+
+def span_length(span: tuple) -> int:
+    return int(span_timesteps(span).shape[0])
+
+
+def _span_from_timesteps(env_idx: int, steps: list[int]) -> tuple:
+    """Prefer a contiguous ``(env, start, length)`` when the rows are adjacent."""
+    if not steps:
+        raise ValueError("empty RNN span")
+    start = int(steps[0])
+    length = len(steps)
+    if steps == list(range(start, start + length)):
+        return (int(env_idx), start, length)
+    return (int(env_idx), np.asarray(steps, dtype=np.int64))
+
 
 def canonical_recurrent_n_seq(
     batch_size: Optional[int],
@@ -165,7 +187,7 @@ def pack_recurrent_sequence_batches(
     batches: list[list[tuple[int, int, int]]] = []
     current: list[tuple[int, int, int]] = []
     for span in sequence_spans:
-        span_len = int(span[2])
+        span_len = span_length(span)
         if span_len <= 0:
             continue
         if current and len(current) >= cap:
@@ -193,36 +215,55 @@ def build_recurrent_sequence_spans(
     episode_starts: np.ndarray,
     max_seq_len: int = 32,
     policy_active: Optional[np.ndarray] = None,
-) -> list[tuple[int, int, int]]:
+    rnn_context_ids: Optional[np.ndarray] = None,
+) -> list[tuple]:
     """
     RNN minibatch sequence boundaries per env column.
 
-    Splits on focal-unit / episode resets (``episode_starts``), skips timesteps where
-    ``policy_active`` is 0 (another env owned that buffer row), and caps length at
-    ``max_seq_len``. Inactive rows must not sit inside a sequence or the RNN hidden
-    state drifts from what collection used when computing ``old_log_prob``.
+    Splits on episode / focal resets (``episode_starts``) and caps length at
+    ``max_seq_len``. Inactive rows (``policy_active==0``) are omitted.
+
+    Trainee-pool IDs (``rnn_context_ids``) do **not** start a new zeroed
+    sequence. Steps that share a pool are gathered in time order so A/B/A/B
+    rotation becomes two long A and B sequences (BPTT + one minibatch count
+    like a single-pool rollout). A 2-tuple ``(env, timesteps)`` is used when
+    those rows are not adjacent in the buffer.
     """
-    spans: list[tuple[int, int, int]] = []
+    spans: list[tuple] = []
+    use_context = (
+        rnn_context_ids is not None
+        and np.any(np.asarray(rnn_context_ids[:buffer_size]) >= 0)
+    )
     for env_idx in range(n_envs):
-        t = 0
-        while t < buffer_size:
-            while t < buffer_size:
-                if policy_active is None or policy_active[t, env_idx] > 1e-8:
-                    break
-                t += 1
-            if t >= buffer_size:
-                break
-            start = t
-            length = 0
-            while t < buffer_size and length < max_seq_len:
-                if policy_active is not None and policy_active[t, env_idx] <= 1e-8:
-                    break
-                if t > start and episode_starts[t, env_idx]:
-                    break
-                length += 1
-                t += 1
-            if length > 0:
-                spans.append((env_idx, start, length))
+        open_chains: dict[int, list[int]] = {}
+        finished: list[list[int]] = []
+        for t in range(buffer_size):
+            if policy_active is not None and float(policy_active[t, env_idx]) <= 1e-8:
+                continue
+            if not use_context:
+                ctx = 0
+            else:
+                ctx = int(rnn_context_ids[t, env_idx])
+                if ctx < 0:
+                    continue
+            if episode_starts[t, env_idx]:
+                for old_ctx, old_chain in list(open_chains.items()):
+                    if old_chain:
+                        finished.append(old_chain)
+                    open_chains[old_ctx] = []
+                open_chains[ctx] = [t]
+                continue
+            chain = open_chains.get(ctx)
+            if chain is None:
+                open_chains[ctx] = [t]
+            else:
+                chain.append(t)
+        finished.extend(chain for chain in open_chains.values() if chain)
+        for chain in finished:
+            for i in range(0, len(chain), max_seq_len):
+                chunk = chain[i : i + max_seq_len]
+                if chunk:
+                    spans.append(_span_from_timesteps(env_idx, chunk))
     return spans
 
 
@@ -294,6 +335,9 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
             self.cell_states_vf = np.zeros((self.buffer_size, 1, self.n_envs, self.hidden_size), dtype=np.float32)
 
         self.policy_active = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        self.rnn_context_ids = np.full(
+            (self.buffer_size, self.n_envs), -1, dtype=np.int64
+        )
 
         # Offload large observations to memmap files (disk backend only).
         self.disk_files = {}
@@ -322,6 +366,8 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
                     self.observations[key] = np.memmap(filename, dtype=np.float32, mode='r+', shape=shape)
         if hasattr(self, "policy_active"):
             self.policy_active.fill(0.0)
+        if hasattr(self, "rnn_context_ids"):
+            self.rnn_context_ids.fill(-1)
 
     def to_device(self, device: torch.device):
         self.device = device
@@ -353,11 +399,18 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
         lstm_states: RNNStates = None,
         action_masks: Optional[np.ndarray] = None,
         policy_active: Optional[np.ndarray] = None,
+        rnn_context_ids: Optional[np.ndarray] = None,
     ) -> None:
         if policy_active is not None:
             self.policy_active[self.pos] = np.asarray(policy_active, dtype=np.float32).reshape(self.n_envs)
         else:
             self.policy_active[self.pos] = 1.0
+        if rnn_context_ids is not None:
+            self.rnn_context_ids[self.pos] = np.asarray(
+                rnn_context_ids, dtype=np.int64
+            ).reshape(self.n_envs)
+        else:
+            self.rnn_context_ids[self.pos] = -1
 
         if lstm_states is not None:
             # Robustly normalize incoming RNN states to (1, n_envs, hidden_size).
@@ -541,16 +594,24 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
             self.episode_starts,
             max_seq_len,
             policy_active=getattr(self, "policy_active", None),
+            rnn_context_ids=getattr(self, "rnn_context_ids", None),
         )
         np.random.shuffle(sequence_spans)
 
         if not sequence_spans:
+            logger.warning("RNN get: no sequence spans (empty buffer or all context ids < 0)")
             return
 
         batches = pack_recurrent_sequence_batches(
             sequence_spans, batch_size, max_seq_len=max_seq_len
         )
         pad_n_seq = canonical_recurrent_n_seq(batch_size, max_seq_len)
+        gathered = sum(1 for span in sequence_spans if len(span) == 2)
+        logger.info(
+            f"RNN get: spans={len(sequence_spans)} gathered_noncontiguous={gathered} "
+            f"batches={len(batches)} filled={filled_steps} n_envs={self.n_envs} "
+            f"batch_size={batch_size}"
+        )
 
         for batch_spans in batches:
             yield self._get_samples_by_sequences(
@@ -623,11 +684,14 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
         h_pi_starts, h_vf_starts = [], []
         c_pi_starts, c_vf_starts = [], []
 
-        for env_idx, start_step, actual_len in batch_spans:
-            end_step = start_step + actual_len
+        for span in batch_spans:
+            env_idx = int(span[0])
+            steps = span_timesteps(span)
+            actual_len = int(steps.shape[0])
+            start_step = int(steps[0])
 
             for k in obs_batch.keys():
-                chunk = self.observations[k][start_step:end_step, env_idx]
+                chunk = self.observations[k][steps, env_idx]
                 if actual_len < seq_len:
                     pad_shape = (seq_len - actual_len, *chunk.shape[1:])
                     chunk = np.concatenate([chunk, np.zeros(pad_shape, dtype=np.float32)])
@@ -639,10 +703,10 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
                 c_pi_starts.append(self.cell_states_pi[start_step, :, env_idx, :])
                 c_vf_starts.append(self.cell_states_vf[start_step, :, env_idx, :])
 
-            def get_and_pad(arr, is_2d=False):
-                chunk = arr[start_step:end_step, env_idx]
-                if actual_len < seq_len:
-                    pad_shape = (seq_len - actual_len, *chunk.shape[1:]) if is_2d else (seq_len - actual_len,)
+            def get_and_pad(arr, is_2d=False, _steps=steps, _env=env_idx, _n=actual_len):
+                chunk = arr[_steps, _env]
+                if _n < seq_len:
+                    pad_shape = (seq_len - _n, *chunk.shape[1:]) if is_2d else (seq_len - _n,)
                     chunk = np.concatenate([chunk, np.zeros(pad_shape, dtype=arr.dtype)])
                 return chunk
 
@@ -721,9 +785,11 @@ class DiskDictRolloutBuffer(MaskableDictRolloutBuffer):
             lstm_states = RNNStates((h_pi,), (h_vf,))
 
         m_list = []
-        for env_idx, start_step, actual_len in batch_spans:
-            end_step = start_step + actual_len
-            chunk = self.action_masks[start_step:end_step, env_idx]
+        for span in batch_spans:
+            env_idx = int(span[0])
+            steps = span_timesteps(span)
+            actual_len = int(steps.shape[0])
+            chunk = self.action_masks[steps, env_idx]
             if actual_len < seq_len:
                 pad = np.ones((seq_len - actual_len, chunk.shape[-1]), dtype=bool)
                 chunk = np.concatenate([chunk, pad])

@@ -84,6 +84,18 @@ TRAINING_PROCESS_NEEDLES = (
     "train_pipeline.py",
 )
 
+# Operational noise. A refused PPO step is the replay guard dropping one bad
+# buffer; the TensorBoard HTTP port is optional (the watcher reads event files
+# directly). A real collector/learner disconnect still raises CRIT from
+# train/rollout_log_prob_abs_err.
+BENIGN_ALERT_RE = re.compile(
+    r"TensorBoard process started but port"
+    r"|flat replay abs err"
+    r"|weights were not stepped and will not be republished"
+    r"|Update skipped after replay mismatch"
+    r"|skipped periodic checkpoint save \(replay mismatch"
+)
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -394,8 +406,13 @@ def read_tb_latest_scalars(log_dir: str, tags: tuple[str, ...]) -> dict[str, tup
     return out
 
 
+def is_benign_alert_line(line: str) -> bool:
+    """True for expected log lines that must not raise digest severity."""
+    return bool(BENIGN_ALERT_RE.search(line))
+
+
 def _line_is_alert(line: str) -> bool:
-    if not line.strip():
+    if not line.strip() or is_benign_alert_line(line):
         return False
     if LOGURU_ALERT_LEVEL_RE.search(line):
         return True
@@ -601,16 +618,17 @@ def evaluate_findings(
             Finding("CRIT", "value_loss", f"value_loss is non-finite ({value_loss}).")
         )
 
-    if alert_lines:
+    scored_alerts = [line for line in alert_lines if not is_benign_alert_line(line)]
+    if scored_alerts:
         err_hits = [
             line
-            for line in alert_lines
+            for line in scored_alerts
             if re.search(r"\|\s*(ERROR|CRITICAL)\s*\|", line)
             or re.search(r"(?i)\b(traceback|exception)\b", line)
         ]
         graft_hits = [
             line
-            for line in alert_lines
+            for line in scored_alerts
             if re.search(r"(?i)graft|shape mismatch", line)
         ]
         if err_hits:
@@ -619,7 +637,7 @@ def evaluate_findings(
                     "CRIT",
                     "alert_logs",
                     f"{len(err_hits)} ERROR/Traceback-like line(s) in alert excerpt "
-                    f"(of {len(alert_lines)} total alerts).",
+                    f"(of {len(scored_alerts)} total alerts).",
                 )
             )
         elif graft_hits:
@@ -636,7 +654,7 @@ def evaluate_findings(
                 Finding(
                     "WARN",
                     "alert_logs",
-                    f"{len(alert_lines)} warning-like line(s) in alert excerpt.",
+                    f"{len(scored_alerts)} warning-like line(s) in alert excerpt.",
                 )
             )
     else:

@@ -19,6 +19,14 @@ The scalar log probability is the sum of those conditional log probabilities.
 Proximal Policy Optimization trains against exactly the distribution the
 collector sampled from (watch ``train/rollout_log_prob_abs_err``).
 
+When ``use_relational_decode`` is on (per-level YAML, same pattern as
+``use_self_attention``), three zero-initialised extras condition later
+factors on earlier ones without changing a grafted checkpoint at step 0:
+
+* command-conditioned attention over allied embeddings added to actor logits
+* selected-actor mean embedding added to the target pointer and spatial latent
+* cross-side attention inside ``SquadNetwork`` (allies ↔ hostiles)
+
 Command-dependent legality rides in the observation (``command_modes``,
 ``heal_actor_mask``, ``heal_target_mask``, ``load_actor_mask``,
 ``load_target_mask``, ``attack_actor_mask``, ``aoe_actor_mask``,
@@ -189,6 +197,11 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
         fe_kw = dict(kwargs.get("features_extractor_kwargs") or {})
         fe_kw.setdefault("features_dim", 512)
         fe_kw.setdefault("thinking_steps", 3)
+        use_rel = bool(
+            kwargs.pop("use_relational_decode", fe_kw.get("use_relational_decode", False))
+        )
+        fe_kw["use_relational_decode"] = use_rel
+        self.use_relational_decode = use_rel
         kwargs["features_extractor_kwargs"] = fe_kw
         if "lstm_hidden_size" not in kwargs:
             kwargs["lstm_hidden_size"] = 512
@@ -219,11 +232,27 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
         self.target_pointer = TargetPointerHead(
             latent_dim_pi, COMMAND_EMBED_DIM, embed_dim=64
         )
+        if self.use_relational_decode:
+            # Query (latent + command) against allied embeddings. The scale
+            # starts at 0 so actor logits match the grafted policy.
+            self.actor_cmd_query = nn.Linear(
+                latent_dim_pi + COMMAND_EMBED_DIM, COMMAND_EMBED_DIM
+            )
+            self.actor_cmd_attn_scale = nn.Parameter(torch.zeros(()))
+            self.target_selection_adapter = nn.Linear(COMMAND_EMBED_DIM, latent_dim_pi)
+            nn.init.zeros_(self.target_selection_adapter.weight)
+            nn.init.zeros_(self.target_selection_adapter.bias)
+            self.spatial_selection_adapter = nn.Linear(COMMAND_EMBED_DIM, latent_dim_pi)
+            nn.init.zeros_(self.spatial_selection_adapter.weight)
+            nn.init.zeros_(self.spatial_selection_adapter.bias)
         delattr(self, "action_net")
         if self.ortho_init:
             self.command_head.apply(partial(self.init_weights, gain=0.01))
             self.spatial_decoder.apply(partial(self.init_weights, gain=0.01))
             self.target_pointer.apply(partial(self.init_weights, gain=0.01))
+        rezero = getattr(self.features_extractor, "rezero_relational_identity", None)
+        if callable(rezero):
+            rezero()
         self.optimizer = self.optimizer_class(
             self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs
         )
@@ -414,6 +443,45 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
         center_only[:, UNIVERSAL_DEFAULT_SPATIAL_IDX] = True
         return torch.where(is_spatial, all_cells, center_only)
 
+    def _actor_command_attention(
+        self,
+        latent_pi: torch.Tensor,
+        cmd_embed: torch.Tensor,
+        ally_embeddings: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Command-conditioned pointer residual over allied slots (zero at init)."""
+        batch = latent_pi.shape[0]
+        extra = latent_pi.new_zeros((batch, MAX_SQUAD_UNITS))
+        if (
+            not self.use_relational_decode
+            or ally_embeddings is None
+            or not hasattr(self, "actor_cmd_query")
+        ):
+            return extra
+        query = self.actor_cmd_query(torch.cat([latent_pi, cmd_embed], dim=-1))
+        keys = ally_embeddings
+        scores = torch.einsum("be,bne->bn", query, keys) * (float(query.shape[-1]) ** -0.5)
+        n = min(MAX_SQUAD_UNITS, scores.shape[1])
+        extra[:, :n] = scores[:, :n]
+        return extra * self.actor_cmd_attn_scale
+
+    def _selected_actor_context(
+        self,
+        bits: torch.Tensor,
+        ally_embeddings: Optional[torch.Tensor],
+        latent_pi: torch.Tensor,
+    ) -> torch.Tensor:
+        """Mean embedding of selected allies; empty selection is the zero vector."""
+        if ally_embeddings is None:
+            return latent_pi.new_zeros((latent_pi.shape[0], COMMAND_EMBED_DIM))
+        n = min(MAX_SQUAD_UNITS, ally_embeddings.shape[1], bits.shape[1])
+        weights = bits[:, :n].to(dtype=ally_embeddings.dtype).unsqueeze(-1)
+        total = weights.sum(dim=1).clamp(min=1.0)
+        summed = torch.nan_to_num(
+            ally_embeddings[:, :n], nan=0.0, posinf=0.0, neginf=0.0
+        )
+        return (summed * weights).sum(dim=1) / total
+
     # ------------------------------------------------------------------
     # Autoregressive decode
     # ------------------------------------------------------------------
@@ -457,7 +525,11 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
         if base_pointer is None:
             base_pointer = latent_pi.new_zeros((batch, MAX_SQUAD_UNITS))
         actor_logits = _stabilize_action_logits(
-            base_pointer + self.actor_cmd_adapter(cmd_embed)
+            base_pointer
+            + self.actor_cmd_adapter(cmd_embed)
+            + self._actor_command_attention(
+                latent_pi, cmd_embed, getattr(fe, "_ally_embeddings", None)
+            )
         )
         alive = self._alive_mask_from_flat(action_masks, obs, batch, device)
         actor_mask = self._actor_mask(obs, modes, alive, batch, device)
@@ -493,12 +565,20 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
         log_prob = log_prob + slot_logp.sum(dim=-1)
         entropy = entropy + slot_entropy.sum(dim=-1)
 
+        ally_embs = getattr(fe, "_ally_embeddings", None)
+        target_latent = latent_pi
+        spatial_latent = latent_pi + self.spatial_cmd_adapter(cmd_embed)
+        if self.use_relational_decode and hasattr(self, "target_selection_adapter"):
+            selected = self._selected_actor_context(bits, ally_embs, latent_pi)
+            target_latent = latent_pi + self.target_selection_adapter(selected)
+            spatial_latent = spatial_latent + self.spatial_selection_adapter(selected)
+
         # --- 3a. terminal unit target ---
         target_logits = _stabilize_action_logits(
             self.target_pointer(
-                latent_pi,
+                target_latent,
                 cmd_embed,
-                getattr(fe, "_ally_embeddings", None),
+                ally_embs,
                 getattr(fe, "_enemy_embeddings", None),
             )
         )
@@ -518,7 +598,6 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
         fused = getattr(fe, "_spatial_fused", None)
         if fused is None:
             fused = latent_pi.new_zeros((batch, 128, 16, 16))
-        spatial_latent = latent_pi + self.spatial_cmd_adapter(cmd_embed)
         spatial_logits = self.spatial_decoder(spatial_latent, fused)
         spatial_logits = spatial_logits + tactical_center_spatial_bias(
             self.spatial_resolution, latent_pi

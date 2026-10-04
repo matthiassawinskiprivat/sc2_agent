@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence, Tuple
 
 import gymnasium as gym
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from src.agent.unit_scalar_constants import UnitScalarConstants
 from src.models.components.entity_encoder import EntityEncoder, PointerAttention
 from src.models.components.reasoning_core import ReasoningCore
+from src.models.components.side_cross_attention import SideCrossAttention
 
 
 class SquadNetwork(BaseFeaturesExtractor):
@@ -32,6 +35,8 @@ class SquadNetwork(BaseFeaturesExtractor):
         cnn_chunk_size: int = 16,
         tactical_cnn_chunk_size: Optional[int] = None,
         use_self_attention: bool = False,
+        use_relational_decode: bool = False,
+        active_unit_scalars: Optional[Sequence[str]] = None,
         **kwargs,
     ):
         super().__init__(observation_space, features_dim)
@@ -111,6 +116,26 @@ class SquadNetwork(BaseFeaturesExtractor):
             if self.enemy_feat_dim > 0
             else None
         )
+        self.use_relational_decode = bool(use_relational_decode)
+        self.side_cross_attention: Optional[SideCrossAttention] = (
+            SideCrossAttention(embed_dim=64, nhead=4)
+            if self.use_relational_decode and self.enemy_encoder is not None
+            else None
+        )
+        # Sample the global 16×16 CNN at each unit's (x_norm, y_norm) and add
+        # it to that unit's key. Zero-initialised so a grafted checkpoint is
+        # unchanged until this residual moves.
+        self._xy_indices = self._resolve_xy_indices(
+            active_unit_scalars, self.unit_feat_dim
+        )
+        self.map_sample_adapter: Optional[nn.Linear] = (
+            nn.Linear(64, 64)
+            if self.use_relational_decode and self._xy_indices is not None
+            else None
+        )
+        if self.map_sample_adapter is not None:
+            nn.init.zeros_(self.map_sample_adapter.weight)
+            nn.init.zeros_(self.map_sample_adapter.bias)
         self.pointer_attention = PointerAttention(
             query_dim=features_dim, embed_dim=64, use_sigmoid=False
         )
@@ -140,6 +165,33 @@ class SquadNetwork(BaseFeaturesExtractor):
         self._spatial_fused: Optional[torch.Tensor] = None
         self._ally_embeddings: Optional[torch.Tensor] = None
         self._enemy_embeddings: Optional[torch.Tensor] = None
+        self.rezero_relational_identity()
+
+    def rezero_relational_identity(self) -> None:
+        """Keep residual extras at 0 after SB3 ortho init."""
+        attn = getattr(self, "side_cross_attention", None)
+        if attn is not None:
+            nn.init.zeros_(attn.out_proj.weight)
+            nn.init.zeros_(attn.out_proj.bias)
+        adapter = getattr(self, "map_sample_adapter", None)
+        if adapter is not None:
+            nn.init.zeros_(adapter.weight)
+            nn.init.zeros_(adapter.bias)
+
+    @staticmethod
+    def _resolve_xy_indices(
+        names: Optional[Sequence[str]],
+        unit_feat_dim: int,
+    ) -> Optional[Tuple[int, int]]:
+        if names:
+            lower = [str(n).lower() for n in names]
+            if "x_norm" in lower and "y_norm" in lower:
+                return lower.index("x_norm"), lower.index("y_norm")
+            return None
+        if unit_feat_dim == UnitScalarConstants.get_dim():
+            feats = UnitScalarConstants.FEATURES
+            return feats[UnitScalarConstants.X_NORM], feats[UnitScalarConstants.Y_NORM]
+        return None
 
     def clear_forward_cache(self) -> None:
         """Drop stashed forward tensors so autograd intermediates can be freed."""
@@ -193,6 +245,22 @@ class SquadNetwork(BaseFeaturesExtractor):
         if self.enemy_encoder is not None and "enemy_scalars" in observations:
             enemy_mask = observations["enemy_mask"]
             enemy_embs = self.enemy_encoder(observations["enemy_scalars"], enemy_mask)
+        if self.map_sample_adapter is not None:
+            local = self._sample_map_at_units(global_16, unit_scalars, unit_mask)
+            entity_embs = entity_embs + self.map_sample_adapter(local)
+            if enemy_embs is not None and "enemy_scalars" in observations:
+                enemy_local = self._sample_map_at_units(
+                    global_16, observations["enemy_scalars"], enemy_mask
+                )
+                enemy_embs = enemy_embs + self.map_sample_adapter(enemy_local)
+        if (
+            self.side_cross_attention is not None
+            and enemy_embs is not None
+            and enemy_mask is not None
+        ):
+            entity_embs, enemy_embs = self.side_cross_attention(
+                entity_embs, enemy_embs, unit_mask, enemy_mask
+            )
 
         parts = [gap_g, gap_t, command_obs]
         if self.race_dim > 0:
@@ -254,3 +322,35 @@ class SquadNetwork(BaseFeaturesExtractor):
         # Soft mask for padding — keep magnitude finite before action-logit stabilize.
         logits = logits.masked_fill(mask == 0, -50.0)
         return logits
+
+    def _sample_map_at_units(
+        self,
+        feat_map: torch.Tensor,
+        scalars: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Bilinear sample of the global 16×16 CNN at each unit (x_norm, y_norm).
+
+        Observation rows are y-flipped versus game *y*; *x_norm* / *y_norm* are
+        playable-normalized game coordinates. Letterbox on the 128×128 tensor
+        is ignored — the feature map is treated as the playable plane.
+        """
+        if self._xy_indices is None:
+            batch, n_units, _ = scalars.shape
+            return feat_map.new_zeros((batch, n_units, feat_map.shape[1]))
+        x_idx, y_idx = self._xy_indices
+        x = scalars[..., x_idx].clamp(0.0, 1.0)
+        y = scalars[..., y_idx].clamp(0.0, 1.0)
+        grid = torch.stack((x * 2.0 - 1.0, (1.0 - y) * 2.0 - 1.0), dim=-1)
+        sampled = F.grid_sample(
+            feat_map,
+            grid.unsqueeze(2),
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True,
+        )
+        out = sampled.squeeze(-1).transpose(1, 2)
+        if mask is not None:
+            alive = mask if mask.dtype == torch.bool else mask != 0
+            out = out * alive.unsqueeze(-1).to(dtype=out.dtype)
+        return out

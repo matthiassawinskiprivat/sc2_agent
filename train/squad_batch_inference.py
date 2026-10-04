@@ -511,6 +511,7 @@ class VecRolloutBufferRow:
     masks: np.ndarray
     lstm_starts: np.ndarray
     pre_lstm_by_env: Dict[int, Optional[RNNStates]]
+    rnn_context_ids: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -569,6 +570,11 @@ def write_vec_rollout_row_to_buffer(
         else None
     )
 
+    context_ids = np.full((num_envs,), -1, dtype=np.int64)
+    if vec_row.rnn_context_ids is not None:
+        for j, env_i in enumerate(env_indices):
+            context_ids[env_i] = int(vec_row.rnn_context_ids[j])
+
     buffer.add(
         pre_step_obs,
         row_actions,
@@ -579,6 +585,7 @@ def write_vec_rollout_row_to_buffer(
         buffer_lstm,
         masks,
         policy_active=policy_active,
+        rnn_context_ids=context_ids,
     )
     return 1
 

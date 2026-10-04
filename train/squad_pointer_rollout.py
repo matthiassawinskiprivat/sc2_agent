@@ -2,14 +2,15 @@
 Rollout helper for CTF squad pointer architecture.
 
 One policy forward and one buffer row per env step (no per-unit squad batching).
-Recurrent state resets on episode done only — not on focal-unit change.
+Recurrent state resets on episode done only. Arena / trainee-pool switches
+swap a per-pool carry — they do not zero ``episode_starts``.
 """
 
 from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -24,13 +25,13 @@ from train.opponent_peek_ipc import (
 from train.squad_batch_inference import (
     RolloutResolution,
     VecRolloutBufferRow,
-    _gather_rnn_columns,
     _obs_tensor_to_finite,
     _scatter_rnn_columns,
     clone_rnn_states,
     normalize_vec_rnn_states,
     opponent_pointer_vec_predict,
     select_rnn_state_column,
+    stack_pointer_lstm_states,
 )
 from sb3_contrib.common.recurrent.type_aliases import RNNStates
 
@@ -76,6 +77,25 @@ def stack_info_requires_policy(
     return np.asarray(flags, dtype=bool)
 
 
+def stack_info_trainee_pool_indices(
+    infos: Any, num_envs: int
+) -> Optional[np.ndarray]:
+    """Pull per-env ``trainee_pool_index`` from step/reset infos."""
+    if infos is None:
+        return None
+    if isinstance(infos, dict):
+        infos = [infos]
+    if not isinstance(infos, (list, tuple)) or len(infos) < num_envs:
+        return None
+    rows: List[int] = []
+    for i in range(num_envs):
+        info = infos[i]
+        if not isinstance(info, dict) or "trainee_pool_index" not in info:
+            return None
+        rows.append(int(info["trainee_pool_index"]))
+    return np.asarray(rows, dtype=np.int64)
+
+
 class SquadPointerRolloutHelper:
     """Single forward per env step for squad MultiDiscrete pointer actions."""
 
@@ -83,6 +103,7 @@ class SquadPointerRolloutHelper:
         self.num_envs = num_envs
         self._peek_shm: Optional[OpponentPeekSharedMemory] = None
         self._vec_has_attr: Dict[str, bool] = {}
+        self._trainee_pool_lstm: Dict[Tuple[int, int], RNNStates] = {}
 
     def bind_peek_shm(
         self,
@@ -115,10 +136,12 @@ class SquadPointerRolloutHelper:
             shm.close(unlink=unlink)
 
     def reset(self) -> None:
-        pass
+        self._trainee_pool_lstm.clear()
 
     def clear_env(self, env_idx: int) -> None:
-        pass
+        doomed = [key for key in self._trainee_pool_lstm if key[0] == int(env_idx)]
+        for key in doomed:
+            del self._trainee_pool_lstm[key]
 
     def collector_profile_enabled(self) -> bool:
         """Opt-in wall timers for the collector process (``SC2_COLLECTOR_PROFILE``)."""
@@ -140,6 +163,49 @@ class SquadPointerRolloutHelper:
         sums[key] = sums.get(key, 0.0) + float(seconds)
         counts = self._profile_counts
         counts[key] = counts.get(key, 0) + 1
+
+    def _resolve_pool_indices(
+        self,
+        vec_env,
+        num_envs: int,
+        trainee_pool_indices: Optional[np.ndarray],
+    ) -> np.ndarray:
+        if trainee_pool_indices is not None:
+            return np.asarray(trainee_pool_indices, dtype=np.int64).reshape(num_envs)
+        if self._cached_has_attr(vec_env, "get_current_trainee_pool_index"):
+            try:
+                raw = vec_env.env_method("get_current_trainee_pool_index")
+                return np.asarray(raw, dtype=np.int64).reshape(num_envs)
+            except Exception:
+                self._vec_has_attr["get_current_trainee_pool_index"] = False
+        return np.zeros((num_envs,), dtype=np.int64)
+
+    def gather_vec_lstm_for_pools(
+        self,
+        *,
+        pool_indices: np.ndarray,
+        last_dones: np.ndarray,
+        policy,
+        device: torch.device,
+        num_envs: int,
+    ) -> Tuple[RNNStates, np.ndarray]:
+        """Load per-pool carries for GAE bootstrap. Missing or done → zeros + start."""
+        starts = np.zeros((num_envs,), dtype=np.float32)
+        cols: List[Optional[RNNStates]] = []
+        pools = np.asarray(pool_indices, dtype=np.int64).reshape(num_envs)
+        dones = np.asarray(last_dones).reshape(num_envs)
+        for env_idx in range(num_envs):
+            if bool(dones[env_idx]):
+                starts[env_idx] = 1.0
+                cols.append(None)
+                continue
+            stored = self._trainee_pool_lstm.get((env_idx, int(pools[env_idx])))
+            if stored is None:
+                starts[env_idx] = 1.0
+                cols.append(None)
+            else:
+                cols.append(stored)
+        return stack_pointer_lstm_states(cols, policy, device), starts
 
     def pop_collector_profile_means(self) -> Dict[str, float]:
         """Mean milliseconds per collector-side slice since the last pop."""
@@ -167,8 +233,15 @@ class SquadPointerRolloutHelper:
         lstm_states: Optional[RNNStates],
         device: torch.device,
         action_masks: Optional[np.ndarray] = None,
+        trainee_pool_indices: Optional[np.ndarray] = None,
     ) -> RolloutResolution:
         del prev_focus_tags  # squad pointer: no focal-unit LSTM resets
+        if trainee_pool_indices is not None:
+            pool_ids = np.asarray(trainee_pool_indices, dtype=np.int64).reshape(num_envs)
+        elif is_recurrent:
+            pool_ids = self._resolve_pool_indices(vec_env, num_envs, None)
+        else:
+            pool_ids = np.zeros((num_envs,), dtype=np.int64)
 
         if isinstance(vec_env.action_space, spaces.MultiDiscrete):
             step_actions = np.zeros(
@@ -202,14 +275,25 @@ class SquadPointerRolloutHelper:
                 lstm_starts[j] = float(last_dones[env_idx])
 
             pre_lstm_by_env: Dict[int, Optional[RNNStates]] = {}
+            context_ids = np.asarray(
+                [int(pool_ids[env_idx]) for env_idx in need_forward], dtype=np.int64
+            )
             # Include ``.cpu()`` so the sample waits for the GPU forward to finish.
             t_fwd = time.perf_counter() if self.collector_profile_enabled() else None
             if is_recurrent:
                 sub_starts = torch.as_tensor(lstm_starts, dtype=torch.float32, device=device)
-                sub_lstm = (
-                    _gather_rnn_columns(updated_lstm, need_forward)
-                    if updated_lstm is not None
-                    else None
+                col_states: List[Optional[RNNStates]] = []
+                for j, env_idx in enumerate(need_forward):
+                    if last_dones[env_idx]:
+                        col_states.append(None)
+                    else:
+                        col_states.append(
+                            self._trainee_pool_lstm.get(
+                                (env_idx, int(pool_ids[env_idx]))
+                            )
+                        )
+                sub_lstm = stack_pointer_lstm_states(
+                    col_states, model.policy, device
                 )
                 pre_lstm_by_env = {
                     env_idx: select_rnn_state_column(sub_lstm, j)
@@ -218,7 +302,15 @@ class SquadPointerRolloutHelper:
                 act_t, val_t, logp_t, new_sub_lstm = model.policy.forward(
                     obs_t, sub_lstm, sub_starts, action_masks=m_t
                 )
-                if updated_lstm is not None and new_sub_lstm is not None:
+                for j, env_idx in enumerate(need_forward):
+                    self._trainee_pool_lstm[(env_idx, int(pool_ids[env_idx]))] = (
+                        clone_rnn_states(select_rnn_state_column(new_sub_lstm, j))
+                    )
+                if new_sub_lstm is not None:
+                    if updated_lstm is None:
+                        updated_lstm = stack_pointer_lstm_states(
+                            [None] * num_envs, model.policy, device
+                        )
                     updated_lstm = _scatter_rnn_columns(
                         updated_lstm, need_forward, new_sub_lstm
                     )
@@ -242,6 +334,7 @@ class SquadPointerRolloutHelper:
                     masks=sub_masks,
                     lstm_starts=lstm_starts,
                     pre_lstm_by_env=pre_lstm_by_env,
+                    rnn_context_ids=context_ids,
                 )
             )
             fe = getattr(model.policy, "features_extractor", None)

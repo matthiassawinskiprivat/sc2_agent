@@ -67,6 +67,18 @@ class TestSignalReady:
         payload_path = os.path.join(buf.instance_dir, "payload.npz")
         assert os.path.exists(payload_path)
 
+    def test_payload_roundtrip_rnn_context_ids(self, tmp_path):
+        buf = _create_async_buffer(tmp_path)
+        buf.rnn_context_ids[0, 0] = 2
+        buf.rnn_context_ids[1, 0] = 0
+        buf.signal_ready({})
+        payload_path = os.path.join(buf.instance_dir, "payload.npz")
+        with np.load(payload_path) as payload:
+            assert "rnn_context_ids" in payload.files
+            loaded = payload["rnn_context_ids"]
+        assert loaded[0, 0] == 2
+        assert loaded[1, 0] == 0
+
 
 class TestCheckReady:
     def test_returns_metadata_when_signal_exists(self, tmp_path):
@@ -117,3 +129,19 @@ class TestWaitForConsumer:
 
         result = buf.wait_for_consumer(timeout=0.2)
         assert result is False
+
+    def test_fresh_heartbeat_extends_wait(self, tmp_path):
+        import threading
+        import time
+
+        buf = _create_async_buffer(tmp_path)
+        buf.signal_ready({"epoch": 1})
+
+        def keep_alive_then_clear():
+            time.sleep(0.15)
+            buf.touch_heartbeat()
+            time.sleep(0.15)
+            buf.clear_signal()
+
+        threading.Thread(target=keep_alive_then_clear, daemon=True).start()
+        assert buf.wait_for_consumer(timeout=0.25) is True

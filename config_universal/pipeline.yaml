@@ -193,6 +193,9 @@ levels:
   - "ctf_level_15_reversed"
   - "ctf_level_16"
   - "ctf_level_16_reversed"
+  # use_relational_decode: true in each level YAML from here (same pattern as
+  # use_self_attention) — command-conditioned actors, selected-unit context,
+  # cross-side attention
   - "ctf_level_17"
   - "ctf_level_17_reversed"
   - "ctf_level_17_mirror_terran"

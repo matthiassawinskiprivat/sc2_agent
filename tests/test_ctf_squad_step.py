@@ -123,6 +123,21 @@ def test_get_obs_focus_unit_tag_returns_minus_one(squad_env):
     assert squad_env.get_obs_focus_unit_tag() == -1
 
 
+def test_get_current_trainee_pool_index_matches_current_pool(squad_env):
+    squad_env.current_trainee_pool_index = 2
+    assert squad_env.get_current_trainee_pool_index() == 2
+
+
+def test_attach_action_masks_includes_trainee_pool_index(squad_env):
+    squad_env.current_trainee_pool_index = 2
+    squad_env._cached_squad_action_masks = MagicMock(
+        return_value=np.ones(SQUAD_FLAT_ACTION_DIM, dtype=bool)
+    )
+    info = squad_env._attach_action_masks({"squad_pointer": True})
+    assert info["trainee_pool_index"] == 2
+    assert info["requires_policy_action"] is True
+
+
 def test_squad_pointer_step_applies_trainee_and_advances(squad_env):
     action = np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
     action[0] = 1
@@ -140,6 +155,7 @@ def test_squad_pointer_step_applies_trainee_and_advances(squad_env):
     assert "action_masks" in info
     assert info["action_masks"].dtype == bool
     assert info.get("requires_policy_action") is True
+    assert info.get("trainee_pool_index") == 0
 
 
 def test_squad_pointer_step_applies_paired_opponent_action(squad_env):

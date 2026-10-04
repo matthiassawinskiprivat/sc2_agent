@@ -13,6 +13,29 @@ from src.agent.utils.disk_buffer import (
     obs_fingerprint_payload,
 )
 
+
+def touch_learner_heartbeat(path: str) -> None:
+    """Create or refresh a learner-progress file next to the buffer signal."""
+    if not path:
+        return
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "a", encoding="utf-8"):
+            os.utime(path, None)
+    except OSError:
+        pass
+
+
+def heartbeat_is_fresh(path: str, max_age_sec: float) -> bool:
+    if not path:
+        return False
+    try:
+        return (time.time() - os.path.getmtime(path)) < float(max_age_sec)
+    except OSError:
+        return False
+
 class AsyncDiskBuffer(DiskDictRolloutBuffer):
     """
     An extension of DiskDictRolloutBuffer that supports cross-process 
@@ -21,6 +44,10 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
     @property
     def signal_file(self):
         return os.path.join(self.instance_dir, "buffer_ready.json")
+
+    @property
+    def heartbeat_file(self):
+        return self.signal_file + ".hb"
 
     @property
     def lock_file(self):
@@ -66,6 +93,7 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
             cell_states_vf=getattr(self, 'cell_states_vf', np.array([])),
             action_masks=getattr(self, 'action_masks', np.array([])),
             policy_active=getattr(self, 'policy_active', np.array([])),
+            rnn_context_ids=getattr(self, 'rnn_context_ids', np.array([])),
             **ram_observations
         )
         os.replace(tmp_payload, payload_path)
@@ -115,7 +143,16 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
         """
         if os.path.exists(self.signal_file):
             os.remove(self.signal_file)
+        if os.path.exists(self.heartbeat_file):
+            try:
+                os.remove(self.heartbeat_file)
+            except OSError:
+                pass
         logger.debug(f"Buffer signal cleared: {self.instance_id}")
+
+    def touch_heartbeat(self) -> None:
+        """Learner is still working this buffer (PPO has not finished yet)."""
+        touch_learner_heartbeat(self.heartbeat_file)
 
     @staticmethod
     def attach_disk_observations(
@@ -163,12 +200,18 @@ class AsyncDiskBuffer(DiskDictRolloutBuffer):
 
     def wait_for_consumer(self, timeout=60):
         """
-        Actor calls this to wait until the Learner has finished with this buffer 
+        Actor calls this to wait until the Learner has finished with this buffer
         before overwriting it. This prevents 'Staleness Overrun'.
+
+        A fresh learner heartbeat resets the idle clock so a slow-but-progressing
+        PPO update is not reported as a hang.
         """
-        start_time = time.time()
+        idle_limit = float(timeout)
+        last_progress = time.time()
         while os.path.exists(self.signal_file):
-            if time.time() - start_time > timeout:
+            if heartbeat_is_fresh(self.heartbeat_file, idle_limit):
+                last_progress = time.time()
+            if time.time() - last_progress > idle_limit:
                 logger.warning(f"Timeout waiting for Learner to consume buffer {self.instance_id}")
                 return False
             time.sleep(0.1)

@@ -100,6 +100,45 @@ def test_extract_alert_lines_filters_noise(tmp_path: Path) -> None:
     assert "boring heartbeat" not in joined
 
 
+def test_benign_replay_and_tensorboard_lines_are_not_critical(tmp_path: Path) -> None:
+    benign = [
+        "process_alerts.log: 2026-10-03 20:22:13.043 | ERROR    | "
+        "TensorBoard process started but port 6006 is not listening.",
+        "process_alerts.log: 2026-10-03 21:46:03.873 | ERROR    | "
+        "PPO train: skipping weight update — flat replay abs err 0.217 > 0.05 "
+        "(saved decisions do not match this policy)",
+        "process_alerts.log: 2026-10-03 21:46:04.173 | ERROR    | "
+        "Learner: replay mismatch — weights were not stepped and will not be republished",
+        "process_alerts.log: 2026-10-03 21:46:04.177 | WARNING  | "
+        "Learner: Update skipped after replay mismatch; collector keeps the previous checkpoint.",
+        "process_alerts.log: 2026-10-03 21:46:04.180 | WARNING  | "
+        "Learner: skipped periodic checkpoint save (replay mismatch, weights unchanged)",
+    ]
+    findings = evaluate_findings(
+        training_alive=True,
+        active_log_dir=None,
+        tb_latest={"train/rollout_log_prob_abs_err": (10, 1.6e-4)},
+        alert_lines=benign,
+        stale_minutes=45,
+    )
+    by_code = {f.code: f for f in findings}
+    assert by_code["alert_logs"].severity == "OK"
+    assert by_code["log_prob_mismatch"].severity == "OK"
+
+    alerts = tmp_path / "process_alerts.log"
+    alerts.write_text(
+        "\n".join(line.split(": ", 1)[1] for line in benign)
+        + "\n2026-10-03 21:50:00.000 | ERROR    | Collector subprocess CRASHED\n",
+        encoding="utf-8",
+    )
+    hits = extract_alert_lines([str(alerts)], max_scan_lines=50, max_hits=20)
+    joined = "\n".join(hits)
+    assert "TensorBoard process started" not in joined
+    assert "flat replay abs err" not in joined
+    assert "Update skipped after replay mismatch" not in joined
+    assert "CRASHED" in joined
+
+
 def test_alert_record_filter_keeps_graft_info() -> None:
     assert _is_alert_record({"level": type("L", (), {"no": 20})(), "message": "Grafting head weights"})
     assert _is_alert_record({"level": type("L", (), {"no": 30})(), "message": "something"})

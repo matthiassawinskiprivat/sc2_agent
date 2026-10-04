@@ -129,6 +129,7 @@ model:
       features_dim: 512
       thinking_steps: 3
       use_self_attention: true
+      use_relational_decode: true
     lstm_hidden_size: 512
     net_arch: []
   gamma: 0.99

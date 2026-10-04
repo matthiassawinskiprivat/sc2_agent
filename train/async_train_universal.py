@@ -968,6 +968,7 @@ class AsyncCollector(mp.Process):
             SquadPointerRolloutHelper,
             stack_info_action_masks,
             stack_info_requires_policy,
+            stack_info_trainee_pool_indices,
         )
         from train.train_pipeline import ENV_REGISTRY
         
@@ -1214,6 +1215,11 @@ class AsyncCollector(mp.Process):
             self._prev_obs_focus_tags = vec_env_obs_focus_tags(vec_env, num_envs)
         last_action_masks = stack_info_action_masks(reset_infos, num_envs)
         last_requires_policy = stack_info_requires_policy(reset_infos, num_envs)
+        last_trainee_pool_indices = (
+            stack_info_trainee_pool_indices(reset_infos, num_envs)
+            if is_squad_pointer_rollout
+            else None
+        )
         peek_shm = None
         if is_squad_pointer_rollout:
             try:
@@ -1270,6 +1276,7 @@ class AsyncCollector(mp.Process):
 
         def _recover_vec_env(vec_env, model):
             nonlocal vec_env_ref, last_action_masks, last_requires_policy, peek_shm
+            nonlocal last_trainee_pool_indices
             new_vec, new_obs, new_helper, new_dones, new_focus = recover_collector_vec_env(
                 vec_env, model, env_fns, num_envs, is_recurrent_algo
             )
@@ -1278,6 +1285,7 @@ class AsyncCollector(mp.Process):
             self._prev_obs_focus_tags = new_focus
             last_action_masks = None
             last_requires_policy = None
+            last_trainee_pool_indices = None
             if peek_shm is not None and isinstance(new_helper, SquadPointerRolloutHelper):
                 new_helper.bind_peek_shm(peek_shm, new_vec)
             return new_vec, new_obs, new_helper
@@ -1383,6 +1391,9 @@ class AsyncCollector(mp.Process):
                             from_req = stack_info_requires_policy(infos, num_envs)
                             if from_req is not None:
                                 last_requires_policy = from_req
+                            from_pool = stack_info_trainee_pool_indices(infos, num_envs)
+                            if from_pool is not None:
+                                last_trainee_pool_indices = from_pool
                             # Non-trainee squad steps (legacy cycling / chunk) are
                             # skipped for the training buffer (requires_policy=False).
                             # Their rewards are the acting owner's perspective and
@@ -1409,7 +1420,7 @@ class AsyncCollector(mp.Process):
 
                         pre_step_obs = obs
                         with torch.no_grad():
-                            resolution = squad_batch_helper.resolve_rollout(
+                            resolve_kwargs = dict(
                                 vec_env=vec_env,
                                 num_envs=num_envs,
                                 obs=obs,
@@ -1421,6 +1432,11 @@ class AsyncCollector(mp.Process):
                                 lstm_states=model._last_lstm_states if is_recurrent else None,
                                 device=model.device,
                                 action_masks=last_action_masks,
+                            )
+                            if is_squad_pointer_rollout:
+                                resolve_kwargs["trainee_pool_indices"] = last_trainee_pool_indices
+                            resolution = squad_batch_helper.resolve_rollout(
+                                **resolve_kwargs
                             )
 
                         for env_idx, batch in resolution.squad_batch_actions.items():
@@ -1436,6 +1452,9 @@ class AsyncCollector(mp.Process):
                         from_req = stack_info_requires_policy(infos, num_envs)
                         if from_req is not None:
                             last_requires_policy = from_req
+                        from_pool = stack_info_trainee_pool_indices(infos, num_envs)
+                        if from_pool is not None:
+                            last_trainee_pool_indices = from_pool
                     except COLLECTOR_VEC_PIPE_ERRORS as pipe_exc:
                         logger.error(
                             f"Collector: vec_env worker pipe error during rollout "
@@ -1460,6 +1479,7 @@ class AsyncCollector(mp.Process):
                         )
 
                         if done:
+                            squad_batch_helper.clear_env(i)
                             recent_ep_rewards.append(episode_rewards[i])
                             recent_ep_lengths.append(episode_lengths[i])
                             episode_rewards[i] = 0
@@ -1518,7 +1538,35 @@ class AsyncCollector(mp.Process):
                     # We only need the value
                     if is_recurrent:
                         if is_squad_pointer_rollout:
-                            lstm_starts_last = dones.astype(np.float32)
+                            next_pools = last_trainee_pool_indices
+                            if next_pools is None:
+                                try:
+                                    next_pools = np.asarray(
+                                        vec_env.env_method(
+                                            "get_current_trainee_pool_index"
+                                        ),
+                                        dtype=np.int64,
+                                    )
+                                except Exception:
+                                    next_pools = np.zeros(
+                                        (num_envs,), dtype=np.int64
+                                    )
+                            bootstrap_lstm, lstm_starts_last = (
+                                squad_batch_helper.gather_vec_lstm_for_pools(
+                                    pool_indices=next_pools,
+                                    last_dones=dones,
+                                    policy=model.policy,
+                                    device=model.device,
+                                    num_envs=num_envs,
+                                )
+                            )
+                            model._last_lstm_states = bootstrap_lstm
+                            starts_tensor = torch.as_tensor(lstm_starts_last).to(
+                                model.device
+                            )
+                            last_values = model.policy.predict_values(
+                                obs_tensor, bootstrap_lstm.vf, starts_tensor
+                            )
                         else:
                             focus_last = vec_env_obs_focus_tags(vec_env, num_envs)
                             lstm_starts_last = np.logical_or(
@@ -1526,8 +1574,8 @@ class AsyncCollector(mp.Process):
                                 focus_last != self._prev_obs_focus_tags,
                             ).astype(np.float32)
                             self._prev_obs_focus_tags = focus_last.copy()
-                        starts_tensor = torch.as_tensor(lstm_starts_last).to(model.device)
-                        last_values = model.policy.predict_values(obs_tensor, model._last_lstm_states.vf, starts_tensor)
+                            starts_tensor = torch.as_tensor(lstm_starts_last).to(model.device)
+                            last_values = model.policy.predict_values(obs_tensor, model._last_lstm_states.vf, starts_tensor)
                     else:
                         last_values = model.policy.predict_values(obs_tensor)
                     fe = getattr(model.policy, "features_extractor", None)
@@ -2004,6 +2052,8 @@ class AsyncLearner:
                                         raise e
                                 if 'policy_active' in payload and payload['policy_active'].size > 0:
                                     target_buffer.policy_active = payload['policy_active'].copy()
+                                if 'rnn_context_ids' in payload and payload['rnn_context_ids'].size > 0:
+                                    target_buffer.rnn_context_ids = payload['rnn_context_ids'].copy()
 
                                 # Load RAM-based observations (e.g., 'command')
                                 for key in payload.files:
@@ -2169,6 +2219,7 @@ class AsyncLearner:
                     # Per-minibatch profiling: training.learner_profile in YAML (see parse_learner_profile_option).
                     t_learner_start = time.perf_counter()
                     logger.info("Learner: Starting GPU Update...")
+                    model._learner_heartbeat_path = signal_path + ".hb"
                     try:
                         model.train()
                     finally:

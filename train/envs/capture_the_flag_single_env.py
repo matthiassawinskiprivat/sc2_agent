@@ -1892,6 +1892,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         """Ride mask + requires_policy in ``info`` so the collector skips env_method."""
         out = dict(info)
         out["requires_policy_action"] = bool(self.requires_policy_action())
+        out["trainee_pool_index"] = self.get_current_trainee_pool_index()
         cached = self._cached_squad_action_masks()
         if cached is not None:
             out["action_masks"] = np.asarray(cached, dtype=bool)
@@ -4096,6 +4097,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         completed_tags = tags
         self.current_unit_index = 0
         return await self._finalize_squad_physics_step(completed_tags, acting_player_id)
+
+    def get_current_trainee_pool_index(self) -> int:
+        """``unit_pools`` index for the observation/action this policy step uses."""
+        return int(getattr(self, "current_trainee_pool_index", 0) or 0)
 
     def get_obs_focus_unit_tag(self) -> int:
         """

@@ -185,6 +185,8 @@ class AsyncSharedRamBuffer(AsyncDiskBuffer):
             self.observations[key] = arr
         if hasattr(self, "policy_active"):
             self.policy_active.fill(0.0)
+        if hasattr(self, "rnn_context_ids"):
+            self.rnn_context_ids.fill(-1)
 
     def bind_shared_observation_buffers(self) -> None:
         """Create (collector) or attach (learner) shared segments for large obs tensors."""
@@ -273,6 +275,7 @@ class AsyncSharedRamBuffer(AsyncDiskBuffer):
             cell_states_vf=getattr(self, "cell_states_vf", np.array([])),
             action_masks=getattr(self, "action_masks", np.array([])),
             policy_active=getattr(self, "policy_active", np.array([])),
+            rnn_context_ids=getattr(self, "rnn_context_ids", np.array([])),
             **ram_observations,
         )
         os.replace(tmp_payload, payload_path)

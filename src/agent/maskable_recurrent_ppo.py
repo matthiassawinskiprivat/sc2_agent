@@ -1073,6 +1073,15 @@ class MaskableRecurrentPPO(RecurrentPPO):
     def train(self) -> None:
         self.policy.set_training_mode(True)
         self._update_learning_rate(self.policy.optimizer)
+        heartbeat_path = getattr(self, "_learner_heartbeat_path", None)
+        touch_hb = None
+        if heartbeat_path:
+            from src.agent.utils.async_disk_buffer import touch_learner_heartbeat as touch_hb
+            touch_hb(heartbeat_path)
+        logger.info(
+            f"PPO train start: n_epochs={self.n_epochs} batch_size={self.batch_size} "
+            f"buffer_size={self.rollout_buffer.buffer_size} n_envs={self.rollout_buffer.n_envs}"
+        )
 
         if torch.cuda.is_available():
             from src.utils.cuda_memory import log_cuda_memory
@@ -1116,6 +1125,8 @@ class MaskableRecurrentPPO(RecurrentPPO):
         for epoch in range(self.n_epochs):
             for r_data in self.rollout_buffer.get(self.batch_size):
                 t_batch0 = time.perf_counter()
+                if touch_hb is not None:
+                    touch_hb(heartbeat_path)
                 if profile_phases:
                     if torch.cuda.is_available():
                         torch.cuda.synchronize()

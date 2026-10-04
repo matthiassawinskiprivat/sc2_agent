@@ -59,7 +59,71 @@ def test_skips_inactive_env_rows_in_multi_env_buffer():
     spans = build_recurrent_sequence_spans(
         2, 6, episode_starts, max_seq_len=32, policy_active=policy_active
     )
-    assert spans == [(0, 0, 2), (0, 3, 2), (1, 2, 1), (1, 5, 1)]
+    from src.agent.utils.disk_buffer import span_timesteps
+
+    got = {int(s[0]): list(span_timesteps(s)) for s in spans}
+    assert got[0] == [0, 1, 3, 4]
+    assert got[1] == [2, 5]
+
+
+def test_splits_on_rnn_context_change_without_episode_starts():
+    """A/B/A is gathered into one A-sequence and one B-sequence (no episode reset)."""
+    episode_starts = np.zeros((3, 1), dtype=np.float32)
+    context = np.array([[0], [2], [0]], dtype=np.int64)
+    spans = build_recurrent_sequence_spans(
+        1, 3, episode_starts, max_seq_len=32, rnn_context_ids=context
+    )
+    by_ctx = sorted(spans, key=lambda s: int(s[0]) * 1000 + int(span_first(s)))
+    assert len(by_ctx) == 2
+    a = next(s for s in spans if list(span_ts(s)) == [0, 2])
+    b = next(s for s in spans if list(span_ts(s)) == [1])
+    assert a[0] == 0 and b[0] == 0
+
+
+def span_ts(span):
+    from src.agent.utils.disk_buffer import span_timesteps
+    return span_timesteps(span)
+
+
+def span_first(span):
+    return int(span_ts(span)[0])
+
+
+def test_episode_start_closes_all_pool_chains():
+    """A new episode must not append to the other pool's previous-episode chain."""
+    episode_starts = np.zeros((4, 1), dtype=np.float32)
+    episode_starts[0, 0] = 1.0
+    episode_starts[2, 0] = 1.0
+    context = np.array([[0], [2], [0], [2]], dtype=np.int64)
+    spans = build_recurrent_sequence_spans(
+        1, 4, episode_starts, max_seq_len=32, rnn_context_ids=context
+    )
+    steps = sorted((list(span_ts(s)) for s in spans), key=lambda x: x[0])
+    assert steps == [[0], [1], [2], [3]]
+
+
+def test_alternating_pools_match_single_pool_span_count():
+    """1024 A/B steps → 2×32-long spans, not 1024 length-1 spans."""
+    n = 64
+    episode_starts = np.zeros((n, 1), dtype=np.float32)
+    episode_starts[0, 0] = 1.0
+    context = np.array([[0 if t % 2 == 0 else 2] for t in range(n)], dtype=np.int64)
+    spans = build_recurrent_sequence_spans(
+        1, n, episode_starts, max_seq_len=32, rnn_context_ids=context
+    )
+    assert len(spans) == 2
+    lengths = sorted(int(span_ts(s).shape[0]) for s in spans)
+    assert lengths == [32, 32]
+
+
+def test_single_pool_context_keeps_one_span():
+    episode_starts = np.zeros((8, 1), dtype=np.float32)
+    episode_starts[0, 0] = 1.0
+    context = np.zeros((8, 1), dtype=np.int64)
+    spans = build_recurrent_sequence_spans(
+        1, 8, episode_starts, max_seq_len=32, rnn_context_ids=context
+    )
+    assert spans == [(0, 0, 8)]
 
 
 def test_pack_equal_length_spans_uses_unpadded_equivalent():
