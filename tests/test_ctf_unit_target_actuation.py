@@ -81,6 +81,7 @@ def _bot(*units):
         "uncloak": set(),
     }
     bot._heal_lock = {}
+    bot._snipe_lock = {}
     bot.game_info = None
     bot.state = MagicMock()
     bot.state.game_loop = 0
@@ -93,14 +94,19 @@ def _bot(*units):
     bot.enemy_units = []
 
     bot._apply_unit_target_command = (
-        lambda selected_tags, *, head_name, target_unit_tag: (
+        lambda selected_tags, *, head_name, target_unit_tag, perspective_player_id=None: (
             CaptureTheFlagBot._apply_unit_target_command(
                 bot,
                 selected_tags,
                 head_name=head_name,
                 target_unit_tag=target_unit_tag,
+                perspective_player_id=perspective_player_id,
             )
         )
+    )
+    bot._refresh_snipe_lock = lambda u: CaptureTheFlagBot._refresh_snipe_lock(bot, u)
+    bot._issue_snipe_with_lock = (
+        lambda u, t: CaptureTheFlagBot._issue_snipe_with_lock(bot, u, t)
     )
     bot._issue_attack_on_unit = lambda u, t: CaptureTheFlagBot._issue_attack_on_unit(
         bot, u, t

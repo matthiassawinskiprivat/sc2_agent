@@ -36,8 +36,11 @@ def _bot_with_unit(unit):
     bot.all_units = MagicMock()
     bot.all_units.find_by_tag.return_value = unit
     # Bind real helpers: MagicMock defaults are truthy and would skip attack
-    # via ``elif self._refresh_heal_lock(unit)``.
+    # via ``elif self._refresh_heal_lock(unit)`` / ``_refresh_snipe_lock``.
     bot._refresh_heal_lock = lambda u: CaptureTheFlagBot._refresh_heal_lock(bot, u)
+    bot._refresh_snipe_lock = lambda u: CaptureTheFlagBot._refresh_snipe_lock(bot, u)
+    bot._heal_lock = {}
+    bot._snipe_lock = {}
     bot._mark_command_attempt = (
         lambda u, kind: CaptureTheFlagBot._mark_command_attempt(bot, u, kind)
     )

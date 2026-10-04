@@ -48,9 +48,10 @@ def _bot_with_caster(caster, extra_units=None):
     bot.structures = []
     bot.enemy_units = [u for u in extras if u.owner_id != 1]
     bot.enemy_structures = []
-    # MagicMock(spec=...) leaves unbound methods as truthy mocks; heal-lock
-    # would otherwise short-circuit every AoE before issue_aoe_at_point runs.
+    # MagicMock(spec=...) leaves unbound methods as truthy mocks; heal/snipe
+    # locks would otherwise short-circuit every AoE before issue_aoe_at_point.
     bot._refresh_heal_lock = lambda unit: False
+    bot._refresh_snipe_lock = lambda unit: False
     bot._mark_command_attempt = MagicMock()
 
     agent = MagicMock()

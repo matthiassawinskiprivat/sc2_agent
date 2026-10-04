@@ -1514,6 +1514,33 @@ SNIPE_ABILITY_COOLDOWN_SECONDS: dict = (
     if _SC2_AVAILABLE
     else {}
 )
+
+# Walk-in range for unit-target specials (engine walks when out of range).
+SNIPE_CAST_RANGE: dict = (
+    {
+        UnitTypeId.GHOST: 10.0,
+        UnitTypeId.BATTLECRUISER: 10.0,
+        UnitTypeId.INFESTOR: 8.0,
+        UnitTypeId.INFESTORBURROWED: 8.0,
+        UnitTypeId.HIGHTEMPLAR: 9.0,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+
+# Prep / channel window that must not be overwritten by move/attack.
+# Yamato prep ~3s; Ghost Steady Targeting channel ~1.43s; Neural / Feedback shorter.
+SNIPE_CAST_ANIMATION_SECONDS: dict = (
+    {
+        UnitTypeId.GHOST: 1.43,
+        UnitTypeId.BATTLECRUISER: 3.0,
+        UnitTypeId.INFESTOR: 1.0,
+        UnitTypeId.INFESTORBURROWED: 1.0,
+        UnitTypeId.HIGHTEMPLAR: 0.5,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
 _SPELL_CD_SECONDS = {
     "heal": HEAL_ABILITY_COOLDOWN_SECONDS,
     "aoe": AOE_ABILITY_COOLDOWN_SECONDS,

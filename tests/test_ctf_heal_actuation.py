@@ -99,6 +99,7 @@ def _bot_with_healers(healer, *allies, click=None):
     )
     bot._unit_in_spatial_cell = CaptureTheFlagBot._unit_in_spatial_cell
     bot._refresh_heal_lock = lambda unit: CaptureTheFlagBot._refresh_heal_lock(bot, unit)
+    bot._refresh_snipe_lock = lambda unit: False
     bot._heal_lock_until_loop = (
         lambda healer, patient: CaptureTheFlagBot._heal_lock_until_loop(
             bot, healer, patient

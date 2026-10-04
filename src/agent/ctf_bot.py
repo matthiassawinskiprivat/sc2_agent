@@ -28,6 +28,8 @@ from src.utils.unit_feature_helpers import (
     issue_snipe_on_unit,
     perspective_unit_groups,
     neural_command_allowed,
+    SNIPE_CAST_ANIMATION_SECONDS,
+    SNIPE_CAST_RANGE,
     unit_is_neuraled,
     uses_purification_nova_for_attack,
     uses_spawn_locusts_for_attack,
@@ -117,6 +119,14 @@ class CaptureTheFlagBot(BotAI):
         UnitTypeId.MEDIVAC: 3.5,
         UnitTypeId.SCV: 3.94,
     }
+    _DEFAULT_SNIPE_CASTER_MOVE_SPEED: Dict[UnitTypeId, float] = {
+        UnitTypeId.GHOST: 3.15,
+        UnitTypeId.BATTLECRUISER: 2.62,
+        UnitTypeId.INFESTOR: 2.95,
+        UnitTypeId.INFESTORBURROWED: 0.0,
+        UnitTypeId.HIGHTEMPLAR: 2.62,
+    }
+    _DEFAULT_SNIPE_CAST_ANIMATION_SECONDS: float = 1.0
 
     def __init__(self, player_id: int, training_conf: Optional[Dict] = None):
         super().__init__()
@@ -220,6 +230,9 @@ class CaptureTheFlagBot(BotAI):
         # healer_tag → (patient_tag, expiry_game_loop) while walk-in + cast
         # animation must not be overwritten by attack/move.
         self._heal_lock: Dict[int, Tuple[int, int]] = {}
+        # caster_tag → (target_tag, expiry_game_loop) while Yamato / Steady
+        # Targeting / Neural / Feedback walk-in + prep must not be cancelled.
+        self._snipe_lock: Dict[int, Tuple[int, int]] = {}
         # caster_tag → game_loop when a locally stamped spell is ready again.
         self._heal_ability_ready_after_loop: Dict[int, int] = {}
         self._aoe_ability_ready_after_loop: Dict[int, int] = {}
@@ -328,6 +341,7 @@ class CaptureTheFlagBot(BotAI):
         self._command_attempt_tags = {kind: set() for kind in COMMAND_METRIC_KINDS}
         self._step_cooldown_retreat_reward = 0.0
         self._heal_lock = {}
+        self._snipe_lock = {}
         self._heal_ability_ready_after_loop = {}
         self._aoe_ability_ready_after_loop = {}
         self._snipe_ability_ready_after_loop = {}
@@ -778,6 +792,9 @@ class CaptureTheFlagBot(BotAI):
                     continue
                 if not neural_command_allowed(unit, perspective_player_id, head_name):
                     continue
+                # Cloak/burrow cancels Yamato prep / Steady Targeting channel.
+                if self._refresh_snipe_lock(unit):
+                    continue
                 self._mark_command_attempt(unit, metric_kind)
                 self._issue_cloak_burrow(unit, conceal=conceal)
                 self._unit_last_order[int(unit_tag)] = (head_name, None)
@@ -822,6 +839,9 @@ class CaptureTheFlagBot(BotAI):
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif self._refresh_heal_lock(unit):
                 # Walk-in + Transfuse/Heal start still inside the lock window.
+                continue
+            elif self._refresh_snipe_lock(unit):
+                # Yamato / Steady Targeting / Neural prep must finish.
                 continue
             elif "aoe" in head_name:
                 self._mark_command_attempt(unit, "aoe")
@@ -877,17 +897,20 @@ class CaptureTheFlagBot(BotAI):
                 continue
             if int(getattr(unit, "tag", 0) or 0) == int(target_unit_tag):
                 continue  # never order a unit onto itself
-            if is_heal:
+            if is_snipe:
+                self._mark_command_attempt(unit, "snipe")
+                self._issue_snipe_with_lock(unit, target)
+                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
+            elif self._refresh_snipe_lock(unit):
+                # attack_unit / heal_unit / load would cancel Yamato prep.
+                continue
+            elif is_heal:
                 self._mark_heal_command_attempt(unit)
                 self._issue_heal_on_unit(unit, target)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif is_load:
                 self._mark_command_attempt(unit, "load")
                 self._issue_load_on_unit(unit, target)
-                self._set_last_order_flags(unit_tag, moved=False, attacked=False)
-            elif is_snipe:
-                self._mark_command_attempt(unit, "snipe")
-                issue_snipe_on_unit(self, unit, target)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             else:
                 self._issue_attack_on_unit(unit, target)
@@ -1073,6 +1096,123 @@ class CaptureTheFlagBot(BotAI):
             lock.pop(tag, None)
             return False
         return True
+
+    @staticmethod
+    def _snipe_caster_move_speed(unit: Unit) -> float:
+        for attr in ("real_speed", "movement_speed"):
+            try:
+                speed = float(getattr(unit, attr, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                speed = 0.0
+            if speed > 1e-6:
+                return speed
+        defaults = CaptureTheFlagBot._DEFAULT_SNIPE_CASTER_MOVE_SPEED
+        return float(defaults.get(getattr(unit, "type_id", None), 2.5))
+
+    def _snipe_lock_until_loop(self, caster: Unit, target: Unit) -> int:
+        """Game loop when walk-in + Yamato/Snipe prep animation should finish."""
+        now = CaptureTheFlagBot._game_loop(self)
+        type_id = getattr(caster, "type_id", None)
+        anim = float(
+            SNIPE_CAST_ANIMATION_SECONDS.get(
+                type_id, CaptureTheFlagBot._DEFAULT_SNIPE_CAST_ANIMATION_SECONDS
+            )
+        )
+        try:
+            cast_range = float(SNIPE_CAST_RANGE.get(type_id, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            cast_range = 0.0
+        extra = 0.0
+        try:
+            dist = float(caster.position.distance_to(target.position))
+            extra = max(0.0, dist - cast_range)
+        except (TypeError, ValueError, AttributeError):
+            extra = 0.0
+        speed = CaptureTheFlagBot._snipe_caster_move_speed(caster)
+        walk = extra / max(speed, 1e-6) if speed > 1e-6 else extra
+        loops = int(
+            math.ceil((walk + anim) * CaptureTheFlagBot._HEAL_GAME_LOOPS_PER_SECOND)
+        )
+        return now + max(loops, 1)
+
+    def _refresh_snipe_lock(self, unit: Unit) -> bool:
+        """True while walk-in + snipe prep must not be overwritten.
+
+        Yamato's ~3s laser and Ghost Steady Targeting are cancelled by any new
+        order (and SC2 still burns the full Yamato cooldown on prep cancel).
+        Lock until the window elapses, the caster goes idle, or the target dies.
+        ``snipe`` is still allowed (reaffirm / retarget).
+        """
+        tag = int(getattr(unit, "tag", 0) or 0)
+        lock = getattr(self, "_snipe_lock", None)
+        if tag <= 0 or not isinstance(lock, dict) or tag not in lock:
+            return False
+        entry = lock[tag]
+        try:
+            target_tag = int(entry[0])
+            until_loop = int(entry[1])
+        except (TypeError, ValueError, IndexError):
+            lock.pop(tag, None)
+            return False
+        now = CaptureTheFlagBot._game_loop(self)
+        if now >= until_loop:
+            lock.pop(tag, None)
+            return False
+        if bool(getattr(unit, "is_idle", False)):
+            lock.pop(tag, None)
+            return False
+        target = self.all_units.find_by_tag(target_tag)
+        if target is None:
+            lock.pop(tag, None)
+            return False
+        return True
+
+    def _continuing_snipe_lock(self, unit: Unit, target: Unit) -> bool:
+        """True when this snipe reaffirms the same in-flight target."""
+        tag = int(getattr(unit, "tag", 0) or 0)
+        target_tag = int(getattr(target, "tag", 0) or 0)
+        lock = getattr(self, "_snipe_lock", None)
+        if tag <= 0 or target_tag <= 0 or not isinstance(lock, dict):
+            return False
+        entry = lock.get(tag)
+        if entry is None:
+            return False
+        try:
+            return (
+                int(entry[0]) == target_tag
+                and CaptureTheFlagBot._game_loop(self) < int(entry[1])
+            )
+        except (TypeError, ValueError, IndexError):
+            return False
+
+    def _record_snipe_cast(self, unit: Unit, target: Unit) -> None:
+        """Bookkeep walk-in + prep lock after a successful ``snipe`` issue."""
+        tag = int(getattr(unit, "tag", 0) or 0)
+        target_tag = int(getattr(target, "tag", 0) or 0)
+        if not tag or not target_tag:
+            return
+        lock = getattr(self, "_snipe_lock", None)
+        if not isinstance(lock, dict):
+            self._snipe_lock = {}
+            lock = self._snipe_lock
+        lock[tag] = (
+            target_tag,
+            CaptureTheFlagBot._snipe_lock_until_loop(self, unit, target),
+        )
+
+    def _issue_snipe_with_lock(self, unit: Unit, target: Unit) -> bool:
+        """Issue ``snipe`` and lock the caster through walk-in + prep.
+
+        Reaffirming the same target while locked does not restamp the long
+        Yamato cooldown (would strand the mask closed if prep was cancelled).
+        """
+        continuing = CaptureTheFlagBot._continuing_snipe_lock(self, unit, target)
+        issued = issue_snipe_on_unit(
+            self, unit, target, stamp_cooldown=not continuing
+        )
+        if issued:
+            CaptureTheFlagBot._record_snipe_cast(self, unit, target)
+        return issued
 
     _HEAL_ABILITY_BY_TYPE: Dict[UnitTypeId, AbilityId] = {
         UnitTypeId.MEDIVAC: AbilityId.MEDIVACHEAL_HEAL,
@@ -1339,6 +1479,8 @@ class CaptureTheFlagBot(BotAI):
             if head_idx >= n_spatial:
                 head_name = categorical_heads[head_idx - n_spatial]
                 if head_name in ("cloak_burrow", "uncloak_unburrow"):
+                    if self._refresh_snipe_lock(unit):
+                        return
                     conceal = head_name == "cloak_burrow"
                     self._mark_command_attempt(
                         unit, "cloak" if conceal else "uncloak"
@@ -1361,6 +1503,8 @@ class CaptureTheFlagBot(BotAI):
                 self._unit_last_order[unit_tag] = (head_name, target)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif self._refresh_heal_lock(unit):
+                return
+            elif self._refresh_snipe_lock(unit):
                 return
             elif "aoe" in head_name:
                 self._mark_command_attempt(unit, "aoe")

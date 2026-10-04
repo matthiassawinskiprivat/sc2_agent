@@ -44,6 +44,10 @@ def _bot(unit):
     )
     bot._BURROW_DOWN_BY_TYPE = CaptureTheFlagBot._BURROW_DOWN_BY_TYPE
     bot._BURROW_UP_BY_TYPE = CaptureTheFlagBot._BURROW_UP_BY_TYPE
+    # Cloak path refuses orders while Yamato/snipe prep is locked.
+    bot._refresh_snipe_lock = lambda u: False
+    bot._mark_command_attempt = MagicMock()
+    bot._set_last_order_flags = MagicMock()
     return bot
 
 
