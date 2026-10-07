@@ -48,6 +48,7 @@ def test_expected_feature_names_present():
         USC.ROLE_ATTACK, USC.ROLE_DEFEND,
         USC.AIR_DPS_NORM, USC.HAS_SPLASH, USC.ONETIME_UNIT, USC.IS_FRIENDLY_FIRE,
         USC.IS_TEMPORARY, USC.CAN_AOE, USC.CAN_SNIPE, USC.IS_NEURALED,
+        USC.IS_STRUCTURE, USC.ECONOMIC_VALUE_NORM, USC.HITPOINTS_TOTAL_NORM,
     ]
     for name in required:
         assert name in USC.FEATURES
@@ -66,8 +67,8 @@ def test_default_active_features_matches_catalog_order():
     assert len(names) == USC.get_dim()
 
 
-def test_is_neuraled_starts_at_reversed_colossus_scenario():
-    """Earlier checkpoints keep the ctf_level_01 width. A repeated name is one channel."""
+def test_is_neuraled_and_is_structure_start_at_ctf_level_01():
+    """Retrain graft: both flags are in the first CTF catalog, never re-appended."""
     from pathlib import Path
 
     from src.utils.config_manager import ConfigManager
@@ -78,16 +79,30 @@ def test_is_neuraled_starts_at_reversed_colossus_scenario():
     parent = cm.get_cumulative_active_unit_scalars(
         "scenario_colossus_zealot_vs_swarmhost_hydra"
     )
-    introduced = cm.get_cumulative_active_unit_scalars(
+    reversed_sib = cm.get_cumulative_active_unit_scalars(
         "scenario_colossus_zealot_vs_swarmhost_hydra_reversed"
     )
     later = cm.get_cumulative_active_unit_scalars("ctf_level_09")
-    assert USC.IS_NEURALED not in early
-    assert USC.IS_NEURALED not in parent
-    assert introduced.count(USC.IS_NEURALED) == 1
-    assert introduced[-1] == USC.IS_NEURALED
+    assert early.count(USC.IS_NEURALED) == 1
+    assert early.count(USC.IS_STRUCTURE) == 1
+    assert early.count(USC.ECONOMIC_VALUE_NORM) == 1
+    assert early.count(USC.HITPOINTS_TOTAL_NORM) == 1
+    assert early.index(USC.IS_NEURALED) < early.index(USC.IS_STRUCTURE)
+    assert early.index(USC.IS_STRUCTURE) < early.index(USC.ECONOMIC_VALUE_NORM)
+    assert early.index(USC.ECONOMIC_VALUE_NORM) < early.index(USC.HITPOINTS_TOTAL_NORM)
+    assert USC.HITPOINTS_TOTAL_NORM == early[-1]
+    assert parent.count(USC.IS_NEURALED) == 1
+    assert parent.count(USC.IS_STRUCTURE) == 1
+    assert parent.count(USC.ECONOMIC_VALUE_NORM) == 1
+    assert parent.count(USC.HITPOINTS_TOTAL_NORM) == 1
+    assert reversed_sib == parent
     assert later.count(USC.IS_NEURALED) == 1
-    assert early == introduced[:-1]
+    assert later.count(USC.IS_STRUCTURE) == 1
+    assert later.count(USC.ECONOMIC_VALUE_NORM) == 1
+    assert later.count(USC.HITPOINTS_TOTAL_NORM) == 1
+    assert USC.FEATURES[USC.IS_STRUCTURE] == 49
+    assert USC.FEATURES[USC.ECONOMIC_VALUE_NORM] == 50
+    assert USC.FEATURES[USC.HITPOINTS_TOTAL_NORM] == 51
 
 
 def test_resolve_active_features_empty_falls_back_to_catalog():

@@ -26,7 +26,7 @@ def test_layer_constants_transport_layers():
 def test_layer_count():
     """Verify total layer count includes splash layers."""
     assert LayerConstants.get_num_layers() == 49
-    assert LayerConstants.get_num_tactical_layers() == 47
+    assert LayerConstants.get_num_tactical_layers() == 49
     assert LayerConstants.LAYERS[LayerConstants.ALLIED_SPLASH] == 47
     assert LayerConstants.LAYERS[LayerConstants.ENEMY_SPLASH] == 48
     assert LayerConstants.TACTICAL_LAYERS[LayerConstants.ALLIED_SPLASH] == 37
@@ -37,3 +37,5 @@ def test_layer_count():
     assert LayerConstants.TACTICAL_LAYERS[LayerConstants.PASSENGER_DENSITY] == 44
     assert LayerConstants.TACTICAL_LAYERS[LayerConstants.ALLIED_ENERGY] == 45
     assert LayerConstants.TACTICAL_LAYERS[LayerConstants.ENEMY_ENERGY] == 46
+    assert LayerConstants.TACTICAL_LAYERS[LayerConstants.ALLIED_DETECTION] == 47
+    assert LayerConstants.TACTICAL_LAYERS[LayerConstants.ENEMY_DETECTION] == 48

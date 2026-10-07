@@ -12,9 +12,22 @@ def test_ctf_level_21_adds_cloak_heads_layers_scalars():
     layers = cm.get_cumulative_active_layers("ctf_level_21")
     assert "allied_unit_cloak" in layers
     assert "enemy_unit_cloak" in layers
+    assert "allied_detection" in layers
+    assert "enemy_detection" in layers
+    # Appended with cloak so detector discs never shift earlier channels.
+    cloak_i = layers.index("allied_unit_cloak")
+    assert layers[cloak_i : cloak_i + 4] == [
+        "allied_unit_cloak",
+        "enemy_unit_cloak",
+        "allied_detection",
+        "enemy_detection",
+    ]
 
     tactical = cm.get_cumulative_active_tactical_layers("ctf_level_21")
     assert "allied_unit_cloak" in tactical
+    assert "enemy_unit_cloak" in tactical
+    assert "allied_detection" in tactical
+    assert "enemy_detection" in tactical
 
     scalars = cm.get_cumulative_active_unit_scalars("ctf_level_21")
     assert "is_immobile" in scalars
@@ -34,6 +47,10 @@ def test_ctf_level_22_23_inherit_cloak_config():
         assert "uncloak_unburrow" in cats
         layers = cm.get_cumulative_active_layers(level)
         assert "allied_unit_cloak" in layers
+        assert "allied_detection" in layers
+        assert "enemy_detection" in layers
+        tactical = cm.get_cumulative_active_tactical_layers(level)
+        assert "allied_detection" in tactical
         scalars = cm.get_cumulative_active_unit_scalars(level)
         assert "is_immobile" in scalars
         assert "can_cloak" in scalars

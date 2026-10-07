@@ -389,3 +389,91 @@ def test_opposite_perspective_reuses_world_global_paint():
     # Cross-check: P2 allied ≈ P1 enemy (same world paint, swapped).
     assert np.allclose(obs_p2["map"][allied_idx], obs_p1["map"][enemy_idx], atol=1e-5)
     assert np.allclose(obs_p2["map"][enemy_idx], obs_p1["map"][allied_idx], atol=1e-5)
+
+
+def _pointer_unit(tag, type_id, owner_id, *, is_structure=False):
+    u = MagicMock()
+    u.tag = tag
+    u.type_id = type_id
+    u.owner_id = owner_id
+    u.is_structure = is_structure
+    u.is_alive = True
+    u.position = Point2((float(tag), 0.0))
+    return u
+
+
+def test_resolve_enemy_target_tags_reserves_pylon_then_mobiles_then_structs():
+    ling = _pointer_unit(20, UnitTypeId.ZERGLING, 2)
+    hydra = _pointer_unit(10, UnitTypeId.HYDRALISK, 2)
+    pylon = _pointer_unit(50, UnitTypeId.PYLON, 2, is_structure=True)
+    battery = _pointer_unit(40, UnitTypeId.SHIELDBATTERY, 2, is_structure=True)
+    marine = _pointer_unit(1, UnitTypeId.MARINE, 1)
+    bot = MagicMock()
+    bot.all_units = [marine, ling, hydra, pylon, battery]
+    bot.units = [marine]
+    bot.enemy_units = [ling, hydra]
+    bot.structures = []
+    bot.enemy_structures = [pylon, battery]
+
+    tags = SquadObservationBuilder.resolve_enemy_target_tags(bot, 1)
+    assert tags[0] == 50
+    assert tags[1:3] == [10, 20]
+    assert 40 in tags
+    assert tags.index(40) > tags.index(20)
+
+
+def test_enemy_structure_scalar_marks_buildings(training_conf):
+    builder = SquadObservationBuilder(training_conf)
+    pylon = _pointer_unit(50, UnitTypeId.PYLON, 2, is_structure=True)
+    pylon.health = 200.0
+    pylon.health_max = 200.0
+    pylon.shield = 200.0
+    pylon.shield_max = 200.0
+    feats = builder._unit_static_feats(pylon, frozenset())
+    assert feats[USC.FEATURES[USC.IS_STRUCTURE]] == pytest.approx(1.0)
+    marine = _pointer_unit(1, UnitTypeId.MARINE, 1)
+    marine.health = 45.0
+    marine.health_max = 45.0
+    marine.shield = 0.0
+    marine.shield_max = 0.0
+    marine_feats = builder._unit_static_feats(marine, frozenset())
+    assert marine_feats[USC.FEATURES[USC.IS_STRUCTURE]] == pytest.approx(0.0)
+
+
+def test_economic_value_norm_matches_purchase_cost_ratios(training_conf):
+    """Same minerals/vespene formula as combat reward, linearly scaled into [0, 1]."""
+    from src.agent.ctf_economic_rewards import unit_economic_value
+    from src.transformers.squad_observation_builder import _ECONOMIC_VALUE_OBS_CAP
+
+    builder = SquadObservationBuilder(training_conf)
+    ling = _pointer_unit(1, UnitTypeId.ZERGLING, 1)
+    thor = _pointer_unit(2, UnitTypeId.THOR, 1)
+    mothership = _pointer_unit(3, UnitTypeId.MOTHERSHIP, 1)
+    idx = USC.FEATURES[USC.ECONOMIC_VALUE_NORM]
+    ling_v = builder._unit_static_feats(ling, frozenset())[idx]
+    thor_v = builder._unit_static_feats(thor, frozenset())[idx]
+    ms_v = builder._unit_static_feats(mothership, frozenset())[idx]
+    assert ling_v == pytest.approx(
+        unit_economic_value(ling, value_norm=_ECONOMIC_VALUE_OBS_CAP)
+    )
+    assert thor_v == pytest.approx(
+        unit_economic_value(thor, value_norm=_ECONOMIC_VALUE_OBS_CAP)
+    )
+    assert ms_v == pytest.approx(1.0)
+    assert 0.0 < ling_v < thor_v < ms_v
+    # Thor (300/200) is 24× a Zergling (25/0) on both reward and this channel.
+    assert thor_v / ling_v == pytest.approx(24.0)
+
+
+def test_economic_value_norm_uses_reward_vespene_weight(training_conf):
+    heavy = SquadObservationBuilder({
+        **training_conf,
+        "rewards": {"economic_vespene_weight": 3.0},
+    })
+    default = SquadObservationBuilder(training_conf)
+    thor = _pointer_unit(2, UnitTypeId.THOR, 1)
+    idx = USC.FEATURES[USC.ECONOMIC_VALUE_NORM]
+    default_v = default._unit_static_feats(thor, frozenset())[idx]
+    heavy_v = heavy._unit_static_feats(thor, frozenset())[idx]
+    # Thor gas is 200: raising the vespene weight must increase the channel.
+    assert heavy_v > default_v

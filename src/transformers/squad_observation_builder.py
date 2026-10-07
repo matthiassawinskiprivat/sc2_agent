@@ -34,6 +34,10 @@ from src.agent.squad_target_masks import (
     build_tactical_enemy_mask,
     zero_target_masks,
 )
+from src.agent.ctf_economic_rewards import (
+    DEFAULT_VESPENE_WEIGHT,
+    unit_economic_value,
+)
 from src.agent.unit_scalar_constants import UnitScalarConstants as USC
 from src.utils.unit_feature_helpers import (
     first_unit,
@@ -68,6 +72,11 @@ _F = USC.FEATURES
 _MAX_RANGE = 10.0       # normalisation cap for weapon range (game units)
 _MAX_SPEED = 6.0        # normalisation cap for movement speed
 _MAX_HEALTH = 400.0     # tanh normalisation reference for max-health tankiness
+# Linear cap for economic_value_norm: Mothership mineral-equivalent
+# (400 minerals + 1.5 × 400 vespene). Matches unit_economic_value ratios.
+_ECONOMIC_VALUE_OBS_CAP = 1000.0
+# Linear cap for remaining health+shields (Mothership ~700, Battlecruiser 550).
+_HITPOINTS_TOTAL_OBS_CAP = 800.0
 _CD_FRAMES = 24.0       # approximate max weapon cooldown (frames)
 _MELEE_RANGE_MAX = 1.5  # matches CaptureTheFlagBot._RANGED_WEAPON_RANGE_MIN
 
@@ -169,6 +178,13 @@ class SquadObservationBuilder:
         # Static-per-type feature cache: cache_key → full catalog vector (USC.get_dim(),).
         # Active subset is gathered afterward so cache stays valid across configs.
         self._static_feat_cache: Dict[Any, np.ndarray] = {}
+        r_conf = training_conf.get("rewards") or {}
+        try:
+            self._econ_vespene_weight = float(
+                r_conf.get("economic_vespene_weight", DEFAULT_VESPENE_WEIGHT)
+            )
+        except (TypeError, ValueError):
+            self._econ_vespene_weight = DEFAULT_VESPENE_WEIGHT
         heads = {
             str(h).lower()
             for h in list(training_conf.get("action_heads") or [])
@@ -311,24 +327,26 @@ class SquadObservationBuilder:
     def resolve_enemy_target_tags(bot, perspective_player_id: int) -> List[int]:
         """Stable visible-enemy slot order for the ``attack_unit`` target pointer.
 
-        Sorted hostile **mobile** tags, capped at ``MAX_SQUAD_ENEMIES``. Hostile
-        structures stay off this pointer (and ``enemy_mask``) so ``attack_unit``
-        stays army-only. They still open ``attack_local`` / ``aoe_local`` via
-        ``engage_enemy_mask`` when a building is in any ally's tactical fovea;
-        spatial actuation hard-targets a building whose center lies in the
-        clicked cell.
+        Slot policy (capped at ``MAX_SQUAD_ENEMIES``):
 
-        Ownership-based (``perspective_unit_groups``), not alliance buckets: under
+        1. Reserve **one** slot for the enemy objective pylon when it is visible.
+        2. Fill remaining slots with sorted hostile **mobiles**.
+        3. Then other hostile structures if space remains.
+
+        Neuralled bodies stay on this pointer for both owners. Ownership-based
+        (``perspective_unit_groups``), not alliance buckets: under
         ``debug_control_enemy`` both armies look allied to the P1 client.
         """
-        _, vis_enemies, _, _ = perspective_unit_groups(bot, int(perspective_player_id))
-        tags: List[int] = []
+        _, vis_enemies, _, vis_structs = perspective_unit_groups(
+            bot, int(perspective_player_id)
+        )
+        mobile_tags: List[int] = []
         for unit in vis_enemies or []:
             if unit is None or getattr(unit, "is_structure", False):
                 continue
             tag = getattr(unit, "tag", None)
             if tag is not None:
-                tags.append(int(tag))
+                mobile_tags.append(int(tag))
         # Neural Parasite flips live owner onto the controller, which would hide
         # the body from that player's enemy pointer. Both sides still attack it.
         for unit in _unit_tag_index(bot).values():
@@ -338,8 +356,37 @@ class SquadObservationBuilder:
                 continue
             tag = getattr(unit, "tag", None)
             if tag is not None:
-                tags.append(int(tag))
-        return sorted(set(tags))[:MAX_SQUAD_ENEMIES]
+                mobile_tags.append(int(tag))
+        mobile_tags = sorted(set(mobile_tags))
+
+        pylon = first_unit_of_type(vis_structs, UnitTypeId.PYLON)
+        pylon_tag = None
+        if pylon is not None:
+            raw = getattr(pylon, "tag", None)
+            if raw is not None:
+                pylon_tag = int(raw)
+
+        other_struct_tags: List[int] = []
+        for struct in vis_structs or []:
+            if struct is None:
+                continue
+            raw = getattr(struct, "tag", None)
+            if raw is None:
+                continue
+            tag = int(raw)
+            if pylon_tag is not None and tag == pylon_tag:
+                continue
+            other_struct_tags.append(tag)
+        other_struct_tags = sorted(set(other_struct_tags))
+
+        slots: List[int] = []
+        if pylon_tag is not None:
+            slots.append(pylon_tag)
+        remaining = MAX_SQUAD_ENEMIES - len(slots)
+        slots.extend(mobile_tags[:remaining])
+        remaining = MAX_SQUAD_ENEMIES - len(slots)
+        slots.extend(other_struct_tags[:remaining])
+        return slots
 
     def build(
         self,
@@ -618,6 +665,15 @@ class SquadObservationBuilder:
         feats[_F[USC.IS_MASSIVE]]    = float(bool(getattr(unit, "is_massive", False)))
         feats[_F[USC.IS_FLYING]]     = float(bool(getattr(unit, "is_flying", False)))
         feats[_F[USC.HAS_SHIELD]]    = float(sh_max > 0.0)
+        feats[_F[USC.IS_STRUCTURE]]  = float(bool(getattr(unit, "is_structure", False)))
+        feats[_F[USC.ECONOMIC_VALUE_NORM]] = min(
+            unit_economic_value(
+                unit,
+                vespene_weight=self._econ_vespene_weight,
+                value_norm=_ECONOMIC_VALUE_OBS_CAP,
+            ),
+            1.0,
+        )
 
         # --- Group H: splash / one-shot / friendly-fire flags ---
         feats[_F[USC.HAS_SPLASH]]       = float(unit_has_splash(unit))
@@ -660,6 +716,9 @@ class SquadObservationBuilder:
         catalog[_F[USC.HEALTH_PCT]]        = h / h_max
         catalog[_F[USC.SHIELD_PCT]]        = sh / sh_max if sh_max > 1e-3 else 0.0
         catalog[_F[USC.COMBINED_VITALITY]] = (h + sh) / (h_max + sh_max)
+        catalog[_F[USC.HITPOINTS_TOTAL_NORM]] = min(
+            (h + sh) / _HITPOINTS_TOTAL_OBS_CAP, 1.0
+        )
 
         raw_cd = _safe_float(getattr(unit, "weapon_cooldown", -1.0), default=-1.0)
         norm_cd = max(0.0, raw_cd) / _CD_FRAMES if raw_cd > 0.0 else 0.0

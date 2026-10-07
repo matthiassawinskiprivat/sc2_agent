@@ -125,8 +125,6 @@ def test_reversed_siblings_do_not_redeclare_cumulative_obs_or_heads():
         env = _load(name)["env"]
         assert not env.get("active_layers"), name
         assert not env.get("active_tactical_layers"), name
-        # ``is_neuraled`` is intentionally grafted on the colossus reversed sibling.
-        if name != "scenario_colossus_zealot_vs_swarmhost_hydra_reversed":
-            assert not env.get("active_unit_scalars"), name
+        assert not env.get("active_unit_scalars"), name
         assert not env.get("action_heads"), name
         assert not env.get("categorical_heads"), name

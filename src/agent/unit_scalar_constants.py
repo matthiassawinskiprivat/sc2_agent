@@ -83,6 +83,16 @@ class UnitScalarConstants:
     # Remaining fraction of the control buff: 1 when it lands, 0 when it expires.
     IS_NEURALED = "is_neuraled"
 
+    # === Group N: Building flag (append-only; enemy pointer includes structures) ===
+    IS_STRUCTURE = "is_structure"
+
+    # === Group O: Purchase cost (append-only; same minerals/vespene as combat reward) ===
+    # Linear [0, 1] vs Mothership mineral-equivalent (400 + 1.5×400 = 1000).
+    ECONOMIC_VALUE_NORM = "economic_value_norm"
+
+    # === Group P: Remaining vitality (append-only; health + shields, not a %) ===
+    HITPOINTS_TOTAL_NORM = "hitpoints_total_norm"
+
     # --- INDEX MAPPING — never reorder; append new entries at the end ---
     FEATURES = {
         # Group A
@@ -147,6 +157,12 @@ class UnitScalarConstants:
         CAN_SNIPE: 47,
         # Group M
         IS_NEURALED: 48,
+        # Group N
+        IS_STRUCTURE: 49,
+        # Group O
+        ECONOMIC_VALUE_NORM: 50,
+        # Group P
+        HITPOINTS_TOTAL_NORM: 51,
     }
 
     @classmethod

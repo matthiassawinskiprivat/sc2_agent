@@ -48,6 +48,12 @@ def _bot_with_caster(caster, extra_units=None):
     bot.last_action_was_attack_by_unit = {}
     bot._aoe_lock = {}
     bot._aoe_ability_ready_after_loop = {}
+    bot._step_aoe_land_value = 0.0
+    bot._credit_aoe_splash_value = (
+        lambda unit, target: CaptureTheFlagBot._credit_aoe_splash_value(
+            bot, unit, target
+        )
+    )
     bot.game_info = None
     bot.state = MagicMock()
     bot.state.game_loop = 0
@@ -179,6 +185,25 @@ def test_squad_aoe_viper_empty_cell_noop():
     caster = _make_unit(1, UnitTypeId.VIPER, 50.0, 50.0)
     marine = _make_unit(2, UnitTypeId.MARINE, 60.2, 70.1, owner_id=2, is_flying=False)
     bot = _bot_with_caster(caster, extra_units=[marine])
+    _run_aoe(bot)
+    caster.assert_not_called()
+    bot.do.assert_not_called()
+    assert 1 not in bot._aoe_lock
+
+
+def test_squad_aoe_viper_near_miss_resolves_in_3x3():
+    caster = _make_unit(1, UnitTypeId.VIPER, 50.0, 50.0)
+    muta = _make_unit(2, UnitTypeId.MUTALISK, 61.2, 70.0, owner_id=2, is_flying=True)
+    bot = _bot_with_caster(caster, extra_units=[muta])
+    _run_aoe(bot)
+    caster.assert_called_once_with(AbilityId.PARASITICBOMB_PARASITICBOMB, muta)
+    bot.do.assert_called_once()
+
+
+def test_squad_aoe_viper_far_empty_is_still_noop():
+    caster = _make_unit(1, UnitTypeId.VIPER, 50.0, 50.0)
+    muta = _make_unit(2, UnitTypeId.MUTALISK, 62.2, 70.0, owner_id=2, is_flying=True)
+    bot = _bot_with_caster(caster, extra_units=[muta])
     _run_aoe(bot)
     caster.assert_not_called()
     bot.do.assert_not_called()

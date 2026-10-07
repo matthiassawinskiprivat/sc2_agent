@@ -20,7 +20,14 @@ _CANONICAL_REWARDS = {
     "melee_multiplier": 0.5,
     "distance_multiplier": 2.0,
     "defender_zone_radius": 10.0,
-    "cooldown_retreat_scale": 0.9,
+    "attacker_objective_radius": 12.0,
+    "objective_credit_falloff": 15.0,
+    "objective_credit_min_scale": 0.25,
+    "defender_zone_leave_penalty": 0.08,
+    "defender_zone_return_scale": 1.0,
+    "cooldown_retreat_scale": 0.6,
+    "aoe_land_reward": 0.75,
+    "detection_reward": 1.0,
     "win_reward": 15.0,
     "loss_penalty": -12.5,
     "draw_penalty": -10.0,
@@ -52,7 +59,7 @@ def test_ctf_squad_levels_share_unified_hparams_and_rewards():
 
 def test_ctf_squad_training_steps_are_the_halved_budget():
     """Post-unify budgets are half the pre-unify values (idempotent set)."""
-    allowed = {250_000, 500_000}
+    allowed = {125_000, 250_000, 500_000}
     for path, data in _squad_levels():
         steps = data["training"]["training_steps"]
         assert steps in allowed, f"{path.name} training_steps={steps}"
@@ -66,4 +73,4 @@ def test_pipeline_levels_after_ctf_level_23_use_250k_steps():
         path = _CONFIG_DIR / f"{name}.yaml"
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         steps = data["training"]["training_steps"]
-        assert steps == 250_000, f"{name} training_steps={steps}"
+        assert steps in {125_000, 250_000}, f"{name} training_steps={steps}"

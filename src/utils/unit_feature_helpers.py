@@ -1279,9 +1279,13 @@ def resolve_air_hostile_at_point(
     bot: Any,
     caster: "Unit",
     target: "Point2",
-    cell_half: float = 0.5,
+    cell_half: float = 1.5,
 ) -> Optional[Any]:
-    """Flying hostile (non-structure) whose center lies in the clicked cell."""
+    """Flying hostile (non-structure) nearest the click in a small cell window.
+
+    Default ``cell_half=1.5`` is a 3×3 of 1-world-unit spatial cells so Viper
+    Parasitic Bomb is not a silent no-op on a 1-cell miss.
+    """
     best = None
     best_dist_sq = float("inf")
     for enemy in _hostile_candidates(bot, caster):
@@ -1538,6 +1542,22 @@ SNIPE_CAST_ANIMATION_SECONDS: dict = (
         UnitTypeId.INFESTOR: 1.0,
         UnitTypeId.INFESTORBURROWED: 1.0,
         UnitTypeId.HIGHTEMPLAR: 0.5,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+
+# Splash radius (game units) for ``aoe_local`` land credit. Bile is credited at
+# cast with its impact radius (travel delay is ignored). Parasitic Bomb uses
+# the resolved air unit's position.
+AOE_SPLASH_RADIUS: dict = (
+    {
+        UnitTypeId.INFESTOR: 2.5,
+        UnitTypeId.INFESTORBURROWED: 2.5,
+        UnitTypeId.HIGHTEMPLAR: 1.5,
+        UnitTypeId.GHOST: 1.5,
+        UnitTypeId.RAVAGER: 0.5,
+        UnitTypeId.VIPER: 3.0,
     }
     if _SC2_AVAILABLE
     else {}

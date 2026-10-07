@@ -335,10 +335,10 @@ Unit-pointer heads are **agent-faithful**: the order goes to the exact SC2 tag t
 
 | Topic | Contract |
 |-------|----------|
-| **WHO observation** | Per-unit `unit_scalars[N_max,F]` + `unit_mask[N_max]` (pointer keys; no per-unit tactical stack). Full scalar catalog declared once at **`ctf_level_01`**. Optional `enemy_scalars` / `enemy_mask` for terminal targets. |
+| **WHO observation** | Per-unit `unit_scalars[N_max,F]` + `unit_mask[N_max]` (pointer keys; no per-unit tactical stack). Full scalar catalog declared once at **`ctf_level_01`** (includes `is_neuraled`, `is_structure`, `economic_value_norm`, and `hitpoints_total_norm`). Optional `enemy_scalars` / `enemy_mask` for terminal targets. `attack_unit` reserves one enemy slot for the visible objective pylon, then mobiles, then other structures. |
 | **WHERE observation** | Global `map[C_g,128,128]` + `command[10]` + single hard-anchor `anchor_tactical[C_t,32,32]` (previous-step selection, or provisional first-alive) |
 | **Action space** | `MultiDiscrete([2]*N_max + [64, SQUAD_TARGET_SLOTS, 1024])` — actor bits + command + target slot + spatial |
-| **Selection** | Env resolves sigmoid/Bernoulli pointer via threshold + min/max clamp (`env.squad_selection`); stores hard `anchor_tag` for the next obs crop |
+| **Selection** | Env resolves sigmoid/Bernoulli pointer via threshold + min/max clamp (`env.squad_selection`); stores hard `anchor_tag` for the next obs crop. `aoe_local` / `snipe` are hard-capped to **one** actor (highest pointer score) even if many bits are on. |
 | **Local actions** | Spatial targets decode in **anchor unit frame** to one shared world `Point2`; unit-target commands bypass spatial decode |
 | **Physics stepping** | **One trainee squad decision per env step**, paired with **one opponent squad** (same `region`) → one `client.step()` → one rollout row |
 | **Recurrent** | LSTM/GRU resets on **episode done only** (`get_obs_focus_unit_tag` returns `-1`) |
@@ -351,7 +351,7 @@ Unit-pointer heads are **agent-faithful**: the order goes to the exact SC2 tag t
 
 ### Curriculum shape (two phases)
 
-See `config_universal/pipeline.yaml`. **Phase 1** introduces every squad command (`attack_unit`, `heal_unit`, cloak, `aoe_local`, `load_unit`/`unload_local`) while the map stack stays close to the attack-5 graft, plus only the channels each action needs (HPS/creep, cloak, energy, cargo). **Phase 2** adds detailed overlays (bio/mech, light/armored/massive, air DPS modifiers, splash, upgrades) and harder compositions. Actions accumulate and are never removed; unused commands are masked.
+See `config_universal/pipeline.yaml`. **Phase 1** introduces every squad command (`attack_unit`, `heal_unit`, cloak, `aoe_local`, `load_unit`/`unload_local`) while the map stack stays close to the attack-5 graft, plus only the channels each action needs (HPS/creep, cloak, energy, cargo). Allied/enemy detection discs land with cloak at **`ctf_level_21`**. **Phase 2** adds detailed overlays (bio/mech, light/armored/massive, air DPS modifiers, splash, upgrades) and harder compositions. Actions accumulate and are never removed; unused commands are masked.
 
 ### Economic role rewards
 
@@ -361,7 +361,7 @@ Flat per-hit-point / flat kill bonuses are gone. Combat credit is **resource-wei
 \mathrm{value} = (\mathrm{minerals} + w_{\mathrm{vespene}}\cdot\mathrm{vespene}) / \mathrm{norm}
 \]
 
-Damage pays the fraction of that value removed; a death pays only the value still standing (no double-count with prior damage). Attackers get a strong enemy-value reward and a smaller own-loss penalty; defenders get a heavier own-value penalty, zone-gated enemy credit, scaled pylon penalty, and a **terminal** `defender_retained_value_bonus` (not a farmable per-step survival payout). Temporary summons (Interceptors, Locusts, Broodlings, …) are excluded; transformed bodies (sieged tank, burrowed units) alias to the purchased type (`train/envs/ctf/game_data.py`).
+Damage pays the fraction of that value removed; a death pays only the value still standing (no double-count with prior damage). Attackers get a strong enemy-value reward and a smaller own-loss penalty; defenders get a heavier own-value penalty, scaled pylon penalty, and a **terminal** `defender_retained_value_bonus` (not a farmable per-step survival payout). Enemy-value credit for **both** roles is scaled by distance to the role objective (full inside the inner radius, linear falloff to `objective_credit_min_scale`). Own-loss penalties are never scaled. Temporary summons (Interceptors, Locusts, Broodlings, …) are excluded; transformed bodies (sieged tank, burrowed units) alias to the purchased type (`train/envs/ctf/game_data.py`).
 
 **Key files:** `src/agent/squad_constants.py`, `src/agent/squad_selection.py`, `src/agent/squad_target_masks.py`, `src/transformers/squad_observation_builder.py`, `src/agent/models/squad_network.py`, `src/agent/models/squad_policy.py`, `src/agent/ctf_economic_rewards.py`, `train/envs/capture_the_flag_single_env.py` (`_async_step_squad_pointer`), `train/squad_pointer_rollout.py`.
 

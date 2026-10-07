@@ -17,6 +17,7 @@ from src.utils.unit_feature_helpers import (
     alliance_perspective_groups,
     AOE_CAST_ANIMATION_SECONDS,
     AOE_CAST_RANGE,
+    AOE_SPLASH_RADIUS,
     counts_for_combat_hp_reward,
     first_unit,
     first_unit_of_type,
@@ -51,7 +52,9 @@ from src.agent.ctf_economic_rewards import (
     UnitValue,
     build_value_snapshot,
     apply_neural_reward_buckets,
+    objective_credit_scale,
     retained_value_fraction,
+    unit_economic_value,
     value_delta,
 )
 
@@ -62,6 +65,9 @@ ECONOMIC_METRIC_KEYS: Tuple[str, ...] = (
     "economic_attacker_loss",
     "economic_defender_loss",
     "economic_healing",
+    "aoe_land_value",
+    "detection_reward",
+    "defender_zone_shaping",
 )
 EMPTY_ECONOMIC_METRICS: Dict[str, float] = {key: 0.0 for key in ECONOMIC_METRIC_KEYS}
 
@@ -206,6 +212,8 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_dist_to_enemy_com: Dict[int, float] = {}
         self._pre_action_enemy_com: Dict[int, Point2] = {}
         self._pre_action_dist_to_defend_pylon: Dict[int, float] = {}
+        self._pre_action_vitality: Dict[int, float] = {}
+        self._step_aoe_land_value: float = 0.0
         # True when this unit's last *policy* order was a move / attack. Attack is
         # snapshotted at record_pre_action time as "fired last step" so the kite
         # window still opens when weapon_cooldown has already ticked to 0 across
@@ -347,6 +355,8 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_dist_to_enemy_com = {}
         self._pre_action_enemy_com = {}
         self._pre_action_dist_to_defend_pylon = {}
+        self._pre_action_vitality = {}
+        self._step_aoe_land_value = 0.0
         self.last_action_was_move_by_unit = {}
         self.last_action_was_attack_by_unit = {}
         self._pre_action_attacked_prev_step = {}
@@ -1409,7 +1419,49 @@ class CaptureTheFlagBot(BotAI):
         )
         if issued:
             CaptureTheFlagBot._record_aoe_cast(self, unit, target)
+            if not continuing:
+                CaptureTheFlagBot._credit_aoe_splash_value(self, unit, target)
         return issued
+
+    def _credit_aoe_splash_value(self, unit: Unit, target: Point2) -> None:
+        """Credit economic value of hostiles in this caster's splash radius.
+
+        Bile is scored at cast with its impact radius (travel delay ignored).
+        Viper Parasitic Bomb uses the resolved air unit as the splash center.
+        """
+        radius = float(AOE_SPLASH_RADIUS.get(getattr(unit, "type_id", None), 0.0) or 0.0)
+        if radius <= 0.0:
+            return
+        center = target
+        if getattr(unit, "type_id", None) == UnitTypeId.VIPER:
+            hard = resolve_air_hostile_at_point(self, unit, target)
+            if hard is None:
+                return
+            center = getattr(hard, "position", None) or target
+        cx = float(getattr(center, "x", 0.0))
+        cy = float(getattr(center, "y", 0.0))
+        r_conf = self.training_conf.get("rewards", {})
+        econ = EconomicRewardConfig.from_rewards_conf(r_conf)
+        total = 0.0
+        for hostile in _hostile_candidates(self, unit):
+            if hostile is None:
+                continue
+            pos = getattr(hostile, "position", None)
+            if pos is None:
+                continue
+            dist = math.hypot(float(pos.x) - cx, float(pos.y) - cy)
+            if dist > radius + 1e-6:
+                continue
+            total += unit_economic_value(
+                hostile,
+                vespene_weight=econ.vespene_weight,
+                value_norm=econ.value_norm,
+            )
+        try:
+            prev = float(getattr(self, "_step_aoe_land_value", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            prev = 0.0
+        self._step_aoe_land_value = prev + total
 
     _HEAL_ABILITY_BY_TYPE: Dict[UnitTypeId, AbilityId] = {
         UnitTypeId.MEDIVAC: AbilityId.MEDIVACHEAL_HEAL,
@@ -1877,6 +1929,7 @@ class CaptureTheFlagBot(BotAI):
             self._pre_action_enemy_com.pop(unit_tag, None)
             self._pre_action_attacked_prev_step.pop(unit_tag, None)
             self._pre_action_dist_to_defend_pylon.pop(unit_tag, None)
+            self._pre_action_vitality.pop(unit_tag, None)
             return
 
         # python-sc2 returns -1 when the unit cannot attack.
@@ -1888,6 +1941,7 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_attacked_prev_step[unit_tag] = bool(
             self.last_action_was_attack_by_unit.get(unit_tag, False)
         )
+        self._pre_action_vitality[unit_tag] = self._raw_vitality(unit)
 
         enemies = self._enemies_for_unit(unit)
         enemy_com = self._enemy_com_in_tactical_fovea(unit, enemies)
@@ -1911,24 +1965,51 @@ class CaptureTheFlagBot(BotAI):
         else:
             self._pre_action_dist_to_defend_pylon.pop(unit_tag, None)
 
+    @staticmethod
+    def _raw_vitality(unit: Any) -> float:
+        """Current health + shields (0 when the unit or bars are missing)."""
+        if unit is None:
+            return 0.0
+        try:
+            health = float(getattr(unit, "health", 0.0) or 0.0)
+            shield = float(getattr(unit, "shield", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, health + shield)
+
+    @staticmethod
+    def _combined_vitality(unit: Any) -> float:
+        """Fraction of max health+shields in ``[0, 1]``."""
+        curr = CaptureTheFlagBot._raw_vitality(unit)
+        if unit is None:
+            return 0.0
+        try:
+            hmax = float(getattr(unit, "health_max", 0.0) or 0.0)
+            smax = float(getattr(unit, "shield_max", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            hmax, smax = 0.0, 0.0
+        cap = hmax + smax
+        if cap <= 1e-6:
+            cap = max(curr, 1.0)
+        return max(0.0, min(1.0, curr / cap))
+
     def calculate_cooldown_retreat_reward(
         self, unit_tag: int, enemies: Iterable[Unit]
     ) -> float:
         """
-        Reward moving away from the enemy cluster CoM while in the post-shot kite window.
+        Reward kiting away from the enemy CoM while under fire and low on HP.
 
         Gates (all required):
         - ``cooldown_retreat_scale`` > 0 in config
         - Unit has ranged weapon range (> ``_RANGED_WEAPON_RANGE_MIN``)
-        - Kite window open: pre-action ``weapon_cooldown`` > 0 **or** the unit's
-          last order was an attack (covers long physics steps that burn CD to 0)
+        - Vitality dropped since the pre-action snapshot (actually under attack)
         - This step's order was a move (not attack)
         - Enemies were in the unit's tactical fovea at pre-action (frozen CoM)
         - Distance to that **frozen** pre-action CoM increased
 
-        Distance is measured against the pre-action CoM, not the live post-step
-        CoM. Trainee and opponent act in one physics step; faster melee chase
-        would otherwise shrink the live gap and cancel a correct kite move.
+        Magnitude is ``scale * (1 - combined_vitality) * Δdist`` so a near-dead
+        kite pays more than a full-HP one. Distance uses the frozen CoM so a
+        faster melee chase in the same physics step cannot cancel the kite.
         """
         if unit_tag is None:
             return 0.0
@@ -1945,20 +2026,21 @@ class CaptureTheFlagBot(BotAI):
             self._pre_action_enemy_com.pop(unit_tag, None)
             self._pre_action_weapon_cd_by_unit.pop(unit_tag, None)
             self._pre_action_attacked_prev_step.pop(unit_tag, None)
+            self._pre_action_vitality.pop(unit_tag, None)
             return 0.0
 
         if not self._is_ranged_combat_unit(unit, enemies):
             return 0.0
 
-        pre_cd = self._pre_action_weapon_cd_by_unit.get(unit_tag)
         prev_dist = self._pre_action_dist_to_enemy_com.get(unit_tag)
         pre_com = self._pre_action_enemy_com.get(unit_tag)
-        if pre_cd is None or prev_dist is None or pre_com is None:
+        prev_vit = self._pre_action_vitality.get(unit_tag)
+        if prev_dist is None or pre_com is None or prev_vit is None:
             return 0.0
 
         eps = 1e-3
-        attacked_prev = bool(self._pre_action_attacked_prev_step.get(unit_tag, False))
-        if float(pre_cd) <= eps and not attacked_prev:
+        curr_vit = self._raw_vitality(unit)
+        if curr_vit >= float(prev_vit) - eps:
             return 0.0
 
         if not self.last_action_was_move_by_unit.get(unit_tag, False):
@@ -1968,17 +2050,21 @@ class CaptureTheFlagBot(BotAI):
         if curr_dist <= prev_dist + eps:
             return 0.0
 
-        return scale * (curr_dist - prev_dist)
+        hp_scale = 1.0 - self._combined_vitality(unit)
+        if hp_scale <= 0.0:
+            return 0.0
+        return scale * hp_scale * (curr_dist - prev_dist)
 
     def calculate_defender_zone_penalty(
         self, unit_tag: int, own_pylon_pos: Optional[Point2]
     ) -> float:
         """
-        Penalize defender units that move farther from their pylon while outside
-        the defender zone (distance > ``defender_zone_radius`` map units).
+        Shape defenders that leave the pylon zone.
 
-        No positive shaping — defenders are only penalized for stepping away
-        beyond the zone until they return inside it.
+        Outside ``defender_zone_radius``: pay ``-defender_zone_leave_penalty``
+        every step, plus ``defender_zone_return_scale * Δdist_in`` when moving
+        closer to the pylon. No extra farther-from-pylon term (leave cost already
+        charges standing or walking away). Inside the zone: 0.
         """
         if unit_tag is None:
             return 0.0
@@ -1987,9 +2073,10 @@ class CaptureTheFlagBot(BotAI):
             return 0.0
 
         r_conf = self.training_conf.get("rewards", {})
-        dist_mult = float(r_conf.get("distance_multiplier", 0.1))
+        leave = float(r_conf.get("defender_zone_leave_penalty", 0.08))
+        return_scale = float(r_conf.get("defender_zone_return_scale", 1.0))
         zone_radius = float(r_conf.get("defender_zone_radius", 10.0))
-        if dist_mult == 0.0:
+        if leave == 0.0 and return_scale == 0.0:
             return 0.0
 
         unit = self.all_units.find_by_tag(unit_tag)
@@ -2001,22 +2088,16 @@ class CaptureTheFlagBot(BotAI):
         if pylon_pos is None:
             return 0.0
 
-        prev_dist = self._pre_action_dist_to_defend_pylon.get(unit_tag)
-        if prev_dist is None:
-            return 0.0
-
         curr_dist = self._dist_to_point(unit, pylon_pos)
         eps = 1e-3
-
-        # Inside the defender zone — no penalty from this signal.
         if curr_dist <= zone_radius + eps:
             return 0.0
 
-        # Outside the zone: penalize only when moving farther from the pylon.
-        if curr_dist > prev_dist + eps:
-            return -dist_mult * (curr_dist - prev_dist)
-
-        return 0.0
+        total = -leave
+        prev_dist = self._pre_action_dist_to_defend_pylon.get(unit_tag)
+        if prev_dist is not None and return_scale != 0.0 and curr_dist + eps < prev_dist:
+            total += return_scale * (prev_dist - curr_dist)
+        return total
 
     @staticmethod
     def _iter_combat_units_with_passengers(
@@ -2119,6 +2200,112 @@ class CaptureTheFlagBot(BotAI):
                 return self.unit_target_map[tag]
         return fallback_pylon_pos
 
+    def _squad_objective_anchor(
+        self,
+        squad_tags: List[int],
+        fallback: Optional[Point2],
+    ) -> Optional[Point2]:
+        for tag in squad_tags:
+            mapped = self.unit_target_map.get(tag)
+            if mapped is not None:
+                return mapped
+        return fallback
+
+    def _enemy_value_position_scale(
+        self,
+        *,
+        squad_is_defend: bool,
+        squad_tags: List[int],
+        own_pylon_pos: Optional[Point2],
+        enemy_objective: Optional[Point2],
+        r_conf: dict,
+    ):
+        """Scale enemy-value credit by distance to the role objective."""
+        if squad_is_defend:
+            inner = float(r_conf.get("defender_zone_radius", 10.0))
+            anchor = self._defender_zone_anchor(squad_tags, own_pylon_pos)
+        else:
+            inner = float(r_conf.get("attacker_objective_radius", 12.0))
+            anchor = self._squad_objective_anchor(squad_tags, enemy_objective)
+        falloff = float(r_conf.get("objective_credit_falloff", 15.0))
+        min_scale = float(r_conf.get("objective_credit_min_scale", 0.25))
+
+        def _scale(pos):
+            if pos is None or anchor is None:
+                return 1.0
+            dist = math.hypot(
+                float(pos.x) - float(anchor.x),
+                float(pos.y) - float(anchor.y),
+            )
+            return objective_credit_scale(
+                dist, inner_radius=inner, falloff=falloff, min_scale=min_scale
+            )
+
+        return _scale
+
+    @staticmethod
+    def _unit_is_concealed(unit: Any) -> bool:
+        return bool(getattr(unit, "is_cloaked", False)) or bool(
+            getattr(unit, "is_burrowed", False)
+        )
+
+    def _allied_detector_covers(
+        self, unit: Any, own_units: Iterable, own_structs: Iterable
+    ) -> bool:
+        pos = getattr(unit, "position", None)
+        if pos is None:
+            return False
+        ux, uy = float(pos.x), float(pos.y)
+        for detector in list(own_units or []) + list(own_structs or []):
+            if detector is None:
+                continue
+            try:
+                rng = float(getattr(detector, "detect_range", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                rng = 0.0
+            if rng <= 0.0:
+                continue
+            dpos = getattr(detector, "position", None)
+            if dpos is None:
+                continue
+            if math.hypot(ux - float(dpos.x), uy - float(dpos.y)) <= rng + 1e-6:
+                return True
+        return False
+
+    def _detection_step_reward(
+        self,
+        enemy_units: Iterable,
+        own_units: Iterable,
+        own_structs: Iterable,
+        r_conf: dict,
+        econ: EconomicRewardConfig,
+    ) -> float:
+        """Pay for every concealed hostile currently inside an allied detector disc.
+
+        The payout is ``detection_reward ×`` the sum of those units' economic
+        values, so two Dark Templar in range pay twice one, and a Banshee pays
+        more than a Zergling. Visible (uncloaked/unburrowed) hostiles never
+        count. Proto ``is_detected`` alone is not enough — the detector has to
+        actually cover them.
+        """
+        detect_scale = float(r_conf.get("detection_reward", 0.0))
+        if detect_scale == 0.0:
+            return 0.0
+        reward = 0.0
+        for unit in enemy_units or []:
+            if unit is None or getattr(unit, "is_structure", False) is True:
+                continue
+            if not self._unit_is_concealed(unit):
+                continue
+            if not self._allied_detector_covers(unit, own_units, own_structs):
+                continue
+            reward += detect_scale * unit_economic_value(
+                unit,
+                vespene_weight=econ.vespene_weight,
+                value_norm=econ.value_norm,
+            )
+        return reward
+
     def _defender_zone_credited_enemy_combat(
         self,
         p_id: int,
@@ -2176,9 +2363,9 @@ class CaptureTheFlagBot(BotAI):
         Per-unit shaping (cooldown retreat, defender zone, step penalty) is summed
         over ``squad_tags``.
 
-        Defend-role squads only receive ``damage_reward`` / ``kill_reward`` for
-        enemies inside ``defender_zone_radius``. Own ``damage_penalty`` /
-        ``kill_penalty`` still apply when defenders are outside the zone.
+        Enemy-value credit for both roles is scaled by distance to the role
+        objective (full inside the inner radius, fading to
+        ``objective_credit_min_scale``). Own-loss penalties are never scaled.
         """
         self._step_cooldown_retreat_reward = 0.0
         p_id = perspective_player_id if perspective_player_id is not None else self.player_id
@@ -2290,18 +2477,18 @@ class CaptureTheFlagBot(BotAI):
         prev_enemy_values = self.prev_enemy_value_snapshot.get(p_id) or {}
         prev_own_values = self.prev_own_value_snapshot.get(p_id) or {}
 
-        # Defend role: enemy value only counts inside defender_zone_radius, so a
-        # defender cannot farm reward by abandoning the pylon to chase a fight.
-        # Attack role credits enemy value anywhere on the map.
-        zone_filter = None
-        if squad_is_defend:
-            zone_radius = float(r_conf.get("defender_zone_radius", 10.0))
-            zone_anchor = self._defender_zone_anchor(squad_tags, own_pylon_pos)
-            zone_filter = lambda pos: self._is_in_defender_zone(  # noqa: E731
-                pos, zone_anchor, zone_radius
-            )
+        # Both roles scale enemy-value credit by distance to the role objective
+        # (attack: enemy pylon; defend: own pylon). Far fights still pay a
+        # floor (``objective_credit_min_scale``) instead of zero.
+        pos_scale = self._enemy_value_position_scale(
+            squad_is_defend=squad_is_defend,
+            squad_tags=squad_tags,
+            own_pylon_pos=own_pylon_pos,
+            enemy_objective=target_pos,
+            r_conf=r_conf,
+        )
         enemy_flow = value_delta(
-            prev_enemy_values, curr_enemy_values, position_filter=zone_filter
+            prev_enemy_values, curr_enemy_values, position_scale=pos_scale
         )
         enemy_coeff = econ.scaled_enemy_value_reward(
             econ.defender_enemy_value_reward
@@ -2394,7 +2581,20 @@ class CaptureTheFlagBot(BotAI):
         self.prev_own_unit_count[p_id] = self._mobile_combat_count(
             own_units, include_filter=counts_for_combat_hp_reward
         )
-        self._step_economic_metrics = metrics
+
+        aoe_land_coeff = float(r_conf.get("aoe_land_reward", 0.0))
+        aoe_land_value = float(getattr(self, "_step_aoe_land_value", 0.0) or 0.0)
+        self._step_aoe_land_value = 0.0
+        if aoe_land_coeff != 0.0 and aoe_land_value > 0.0:
+            reward += aoe_land_coeff * aoe_land_value
+        metrics["aoe_land_value"] = aoe_land_value
+
+        detection = self._detection_step_reward(
+            enemy_units, own_units, own_structs, r_conf, econ
+        )
+        if detection != 0.0:
+            reward += detection
+        metrics["detection_reward"] = detection
 
         # 3. Progress Rewards — attacker squad Center-of-Mass distance shaping
         #
@@ -2434,6 +2634,7 @@ class CaptureTheFlagBot(BotAI):
             if squad_tags
             else True
         )
+        zone_total = 0.0
         for tag in squad_tags:
             self.active_unit_tag = tag
             retreat = self.calculate_cooldown_retreat_reward(tag, mobile_enemies)
@@ -2441,8 +2642,12 @@ class CaptureTheFlagBot(BotAI):
                 float(getattr(self, "_step_cooldown_retreat_reward", 0.0)) + float(retreat)
             )
             reward += retreat
-            reward += self.calculate_defender_zone_penalty(tag, own_pylon_pos)
+            zone = self.calculate_defender_zone_penalty(tag, own_pylon_pos)
+            zone_total += float(zone)
+            reward += zone
         self.active_unit_tag = saved_active
+        metrics["defender_zone_shaping"] = zone_total
+        self._step_economic_metrics = metrics
 
         # Both roles pay the step penalty. The old per-step defender_step_reward is
         # gone: paying a defender simply for existing is farmable by hiding in a

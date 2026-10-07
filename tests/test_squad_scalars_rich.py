@@ -111,6 +111,39 @@ def test_health_pct_full_health(training_conf):
     assert feats[USC.FEATURES[USC.HEALTH_PCT]] == pytest.approx(1.0)
 
 
+def test_hitpoints_total_norm_is_absolute_not_percent(training_conf):
+    """Full Marine and full Thor both have health_pct=1; remaining HP still differs."""
+    from src.transformers.squad_observation_builder import _HITPOINTS_TOTAL_OBS_CAP
+
+    builder = SquadObservationBuilder(training_conf)
+    marine = _make_unit(health=45.0, health_max=45.0, shield=0.0, shield_max=0.0)
+    thor = _make_unit(health=400.0, health_max=400.0, shield=0.0, shield_max=0.0)
+    wounded = _make_unit(health=200.0, health_max=400.0, shield=0.0, shield_max=0.0)
+    shielded = _make_unit(health=80.0, health_max=80.0, shield=80.0, shield_max=80.0)
+    idx = USC.FEATURES[USC.HITPOINTS_TOTAL_NORM]
+    marine_v = builder._unit_scalars(
+        marine, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )[idx]
+    thor_v = builder._unit_scalars(
+        thor, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )[idx]
+    wounded_v = builder._unit_scalars(
+        wounded, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )[idx]
+    shielded_v = builder._unit_scalars(
+        shielded, "attack", playable_w=128.0, playable_h=128.0,
+        upgrades=frozenset(), objective=None, enemy_com=None, allied_com=None,
+    )[idx]
+    assert marine_v == pytest.approx(45.0 / _HITPOINTS_TOTAL_OBS_CAP)
+    assert thor_v == pytest.approx(400.0 / _HITPOINTS_TOTAL_OBS_CAP)
+    assert wounded_v == pytest.approx(0.5 * thor_v)
+    assert shielded_v == pytest.approx(160.0 / _HITPOINTS_TOTAL_OBS_CAP)
+    assert marine_v < thor_v
+
+
 def test_health_pct_half(training_conf):
     builder = SquadObservationBuilder(training_conf)
     unit = _make_unit(health=50.0, health_max=100.0)

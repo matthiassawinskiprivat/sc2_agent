@@ -57,7 +57,7 @@ env:
   # Squad pointer: game frames simulated after one joint squad order.
   # Independent of army size (about three decisions per game second at 22.4 fps).
   # Per-level YAML can override. Per-unit / chunk turns still use step_mul_per_unit.
-  squad_pointer_step_size: 8
+  squad_pointer_step_size: 6
   # Opponent samples a new squad order every N *paired turns for that opponent
   # pool* and keeps that order in between (last orders are reissued). The clock
   # is per opponent pool so dual-arena levels that alternate trainee pools each
@@ -92,9 +92,9 @@ env:
 # made `attack_local` usage collapse when spatial healing was introduced).
 #
 # Per-unit scalars are declared once at `ctf_level_01` so pointer identity stays
-# stable. `is_neuraled` is appended later, at
-# `scenario_colossus_zealot_vs_swarmhost_hydra_reversed`. A repeated name is
-# skipped, so listing it again does not add a second channel.
+# stable (`is_neuraled` / `is_structure` / `economic_value_norm` /
+# `hitpoints_total_norm` included). A repeated name is skipped, so listing it
+# again does not add a second channel.
 levels:
   - "level_move_single_0"
   - "level_move_single_1"
@@ -122,7 +122,7 @@ levels:
   - "ctf_level_19"
   - "ctf_level_20"
   - "scenario_queen_roach_vs_stalker_disruptor"
-  # concealment (cloak_burrow / uncloak_unburrow) + cloak channels
+  # concealment (cloak_burrow / uncloak_unburrow) + cloak / detection channels
   - "ctf_level_21"
   - "ctf_level_22"
   - "ctf_level_23"

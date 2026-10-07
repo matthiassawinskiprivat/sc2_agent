@@ -1,5 +1,5 @@
 """
-Tests for CTF defender zone distance penalty (outside radius, moving away only).
+Tests for CTF defender zone shaping (leave cost + return bonus).
 """
 import pytest
 from unittest.mock import MagicMock
@@ -15,17 +15,30 @@ def _make_unit(tag: int, x: float, y: float, owner_id: int = 1):
     u.owner_id = owner_id
     u.is_structure = False
     u.health = 100.0
+    u.health_max = 100.0
     u.shield = 0.0
+    u.shield_max = 0.0
     return u
 
 
-def _make_bot(dist_mult: float = 0.5, zone_radius: float = 10.0) -> CaptureTheFlagBot:
+def _make_bot(
+    *,
+    leave: float = 0.08,
+    return_scale: float = 1.0,
+    zone_radius: float = 10.0,
+) -> CaptureTheFlagBot:
     return CaptureTheFlagBot(
         player_id=1,
         training_conf={
             "rewards": {
-                "distance_multiplier": dist_mult,
+                "defender_zone_leave_penalty": leave,
+                "defender_zone_return_scale": return_scale,
                 "defender_zone_radius": zone_radius,
+                "distance_multiplier": 0.0,
+                "cooldown_retreat_scale": 0.0,
+                "detection_reward": 0.0,
+                "aoe_land_reward": 0.0,
+                "step_penalty": -0.05,
             }
         },
     )
@@ -36,42 +49,40 @@ def _wire_unit(bot: CaptureTheFlagBot, unit) -> None:
     bot.all_units.find_by_tag.return_value = unit
 
 
-def test_penalty_when_outside_zone_and_moving_away():
-    bot = _make_bot(dist_mult=0.5)
+def test_leave_penalty_when_outside_zone():
+    bot = _make_bot(leave=0.08, return_scale=0.0)
     pylon = Point2((0.0, 0.0))
     unit = _make_unit(101, 14.0, 0.0)
     bot.unit_command_map = {101: "defend"}
     bot.unit_target_map = {101: pylon}
     _wire_unit(bot, unit)
-
     bot._pre_action_dist_to_defend_pylon[101] = 12.0
 
     penalty = bot.calculate_defender_zone_penalty(101, pylon)
-    assert penalty == pytest.approx(-0.5 * (14.0 - 12.0))
+    assert penalty == pytest.approx(-0.08)
 
 
-def test_no_penalty_inside_zone():
+def test_return_bonus_when_outside_and_moving_toward_pylon():
+    bot = _make_bot(leave=0.08, return_scale=1.0)
+    pylon = Point2((0.0, 0.0))
+    unit = _make_unit(101, 12.0, 0.0)
+    bot.unit_command_map = {101: "defend"}
+    bot.unit_target_map = {101: pylon}
+    _wire_unit(bot, unit)
+    bot._pre_action_dist_to_defend_pylon[101] = 14.0
+
+    shaping = bot.calculate_defender_zone_penalty(101, pylon)
+    assert shaping == pytest.approx(-0.08 + 1.0 * (14.0 - 12.0))
+
+
+def test_no_shaping_inside_zone():
     bot = _make_bot()
     pylon = Point2((0.0, 0.0))
     unit = _make_unit(101, 8.0, 0.0)
     bot.unit_command_map = {101: "defend"}
     bot.unit_target_map = {101: pylon}
     _wire_unit(bot, unit)
-
     bot._pre_action_dist_to_defend_pylon[101] = 9.0
-
-    assert bot.calculate_defender_zone_penalty(101, pylon) == 0.0
-
-
-def test_no_penalty_when_outside_but_moving_toward_pylon():
-    bot = _make_bot()
-    pylon = Point2((0.0, 0.0))
-    unit = _make_unit(101, 12.0, 0.0)
-    bot.unit_command_map = {101: "defend"}
-    bot.unit_target_map = {101: pylon}
-    _wire_unit(bot, unit)
-
-    bot._pre_action_dist_to_defend_pylon[101] = 14.0
 
     assert bot.calculate_defender_zone_penalty(101, pylon) == 0.0
 
@@ -87,15 +98,15 @@ def test_no_penalty_for_attackers():
     assert bot.calculate_defender_zone_penalty(101, pylon) == 0.0
 
 
-def test_no_penalty_on_first_step_without_baseline():
-    bot = _make_bot()
+def test_leave_penalty_on_first_step_without_baseline():
+    bot = _make_bot(leave=0.08, return_scale=1.0)
     pylon = Point2((0.0, 0.0))
     unit = _make_unit(101, 15.0, 0.0)
     bot.unit_command_map = {101: "defend"}
     bot.unit_target_map = {101: pylon}
     _wire_unit(bot, unit)
 
-    assert bot.calculate_defender_zone_penalty(101, pylon) == 0.0
+    assert bot.calculate_defender_zone_penalty(101, pylon) == pytest.approx(-0.08)
 
 
 def test_record_pre_action_snapshots_defender_distance():
@@ -114,11 +125,7 @@ def test_record_pre_action_snapshots_defender_distance():
 
 
 def test_integrated_defender_penalty_in_calculate_reward():
-    """Defenders pay the shared ``step_penalty`` now; the old free per-step
-    ``defender_step_reward`` (farmable by hiding all episode) is gone — see
-    ``src/agent/ctf_economic_rewards.py`` and ``defender_retained_value_bonus``.
-    """
-    bot = _make_bot(dist_mult=0.5)
+    bot = _make_bot(leave=0.08, return_scale=0.0)
     pylon_pos = Point2((0.0, 0.0))
     own_pylon = _make_unit(888, 0.0, 0.0)
     own_pylon.is_structure = True
@@ -153,6 +160,5 @@ def test_integrated_defender_penalty_in_calculate_reward():
     bot._pre_action_dist_to_defend_pylon[101] = 11.0
 
     reward = bot.calculate_reward(perspective_player_id=1)
-    expected_penalty = -0.5 * (13.0 - 11.0)
-    step_penalty = -0.05  # shared default; both roles pay it now
-    assert reward == pytest.approx(expected_penalty + step_penalty)
+    step_penalty = -0.05
+    assert reward == pytest.approx(-0.08 + step_penalty)

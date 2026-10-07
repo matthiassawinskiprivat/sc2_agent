@@ -228,6 +228,9 @@ class LayerConstants:
         # Spell energy (AoE curriculum tactical channels)
         ALLIED_ENERGY: 45,
         ENEMY_ENERGY: 46,
+        # Detector discs (cloak curriculum; global LAYERS already had these)
+        ALLIED_DETECTION: 47,
+        ENEMY_DETECTION: 48,
     }
 
     @classmethod
@@ -236,4 +239,4 @@ class LayerConstants:
 
     @classmethod
     def get_num_tactical_layers(cls) -> int:
-        return 47
+        return 49

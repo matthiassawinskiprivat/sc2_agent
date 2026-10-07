@@ -26,7 +26,12 @@ GATES = {
         "enemy_unit_light",
     ],
     "splash": ["allied_splash", "enemy_splash"],
-    "cloak": ["allied_unit_cloak", "enemy_unit_cloak"],
+    "cloak": [
+        "allied_unit_cloak",
+        "enemy_unit_cloak",
+        "allied_detection",
+        "enemy_detection",
+    ],
 }
 
 # Air / transport units that need flying map channels.

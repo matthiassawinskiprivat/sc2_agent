@@ -20,9 +20,13 @@ Roles are asymmetric on purpose:
   loss penalty, so a favourable-but-costly trade (or a necessary suicide into the
   pylon) stays learnable.
 * **Defenders** get a strong own-value preservation penalty, enemy-value credit
-  only for fighting inside their pylon zone, a heavier pylon-damage penalty, and a
-  **terminal** retained-army-value bonus — not a per-step survival payout, which
-  a defender could farm by hiding in a corner for the whole episode.
+  scaled by distance to the defend pylon (full inside the zone, fading to a
+  floor far away), a heavier pylon-damage penalty, and a **terminal**
+  retained-army-value bonus — not a per-step survival payout, which a defender
+  could farm by hiding in a corner for the whole episode.
+* **Attackers** use the same distance scale toward the enemy objective, so
+  mid-map army trading far from the pylon pays less than fighting on the
+  objective.
 
 Vitality means health + shields. Temporary bodies (Interceptors, Locusts,
 Broodlings, hallucinations) are excluded by the caller's ``include_filter`` so a
@@ -312,17 +316,45 @@ def apply_neural_reward_buckets(
     return own_out, enemy_out, suspended
 
 
+def objective_credit_scale(
+    distance: float,
+    *,
+    inner_radius: float,
+    falloff: float,
+    min_scale: float,
+) -> float:
+    """Linear falloff from 1.0 inside ``inner_radius`` to ``min_scale``.
+
+    ``falloff`` is the extra distance beyond the inner radius over which the
+    scale interpolates. Zero/negative falloff snaps to ``min_scale`` outside
+    the inner radius.
+    """
+    dist = max(0.0, float(distance))
+    inner = max(0.0, float(inner_radius))
+    floor = max(0.0, min(1.0, float(min_scale)))
+    if dist <= inner + 1e-6:
+        return 1.0
+    span = float(falloff)
+    if span <= 1e-6:
+        return floor
+    t = min(1.0, (dist - inner) / span)
+    return 1.0 + t * (floor - 1.0)
+
+
 def value_delta(
     previous: Dict[int, UnitValue],
     current: Dict[int, UnitValue],
     *,
     position_filter: Optional[Callable[[Any], bool]] = None,
+    position_scale: Optional[Callable[[Any], float]] = None,
     role_filter: Optional[Callable[[str], bool]] = None,
     ignore_missing_tags: Optional[set] = None,
 ) -> ValueDelta:
     """Damaged / destroyed / restored economic value between two snapshots.
 
-    ``position_filter`` gates credit by where the change happened (defender zone).
+    ``position_filter`` gates credit by where the change happened (hard zero).
+    ``position_scale`` multiplies damaged/destroyed credit by a position-dependent
+    factor in ``[0, 1]`` (objective-distance falloff). Restore is never scaled.
     ``role_filter`` gates by the unit's own high-level role (attacker vs defender
     loss accounting). ``ignore_missing_tags`` drops a disappearance so a body
     that left the ledger because it is neuralled is not booked as a death.
@@ -342,16 +374,23 @@ def value_delta(
         )
         if position_filter is not None and not position_filter(position):
             continue
+        scale = 1.0
+        if position_scale is not None:
+            try:
+                scale = float(position_scale(position))
+            except (TypeError, ValueError):
+                scale = 1.0
+            scale = max(0.0, min(1.0, scale))
         if after is None:
             if ignore_missing_tags is not None and int(tag) in ignore_missing_tags:
                 continue
-            destroyed += before.standing_value
+            destroyed += before.standing_value * scale
             kills += 1
             continue
         anchor = before.max_vitality
         delta_fraction = after.fraction_of(anchor) - before.fraction_of(anchor)
         if delta_fraction < 0.0:
-            damaged += -delta_fraction * before.value
+            damaged += -delta_fraction * before.value * scale
         elif delta_fraction > 0.0:
             restored += delta_fraction * before.value
     return ValueDelta(

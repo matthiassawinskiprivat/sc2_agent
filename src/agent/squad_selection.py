@@ -41,6 +41,10 @@ _ACTOR_MASK_KEY_BY_MODE = {
     CMD_MODE_SPATIAL: "move_actor_mask",
 }
 
+# ``aoe_local`` / ``snipe`` execute as one caster on one target. The policy may
+# still sample many ON bits; the env keeps the highest-score eligible slot.
+SINGLE_CASTER_COMMAND_MODES = frozenset({CMD_MODE_AOE, CMD_MODE_SNIPE})
+
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x, dtype=np.float64)
@@ -122,6 +126,36 @@ def _clamp_selection(
         ranked = sorted(pool_indices, key=lambda i: scores[i], reverse=True)
         selected = ranked[:min_selected]
     return tuple(int(i) for i in sorted(set(selected)))
+
+
+def _clamp_single_caster(
+    result: SquadSelectionResult,
+    command_idx: int,
+    obs: dict | None,
+) -> SquadSelectionResult:
+    """Keep only the highest-score actor for AoE / snipe (ties → lowest index)."""
+    if obs is None or len(result.selected_indices) <= 1:
+        return result
+    modes = obs.get("command_modes")
+    if modes is None:
+        return result
+    table = np.asarray(modes, dtype=np.float32).reshape(-1)
+    idx = int(command_idx)
+    if idx < 0 or idx >= table.shape[0]:
+        return result
+    mode = int(round(float(table[idx])))
+    if mode not in SINGLE_CASTER_COMMAND_MODES:
+        return result
+    scores = np.asarray(result.scores, dtype=np.float64).reshape(-1)
+    best = min(
+        result.selected_indices,
+        key=lambda i: (-float(scores[i]) if 0 <= i < scores.shape[0] else 0.0, i),
+    )
+    return SquadSelectionResult(
+        selected_indices=(int(best),),
+        anchor_index=int(best),
+        scores=result.scores,
+    )
 
 
 def resolve_squad_selection(
@@ -254,6 +288,8 @@ def decode_squad_action(
 
     When ``obs`` is the squad observation the policy saw, min-select clamp uses
     the same command-conditioned actor mask (``attack_actor_mask``, …).
+    ``aoe_local`` / ``snipe`` are hard-capped to one actor (highest pointer
+    score) even if the policy turned several bits on.
     """
     action = np.asarray(action, dtype=np.int64).reshape(-1)
     if action.shape[0] != SQUAD_ACTION_DIM:
@@ -267,6 +303,7 @@ def decode_squad_action(
     selection = resolve_squad_selection_from_binary(
         pointer_binary, unit_mask, config=config, eligible_mask=eligible
     )
+    selection = _clamp_single_caster(selection, command_idx, obs)
     return SquadActionDecode(
         selection=selection,
         command_idx=command_idx,

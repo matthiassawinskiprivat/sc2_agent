@@ -76,7 +76,14 @@ env:
     melee_multiplier: 0.5
     distance_multiplier: 2.0
     defender_zone_radius: 10.0
-    cooldown_retreat_scale: 0.9
+    attacker_objective_radius: 12.0
+    objective_credit_falloff: 15.0
+    objective_credit_min_scale: 0.25
+    defender_zone_leave_penalty: 0.08
+    defender_zone_return_scale: 1.0
+    cooldown_retreat_scale: 0.6
+    aoe_land_reward: 0.75
+    detection_reward: 1.0
     win_reward: 15.0
     loss_penalty: -12.5
     draw_penalty: -10.0
@@ -99,5 +106,5 @@ model:
     net_arch: []
   gamma: 0.99
   ent_coef: 0.01
-  n_epochs: 3
+  n_epochs: 4
 agent_architecture: squad

@@ -198,7 +198,7 @@ def test_attack_local_open_when_engage_enemy_even_if_hard_anchor_empty():
 
 
 def test_attack_local_open_for_building_in_fovea_without_mobile_enemy():
-    """Pylon / bunker in engage fovea opens spatial attack; attack_unit stays army-only."""
+    """Pylon / bunker in engage fovea opens spatial attack even with empty pointer slots."""
     bot = _bot()
     obs = _obs(enemies=0, tactical_enemies=0, engage_enemies=1, attack_ready=1)
     mask = bot.squad_action_masks(obs["unit_mask"], obs)

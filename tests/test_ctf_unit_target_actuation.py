@@ -388,6 +388,17 @@ def test_unit_target_command_with_missing_target_issues_nothing():
     assert bot._unit_last_order == {}
 
 
+def test_attack_unit_can_hard_target_enemy_pylon():
+    marine = _make_unit(1, UnitTypeId.MARINE, owner_id=1)
+    pylon = _make_unit(2, UnitTypeId.PYLON, owner_id=2, is_structure=True)
+    bot, _ = _bot(marine, pylon)
+
+    _apply(bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=2)
+
+    marine.attack.assert_called_once_with(pylon)
+    bot.do.assert_called_once()
+
+
 def test_attack_unit_returns_ordered_tags_on_success():
     marine = _make_unit(1, UnitTypeId.MARINE, owner_id=1)
     ling = _make_unit(2, UnitTypeId.ZERGLING, owner_id=2)

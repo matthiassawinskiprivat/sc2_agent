@@ -86,7 +86,7 @@ def test_graft_model_weights_new_action_bias_is_neutral():
 
 
 def test_graft_model_weights_zero_fills_new_unit_scalar_column():
-    """A trailing unit scalar (is_neuraled, 48 → 49) must not disturb old columns."""
+    """A trailing unit scalar column must not disturb old columns."""
     old = torch.arange(8 * 48, dtype=torch.float32).reshape(8, 48)
     keys = (
         "features_extractor.entity_encoder.encoder.0.weight",

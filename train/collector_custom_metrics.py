@@ -31,6 +31,9 @@ ROLLOUT_SUM_INFO_KEYS: FrozenSet[str] = frozenset(
         "economic_attacker_loss",
         "economic_defender_loss",
         "economic_healing",
+        "aoe_land_value",
+        "detection_reward",
+        "defender_zone_shaping",
     }
 )
 

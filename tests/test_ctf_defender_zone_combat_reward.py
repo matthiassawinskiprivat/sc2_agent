@@ -1,8 +1,7 @@
-"""Defend-role economic rewards are gated by ``defender_zone_radius``.
+"""Defend/attack enemy-value credit scales with distance to the role objective.
 
-Enemy-value credit only counts enemies inside the zone around the defend pylon,
-so a defender cannot farm reward by abandoning the pylon to chase a fight. Own
-value loss is never zone-gated. Attack-role credit stays ungated.
+Full credit inside the inner radius; linear falloff to ``objective_credit_min_scale``.
+Own value loss is never distance-scaled.
 
 Also covers the two defender-specific signals that replaced the old per-step
 survival payout: the heavier pylon-damage penalty, and the terminal
@@ -68,6 +67,13 @@ def _make_bot(**reward_overrides) -> CaptureTheFlagBot:
         "heal_value_reward": 0.0,
         "distance_multiplier": 0.0,
         "defender_zone_radius": 10.0,
+        "attacker_objective_radius": 12.0,
+        "objective_credit_falloff": 15.0,
+        "objective_credit_min_scale": 0.25,
+        "defender_zone_leave_penalty": 0.0,
+        "defender_zone_return_scale": 0.0,
+        "detection_reward": 0.0,
+        "aoe_land_reward": 0.0,
         "step_penalty": 0.0,
         "cooldown_retreat_scale": 0.0,
     }
@@ -134,11 +140,11 @@ def test_defend_credits_enemy_value_inside_zone(trainee_pid):
 
 
 @pytest.mark.parametrize("trainee_pid", [1, 2])
-def test_defend_ignores_enemy_value_outside_zone(trainee_pid):
+def test_defend_credits_far_enemy_at_min_scale(trainee_pid):
     bot = _make_bot(defender_enemy_value_reward=2.0)
     pylon = Point2((0.0, 0.0))
     defender = _make_unit(101, 2.0, 0.0)
-    enemy = _make_unit(201, 20.0, 0.0, hp=100.0)
+    enemy = _make_unit(201, 25.0, 0.0, hp=100.0)
     bot.unit_command_map = {101: "defend"}
     bot.unit_target_map = {101: pylon}
     bot.active_unit_tag = 101
@@ -147,7 +153,7 @@ def test_defend_ignores_enemy_value_outside_zone(trainee_pid):
     enemy.health = 70.0
     reward = bot.calculate_squad_step_reward([101], perspective_player_id=trainee_pid)
 
-    assert reward == pytest.approx(0.0)
+    assert reward == pytest.approx(2.0 * 0.3 * MARINE * 0.25)
 
 
 @pytest.mark.parametrize("trainee_pid", [1, 2])
@@ -166,7 +172,7 @@ def test_defend_only_credits_the_in_zone_enemy_when_both_are_damaged(trainee_pid
     outside.health = 40.0
     reward = bot.calculate_squad_step_reward([101], perspective_player_id=trainee_pid)
 
-    assert reward == pytest.approx(0.2 * MARINE)
+    assert reward == pytest.approx(0.2 * MARINE + 0.6 * MARINE * 0.25)
 
 
 @pytest.mark.parametrize("trainee_pid", [1, 2])
@@ -187,11 +193,11 @@ def test_defend_credits_a_death_inside_the_zone(trainee_pid):
 
 
 @pytest.mark.parametrize("trainee_pid", [1, 2])
-def test_defend_ignores_a_death_outside_the_zone(trainee_pid):
+def test_defend_credits_a_death_outside_the_zone_at_min_scale(trainee_pid):
     bot = _make_bot(defender_enemy_value_reward=2.0)
     pylon = Point2((0.0, 0.0))
     defender = _make_unit(101, 2.0, 0.0)
-    enemy = _make_unit(201, 18.0, 0.0, hp=40.0)
+    enemy = _make_unit(201, 25.0, 0.0, hp=40.0)
     bot.unit_command_map = {101: "defend"}
     bot.unit_target_map = {101: pylon}
     bot.active_unit_tag = 101
@@ -200,17 +206,18 @@ def test_defend_ignores_a_death_outside_the_zone(trainee_pid):
     _wire(bot, [defender], [], pylon, trainee_pid=trainee_pid)
     reward = bot.calculate_squad_step_reward([101], perspective_player_id=trainee_pid)
 
-    assert reward == pytest.approx(0.0)
+    assert reward == pytest.approx(2.0 * MARINE * 0.25)
 
 
 @pytest.mark.parametrize("trainee_pid", [1, 2])
-def test_attack_still_credits_enemy_value_outside_the_defender_zone(trainee_pid):
+def test_attack_credits_full_enemy_value_near_objective(trainee_pid):
     bot = _make_bot(attacker_enemy_value_reward=2.0)
     pylon = Point2((0.0, 0.0))
-    attacker = _make_unit(101, 20.0, 0.0)
-    enemy = _make_unit(201, 25.0, 0.0, hp=100.0)
+    objective = Point2((40.0, 0.0))
+    attacker = _make_unit(101, 38.0, 0.0)
+    enemy = _make_unit(201, 40.0, 0.0, hp=100.0)
     bot.unit_command_map = {101: "attack"}
-    bot.unit_target_map = {101: Point2((40.0, 0.0))}
+    bot.unit_target_map = {101: objective}
     bot.active_unit_tag = 101
     _seed(bot, [attacker], [enemy], pylon, trainee_pid=trainee_pid)
 
@@ -218,6 +225,25 @@ def test_attack_still_credits_enemy_value_outside_the_defender_zone(trainee_pid)
     reward = bot.calculate_squad_step_reward([101], perspective_player_id=trainee_pid)
 
     assert reward == pytest.approx(2.0 * 0.2 * MARINE)
+
+
+@pytest.mark.parametrize("trainee_pid", [1, 2])
+def test_attack_credits_far_enemy_at_min_scale(trainee_pid):
+    bot = _make_bot(attacker_enemy_value_reward=2.0)
+    pylon = Point2((0.0, 0.0))
+    objective = Point2((40.0, 0.0))
+    attacker = _make_unit(101, 10.0, 0.0)
+    enemy = _make_unit(201, 13.0, 0.0, hp=100.0)
+    bot.unit_command_map = {101: "attack"}
+    bot.unit_target_map = {101: objective}
+    bot.active_unit_tag = 101
+    _seed(bot, [attacker], [enemy], pylon, trainee_pid=trainee_pid)
+
+    enemy.health = 80.0
+    reward = bot.calculate_squad_step_reward([101], perspective_player_id=trainee_pid)
+
+    # dist to objective 40 is 27 > 12+15, so min_scale 0.25
+    assert reward == pytest.approx(2.0 * 0.2 * MARINE * 0.25)
 
 
 # ---------------------------------------------------------------------------

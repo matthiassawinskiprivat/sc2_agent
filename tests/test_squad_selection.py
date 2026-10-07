@@ -4,6 +4,8 @@ import numpy as np
 
 from src.agent.squad_selection import (
     SquadSelectionConfig,
+    SquadSelectionResult,
+    _clamp_single_caster,
     eligible_actor_mask_from_obs,
     resolve_squad_selection,
     decode_squad_action,
@@ -225,3 +227,65 @@ def test_command_target_modes_table():
 def test_selected_tags_from_indices():
     tags = [100, 200, 300]
     assert selected_tags_from_indices(tags, [0, 2]) == [100, 300]
+
+
+def _modes(*heads):
+    return command_target_modes(list(heads), [])
+
+
+def test_aoe_clamp_keeps_only_highest_score_actor():
+    scores = np.zeros(MAX_SQUAD_UNITS, dtype=np.float64)
+    scores[0] = 0.6
+    scores[1] = 0.9
+    scores[2] = 0.7
+    result = SquadSelectionResult(
+        selected_indices=(0, 1, 2),
+        anchor_index=1,
+        scores=scores,
+    )
+    obs = {"command_modes": _modes("move_global", "aoe_local")}
+    clamped = _clamp_single_caster(result, 1, obs)
+    assert clamped.selected_indices == (1,)
+    assert clamped.anchor_index == 1
+
+
+def test_snipe_clamp_breaks_score_ties_with_lowest_index():
+    scores = np.zeros(MAX_SQUAD_UNITS, dtype=np.float64)
+    scores[1] = 0.8
+    scores[3] = 0.8
+    result = SquadSelectionResult(
+        selected_indices=(1, 3),
+        anchor_index=3,
+        scores=scores,
+    )
+    obs = {"command_modes": _modes("snipe")}
+    clamped = _clamp_single_caster(result, 0, obs)
+    assert clamped.selected_indices == (1,)
+    assert clamped.anchor_index == 1
+
+
+def test_attack_and_move_are_not_single_caster_capped():
+    scores = np.ones(MAX_SQUAD_UNITS, dtype=np.float64)
+    result = SquadSelectionResult(
+        selected_indices=(0, 1, 2),
+        anchor_index=0,
+        scores=scores,
+    )
+    attack_obs = {"command_modes": _modes("move_global", "attack_unit")}
+    move_obs = {"command_modes": _modes("move_global", "attack_unit")}
+    assert _clamp_single_caster(result, 1, attack_obs).selected_indices == (0, 1, 2)
+    assert _clamp_single_caster(result, 0, move_obs).selected_indices == (0, 1, 2)
+
+
+def test_decode_aoe_caps_many_on_bits_to_one_actor():
+    action = np.zeros(SQUAD_ACTION_DIM, dtype=np.int64)
+    action[0] = 1
+    action[1] = 1
+    action[2] = 1
+    action[SQUAD_ACTION_COMMAND_IDX] = 1
+    unit_mask = np.zeros(MAX_SQUAD_UNITS, dtype=np.float32)
+    unit_mask[:3] = 1.0
+    obs = {"command_modes": _modes("move_global", "aoe_local")}
+    decoded = decode_squad_action(action, unit_mask, obs=obs)
+    assert decoded.selection.selected_indices == (0,)
+    assert decoded.selection.anchor_index == 0
