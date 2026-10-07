@@ -20,7 +20,6 @@ from sc2.ids.unit_typeid import UnitTypeId
 from src.utils.spawning_utils import SpawningUtils
 from src.utils.unit_feature_helpers import (
     disable_cyclone_lock_on_autocast,
-    issue_aoe_at_point,
     issue_attack_at_point,
 )
 from train.envs.ctf.region_loader import RegionLoader
@@ -2525,7 +2524,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return None
         # Hold steps skip the observation build. The collector then skips the
         # opponent forward; step() reissues the last order instead.
-        if not self._opponent_decision_due():
+        if not self._opponent_decision_due(int(opponent_idx)):
             return None
         if getattr(self, "_squad_obs_step_cache", None) is None:
             self._squad_obs_step_cache = {}
@@ -2559,6 +2558,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     ) -> None:
         """Store a collector-batched opponent action for the next pointer step."""
         self._pending_opponent_squad_action = np.asarray(action, dtype=np.int64).reshape(-1)
+        self._pending_opponent_squad_pool_idx = (
+            int(pool_idx) if pool_idx is not None else None
+        )
         if pool_idx is not None and lstm is not None:
             states = getattr(self, "_opponent_lstm_states", None)
             if states is None:
@@ -2741,7 +2743,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         )
         for tag in sorted_tags:
             self.bot.record_pre_action_retreat_state(tag)
-        await self.bot.apply_squad_action(
+        # Only tags that actually received an order (or an in-flight heal/snipe
+        # lock hold). Returning every pointer-selected tag blocked reissue after
+        # null-target / missing-unit no-ops — fatal with opponent_decision_interval
+        # because hold steps then have nothing in ``_unit_last_order`` to replay.
+        ordered = await self.bot.apply_squad_action(
             selected,
             anchor_tag=int(anchor_tag),
             command_idx=decoded.command_idx,
@@ -2751,7 +2757,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         )
         if t_apply is not None:
             self._profile_add("orders_apply", time.perf_counter() - t_apply)
-        return list(selected)
+        return [int(t) for t in (ordered or [])]
 
     async def _predict_opponent_squad_batch(self, tags: List[int]) -> List[np.ndarray]:
         """Batched opponent inference for every unit in the acting squad."""
@@ -3010,13 +3016,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             if "heal" in head_name:
                 # Same Transfuse/Heal/Repair is still walking in; move() would cancel it.
                 continue
+            if "snipe" in head_name:
+                # Yamato / Steady Targeting / Neural prep — move() cancels the cast.
+                continue
+            if "aoe" in head_name:
+                # Bile / storm / fungal cast — reissue would cancel the wind-up.
+                continue
             if "attack" in head_name:
                 issue_attack_at_point(self.bot, unit, target)
                 set_flags = getattr(self.bot, "_set_last_order_flags", None)
                 if callable(set_flags):
                     set_flags(tag, moved=False, attacked=True)
-            elif "aoe" in head_name:
-                issue_aoe_at_point(self.bot, unit, target, stamp_cooldown=False)
             elif target is None:
                 continue
             else:
@@ -3101,11 +3111,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return max(1, int(raw))
 
     def _opponent_decision_interval(self) -> int:
-        """Trainee steps between opponent squad decisions.
+        """Paired-opponent turns between fresh opponent squad decisions.
 
-        ``1`` keeps the old every-step opponent. ``4`` samples on steps
-        0, 4, 8, … and holds the last order in between. Read from
-        ``opponent_decision_interval`` (level YAML, then pipeline ``env``).
+        ``1`` keeps the old every-step opponent. ``4`` samples on that
+        opponent's turns 0, 4, 8, … and holds the last order in between.
+        The clock is **per opponent pool**, not global ``steps_count``: with two
+        trainee arenas alternating every physics step, ``steps_count % 4 == 0``
+        is phase-locked to one arena and permanently starves the other.
         """
         if not hasattr(self, "training_conf"):
             return 4
@@ -3114,13 +3126,29 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return 4
         return max(1, int(raw))
 
-    def _opponent_decision_due(self) -> bool:
-        """True when this step should build an opponent obs and sample an order."""
+    def _get_opponent_decision_turn_counts(self) -> Dict[int, int]:
+        turns = getattr(self, "_opponent_decision_turn_counts", None)
+        if not isinstance(turns, dict):
+            turns = {}
+            self._opponent_decision_turn_counts = turns
+        return turns
+
+    def _bump_opponent_decision_turn(self, opponent_idx: int) -> None:
+        turns = self._get_opponent_decision_turn_counts()
+        key = int(opponent_idx)
+        turns[key] = int(turns.get(key, 0)) + 1
+
+    def _opponent_decision_due(self, opponent_idx: int) -> bool:
+        """True when this paired opponent should build an obs and sample an order."""
         interval = self._opponent_decision_interval()
         if interval <= 1:
             return True
-        step = int(getattr(self, "steps_count", 0) or 0)
-        return step % interval == 0
+        turn = int(self._get_opponent_decision_turn_counts().get(int(opponent_idx), 0))
+        return turn % interval == 0
+
+    def _clear_pending_opponent_squad_action(self) -> None:
+        self._pending_opponent_squad_action = None
+        self._pending_opponent_squad_pool_idx = None
 
     async def _finalize_chunk_physics_step(
         self, chunk: List[_ChunkEntry], acting_player_id: int
@@ -3751,6 +3779,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             trainee_idx = self.current_trainee_pool_index
             trainee_tags = self._pool_alive_tags(trainee_idx)
             if not trainee_tags:
+                # Drop a peek that was built for the dying pool — applying it to
+                # the next arena's opponent desyncs actors/targets.
+                self._clear_pending_opponent_squad_action()
                 trainee_player_id = self._trainee_sc2_player_id()
                 if (
                     not self._any_trainee_pool_alive()
@@ -3792,10 +3823,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 opponent_tags = self._pool_alive_tags(opponent_idx)
                 if opponent_tags and not self._preview_computer_opponent():
                     pending = getattr(self, "_pending_opponent_squad_action", None)
-                    self._pending_opponent_squad_action = None
-                    if pending is not None:
+                    pending_pool = getattr(self, "_pending_opponent_squad_pool_idx", None)
+                    self._clear_pending_opponent_squad_action()
+                    if pending is not None and (
+                        pending_pool is None or int(pending_pool) == int(opponent_idx)
+                    ):
                         opp_action = np.asarray(pending, dtype=np.int64)
-                    elif self._opponent_decision_due():
+                    elif self._opponent_decision_due(int(opponent_idx)):
                         # Collector missed the batch (no pending action). Fall back
                         # to an in-worker forward so a due step still gets an order.
                         opp_action = await self._predict_opponent_squad_pointer(
@@ -3809,6 +3843,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                                 opponent_idx, opp_action
                             )
                         )
+                    # Advance this opponent's interval clock every pairing turn,
+                    # including holds, so alternating arenas are not starved.
+                    self._bump_opponent_decision_turn(int(opponent_idx))
 
             return await self._finalize_squad_pointer_physics_step(
                 trainee_tags,
@@ -3879,7 +3916,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             builder.clear_static_feat_cache()
             builder.reset_upgrade_cache()
         self._squad_obs_step_cache = {}
-        self._pending_opponent_squad_action = None
+        self._clear_pending_opponent_squad_action()
+        self._opponent_decision_turn_counts = {}
         self.current_unit_index = 0
         self.current_squad_index = 0
         self.active_player_id = 1
@@ -3972,7 +4010,11 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             # Skip when all trainee pools are defenders: the learner only trains
             # the defend role so its published model would overwrite the initial
             # attacker checkpoint with a defender policy, breaking the opponent.
-            if not self._all_trainee_pools_are_defenders():
+            #
+            # Also skip the *first* launch reset (no SC2 clients yet): all Subproc
+            # workers hit this path together and stampede the opponent GPU lock.
+            # The async collector pushes ``initial_model.zip`` right after reset.
+            if session_alive and not self._all_trainee_pools_are_defenders():
                 self._sync_opponent_model()
             import torch as _torch
             if _torch.cuda.is_available():

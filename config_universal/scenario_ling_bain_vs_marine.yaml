@@ -30,8 +30,8 @@ env:
     region: A
   - high_level_command: defend
     race: terran
-    mineral_budget: 1050
-    vespene_budget: 800
+    mineral_budget: 1150
+    vespene_budget: 400
     unit_pool:
     - MARINE
     - MEDIVAC
@@ -49,8 +49,8 @@ env:
     region: B
   - high_level_command: attack
     race: terran
-    mineral_budget: 1400
-    vespene_budget: 1050
+    mineral_budget: 1500
+    vespene_budget: 500
     unit_pool:
     - MARINE
     - MEDIVAC

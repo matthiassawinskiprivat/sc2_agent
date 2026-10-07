@@ -15,6 +15,12 @@ _ABILITY_TECH_UNITS = {
     "BATTLECRUISER": "YAMATOCANNON",
     "HIGHTEMPLAR": "PSISTORMTECH",
 }
+# Banshee cloak is also P1-only. Counting it for every dual-race mix would force
+# ``*_reversed`` inserts on ctf_level_09/11/24/26. Upgrades ``scenario_*`` levels
+# with ``include_upgrades`` split on cloak so Terran can be P1 half the time.
+_CLOAK_RESEARCH_UNITS = {
+    "BANSHEE": "BANSHEECLOAK",
+}
 _SNIPE_RESEARCH_UNITS = {
     "INFESTOR": "NEURALPARASITE",
     "INFESTORBURROWED": "NEURALPARASITE",
@@ -26,25 +32,32 @@ def _load(level: str) -> dict:
     return yaml.safe_load((_CONFIG_DIR / f"{level}.yaml").read_text(encoding="utf-8"))
 
 
-def _races_and_tech(pools: list) -> tuple[list[str], dict[str, set[str]]]:
+def _races_and_tech(pools: list, tech_units: dict) -> tuple[list[str], dict[str, set[str]]]:
     races = get_level_races(pools)
     tech: dict[str, set[str]] = {r: set() for r in races}
     for pool in pools:
         race = str(pool.get("race", "")).lower().strip()
         for unit in pool.get("unit_pool") or []:
             key = str(unit).upper()
-            if key in _ABILITY_TECH_UNITS:
+            if key in tech_units:
                 tech[race].add(key)
     return races, tech
 
 
 def _needs_reversed_sibling(name: str, cfg: dict) -> bool:
-    pools = (cfg.get("env") or {}).get("unit_pools") or []
-    races, tech = _races_and_tech(pools)
+    env = cfg.get("env") or {}
+    pools = env.get("unit_pools") or []
+    races, tech = _races_and_tech(pools, _ABILITY_TECH_UNITS)
     if len(races) < 2:
         return False
     if sum(1 for r in races if tech[r]) >= 2:
         return True
+    if name.startswith("scenario_") and env.get("include_upgrades"):
+        _, tech_with_cloak = _races_and_tech(
+            pools, {**_ABILITY_TECH_UNITS, **_CLOAK_RESEARCH_UNITS}
+        )
+        if sum(1 for r in races if tech_with_cloak[r]) >= 2:
+            return True
     if name.startswith("snipe_"):
         p2_units = set()
         for pool in pools:
@@ -94,8 +107,12 @@ def test_ability_tech_conflict_levels_have_reversed_sibling_with_flipped_p1():
 
     assert "snipe_ghost_marauder_vs_roach_hydra" in conflict_parents
     assert "snipe_ghost_marauder_vs_roach_hydra_reversed" in cm.levels
+    assert "scenario_queen_vs_banshee" in conflict_parents
+    assert "scenario_queen_vs_banshee_reversed" in cm.levels
+    assert "scenario_banshee_viking_vs_voidray_carrier" in conflict_parents
     assert "aoe_zergling_infestor_vs_stalker_templar_reversed" not in cm.levels
     assert "scenario_queen_vs_battlecruiser_reversed" not in cm.levels
+    assert "ctf_level_09_reversed" not in cm.levels
     assert len(conflict_parents) >= 18
 
 
@@ -108,6 +125,8 @@ def test_reversed_siblings_do_not_redeclare_cumulative_obs_or_heads():
         env = _load(name)["env"]
         assert not env.get("active_layers"), name
         assert not env.get("active_tactical_layers"), name
-        assert not env.get("active_unit_scalars"), name
+        # ``is_neuraled`` is intentionally grafted on the colossus reversed sibling.
+        if name != "scenario_colossus_zealot_vs_swarmhost_hydra_reversed":
+            assert not env.get("active_unit_scalars"), name
         assert not env.get("action_heads"), name
         assert not env.get("categorical_heads"), name

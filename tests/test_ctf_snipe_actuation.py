@@ -109,6 +109,7 @@ def _bot(*units):
         )
     )
     bot._refresh_heal_lock = lambda unit: False
+    bot._refresh_aoe_lock = lambda unit: False
     bot._refresh_snipe_lock = lambda unit: CaptureTheFlagBot._refresh_snipe_lock(
         bot, unit
     )

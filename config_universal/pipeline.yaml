@@ -58,9 +58,11 @@ env:
   # Independent of army size (about three decisions per game second at 22.4 fps).
   # Per-level YAML can override. Per-unit / chunk turns still use step_mul_per_unit.
   squad_pointer_step_size: 8
-  # Opponent samples a new squad order every N trainee decisions and keeps
-  # that order in between (last orders are reissued, no extra network pass).
-  # 1 = decide every step. Per-level YAML can override.
+  # Opponent samples a new squad order every N *paired turns for that opponent
+  # pool* and keeps that order in between (last orders are reissued). The clock
+  # is per opponent pool so dual-arena levels that alternate trainee pools each
+  # step are not phase-locked to steps_count % N (which starves one arena).
+  # 1 = decide every pairing. Per-level YAML can override.
   opponent_decision_interval: 4
   # Whole-session wait_for around launch+join+first obs. Later Subproc workers
   # add stagger + join-slack on top (see SingleClientEnv._startup_timeout_sec).
@@ -139,7 +141,8 @@ levels:
   # From snipe onward, levels where both races need a researched cast ability
   # (or snipe puts Infestor/BC on P2) are split: half steps here, half on the
   # immediate ``*_reversed`` sibling with the other race as SC2 player 1
-  # (debug_upgrade only reaches the client / P1).
+  # (debug_upgrade only reaches the client / P1). Same for upgrades scenarios
+  # where Banshee cloak is on the P2 race (queen_vs_banshee, banshee_viking).
   - "snipe_ghost_marauder_vs_roach_hydra"
   - "snipe_ghost_marauder_vs_roach_hydra_reversed"
   - "snipe_infestor_roach_vs_battlecruiser_scv"
@@ -214,7 +217,9 @@ levels:
   - "scenario_dt_vs_marauder"
   - "scenario_widowmine_vs_zergling"
   - "scenario_queen_vs_banshee"
+  - "scenario_queen_vs_banshee_reversed"
   - "scenario_banshee_viking_vs_voidray_carrier"
+  - "scenario_banshee_viking_vs_voidray_carrier_reversed"
   - "scenario_battlecruiser_viking_vs_corruptor_mutalisk"
   - "scenario_battlecruiser_viking_vs_corruptor_mutalisk_reversed"
   - "scenario_tempest_voidray_vs_corruptor_mutalisk"

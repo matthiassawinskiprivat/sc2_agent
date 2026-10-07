@@ -101,6 +101,11 @@ def _apply_categorical_mask(
     legal. That stops a slightly drifted obs mask (missing ``command_modes`` /
     heal target bits in a padded RNN row, etc.) from assigning the collected
     action log-prob ≈ ``_MASK_NEG`` and blowing up the PPO ratio.
+
+    Illegal classes are filled to ``max(legal) + _MASK_NEG``, not a fixed
+    ``_MASK_NEG``. A fixed fill of -50 loses when the only legal logit is
+    e.g. -1000: softmax then prefers the soft-masked illegals, sampling draws
+    forbidden classes, and collect/eval logπ diverge by ~log(N).
     """
     any_legal = mask.any(dim=-1, keepdim=True)
     safe = torch.where(any_legal, mask, torch.ones_like(mask))
@@ -108,7 +113,14 @@ def _apply_categorical_mask(
         safe = safe.clone()
         idx = taken.long().view(-1, 1).clamp(0, safe.shape[-1] - 1)
         safe.scatter_(1, idx, True)
-    return logits.masked_fill(~safe, _MASK_NEG)
+    legal_logits = logits.masked_fill(~safe, float("-inf"))
+    legal_max = legal_logits.amax(dim=-1, keepdim=True)
+    # All-illegal rows already fell back to ones_like(mask); still guard.
+    legal_max = torch.where(
+        torch.isfinite(legal_max), legal_max, torch.zeros_like(legal_max)
+    )
+    illegal_level = legal_max + _MASK_NEG
+    return torch.where(safe, logits, illegal_level.expand_as(logits))
 
 
 def _categorical_sample(logits: torch.Tensor, deterministic: bool) -> torch.Tensor:
@@ -595,6 +607,16 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
         entropy = entropy + _categorical_entropy(target_logits)
 
         # --- 3b. terminal world cell ---
+        # Unit-pointer / categorical commands do not use the world cell. Pin it
+        # to the default index and contribute exactly zero spatial logπ /
+        # entropy so a soft-mask inversion on the unused head cannot poison
+        # collect↔evaluate parity (see ``_apply_categorical_mask``).
+        is_spatial_cmd = torch.zeros((batch,), dtype=torch.bool, device=device)
+        for mode in SPATIAL_COMMAND_MODES:
+            is_spatial_cmd = is_spatial_cmd | (modes == mode)
+        default_cell = latent_pi.new_full(
+            (batch,), float(UNIVERSAL_DEFAULT_SPATIAL_IDX)
+        ).long()
         fused = getattr(fe, "_spatial_fused", None)
         if fused is None:
             fused = latent_pi.new_zeros((batch, 128, 16, 16))
@@ -608,14 +630,19 @@ class SquadRecurrentPolicy(MaskableRecurrentActorCriticPolicy):
             cells = actions[:, SQUAD_ACTION_SPATIAL_IDX].clamp(
                 0, self.spatial_resolution ** 2 - 1
             )
+            cells = torch.where(is_spatial_cmd, cells, default_cell)
             spatial_logits = _apply_categorical_mask(
                 spatial_logits, spatial_mask, taken=cells
             )
         else:
             spatial_logits = _apply_categorical_mask(spatial_logits, spatial_mask)
             cells = _categorical_sample(spatial_logits, deterministic)
-        log_prob = log_prob + _categorical_log_prob(spatial_logits, cells)
-        entropy = entropy + _categorical_entropy(spatial_logits)
+            cells = torch.where(is_spatial_cmd, cells, default_cell)
+        spatial_weight = is_spatial_cmd.to(dtype=log_prob.dtype)
+        log_prob = log_prob + spatial_weight * _categorical_log_prob(
+            spatial_logits, cells
+        )
+        entropy = entropy + spatial_weight * _categorical_entropy(spatial_logits)
 
         if given:
             out_actions = actions

@@ -118,6 +118,75 @@ def opponent_load_file_lock(timeout: float = 300.0) -> Iterator[None]:
         yield
 
 
+def _pid_is_alive(pid: int) -> bool:
+    """True when ``pid`` looks like a live OS process."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we cannot signal it — treat as alive.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_lock_owner_pid(lock_path: str) -> Optional[int]:
+    try:
+        with open(lock_path, "r", encoding="utf-8") as fh:
+            raw = fh.read().strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        return int(raw.split()[0])
+    except (TypeError, ValueError):
+        return None
+
+
+# Creator must write+fsync its PID before waiters may treat an empty lock as
+# abandoned. Stealing sooner races O_EXCL create vs write and lets two workers
+# enter CUDA init together (Windows often surfaces that as console CTRL_C).
+_LOCK_EMPTY_GRACE_SEC = 5.0
+
+
+def _lock_is_stale(lock_path: str, *, now: Optional[float] = None) -> bool:
+    """True when the lock may be unlinked and recreated by a waiter."""
+    owner = _read_lock_owner_pid(lock_path)
+    if owner is not None:
+        return not _pid_is_alive(owner)
+    try:
+        age = (time.time() if now is None else now) - os.path.getmtime(lock_path)
+    except OSError:
+        return True
+    return age > _LOCK_EMPTY_GRACE_SEC
+
+
+def clear_stale_training_locks() -> list[str]:
+    """Remove CUDA/opponent lock files whose owner PID is gone (or empty/corrupt).
+
+    Empty locks older than ``_LOCK_EMPTY_GRACE_SEC`` are leftovers from older
+    builds or crashed holders. A crash mid-``sync_opponent_model`` otherwise
+    blocks the next run for the full lock timeout.
+    """
+    cleared: list[str] = []
+    for path in (cuda_init_lock_path(), opponent_load_lock_path()):
+        if not os.path.exists(path):
+            continue
+        if not _lock_is_stale(path):
+            continue
+        try:
+            os.unlink(path)
+            cleared.append(path)
+        except OSError:
+            pass
+    return cleared
+
+
 @contextlib.contextmanager
 def _cross_process_file_lock(
     lock_path: str, *, timeout: float, label: str
@@ -127,12 +196,22 @@ def _cross_process_file_lock(
     while True:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+            os.fsync(fd)
             break
         except FileExistsError:
+            if _lock_is_stale(lock_path):
+                try:
+                    os.unlink(lock_path)
+                    continue
+                except OSError:
+                    pass
             if time.monotonic() - start > timeout:
+                owner = _read_lock_owner_pid(lock_path)
                 raise TimeoutError(
                     f"Timed out after {timeout:.0f}s waiting for {label} lock "
-                    f"({lock_path}). Another training process may be stuck on the GPU."
+                    f"({lock_path}, owner_pid={owner}). "
+                    "Another training process may be stuck on the GPU."
                 )
             time.sleep(0.25)
     try:

@@ -56,6 +56,7 @@ def _bot_with_healers(healer, *allies, click=None):
     bot.do = MagicMock()
     bot._unit_last_order = {}
     bot.last_action_was_move_by_unit = {}
+    bot.last_action_was_attack_by_unit = {}
     bot._heal_cast_tags = set()
     bot._heal_order_tags = set()
     bot._heal_attempt_tags = set()
@@ -76,6 +77,11 @@ def _bot_with_healers(healer, *allies, click=None):
     bot.enemy_units = []
 
     # Bind real helpers onto the mock so apply_squad_action works.
+    bot._set_last_order_flags = (
+        lambda unit_tag, moved=False, attacked=False: CaptureTheFlagBot._set_last_order_flags(
+            bot, unit_tag, moved=moved, attacked=attacked
+        )
+    )
     bot._issue_heal_at_point = lambda unit, target: CaptureTheFlagBot._issue_heal_at_point(
         bot, unit, target
     )
@@ -100,6 +106,7 @@ def _bot_with_healers(healer, *allies, click=None):
     bot._unit_in_spatial_cell = CaptureTheFlagBot._unit_in_spatial_cell
     bot._refresh_heal_lock = lambda unit: CaptureTheFlagBot._refresh_heal_lock(bot, unit)
     bot._refresh_snipe_lock = lambda unit: False
+    bot._refresh_aoe_lock = lambda unit: False
     bot._heal_lock_until_loop = (
         lambda healer, patient: CaptureTheFlagBot._heal_lock_until_loop(
             bot, healer, patient
@@ -119,7 +126,7 @@ def _bot_with_healers(healer, *allies, click=None):
 
 
 def _apply_squad_heal(bot, healer_tag):
-    asyncio.run(
+    return asyncio.run(
         CaptureTheFlagBot.apply_squad_action(
             bot,
             selected_tags=[healer_tag],
@@ -199,12 +206,15 @@ def test_squad_heal_no_ally_in_cell_is_noop():
     click = Point2((60.0, 70.0))
     bot = _bot_with_healers(healer, ally, click=click)
 
-    _apply_squad_heal(bot, 1)
+    ordered = _apply_squad_heal(bot, 1)
 
     healer.assert_not_called()
     healer.move.assert_not_called()
     bot.do.assert_not_called()
-    assert bot.last_action_was_move_by_unit[1] is False
+    # Miss must not claim ordered / move flags — that blocks last-order reissue.
+    assert ordered == []
+    assert 1 not in bot.last_action_was_move_by_unit
+    assert bot._unit_last_order == {}
     assert bot._heal_cast_tags == set()
     assert 1 in bot._heal_attempt_tags
 
@@ -291,12 +301,14 @@ def test_squad_heal_full_hp_in_cell_is_noop():
     ally = _make_unit(2, UnitTypeId.MARINE, 52.0, 50.0, health=100.0, health_max=100.0)
     bot = _bot_with_healers(healer, ally)
 
-    _apply_squad_heal(bot, 1)
+    ordered = _apply_squad_heal(bot, 1)
 
     healer.assert_not_called()
     healer.move.assert_not_called()
     bot.do.assert_not_called()
-    assert bot.last_action_was_move_by_unit[1] is False
+    assert ordered == []
+    assert 1 not in bot.last_action_was_move_by_unit
+    assert bot._unit_last_order == {}
 
 
 def test_squad_heal_out_of_cast_range_still_issues_ability():

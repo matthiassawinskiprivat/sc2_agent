@@ -35,7 +35,6 @@ env:
     unit_pool:
     - MARAUDER
     - GHOST
-    - MEDIVAC
     region: A
   - high_level_command: defend
     race: protoss
@@ -52,7 +51,6 @@ env:
     unit_pool:
     - MARAUDER
     - GHOST
-    - MEDIVAC
     region: B
   rewards:
     economic_vespene_weight: 1.5
@@ -92,5 +90,5 @@ model:
     net_arch: []
   gamma: 0.99
   ent_coef: 0.01
-  n_epochs: 4
+  n_epochs: 3
 agent_architecture: squad

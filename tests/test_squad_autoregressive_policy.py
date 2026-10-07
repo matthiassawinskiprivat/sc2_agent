@@ -417,3 +417,62 @@ def test_target_slot_axis_covers_allies_enemies_and_null():
     nvec = squad_action_space_nvec()
     assert nvec[SQUAD_ACTION_TARGET_IDX] == SQUAD_TARGET_SLOTS
     assert SQUAD_TARGET_SLOTS == MAX_SQUAD_UNITS + MAX_SQUAD_ENEMIES + 1
+
+
+def test_apply_categorical_mask_keeps_legal_above_illegal_floor():
+    """A legal logit ≪ ``_MASK_NEG`` must still win over soft-masked illegals."""
+    from src.agent.models.squad_policy import (
+        _MASK_NEG,
+        _apply_categorical_mask,
+        _categorical_sample,
+    )
+
+    logits = torch.full((4, 1024), -1000.0)
+    mask = torch.zeros((4, 1024), dtype=torch.bool)
+    mask[:, UNIVERSAL_DEFAULT_SPATIAL_IDX] = True
+    masked = _apply_categorical_mask(logits, mask)
+    legal = float(masked[0, UNIVERSAL_DEFAULT_SPATIAL_IDX])
+    others = masked[0, torch.arange(1024) != UNIVERSAL_DEFAULT_SPATIAL_IDX]
+    assert legal == pytest.approx(-1000.0)
+    assert float(others.max()) == pytest.approx(legal + _MASK_NEG)
+    cells = [
+        int(_categorical_sample(masked, deterministic=False)[i])
+        for _ in range(40)
+        for i in range(4)
+    ]
+    assert set(cells) == {UNIVERSAL_DEFAULT_SPATIAL_IDX}
+
+def test_unit_target_spatial_pin_survives_strongly_negative_spatial_logits():
+    """Regression: soft spatial mask used to invert when center logit ≪ -50.
+
+    Collector then stored a random world cell for ``attack_unit`` / heal / snipe
+    and charged ~log(1/1024). Learner remask scored differently → flat replay
+    abs-err ≫ 0.05 and every PPO update was skipped.
+    """
+    batch = 16
+    policy = _make_policy()
+    obs = _obs(batch, n_enemies=2, seed=61)
+    mask = _flat_mask(batch, legal_commands=[1])  # attack_unit only
+    real_spatial = policy.spatial_decoder.forward
+
+    def _very_negative_spatial(latent, fused):
+        out = real_spatial(latent, fused)
+        return torch.full_like(out, -1000.0)
+
+    policy.spatial_decoder.forward = _very_negative_spatial
+    obs_t = policy.obs_to_tensor(obs)[0]
+    with torch.no_grad():
+        actions, _, log_prob, _ = _run(policy, obs, mask, batch)
+        _, eval_log_prob, entropy = policy.evaluate_actions(
+            obs_t,
+            actions,
+            _zero_states(policy, batch),
+            torch.ones(batch),
+            action_masks=torch.as_tensor(mask),
+        )
+    assert (actions[:, SQUAD_ACTION_COMMAND_IDX] == 1).all()
+    assert (actions[:, SQUAD_ACTION_SPATIAL_IDX] == UNIVERSAL_DEFAULT_SPATIAL_IDX).all()
+    err = (eval_log_prob - log_prob).abs().max().item()
+    assert err < 1e-4, f"unit-target spatial pin collect/eval drift = {err}"
+    assert torch.isfinite(entropy).all()
+    assert torch.isfinite(log_prob).all()

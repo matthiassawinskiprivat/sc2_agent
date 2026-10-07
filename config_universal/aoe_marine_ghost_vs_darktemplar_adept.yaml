@@ -32,21 +32,19 @@ env:
     region: A
   - high_level_command: attack
     race: terran
-    mineral_budget: 1725
-    vespene_budget: 1325
+    mineral_budget: 2000
+    vespene_budget: 500
     unit_pool:
     - MARINE
     - GHOST
-    - MEDIVAC
     region: A
   - high_level_command: defend
     race: terran
-    mineral_budget: 1300
-    vespene_budget: 1000
+    mineral_budget: 1600
+    vespene_budget: 500
     unit_pool:
     - MARINE
     - GHOST
-    - MEDIVAC
     region: B
   - high_level_command: attack
     race: protoss
@@ -95,5 +93,5 @@ model:
     net_arch: []
   gamma: 0.99
   ent_coef: 0.01
-  n_epochs: 4
+  n_epochs: 3
 agent_architecture: squad

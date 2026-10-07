@@ -15,6 +15,8 @@ from src.utils.unit_feature_helpers import (
     _hostile_candidates,
     allied_candidates_for_owner,
     alliance_perspective_groups,
+    AOE_CAST_ANIMATION_SECONDS,
+    AOE_CAST_RANGE,
     counts_for_combat_hp_reward,
     first_unit,
     first_unit_of_type,
@@ -28,6 +30,7 @@ from src.utils.unit_feature_helpers import (
     issue_snipe_on_unit,
     perspective_unit_groups,
     neural_command_allowed,
+    resolve_air_hostile_at_point,
     SNIPE_CAST_ANIMATION_SECONDS,
     SNIPE_CAST_RANGE,
     unit_is_neuraled,
@@ -127,6 +130,15 @@ class CaptureTheFlagBot(BotAI):
         UnitTypeId.HIGHTEMPLAR: 2.62,
     }
     _DEFAULT_SNIPE_CAST_ANIMATION_SECONDS: float = 1.0
+    _DEFAULT_AOE_CASTER_MOVE_SPEED: Dict[UnitTypeId, float] = {
+        UnitTypeId.INFESTOR: 2.95,
+        UnitTypeId.INFESTORBURROWED: 0.0,
+        UnitTypeId.HIGHTEMPLAR: 2.62,
+        UnitTypeId.GHOST: 3.15,
+        UnitTypeId.RAVAGER: 3.85,
+        UnitTypeId.VIPER: 4.13,
+    }
+    _DEFAULT_AOE_CAST_ANIMATION_SECONDS: float = 0.5
 
     def __init__(self, player_id: int, training_conf: Optional[Dict] = None):
         super().__init__()
@@ -233,6 +245,9 @@ class CaptureTheFlagBot(BotAI):
         # caster_tag → (target_tag, expiry_game_loop) while Yamato / Steady
         # Targeting / Neural / Feedback walk-in + prep must not be cancelled.
         self._snipe_lock: Dict[int, Tuple[int, int]] = {}
+        # caster_tag → (point_or_air_tag, expiry_game_loop) while bile / storm /
+        # fungal / EMP / parasitic-bomb walk-in + cast must not be cancelled.
+        self._aoe_lock: Dict[int, Tuple[Any, int]] = {}
         # caster_tag → game_loop when a locally stamped spell is ready again.
         self._heal_ability_ready_after_loop: Dict[int, int] = {}
         self._aoe_ability_ready_after_loop: Dict[int, int] = {}
@@ -342,6 +357,7 @@ class CaptureTheFlagBot(BotAI):
         self._step_cooldown_retreat_reward = 0.0
         self._heal_lock = {}
         self._snipe_lock = {}
+        self._aoe_lock = {}
         self._heal_ability_ready_after_loop = {}
         self._aoe_ability_ready_after_loop = {}
         self._snipe_ability_ready_after_loop = {}
@@ -740,7 +756,7 @@ class CaptureTheFlagBot(BotAI):
         spatial_idx: int,
         perspective_player_id: int,
         target_unit_tag: Optional[int] = None,
-    ) -> None:
+    ) -> List[int]:
         """Apply one squad group order to selected units.
 
         Spatial commands share one decoded world ``Point2`` (agent-faithful: the
@@ -751,16 +767,22 @@ class CaptureTheFlagBot(BotAI):
         ``perspective_player_id`` is the env's SC2 owner for this order (trainee
         or opponent). Spatial cells are world-frame for every owner: no 180°
         un-rotation. Targeting uses each caster's ``owner_id``.
+
+        Returns tags that must be skipped by last-order reissue this physics step:
+        units that received a fresh order, plus heal/snipe/aoe lock holds. Selected
+        units that no-op (null target, missing unit, illegal caster) are *not*
+        returned — otherwise ``opponent_decision_interval`` hold steps leave them
+        idle forever with no ``_unit_last_order`` to reissue.
         """
         if not self.agent_system or "active_agent" not in self.agent_system.unit_agents:
-            return
+            return []
 
         action_heads = list(self.training_conf.get("action_heads") or [])
         categorical_heads = list(self.training_conf.get("categorical_heads") or [])
         n_spatial = len(action_heads)
         n_total = n_spatial + len(categorical_heads)
         if command_idx < 0 or command_idx >= n_total:
-            return
+            return []
 
         is_categorical = command_idx >= n_spatial
         if is_categorical:
@@ -772,7 +794,7 @@ class CaptureTheFlagBot(BotAI):
         if anchor is None and selected_tags:
             anchor = self.all_units.find_by_tag(selected_tags[0])
         if anchor is None:
-            return
+            return []
 
         # CoM / role shaping in calculate_squad_step_reward keys off active_unit_tag.
         self.active_unit_tag = int(anchor.tag)
@@ -781,6 +803,8 @@ class CaptureTheFlagBot(BotAI):
         game_info = getattr(self, "game_info", None)
         if game_info is not None:
             agent.last_game_info = game_info
+
+        ordered: List[int] = []
 
         # Categorical cloak/burrow: no spatial decode.
         if is_categorical and head_name in ("cloak_burrow", "uncloak_unburrow"):
@@ -792,26 +816,27 @@ class CaptureTheFlagBot(BotAI):
                     continue
                 if not neural_command_allowed(unit, perspective_player_id, head_name):
                     continue
-                # Cloak/burrow cancels Yamato prep / Steady Targeting channel.
-                if self._refresh_snipe_lock(unit):
+                # Cloak/burrow cancels Yamato prep / Steady Targeting / AoE cast.
+                if self._refresh_snipe_lock(unit) or self._refresh_aoe_lock(unit):
+                    ordered.append(int(unit_tag))
                     continue
                 self._mark_command_attempt(unit, metric_kind)
                 self._issue_cloak_burrow(unit, conceal=conceal)
                 self._unit_last_order[int(unit_tag)] = (head_name, None)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
-            return
+                ordered.append(int(unit_tag))
+            return ordered
 
         if is_categorical:
-            return  # Unknown categorical head — no-op
+            return []  # Unknown categorical head — no-op
 
         if head_name in UNIT_TARGET_COMMAND_HEADS:
-            self._apply_unit_target_command(
+            return self._apply_unit_target_command(
                 selected_tags,
                 head_name=head_name,
                 target_unit_tag=target_unit_tag,
                 perspective_player_id=perspective_player_id,
             )
-            return
 
         decode_unit = anchor
         world_x, world_y = agent.convert_spatial_action_to_world(
@@ -832,37 +857,50 @@ class CaptureTheFlagBot(BotAI):
                 continue
             if "heal" in head_name:
                 self._mark_heal_command_attempt(unit)
-                self._issue_heal_at_point(unit, target)
-                self._unit_last_order[int(unit_tag)] = (head_name, target)
                 # Misses are no-ops, not moves: cooldown-retreat must not treat
-                # a failed Transfuse as a kite.
+                # a failed Transfuse as a kite. Do not claim ordered either —
+                # that would block last-order reissue of a prior move/attack.
+                if self._issue_heal_at_point(unit, target) is None:
+                    continue
+                self._unit_last_order[int(unit_tag)] = (head_name, target)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
+                ordered.append(int(unit_tag))
             elif self._refresh_heal_lock(unit):
                 # Walk-in + Transfuse/Heal start still inside the lock window.
-                continue
+                ordered.append(int(unit_tag))
             elif self._refresh_snipe_lock(unit):
                 # Yamato / Steady Targeting / Neural prep must finish.
-                continue
+                ordered.append(int(unit_tag))
             elif "aoe" in head_name:
                 self._mark_command_attempt(unit, "aoe")
-                issue_aoe_at_point(self, unit, target)
+                if not self._issue_aoe_with_lock(unit, target):
+                    continue
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
+                ordered.append(int(unit_tag))
+            elif self._refresh_aoe_lock(unit):
+                # Corrosive Bile / Psi Storm / Fungal cast must finish.
+                ordered.append(int(unit_tag))
             elif "unload" in head_name:
                 self._mark_command_attempt(unit, "unload")
-                self._issue_unload_at_point(unit, target)
+                if not self._issue_unload_at_point(unit, target):
+                    continue
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
+                ordered.append(int(unit_tag))
             elif "attack" in head_name:
                 issue_attack_at_point(self, unit, target)
                 self._mark_command_attempt(unit, "attack")
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=True)
+                ordered.append(int(unit_tag))
             else:
                 self.do(unit.move(target))
                 self._mark_command_attempt(unit, "move")
                 self._unit_last_order[int(unit_tag)] = (head_name, target)
                 self._set_last_order_flags(unit_tag, moved=True, attacked=False)
+                ordered.append(int(unit_tag))
+        return ordered
 
     def _apply_unit_target_command(
         self,
@@ -871,7 +909,7 @@ class CaptureTheFlagBot(BotAI):
         head_name: str,
         target_unit_tag: Optional[int],
         perspective_player_id: Optional[int] = None,
-    ) -> None:
+    ) -> List[int]:
         """Issue ``heal_unit`` / ``load_unit`` / ``attack_unit`` / ``snipe`` against one tag.
 
         The policy already chose *which* unit through the terminal target slot, so
@@ -880,15 +918,21 @@ class CaptureTheFlagBot(BotAI):
         (an SCV cannot repair a Marine; a full Medivac cannot load; Ghost Snipe
         needs bio), because the observation's target masks only guarantee *some*
         actor in the squad matches.
+
+        Returns tags that received an order or are held under an in-flight
+        heal/snipe/aoe lock. A null/missing target, or a per-caster no-op
+        (full-HP heal, friendly-fire attack, failed snipe), is not ordered so
+        reissue can keep prior move/attack orders alive.
         """
         if target_unit_tag is None:
-            return
+            return []
         target = self.all_units.find_by_tag(int(target_unit_tag))
         if target is None:
-            return
+            return []
         is_heal = head_name in ALLY_TARGET_COMMAND_HEADS
         is_load = head_name in LOAD_TARGET_COMMAND_HEADS
         is_snipe = head_name in SNIPE_COMMAND_HEADS
+        ordered: List[int] = []
         for unit_tag in selected_tags:
             unit = self.all_units.find_by_tag(unit_tag)
             if unit is None or unit.type_id == UnitTypeId.SHIELDBATTERY:
@@ -898,27 +942,42 @@ class CaptureTheFlagBot(BotAI):
             if int(getattr(unit, "tag", 0) or 0) == int(target_unit_tag):
                 continue  # never order a unit onto itself
             if is_snipe:
+                if self._refresh_aoe_lock(unit):
+                    # Snipe would cancel bile / storm / fungal wind-up.
+                    ordered.append(int(unit_tag))
+                    continue
                 self._mark_command_attempt(unit, "snipe")
-                self._issue_snipe_with_lock(unit, target)
+                if not self._issue_snipe_with_lock(unit, target):
+                    continue
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif self._refresh_snipe_lock(unit):
                 # attack_unit / heal_unit / load would cancel Yamato prep.
+                ordered.append(int(unit_tag))
+                continue
+            elif self._refresh_aoe_lock(unit):
+                # attack_unit / heal_unit / load would cancel AoE cast.
+                ordered.append(int(unit_tag))
                 continue
             elif is_heal:
                 self._mark_heal_command_attempt(unit)
-                self._issue_heal_on_unit(unit, target)
+                if self._issue_heal_on_unit(unit, target) is None:
+                    continue
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             elif is_load:
                 self._mark_command_attempt(unit, "load")
-                self._issue_load_on_unit(unit, target)
+                if not self._issue_load_on_unit(unit, target):
+                    continue
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
             else:
-                self._issue_attack_on_unit(unit, target)
                 self._mark_command_attempt(unit, "attack")
+                if not self._issue_attack_on_unit(unit, target):
+                    continue
                 self._set_last_order_flags(unit_tag, moved=False, attacked=True)
             self._unit_last_order[int(unit_tag)] = (head_name, target.position)
+            ordered.append(int(unit_tag))
+        return ordered
 
-    def _issue_attack_on_unit(self, unit: Unit, target: Unit) -> None:
+    def _issue_attack_on_unit(self, unit: Unit, target: Unit) -> bool:
         """Focus-fire ``target``; skip friendly fire under ``debug_control_enemy``.
 
         Both armies look allied to the P1 client after ``debug_control_enemy``, so
@@ -929,18 +988,21 @@ class CaptureTheFlagBot(BotAI):
         Weaponless casters whose spatial attack already remaps (Swarm Host →
         Spawn Locusts, Disruptor → Purification Nova) cast at ``target.position``
         so ``attack_unit`` stays agent-faithful to the same ability mapping.
+
+        Returns ``True`` when an order was issued.
         """
         if int(getattr(target, "owner_id", 0) or 0) == int(
             getattr(unit, "owner_id", 0) or 0
         ) and not unit_is_neuraled(target):
-            return
+            return False
         if uses_spawn_locusts_for_attack(unit):
             self.do(unit(AbilityId.EFFECT_SPAWNLOCUSTS, target.position))
-            return
+            return True
         if uses_purification_nova_for_attack(unit):
             self.do(unit(AbilityId.EFFECT_PURIFICATIONNOVA, target.position))
-            return
+            return True
         self.do(unit.attack(target))
+        return True
 
     def _issue_heal_on_unit(self, healer: Unit, patient: Unit) -> Optional[str]:
         """Heal/Repair/Transfuse ``patient`` directly, bookkeeping casts as usual."""
@@ -1214,6 +1276,141 @@ class CaptureTheFlagBot(BotAI):
             CaptureTheFlagBot._record_snipe_cast(self, unit, target)
         return issued
 
+    @staticmethod
+    def _aoe_caster_move_speed(unit: Unit) -> float:
+        for attr in ("real_speed", "movement_speed"):
+            try:
+                speed = float(getattr(unit, attr, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                speed = 0.0
+            if speed > 1e-6:
+                return speed
+        defaults = CaptureTheFlagBot._DEFAULT_AOE_CASTER_MOVE_SPEED
+        return float(defaults.get(getattr(unit, "type_id", None), 2.5))
+
+    def _aoe_lock_until_loop(self, caster: Unit, target_pos: Point2) -> int:
+        """Game loop when walk-in + AoE cast animation should finish."""
+        now = CaptureTheFlagBot._game_loop(self)
+        type_id = getattr(caster, "type_id", None)
+        anim = float(
+            AOE_CAST_ANIMATION_SECONDS.get(
+                type_id, CaptureTheFlagBot._DEFAULT_AOE_CAST_ANIMATION_SECONDS
+            )
+        )
+        try:
+            cast_range = float(AOE_CAST_RANGE.get(type_id, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            cast_range = 0.0
+        extra = 0.0
+        try:
+            dist = float(caster.position.distance_to(target_pos))
+            extra = max(0.0, dist - cast_range)
+        except (TypeError, ValueError, AttributeError):
+            extra = 0.0
+        speed = CaptureTheFlagBot._aoe_caster_move_speed(caster)
+        walk = extra / max(speed, 1e-6) if speed > 1e-6 else extra
+        loops = int(
+            math.ceil((walk + anim) * CaptureTheFlagBot._HEAL_GAME_LOOPS_PER_SECOND)
+        )
+        return now + max(loops, 1)
+
+    def _refresh_aoe_lock(self, unit: Unit) -> bool:
+        """True while walk-in + AoE cast must not be overwritten.
+
+        Corrosive Bile / Psi Storm / Fungal / EMP / Parasitic Bomb are cancelled
+        by a new order. Lock until the window elapses, the caster goes idle, or
+        (Viper) the hard-target dies. ``aoe_local`` is still allowed (reaffirm /
+        retarget).
+        """
+        tag = int(getattr(unit, "tag", 0) or 0)
+        lock = getattr(self, "_aoe_lock", None)
+        if tag <= 0 or not isinstance(lock, dict) or tag not in lock:
+            return False
+        entry = lock[tag]
+        try:
+            lock_key = entry[0]
+            until_loop = int(entry[1])
+        except (TypeError, ValueError, IndexError):
+            lock.pop(tag, None)
+            return False
+        now = CaptureTheFlagBot._game_loop(self)
+        if now >= until_loop:
+            lock.pop(tag, None)
+            return False
+        if bool(getattr(unit, "is_idle", False)):
+            lock.pop(tag, None)
+            return False
+        if isinstance(lock_key, int):
+            target = self.all_units.find_by_tag(int(lock_key))
+            if target is None:
+                lock.pop(tag, None)
+                return False
+        return True
+
+    def _continuing_aoe_lock(self, unit: Unit, target: Point2) -> bool:
+        """True when this ``aoe_local`` reaffirms the same in-flight cast."""
+        tag = int(getattr(unit, "tag", 0) or 0)
+        lock = getattr(self, "_aoe_lock", None)
+        if tag <= 0 or not isinstance(lock, dict):
+            return False
+        entry = lock.get(tag)
+        if entry is None:
+            return False
+        try:
+            lock_key = entry[0]
+            until_loop = int(entry[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        if CaptureTheFlagBot._game_loop(self) >= until_loop:
+            return False
+        if isinstance(lock_key, int):
+            hard = resolve_air_hostile_at_point(self, unit, target)
+            return hard is not None and int(getattr(hard, "tag", 0) or 0) == int(
+                lock_key
+            )
+        try:
+            return (
+                float(lock_key.x) == float(target.x)
+                and float(lock_key.y) == float(target.y)
+            )
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    def _record_aoe_cast(self, unit: Unit, target: Point2) -> None:
+        """Bookkeep walk-in + cast lock after a successful ``aoe_local`` issue."""
+        tag = int(getattr(unit, "tag", 0) or 0)
+        if not tag:
+            return
+        lock = getattr(self, "_aoe_lock", None)
+        if not isinstance(lock, dict):
+            self._aoe_lock = {}
+            lock = self._aoe_lock
+        lock_key: Any = Point2((float(target.x), float(target.y)))
+        ref_pos = target
+        if getattr(unit, "type_id", None) == UnitTypeId.VIPER:
+            hard = resolve_air_hostile_at_point(self, unit, target)
+            if hard is not None:
+                lock_key = int(getattr(hard, "tag", 0) or 0)
+                ref_pos = hard.position
+        lock[tag] = (
+            lock_key,
+            CaptureTheFlagBot._aoe_lock_until_loop(self, unit, ref_pos),
+        )
+
+    def _issue_aoe_with_lock(self, unit: Unit, target: Point2) -> bool:
+        """Issue ``aoe_local`` and lock the caster through walk-in + cast.
+
+        Reaffirming the same point / air target while locked does not restamp
+        the local ability cooldown.
+        """
+        continuing = CaptureTheFlagBot._continuing_aoe_lock(self, unit, target)
+        issued = issue_aoe_at_point(
+            self, unit, target, stamp_cooldown=not continuing
+        )
+        if issued:
+            CaptureTheFlagBot._record_aoe_cast(self, unit, target)
+        return issued
+
     _HEAL_ABILITY_BY_TYPE: Dict[UnitTypeId, AbilityId] = {
         UnitTypeId.MEDIVAC: AbilityId.MEDIVACHEAL_HEAL,
         UnitTypeId.SCV: AbilityId.EFFECT_REPAIR_SCV,
@@ -1309,19 +1506,23 @@ class CaptureTheFlagBot(BotAI):
         UnitTypeId.WARPPRISMPHASING: AbilityId.UNLOADALL_WARPPRISM,
     }
 
-    def _issue_load_on_unit(self, unit: Unit, target: Unit) -> None:
-        """Dual-role load by tag: transport LOADs passenger; passenger smarts onto transport."""
+    def _issue_load_on_unit(self, unit: Unit, target: Unit) -> bool:
+        """Dual-role load by tag: transport LOADs passenger; passenger smarts onto transport.
+
+        Returns ``True`` when an order was issued.
+        """
         from src.utils.unit_feature_helpers import load_pair_is_eligible, unit_is_transport
 
         if not load_pair_is_eligible(unit, target):
-            return
+            return False
         if unit_is_transport(unit):
             ability = self._TRANSPORT_LOAD_ABILITY.get(unit.type_id)
             if ability is None:
-                return
+                return False
             self.do(unit(ability, target))
-            return
+            return True
         self.do(unit.smart(target))
+        return True
 
     def _resolve_loadable_in_cell(self, transport: Unit, target: Point2) -> Optional[Unit]:
         """Allied non-transport in the clicked cell (loadable passenger)."""
@@ -1365,17 +1566,21 @@ class CaptureTheFlagBot(BotAI):
             return
         self.do(unit.smart(transport))
 
-    def _issue_unload_at_point(self, unit: Unit, target: Point2) -> None:
-        """Unload all cargo at the decoded world point (transports with cargo only)."""
+    def _issue_unload_at_point(self, unit: Unit, target: Point2) -> bool:
+        """Unload all cargo at the decoded world point (transports with cargo only).
+
+        Returns ``True`` when an unload order was issued.
+        """
         if int(getattr(unit, "cargo_max", 0) or 0) <= 0:
-            return
+            return False
         if int(getattr(unit, "cargo_used", 0) or 0) <= 0:
-            return
+            return False
         ability = self._TRANSPORT_UNLOAD_ABILITY.get(unit.type_id, AbilityId.UNLOADALLAT)
         if ability == AbilityId.UNLOADALL_WARPPRISM:
             self.do(unit(ability))
         else:
             self.do(unit(ability, target))
+        return True
 
     _BURROW_DOWN_BY_TYPE = {
         UnitTypeId.ZERGLING: AbilityId.BURROWDOWN_ZERGLING,
@@ -1479,7 +1684,7 @@ class CaptureTheFlagBot(BotAI):
             if head_idx >= n_spatial:
                 head_name = categorical_heads[head_idx - n_spatial]
                 if head_name in ("cloak_burrow", "uncloak_unburrow"):
-                    if self._refresh_snipe_lock(unit):
+                    if self._refresh_snipe_lock(unit) or self._refresh_aoe_lock(unit):
                         return
                     conceal = head_name == "cloak_burrow"
                     self._mark_command_attempt(
@@ -1508,9 +1713,11 @@ class CaptureTheFlagBot(BotAI):
                 return
             elif "aoe" in head_name:
                 self._mark_command_attempt(unit, "aoe")
-                issue_aoe_at_point(self, unit, target)
+                self._issue_aoe_with_lock(unit, target)
                 self._unit_last_order[unit_tag] = (head_name, target)
                 self._set_last_order_flags(unit_tag, moved=False, attacked=False)
+            elif self._refresh_aoe_lock(unit):
+                return
             elif "unload" in head_name:
                 self._mark_command_attempt(unit, "unload")
                 self._issue_unload_at_point(unit, target)

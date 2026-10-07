@@ -25,7 +25,7 @@ env:
     vespene_budget: 1200
     unit_pool:
     - ZERGLING
-    - INFESTOR
+    - BANELING
     - QUEEN
     region: A
   - high_level_command: defend
@@ -36,8 +36,6 @@ env:
     - WIDOWMINE
     - HELLION
     - GHOST
-    - SCV
-    - MEDIVAC
     region: A
   - high_level_command: defend
     race: zerg
@@ -47,7 +45,6 @@ env:
     - ZERGLING
     - BANELING
     - INFESTOR
-    - QUEEN
     region: B
   - high_level_command: attack
     race: terran
@@ -56,10 +53,8 @@ env:
     unit_pool:
     - MARINE
     - MARAUDER
-    - CYCLONE
     - GHOST
-    - SCV
-    - MEDIVAC
+    - WIDOWMINE
     region: B
   rewards:
     economic_vespene_weight: 1.5
@@ -99,5 +94,5 @@ model:
     net_arch: []
   gamma: 0.99
   ent_coef: 0.01
-  n_epochs: 4
+  n_epochs: 3
 agent_architecture: squad

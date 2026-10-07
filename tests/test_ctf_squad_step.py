@@ -355,11 +355,12 @@ def test_finalize_invalidates_obs_cache_after_physics(squad_env):
 
 
 def test_opponent_decision_holds_between_samples(squad_env):
-    """Steps 1–3 reuse the last order: no obs build, no forward, no new apply."""
+    """Non-due paired turns reuse the last order: no obs build, no forward, no new apply."""
     from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
 
     squad_env._preview_computer_opponent = MagicMock(return_value=False)
-    squad_env.steps_count = 1
+    # Opponent pool 1 already took its first (due) turn.
+    squad_env._opponent_decision_turn_counts = {1: 1}
     squad_env._predict_opponent_squad_pointer = AsyncMock(
         side_effect=AssertionError("hold step must not run the opponent network")
     )
@@ -375,17 +376,18 @@ def test_opponent_decision_holds_between_samples(squad_env):
     assert squad_env._apply_squad_action_for_pool.await_args.args[0] == 0
     reissued = squad_env._reissue_non_squad_orders.await_args.args[0]
     assert 201 not in reissued
+    assert squad_env._opponent_decision_turn_counts[1] == 2
 
 
-def test_opponent_decision_due_every_fourth_step(squad_env):
+def test_opponent_decision_due_every_fourth_paired_turn(squad_env):
     from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
 
     squad_env._preview_computer_opponent = MagicMock(return_value=False)
     squad_env._squad_obs_step_cache = {}
     squad_env._opponent_lstm_states = {}
     squad_env.bot.squad_action_masks = MagicMock(return_value=np.ones(8, dtype=bool))
-    for step, due in ((0, True), (1, False), (3, False), (4, True)):
-        squad_env.steps_count = step
+    for turn, due in ((0, True), (1, False), (3, False), (4, True)):
+        squad_env._opponent_decision_turn_counts = {1: turn}
         squad_env._get_squad_observation_for_pool.reset_mock()
         payload = CaptureTheFlagSingleEnv.peek_opponent_squad_pointer(squad_env)
         if due:
@@ -396,12 +398,137 @@ def test_opponent_decision_due_every_fourth_step(squad_env):
             squad_env._get_squad_observation_for_pool.assert_not_called()
 
 
+def test_opponent_decision_interval_not_phase_locked_across_arenas(squad_env):
+    """Dual trainee pools alternate each step; both opponents must get due turns.
+
+    Regression: ``steps_count % 4 == 0`` was always true on the attack-trainee
+    step and always false on the defend-trainee step, so the attack-role
+    opponent never received a fresh order.
+    """
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    env = squad_env
+    env._preview_computer_opponent = MagicMock(return_value=False)
+    env._opponent_decision_turn_counts = {}
+    # Mirror layout: trainee 0↔opp 1, trainee 2↔opp 3
+    assert env._opponent_decision_due(1) is True
+    assert env._opponent_decision_due(3) is True
+    CaptureTheFlagSingleEnv._bump_opponent_decision_turn(env, 1)
+    CaptureTheFlagSingleEnv._bump_opponent_decision_turn(env, 3)
+    assert env._opponent_decision_due(1) is False
+    assert env._opponent_decision_due(3) is False
+    for _ in range(3):
+        CaptureTheFlagSingleEnv._bump_opponent_decision_turn(env, 1)
+        CaptureTheFlagSingleEnv._bump_opponent_decision_turn(env, 3)
+    assert env._opponent_decision_due(1) is True
+    assert env._opponent_decision_due(3) is True
+
+
+def test_alternating_arenas_both_opponents_get_fresh_orders(squad_env):
+    """Defend opp (pool 1) and attack opp (pool 3) both sample on their due turns.
+
+    With the old global ``steps_count % 4`` clock, only the even trainee steps
+    (pool 0 ↔ defend opp 1) were ever due — the attack-role opponent stayed idle
+    forever even after the null-target reissue fix.
+    """
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+    from train.envs.ctf.squad_pool_pairing import paired_opponent_pool_index
+
+    env = squad_env
+    env.training_conf["opponent_decision_interval"] = 4
+    env._preview_computer_opponent = MagicMock(return_value=False)
+    env._opponent_decision_turn_counts = {}
+    env._pending_opponent_squad_action = None
+    env._pending_opponent_squad_pool_idx = None
+    env._paired_opponent_pool_index = lambda idx: paired_opponent_pool_index(
+        idx, env.unit_pools_config, is_pool_trainee=env._is_pool_trainee
+    )
+    env._trainee_pool_indices = lambda: [0, 2]
+    env._refresh_unit_lists = AsyncMock()
+
+    # After each physics step, advance like the real finalize path.
+    async def _finalize_and_advance(*_a, **_k):
+        await CaptureTheFlagSingleEnv._advance_trainee_pool_index(
+            env, refresh_units=False
+        )
+        return {"map": np.zeros(1)}, 0.0, False, False, {"squad_physics_step": True}
+
+    env._finalize_squad_pointer_physics_step = _finalize_and_advance
+    env._predict_opponent_squad_pointer = AsyncMock(
+        side_effect=lambda pool_idx: np.full(
+            len(squad_action_space_nvec()), int(pool_idx), dtype=np.int64
+        )
+    )
+    env._apply_squad_action_for_pool = AsyncMock(
+        side_effect=lambda pool_idx, _action: (
+            [101] if int(pool_idx) in (0, 2) else [201 if int(pool_idx) == 1 else 401]
+        )
+    )
+
+    applied_opp_pools: list[int] = []
+    peeked_opp_pools: list[int] = []
+
+    action = np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
+    action[0] = 1
+    # Each arena pairs every other env step. Interval 4 → dues at turns 0 and 4
+    # need five pairings per opponent. Starting on trainee 0, that is 10 env steps
+    # so pool 3 also reaches its second due turn.
+    for _ in range(10):
+        env._squad_obs_step_cache = {}
+        peek = CaptureTheFlagSingleEnv.peek_opponent_squad_pointer(env)
+        if peek is not None:
+            peeked_opp_pools.append(int(peek["pool_idx"]))
+            env.set_pending_opponent_squad_action(
+                np.full(len(squad_action_space_nvec()), peek["pool_idx"], dtype=np.int64),
+                pool_idx=peek["pool_idx"],
+            )
+        before = env._apply_squad_action_for_pool.await_count
+        asyncio.run(env._async_step_squad_pointer(action))
+        for call in env._apply_squad_action_for_pool.await_args_list[before:]:
+            pool = int(call.args[0])
+            if pool in (1, 3):
+                applied_opp_pools.append(pool)
+
+    assert peeked_opp_pools.count(1) == 2, peeked_opp_pools
+    assert peeked_opp_pools.count(3) == 2, peeked_opp_pools
+    assert applied_opp_pools.count(1) == 2, applied_opp_pools
+    assert applied_opp_pools.count(3) == 2, applied_opp_pools
+    # Old steps_count % 4 clock would have applied pool 3 zero times.
+
+
+def test_stale_pending_opponent_action_ignored_for_other_pool(squad_env):
+    """Pending peeked for pool 1 must not be applied after handoff to pool 3."""
+    from train.envs.ctf.squad_pool_pairing import paired_opponent_pool_index
+
+    squad_env._preview_computer_opponent = MagicMock(return_value=False)
+    squad_env.current_trainee_pool_index = 2
+    squad_env._opponent_decision_turn_counts = {3: 0}
+    squad_env._paired_opponent_pool_index = lambda idx: paired_opponent_pool_index(
+        idx, squad_env.unit_pools_config, is_pool_trainee=squad_env._is_pool_trainee
+    )
+    squad_env._predict_opponent_squad_pointer = AsyncMock(
+        return_value=np.arange(len(squad_action_space_nvec()), dtype=np.int64)
+    )
+    stale = np.full(len(squad_action_space_nvec()), 7, dtype=np.int64)
+    squad_env._pending_opponent_squad_action = stale
+    squad_env._pending_opponent_squad_pool_idx = 1
+    action = np.zeros(len(squad_action_space_nvec()), dtype=np.int64)
+    action[0] = 1
+    asyncio.run(squad_env._async_step_squad_pointer(action))
+    applied = [
+        call.args[1] for call in squad_env._apply_squad_action_for_pool.await_args_list
+    ]
+    assert len(applied) == 2
+    assert not np.array_equal(applied[1], stale)
+    squad_env._predict_opponent_squad_pointer.assert_awaited_once_with(3)
+
+
 def test_opponent_decision_interval_one_samples_every_step(squad_env):
     from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
 
     squad_env.training_conf["opponent_decision_interval"] = 1
     squad_env._preview_computer_opponent = MagicMock(return_value=False)
-    squad_env.steps_count = 2
+    squad_env._opponent_decision_turn_counts = {1: 2}
     squad_env._squad_obs_step_cache = {}
     squad_env._opponent_lstm_states = {}
     squad_env.bot.squad_action_masks = MagicMock(return_value=np.ones(8, dtype=bool))
@@ -672,6 +799,7 @@ def test_stolen_caster_snipe_is_issued_only_for_the_controller():
     stolen.owner_id = 1
     stolen.buffs = {BuffId.NEURALPARASITE}
     stolen.position = MagicMock()
+    stolen.is_idle = False
     enemy = MagicMock()
     enemy.tag = 8
     enemy.owner_id = 2
@@ -682,6 +810,26 @@ def test_stolen_caster_snipe_is_issued_only_for_the_controller():
     bot = MagicMock()
     bot.all_units.find_by_tag.side_effect = lambda tag: {7: stolen, 8: enemy}[int(tag)]
     bot._unit_last_order = {}
+    bot._snipe_lock = {}
+    bot._snipe_ability_ready_after_loop = {}
+    bot._command_attempt_tags = {"snipe": set()}
+    bot.state = MagicMock(game_loop=0)
+    bot.frame_count = 0
+    bot._mark_command_attempt = (
+        lambda u, kind: CaptureTheFlagBot._mark_command_attempt(bot, u, kind)
+    )
+    bot._set_last_order_flags = (
+        lambda tag, *, moved=False, attacked=False: CaptureTheFlagBot._set_last_order_flags(
+            bot, tag, moved=moved, attacked=attacked
+        )
+    )
+    bot._refresh_snipe_lock = lambda u: CaptureTheFlagBot._refresh_snipe_lock(bot, u)
+    bot._refresh_aoe_lock = lambda u: False
+    bot._issue_snipe_with_lock = (
+        lambda u, t: CaptureTheFlagBot._issue_snipe_with_lock(bot, u, t)
+    )
+    bot.last_action_was_move_by_unit = {}
+    bot.last_action_was_attack_by_unit = {}
 
     CaptureTheFlagBot._apply_unit_target_command(
         bot, [7], head_name="snipe", target_unit_tag=8, perspective_player_id=1

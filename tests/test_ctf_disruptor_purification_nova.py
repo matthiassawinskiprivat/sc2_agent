@@ -27,6 +27,7 @@ def _bot_with_unit(unit):
     # MagicMock defaults are truthy; empty cast locks must not skip attack.
     bot._refresh_heal_lock = lambda u: False
     bot._refresh_snipe_lock = lambda u: False
+    bot._refresh_aoe_lock = lambda u: False
     agent = MagicMock()
     agent.last_game_info = None
     agent.convert_spatial_action_to_world.return_value = (60.0, 70.0)

@@ -1148,12 +1148,12 @@ def test_issue_aoe_reissue_does_not_restamp():
     bot = _bot_at_loop(20)
     target = Point2((8.0, 9.0))
 
-    assert issue_aoe_at_point(bot, ravager, target, stamp_cooldown=False) is None
+    assert issue_aoe_at_point(bot, ravager, target, stamp_cooldown=False) is True
     store = getattr(bot, "_aoe_ability_ready_after_loop", None)
     assert not isinstance(store, dict) or 34 not in store
     assert unit_can_aoe(ravager, bot=bot) is True
 
-    assert issue_aoe_at_point(bot, ravager, target) is None
+    assert issue_aoe_at_point(bot, ravager, target) is True
     assert 34 in bot._aoe_ability_ready_after_loop
     assert unit_can_aoe(ravager, bot=bot) is False
 
@@ -1326,7 +1326,7 @@ def test_issue_aoe_at_point_ravager_bile():
     unit.return_value = cast_cmd
     target = Point2((12.0, 34.0))
 
-    assert issue_aoe_at_point(bot, unit, target) is None
+    assert issue_aoe_at_point(bot, unit, target) is True
     unit.assert_called_once_with(AbilityId.EFFECT_CORROSIVEBILE, target)
     bot.do.assert_called_once_with(cast_cmd)
     unit.attack.assert_not_called()
@@ -1351,7 +1351,7 @@ def test_issue_aoe_at_point_viper_bombs_air():
     unit.owner_id = 1
     target = Point2((12.0, 34.0))
 
-    assert issue_aoe_at_point(bot, unit, target) is muta
+    assert issue_aoe_at_point(bot, unit, target) is True
     unit.assert_called_once_with(AbilityId.PARASITICBOMB_PARASITICBOMB, muta)
 
 
@@ -1376,7 +1376,7 @@ def test_issue_aoe_at_point_viper_opponent_uses_bot_units():
     unit.owner_id = 2
     target = Point2((12.0, 34.0))
 
-    assert issue_aoe_at_point(bot, unit, target) is muta
+    assert issue_aoe_at_point(bot, unit, target) is True
     unit.assert_called_once_with(AbilityId.PARASITICBOMB_PARASITICBOMB, muta)
 
 
@@ -1415,7 +1415,7 @@ def test_issue_aoe_at_point_marine_noop():
     unit.type_id = UnitTypeId.MARINE
     target = Point2((12.0, 34.0))
 
-    assert issue_aoe_at_point(bot, unit, target) is None
+    assert issue_aoe_at_point(bot, unit, target) is False
     bot.do.assert_not_called()
     unit.attack.assert_not_called()
     unit.move.assert_not_called()

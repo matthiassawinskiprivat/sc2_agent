@@ -105,6 +105,7 @@ def _bot(*units):
         )
     )
     bot._refresh_snipe_lock = lambda u: CaptureTheFlagBot._refresh_snipe_lock(bot, u)
+    bot._refresh_aoe_lock = lambda u: False
     bot._issue_snipe_with_lock = (
         lambda u, t: CaptureTheFlagBot._issue_snipe_with_lock(bot, u, t)
     )
@@ -147,7 +148,7 @@ def _bot(*units):
 
 
 def _apply(bot, *, selected, command_idx, target_unit_tag, spatial_idx=100):
-    asyncio.run(
+    return asyncio.run(
         CaptureTheFlagBot.apply_squad_action(
             bot,
             selected_tags=list(selected),
@@ -213,10 +214,12 @@ def test_attack_unit_skips_same_owner_target():
     ally = _make_unit(2, UnitTypeId.MARAUDER, owner_id=2)
     bot, _ = _bot(marine, ally)
 
-    _apply(bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=2)
+    ordered = _apply(bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=2)
 
     marine.attack.assert_not_called()
     bot.do.assert_not_called()
+    assert ordered == []
+    assert bot._unit_last_order == {}
 
 
 def test_attack_unit_with_dead_target_is_a_no_op():
@@ -254,12 +257,14 @@ def test_heal_unit_respects_per_caster_biology():
     )
     bot, _ = _bot(scv, wounded_marine)
 
-    _apply(bot, selected=[1], command_idx=CMD_HEAL_UNIT, target_unit_tag=2)
+    ordered = _apply(bot, selected=[1], command_idx=CMD_HEAL_UNIT, target_unit_tag=2)
 
     scv.assert_not_called()
     bot.do.assert_not_called()
     # Still counted as an attempt, so TensorBoard shows the wasted decision.
     assert 1 in bot._heal_attempt_tags
+    assert ordered == []
+    assert bot._unit_last_order == {}
 
 
 def test_heal_unit_skips_full_health_target():
@@ -274,10 +279,12 @@ def test_heal_unit_skips_full_health_target():
     )
     bot, _ = _bot(queen, healthy)
 
-    _apply(bot, selected=[1], command_idx=CMD_HEAL_UNIT, target_unit_tag=2)
+    ordered = _apply(bot, selected=[1], command_idx=CMD_HEAL_UNIT, target_unit_tag=2)
 
     queen.assert_not_called()
     assert 1 not in bot._heal_cast_tags
+    assert ordered == []
+    assert bot._unit_last_order == {}
 
 
 def test_heal_unit_skips_enemy_target():
@@ -355,10 +362,43 @@ def test_unit_target_command_with_null_target_issues_nothing():
     ling = _make_unit(2, UnitTypeId.ZERGLING, owner_id=2)
     bot, _ = _bot(marine, ling)
 
-    _apply(bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=None)
+    ordered = _apply(
+        bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=None
+    )
 
     marine.attack.assert_not_called()
     bot.do.assert_not_called()
+    # Must not claim the pointer selection as "ordered" — that blocks last-order
+    # reissue and freezes opponents under opponent_decision_interval holds.
+    assert ordered == []
+    assert bot._unit_last_order == {}
+
+
+def test_unit_target_command_with_missing_target_issues_nothing():
+    marine = _make_unit(1, UnitTypeId.MARINE, owner_id=1)
+    bot, _ = _bot(marine)
+
+    ordered = _apply(
+        bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=99
+    )
+
+    marine.attack.assert_not_called()
+    bot.do.assert_not_called()
+    assert ordered == []
+    assert bot._unit_last_order == {}
+
+
+def test_attack_unit_returns_ordered_tags_on_success():
+    marine = _make_unit(1, UnitTypeId.MARINE, owner_id=1)
+    ling = _make_unit(2, UnitTypeId.ZERGLING, owner_id=2)
+    bot, _ = _bot(marine, ling)
+
+    ordered = _apply(
+        bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=2
+    )
+
+    assert ordered == [1]
+    assert 1 in bot._unit_last_order
 
 
 def test_shield_battery_is_never_ordered():
@@ -366,7 +406,8 @@ def test_shield_battery_is_never_ordered():
     wounded = _make_unit(2, UnitTypeId.ZEALOT, owner_id=1, health=10.0)
     bot, _ = _bot(battery, wounded)
 
-    _apply(bot, selected=[1], command_idx=CMD_HEAL_UNIT, target_unit_tag=2)
+    ordered = _apply(bot, selected=[1], command_idx=CMD_HEAL_UNIT, target_unit_tag=2)
 
     battery.assert_not_called()
     bot.do.assert_not_called()
+    assert ordered == []

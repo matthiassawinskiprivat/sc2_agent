@@ -661,15 +661,37 @@ def push_opponent_checkpoint_to_envs(vec_env, checkpoint_path: Optional[str] = N
     """Load opponent weights inside each vec-env worker (Subproc-safe path string).
 
     Only CTF envs implement ``sync_opponent_model``; move/attack levels skip silently.
+
+    Workers take a shared GPU file lock and load one at a time. Fan-out to all
+    remotes at once then makes the collector sit silent until the last worker
+    finishes (often several minutes on squad CTF). Sync one index at a time so
+    progress is visible and a stuck worker is identifiable.
     """
     try:
         if not vec_env.has_attr("sync_opponent_model"):
             logger.debug("Collector: skipping opponent sync (env has no sync_opponent_model)")
             return
-        if checkpoint_path:
-            vec_env.env_method("sync_opponent_model", checkpoint_path)
-        else:
-            vec_env.env_method("sync_opponent_model")
+        n_envs = int(getattr(vec_env, "num_envs", 1) or 1)
+        t0 = time.perf_counter()
+        logger.info(
+            f"Collector: syncing opponent into {n_envs} env worker(s) "
+            f"(serial GPU lock; can take a few minutes on first squad load)..."
+        )
+        for env_i in range(n_envs):
+            t_i = time.perf_counter()
+            if checkpoint_path:
+                vec_env.env_method(
+                    "sync_opponent_model", checkpoint_path, indices=[env_i]
+                )
+            else:
+                vec_env.env_method("sync_opponent_model", indices=[env_i])
+            logger.info(
+                f"Collector: opponent sync env {env_i + 1}/{n_envs} "
+                f"done in {time.perf_counter() - t_i:.1f}s"
+            )
+        logger.info(
+            f"Collector: opponent sync complete in {time.perf_counter() - t0:.1f}s"
+        )
     except Exception as e:
         logger.warning(f"Collector: opponent sync on env workers failed: {e}")
 
@@ -1158,7 +1180,9 @@ class AsyncCollector(mp.Process):
         initial_path = os.path.join(TEMP_DIR, "initial_model.zip")
         model.save(initial_path)
         logger.info("Collector: Saved initial weights for Learner synchronization.")
-        push_opponent_checkpoint_to_envs(vec_env, initial_path)
+        # Publish ready *before* opponent sync. Six serial squad grafts on the
+        # shared GPU often take minutes; blocking the marker made startup look
+        # hung (and Ctrl+C landed in env_method recv).
         _write_collector_ready_marker()
         _emit_collector_status("ready for learner")
         
@@ -1196,7 +1220,10 @@ class AsyncCollector(mp.Process):
             )
             vec_env.close()
             raise
-        logger.info("Collector: SC2 environments ready. Entering main loop...")
+        logger.info("Collector: SC2 environments ready.")
+        # Opponent inference models after reset so SC2 workers are alive first.
+        push_opponent_checkpoint_to_envs(vec_env, initial_path)
+        logger.info("Collector: Entering main loop...")
         obs = _reset_out[0] if isinstance(_reset_out, tuple) else _reset_out
         reset_infos = (
             _reset_out[1]
@@ -2421,6 +2448,18 @@ def run_single_async_training_session(
         )
 
     clear_temp_dir()
+
+    # Opponent/CUDA locks live outside TEMP_DIR. A killed collector can leave an
+    # empty lock file that blocks the next run's push_opponent_checkpoint_to_envs
+    # (looks hung right after "Saved initial weights for Learner synchronization").
+    from src.utils.training_device import clear_stale_training_locks
+
+    stale_locks = clear_stale_training_locks()
+    if stale_locks:
+        logger.warning(
+            "Cleared stale training lock(s) from a previous run: "
+            + ", ".join(stale_locks)
+        )
 
     stale_model = os.path.join(TEMP_DIR, "latest_learner_model.zip")
     if os.path.exists(stale_model):

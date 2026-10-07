@@ -295,10 +295,19 @@ def test_push_opponent_checkpoint_to_envs_calls_env_method():
 
     vec = MagicMock()
     vec.has_attr.return_value = True
+    vec.num_envs = 2
     push_opponent_checkpoint_to_envs(vec, r"D:\temp\async_train\initial_model.zip")
     vec.has_attr.assert_called_once_with("sync_opponent_model")
-    vec.env_method.assert_called_once_with(
-        "sync_opponent_model", r"D:\temp\async_train\initial_model.zip"
+    assert vec.env_method.call_count == 2
+    vec.env_method.assert_any_call(
+        "sync_opponent_model",
+        r"D:\temp\async_train\initial_model.zip",
+        indices=[0],
+    )
+    vec.env_method.assert_any_call(
+        "sync_opponent_model",
+        r"D:\temp\async_train\initial_model.zip",
+        indices=[1],
     )
 
 
@@ -335,7 +344,11 @@ def test_collector_try_reload_does_not_sync_opponent_by_default(tmp_path, monkey
         lambda *_a, **_k: (True, "ok", []),
     )
 
-    model = type("M", (), {"device": "cpu"})()
+    model = type("M", (), {"device": "cpu", "policy": object()})()
+    monkeypatch.setattr(
+        "src.utils.model_utils.load_policy_weights_from_zip",
+        lambda *_a, **_k: (True, [], []),
+    )
     sync = mod.CollectorWeightSync()
     assert sync.try_reload(model, object()) is True
     assert pushed["n"] == 0
@@ -397,6 +410,25 @@ def test_hard_reset_syncs_opponent():
             env.reset()
 
     mock_sync.assert_called_once()
+
+
+def test_first_launch_reset_skips_opponent_sync_without_clients():
+    """First vec_env.reset has no SC2 clients; collector pushes initial_model after."""
+    env = _make_env()
+    env.episode_counter = 0
+    env.training_conf["env"] = {"every_k_episodes": 250}
+    env._manager = MagicMock()
+    env._manager.clients = []
+    env.map_list = ["MapA"]
+    env.worker_index = 0
+    env.num_workers = 1
+
+    with patch("train.envs.capture_the_flag_single_env.SingleClientEnv.reset") as mock_super_reset:
+        mock_super_reset.return_value = (np.zeros((3, 128, 128)), {})
+        with patch.object(env, "_sync_opponent_model", return_value=True) as mock_sync:
+            env.reset()
+
+    mock_sync.assert_not_called()
 
 
 def test_ensure_opponent_model_loaded_retries_sync_when_missing():

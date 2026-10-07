@@ -140,5 +140,5 @@ model:
     net_arch: []
   gamma: 0.99
   ent_coef: 0.01
-  n_epochs: 4
+  n_epochs: 3
 agent_architecture: squad

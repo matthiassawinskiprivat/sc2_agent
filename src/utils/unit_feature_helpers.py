@@ -1300,7 +1300,7 @@ def resolve_air_hostile_at_point(
 
 def issue_aoe_at_point(
     bot: Any, unit: "Unit", target: "Point2", *, stamp_cooldown: bool = True
-) -> Optional[Any]:
+) -> bool:
     """Issue the caster's splash spell at *target* (``aoe_local``).
 
     Infestor / burrowed Infestor → Fungal Growth at the point;
@@ -1310,7 +1310,7 @@ def issue_aoe_at_point(
     Viper → Parasitic Bomb on an air unit in the clicked cell (no-op if none);
     all other units no-op (do not convert to move).
 
-    Returns the bomb hard-target when Parasitic Bomb was issued; otherwise ``None``.
+    Returns ``True`` when an order was issued.
 
     ``stamp_cooldown`` records a local ready-at loop (bile / storm / bomb CD).
     Pass ``False`` on leftover-order reissue so the timer is not reset.
@@ -1320,17 +1320,18 @@ def issue_aoe_at_point(
     if air_ability is not None:
         enemy = resolve_air_hostile_at_point(bot, unit, target)
         if enemy is None:
-            return None
+            return False
         bot.do(unit(air_ability, enemy))
         if stamp_cooldown:
             mark_spell_ability_cooldown(bot, unit, "aoe")
-        return enemy
+        return True
     point_ability = _AOE_POINT_ABILITIES.get(tid)
     if point_ability is not None:
         bot.do(unit(point_ability, target))
         if stamp_cooldown:
             mark_spell_ability_cooldown(bot, unit, "aoe")
-    return None
+        return True
+    return False
 
 
 def weapon_range_upgrade_deltas(unit: "Unit", upgrades: frozenset) -> tuple[float, float]:
@@ -1537,6 +1538,34 @@ SNIPE_CAST_ANIMATION_SECONDS: dict = (
         UnitTypeId.INFESTOR: 1.0,
         UnitTypeId.INFESTORBURROWED: 1.0,
         UnitTypeId.HIGHTEMPLAR: 0.5,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+
+# Walk-in range for ``aoe_local`` point / air-cell casts.
+AOE_CAST_RANGE: dict = (
+    {
+        UnitTypeId.INFESTOR: 10.0,
+        UnitTypeId.INFESTORBURROWED: 10.0,
+        UnitTypeId.HIGHTEMPLAR: 9.0,
+        UnitTypeId.GHOST: 10.0,
+        UnitTypeId.RAVAGER: 9.0,
+        UnitTypeId.VIPER: 8.0,
+    }
+    if _SC2_AVAILABLE
+    else {}
+)
+
+# Cast / wind-up that must not be overwritten by move/attack (bile, storm, bomb).
+AOE_CAST_ANIMATION_SECONDS: dict = (
+    {
+        UnitTypeId.RAVAGER: 1.07,
+        UnitTypeId.HIGHTEMPLAR: 0.5,
+        UnitTypeId.INFESTOR: 0.5,
+        UnitTypeId.INFESTORBURROWED: 0.5,
+        UnitTypeId.GHOST: 0.5,
+        UnitTypeId.VIPER: 1.0,
     }
     if _SC2_AVAILABLE
     else {}
