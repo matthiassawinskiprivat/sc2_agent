@@ -10,7 +10,7 @@ training:
   rollout_buffer: disk
 env:
   env_class: CaptureTheFlagEnv
-  max_steps: 100
+  max_steps: 150
   headless: true
   every_k_episodes: 200
   alternate_trainee_race: true
@@ -20,15 +20,14 @@ env:
   unit_pools:
   - high_level_command: attack
     race: zerg
-    mineral_budget: 400
-    vespene_budget: 175
+    mineral_budget: 440
+    vespene_budget: 200
     unit_pool:
     - ZERGLING
     - BANELING
     - ROACH
     - RAVAGER
     - HYDRALISK
-    - SWARMHOSTMP
     - QUEEN
     region: A
   - high_level_command: defend
@@ -40,7 +39,6 @@ env:
     - STALKER
     - ADEPT
     - IMMORTAL
-    - DISRUPTOR
     - SHIELDBATTERY
     region: A
   - high_level_command: defend
@@ -53,19 +51,17 @@ env:
     - ROACH
     - RAVAGER
     - HYDRALISK
-    - SWARMHOSTMP
     - QUEEN
     region: B
   - high_level_command: attack
     race: protoss
-    mineral_budget: 400
-    vespene_budget: 175
+    mineral_budget: 440
+    vespene_budget: 200
     unit_pool:
     - ZEALOT
     - STALKER
     - ADEPT
     - IMMORTAL
-    - DISRUPTOR
     region: B
   rewards:
     economic_vespene_weight: 1.5
@@ -77,8 +73,8 @@ env:
     defender_pylon_penalty_scale: 1.5
     defender_retained_value_bonus: 4.0
     heal_value_reward: 4.0
-    pylon_damage_reward: 2.0
-    pylon_damage_penalty: 0.9
+    pylon_value_scale: 1.0
+    pylon_own_value_penalty: 1.0
     melee_multiplier: 0.5
     distance_multiplier: 2.0
     defender_zone_radius: 10.0

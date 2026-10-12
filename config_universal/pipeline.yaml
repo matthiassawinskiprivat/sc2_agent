@@ -57,7 +57,7 @@ env:
   # Squad pointer: game frames simulated after one joint squad order.
   # Independent of army size (about three decisions per game second at 22.4 fps).
   # Per-level YAML can override. Per-unit / chunk turns still use step_mul_per_unit.
-  squad_pointer_step_size: 6
+  squad_pointer_step_size: 4
   # Opponent samples a new squad order every N *paired turns for that opponent
   # pool* and keeps that order in between (last orders are reissued). The clock
   # is per opponent pool so dual-arena levels that alternate trainee pools each
@@ -127,13 +127,21 @@ levels:
   - "ctf_level_22"
   - "ctf_level_23"
   # area-of-effect (aoe_local) + energy channels
-  # (No ``*_reversed`` siblings before snipe — mid-curriculum inserts would
-  # block CONTINUE_TRAINING on later completed levels after a restart.)
+  # debug_upgrade only reaches SC2 player 1. These four matchups put a
+  # researched upgrade on player 2 (Ghost cloak / Stim, or Zerg burrow and
+  # speed), so each is followed by a ``*_reversed`` sibling that lists the
+  # other race first and takes half the step budget. The Zerg mirror stays
+  # unsplit: both armies are the same race, so a sibling would not change
+  # who receives the cheat.
   - "aoe_high_templar_zealot_vs_marine_marauder"
+  - "aoe_high_templar_zealot_vs_marine_marauder_reversed"
   - "aoe_infestor_roach_vs_marine_marauder"
+  - "aoe_infestor_roach_vs_marine_marauder_reversed"
   - "aoe_zergling_infestor_vs_stalker_templar"
+  - "aoe_zergling_infestor_vs_stalker_templar_reversed"
   - "aoe_infestor_ling_vs_infestor_ling"
   - "aoe_zergling_roach_vs_high_templar_immortal"
+  - "aoe_zergling_roach_vs_high_templar_immortal_reversed"
   # heal duty-cycle revisit (damaged_units) + flying / air-DPS-base channels
   - "scenario_queen_vs_battlecruiser"
   # unit-target specials (snipe): Ghost Steady Targeting / Yamato / Neural / Feedback
@@ -161,6 +169,9 @@ levels:
   - "ctf_level_04"
   - "ctf_level_05"
   - "ctf_level_05_reversed"
+  # use_relational_decode: true in each level YAML from here — command-conditioned
+  # actors, selected-unit context, cross-side attention. Zero-initialised, so a
+  # checkpoint trained without the flag stays identical on the first forward pass.
   - "ctf_level_06"
   - "scenario_adept_disruptor_vs_marine_marauder"
   # massive
@@ -196,9 +207,6 @@ levels:
   - "ctf_level_15_reversed"
   - "ctf_level_16"
   - "ctf_level_16_reversed"
-  # use_relational_decode: true in each level YAML from here (same pattern as
-  # use_self_attention) — command-conditioned actors, selected-unit context,
-  # cross-side attention
   - "ctf_level_17"
   - "ctf_level_17_reversed"
   - "ctf_level_17_mirror_terran"

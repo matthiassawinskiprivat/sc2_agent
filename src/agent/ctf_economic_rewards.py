@@ -1,4 +1,4 @@
-"""Resource-weighted, role-specific combat rewards for the CTF squad curriculum.
+r"""Resource-weighted, role-specific combat rewards for the CTF squad curriculum.
 
 StarCraft II is an economy game: killing a 300/200 Thor is worth far more than
 killing a 25/0 Zergling, and the flat hit-point shaping this module replaces paid
@@ -28,6 +28,14 @@ Roles are asymmetric on purpose:
   mid-map army trading far from the pylon pays less than fighting on the
   objective.
 
+Pylon hit-points are **not** paid per raw HP. At episode start the env freezes
+each owner's mobile army value \(V\) and each pylon's max vitality; damaging a
+pylon then pays the fraction of vitality removed times
+``pylon_value_scale * V * coefficient``. With ``pylon_value_scale: 1.0`` and the
+attacker enemy-value coefficient, destroying the enemy pylon pays the same as
+wiping that owner's spawn army once — early cheap armies and late expensive
+ones keep the same pylon∶army ratio.
+
 Vitality means health + shields. Temporary bodies (Interceptors, Locusts,
 Broodlings, hallucinations) are excluded by the caller's ``include_filter`` so a
 Carrier launching Interceptors does not look like free army value appearing and
@@ -42,6 +50,8 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 DEFAULT_VESPENE_WEIGHT = 1.5
 DEFAULT_VALUE_NORM = 100.0
+DEFAULT_PYLON_VALUE_SCALE = 1.0
+DEFAULT_PYLON_OWN_VALUE_PENALTY = 1.0
 
 # Fallback used when a unit type is missing from the cost table. Small but
 # nonzero: a silent 0 would make an unmodelled unit free to lose and worthless
@@ -67,6 +77,10 @@ class EconomicRewardConfig:
     defender_retained_value_bonus: float = 3.0
     heal_value_reward: float = 1.0
     melee_multiplier: float = 0.5
+    # Full pylon destroy vs wiping that owner's spawn army (same economic units).
+    pylon_value_scale: float = DEFAULT_PYLON_VALUE_SCALE
+    # Own-pylon loss coefficient (× defender_pylon_penalty_scale when defending).
+    pylon_own_value_penalty: float = DEFAULT_PYLON_OWN_VALUE_PENALTY
 
     @classmethod
     def from_rewards_conf(cls, r_conf: Optional[dict]) -> "EconomicRewardConfig":
@@ -90,6 +104,10 @@ class EconomicRewardConfig:
             defender_retained_value_bonus=_f("defender_retained_value_bonus", 3.0),
             heal_value_reward=_f("heal_value_reward", 1.0),
             melee_multiplier=_f("melee_multiplier", 0.5),
+            pylon_value_scale=_f("pylon_value_scale", DEFAULT_PYLON_VALUE_SCALE),
+            pylon_own_value_penalty=_f(
+                "pylon_own_value_penalty", DEFAULT_PYLON_OWN_VALUE_PENALTY
+            ),
         )
 
     def scaled_enemy_value_reward(self, base: float, *, squad_is_melee: bool) -> float:
@@ -430,3 +448,41 @@ def trade_efficiency(enemy_value_destroyed: float, own_value_lost: float) -> flo
     if total <= 1e-9:
         return 0.0
     return float(enemy_value_destroyed) / total
+
+
+def snapshot_total_value(snapshot: Dict[int, UnitValue]) -> float:
+    """Sum of purchase-price economic values in a snapshot (ignores vitality)."""
+    return float(sum(entry.value for entry in (snapshot or {}).values()))
+
+
+def pylon_max_vitality(pylon: Any) -> float:
+    """Combined health_max + shield_max, falling back to current vitality."""
+    health_max = _safe_float(getattr(pylon, "health_max", 0.0))
+    shield_max = _safe_float(getattr(pylon, "shield_max", 0.0))
+    max_vit = health_max + shield_max
+    if max_vit > 1e-9:
+        return max_vit
+    health = _safe_float(getattr(pylon, "health", 0.0))
+    shield = _safe_float(getattr(pylon, "shield", 0.0))
+    return max(health + shield, 0.0)
+
+
+def pylon_fraction_credit(
+    vitality_delta: float,
+    *,
+    max_vitality: float,
+    reference_army_value: float,
+    value_scale: float,
+    coefficient: float,
+) -> float:
+    """Economic credit for removing ``vitality_delta`` from a pylon.
+
+    ``value_scale * reference_army_value`` is the pylon's full economic value;
+    the fraction of max vitality removed times ``coefficient`` is the payout.
+    """
+    if vitality_delta <= 0.0 or max_vitality <= 1e-9:
+        return 0.0
+    if abs(float(value_scale)) <= 1e-12 or abs(float(coefficient)) <= 1e-12:
+        return 0.0
+    frac = min(1.0, float(vitality_delta) / float(max_vitality))
+    return frac * float(value_scale) * float(reference_army_value) * float(coefficient)

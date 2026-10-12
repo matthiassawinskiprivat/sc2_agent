@@ -313,6 +313,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._deferred_truncated: bool = False
         self._deferred_p1_terminal_reward: float = 0.0
         self._deferred_terminal_obs: Optional[Any] = None
+        self._deferred_outcome: Dict[str, float] = {}
 
         # Self-play opponent model — frozen snapshot, synced on hard reset (every_k_episodes).
         # None until the first hard reset; also None when using symmetric self-play.
@@ -328,7 +329,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         self._opponent_last_focus_tag: Optional[int] = None
         self._prepared_chunk: Optional[List[_ChunkEntry]] = None
         self._alternate_trainee_race = alternate_trainee_race_enabled(self.training_conf)
-        # debug_free is a toggle — track so soft resets do not flip it off.
+        # Kept so a hard reset cannot leave a stale "free costs" toggle armed.
+        # The spawn path no longer calls debug_free (it waives ability energy).
         self._ctf_resource_free_enabled: bool = False
         # Upgrades mode: how many debug_upgrade calls applied in this SC2 session.
         self._debug_upgrade_tier_applied: int = 0
@@ -1221,10 +1223,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         return self._has_env_mode("cloak")
 
     async def _apply_ctf_resources(self) -> None:
-        """Grant minerals/vespene to agent and opponent for all CTF races.
+        """Grant player 1 a mineral and vespene bank.
 
-        Player 1 gets a resource bank (morphs, SCV repair). Player 2 gets
-        ``debug_free`` because the API cannot set the opponent bank. See
+        ``debug_free`` is intentionally not used: it also makes ability energy
+        free, so Transfusion and other spells never spend their bar. See
         ``train.envs.ctf.heal_resources``.
         """
         from train.envs.ctf.heal_resources import apply_ctf_resources
@@ -1374,18 +1376,19 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         )
 
     async def _apply_spellcaster_energy(self) -> None:
-        """Fill energy bars so Transfuse / Heal / Fungal / Storm / EMP can be cast immediately.
+        """Limited starting energy for spellcaster and heal modes.
 
-        Queens spawn at 25 energy; Transfuse costs 50. Heal mode therefore uses
-        the same max-energy cheat as spellcaster (Medivacs benefit as well).
+        Each known caster gets two uses of its main energy spell, or one use
+        when two would fill the bar. Queens spawn at 25, below Transfusion, so
+        they are raised to 100. Nothing is filled to ``energy_max``.
         """
         if self.bot is None:
             return
         if not (self._has_env_mode("spellcaster") or self._has_env_mode("heal")):
             return
-        from train.envs.ctf.spellcaster import apply_max_energy
+        from train.envs.ctf.spellcaster import apply_caster_start_energy
 
-        await apply_max_energy(self.bot)
+        await apply_caster_start_energy(self.bot)
 
     async def _apply_damaged_units(self) -> None:
         """Cut army HP to half when ``env.damaged_units`` is true (heal intro)."""
@@ -1757,13 +1760,13 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         by_tag = self._all_units_by_tag()
         finder = getattr(getattr(bot, "all_units", None), "find_by_tag", None)
         if self.unit_pools_config and by_tag:
-            from src.utils.unit_feature_helpers import borrowed_neural_spellcaster_tags
+            from src.utils.unit_feature_helpers import borrowed_neural_unit_tags
 
             for idx in range(len(self.unit_pools_config)):
                 native = self._pool_alive_tags(idx)
                 player_id = self._pool_player_id(self.unit_pools_config[idx])
                 tags.extend(
-                    borrowed_neural_spellcaster_tags(
+                    borrowed_neural_unit_tags(
                         by_tag.values(), player_id, native
                     )
                 )
@@ -1979,14 +1982,17 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             builder.clear_global_cache()
 
     def _squad_pointer_tags(self, pool_idx: int) -> List[int]:
-        """Pool tags plus spellcasters this player holds under Neural Parasite.
+        """Units this squad can command, including bodies taken by Neural Parasite.
 
-        Borrowed casters are appended after the native tags so existing slot
-        indices do not shift when the link starts. They are not added to
-        ``unit_pool_index``; win checks and the other squad stay on spawn pools.
+        A stolen body is removed from the squad that spawned it and joined to
+        the thief's pointer. Slots are ordered by unit tag. Past 24 units the
+        cheapest purchased types are left out, so an Ultralisk or caster is
+        not dropped to keep a Zergling. Spawn pools (``unit_pool_index``) are
+        unchanged, so win checks still follow the army that bought the unit.
         """
         from src.utils.unit_feature_helpers import (
-            borrowed_neural_spellcaster_tags,
+            borrowed_neural_unit_tags,
+            native_tags_under_control,
             squad_pointer_tags,
         )
 
@@ -1998,10 +2004,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         ):
             return squad_pointer_tags(native, [])
         player_id = self._pool_player_id(self.unit_pools_config[pool_idx])
-        borrowed = borrowed_neural_spellcaster_tags(
-            self._all_units_by_tag().values(), player_id, native
-        )
-        return squad_pointer_tags(native, borrowed)
+        by_tag = self._all_units_by_tag()
+        native = native_tags_under_control(native, by_tag, player_id)
+        borrowed = borrowed_neural_unit_tags(by_tag.values(), player_id, native)
+        return squad_pointer_tags(native, borrowed, units_by_tag=by_tag)
 
     def _squad_unit_mask_for_pool(self, pool_idx: int) -> np.ndarray:
         from src.agent.squad_constants import MAX_SQUAD_UNITS
@@ -3219,6 +3225,138 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         obs = await self._get_joint_observation()
         return obs, reward, done, truncated, {"squad_physics_step": True}
 
+    def _combat_ignore_types(self) -> set:
+        """Unit types that do not count as combat presence for win/loss checks.
+
+        Cloak-curriculum detectors (Observer / Raven / Overseer) are free sensors,
+        not fighting units. A leftover detector must not keep a wiped army alive
+        or hold the objective zone shut. Cloaked combat units still count.
+        """
+        from src.utils.unit_feature_helpers import cloak_sensor_type_ids
+
+        return {
+            UnitTypeId.LARVA,
+            UnitTypeId.EGG,
+            UnitTypeId.OVERLORD,
+            UnitTypeId.PROBE,
+            UnitTypeId.SCV,
+            UnitTypeId.DRONE,
+            UnitTypeId.PYLON,
+            UnitTypeId.INTERCEPTOR,
+        } | set(cloak_sensor_type_ids())
+
+    def _flag_zone_anchor(self, owner_id: int):
+        """Defend-zone center for ``owner_id`` (live pylon → spawn label → memory)."""
+        from sc2.position import Point2
+
+        bot = getattr(self, "bot", None)
+        if bot is not None:
+            from src.utils.unit_feature_helpers import allied_candidates_for_owner
+
+            for unit in allied_candidates_for_owner(bot, int(owner_id)):
+                if getattr(unit, "type_id", None) != UnitTypeId.PYLON:
+                    continue
+                pos = getattr(unit, "position", None)
+                if pos is not None:
+                    return pos
+
+        if self.unit_pools_config and getattr(self, "label_to_defender_pos", None):
+            for pool in self.unit_pools_config:
+                if self._pool_player_id(pool) != int(owner_id):
+                    continue
+                if str(pool.get("high_level_command", "attack")).lower() != "defend":
+                    continue
+                label = pool.get("region")
+                if label in self.label_to_defender_pos:
+                    return self.label_to_defender_pos[label]
+
+        if bot is not None:
+            # Perspective memory: the other player stores this owner's pylon as enemy.
+            viewer = 2 if int(owner_id) == 1 else 1
+            remembered = getattr(bot, "enemy_pylon_pos", {}).get(viewer)
+            if remembered is not None:
+                return remembered
+        return None
+
+    def _can_scan_all_units(self) -> bool:
+        """True when ``bot.all_units`` supports a real ``filter`` + integer amount."""
+        bot = getattr(self, "bot", None)
+        units = getattr(bot, "all_units", None) if bot is not None else None
+        if units is None or not callable(getattr(units, "filter", None)):
+            return False
+        try:
+            probe = units.filter(lambda _u: False)
+            return isinstance(getattr(probe, "amount", None), int)
+        except (TypeError, AttributeError):
+            return False
+
+    def _owner_blocks_objective_zone(
+        self, owner_id: int, center, radius: float
+    ) -> bool:
+        """True when ``owner_id`` still has any unit or building in the zone.
+
+        Workers / larva / interceptors are ignored (same as combat-army checks).
+        Heal-mode creep tumors never block clear, including the burrowed form
+        when the API omits the Structure attribute. Free cloak detectors
+        (Observer, Raven, Overseer) do not block either: they are not fighting
+        units, and the army may have no weapon that can kill them. Cloaked and
+        burrowed combat units still block. The flag pylon does block clear.
+        """
+        from train.envs.ctf.heal_creep import HEAL_TUMOR_TYPE_IDS
+        from src.utils.unit_feature_helpers import unit_blocks_objective_clear
+
+        bot = getattr(self, "bot", None)
+        if bot is None or center is None or radius < 0.0:
+            return False
+        if not self._can_scan_all_units():
+            return False
+        ignore = self._combat_ignore_types() - {UnitTypeId.PYLON}
+        r2 = float(radius) + 1e-3
+        try:
+            candidates = bot.all_units.filter(
+                lambda u: int(getattr(u, "owner_id", 0) or 0) == int(owner_id)
+                and float(getattr(u, "health", 0.0) or 0.0) > 0.0
+            )
+        except (TypeError, AttributeError):
+            return False
+        for unit in candidates:
+            type_id = getattr(unit, "type_id", None)
+            if type_id in HEAL_TUMOR_TYPE_IDS:
+                continue
+            if not unit_blocks_objective_clear(unit):
+                continue
+            is_structure = bool(getattr(unit, "is_structure", False))
+            if not is_structure and type_id in ignore:
+                continue
+            pos = getattr(unit, "position", None)
+            if pos is None:
+                continue
+            try:
+                if pos.distance_to(center) <= r2:
+                    return True
+            except (TypeError, AttributeError, ValueError):
+                continue
+        return False
+
+    def _enemy_objective_zone_cleared(
+        self, perspective_player_id: int, r_conf: dict
+    ) -> bool:
+        """Enemy units and buildings cleared from their defend/objective zone.
+
+        Win requires the zone empty of combat units and buildings (including
+        the flag pylon). Creep tumors are exempt. Pure attackers with no flag
+        zone cannot be cleared this way. Returns False when the unit board
+        cannot be scanned, so incomplete mocks do not false-trigger a win.
+        """
+        enemy_id = 2 if int(perspective_player_id) == 1 else 1
+        anchor = self._flag_zone_anchor(enemy_id)
+        if anchor is None:
+            return False
+        if not self._can_scan_all_units():
+            return False
+        radius = float(r_conf.get("attacker_objective_radius", 12.0))
+        return not self._owner_blocks_objective_zone(enemy_id, anchor, radius)
+
     def _pylon_army_outcome(
         self,
         p1_lost: bool,
@@ -3228,33 +3366,87 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         perspective_player_id: int,
         r_conf: dict,
     ) -> Tuple[bool, float]:
-        """Pylon / army-wipe terminal from ``perspective_player_id``.
+        """Combat / objective-zone terminal from ``perspective_player_id``.
 
         Returns ``(should_terminate, reward_delta)``.
 
-        Wiping the opponent's army alone does **not** end the episode or award a
-        win: the attacker must destroy the enemy pylon (same persistence rule as
-        multi-client ``CaptureTheFlagEnv``). Own-army wipe is still a loss;
-        mutual wipe is a draw.
+        Attacker win = every enemy unit and building cleared from the enemy
+        defend zone (``attacker_objective_radius``), including the flag pylon.
+        Heal-mode creep tumors do not have to be cleared. Army wipe alone is
+        not enough while the pylon (or any other building) still stands in the
+        zone. Own-army wipe is a loss; mutual wipe is a draw.
         """
-        if int(perspective_player_id) == 2:
+        pid = int(perspective_player_id)
+        if pid == 2:
             p1_lost, p2_lost = p2_lost, p1_lost
             p1_army_lost, p2_army_lost = p2_army_lost, p1_army_lost
         win_reward = r_conf.get("win_reward", 100.0)
         loss_penalty = r_conf.get("loss_penalty", -100.0)
         draw_penalty = r_conf.get("draw_penalty", -10.0)
 
-        if p1_lost:
-            return True, loss_penalty
-        if p2_lost:
-            return True, win_reward
+        # Pylon destroy alone is not a win trophy; it only helps toward zone clear.
+        _ = (p1_lost, p2_lost)
         if p1_army_lost and p2_army_lost:
             return True, draw_penalty
         if p1_army_lost:
             return True, loss_penalty
-        if p2_army_lost:
-            return False, 0.0
+        if self._enemy_objective_zone_cleared(pid, r_conf):
+            return True, win_reward
         return False, 0.0
+
+    def _episode_outcome_flags(
+        self,
+        *,
+        p1_lost: bool,
+        p2_lost: bool,
+        p1_army_lost: bool,
+        p2_army_lost: bool,
+        all_units_gone: bool,
+        timeout: bool,
+        r_conf: dict,
+        perspective_player_id: Optional[int] = None,
+    ) -> dict:
+        """Trainee-perspective win/draw/loss one-hots for TensorBoard."""
+        pid = (
+            int(perspective_player_id)
+            if perspective_player_id is not None
+            else int(self._trainee_sc2_player_id())
+        )
+        terminate, delta = self._pylon_army_outcome(
+            p1_lost,
+            p2_lost,
+            p1_army_lost,
+            p2_army_lost,
+            pid,
+            r_conf,
+        )
+        win_reward = float(r_conf.get("win_reward", 100.0))
+        loss_penalty = float(r_conf.get("loss_penalty", -100.0))
+        draw_penalty = float(r_conf.get("draw_penalty", -10.0))
+        label = None
+        if terminate:
+            if abs(float(delta) - win_reward) < 1e-6:
+                label = "win"
+            elif abs(float(delta) - loss_penalty) < 1e-6:
+                label = "loss"
+            else:
+                label = "draw"
+        elif all_units_gone:
+            label = "draw"
+        elif timeout:
+            if self._agent_attack_units_alive() > 0:
+                label = "loss"
+            elif self._p1_defended_on_timeout(r_conf):
+                label = "win"
+            else:
+                label = "draw"
+        if label is None:
+            return {}
+        return {
+            "episode_win": 1.0 if label == "win" else 0.0,
+            "episode_loss": 1.0 if label == "loss" else 0.0,
+            "episode_draw": 1.0 if label == "draw" else 0.0,
+        }
 
     def _compute_p1_terminal_reward(
         self,
@@ -3625,6 +3817,16 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self._deferred_truncated = truncated
             self._deferred_p1_terminal_reward = p1_terminal
             self._deferred_terminal_obs = obs
+            self._deferred_outcome = self._episode_outcome_flags(
+                p1_lost=p1_lost,
+                p2_lost=p2_lost,
+                p1_army_lost=p1_army_lost,
+                p2_army_lost=p2_army_lost,
+                all_units_gone=all_units_gone,
+                timeout=timeout,
+                r_conf=r_conf,
+                perspective_player_id=trainee_pid,
+            )
             return obs, 0.0, False, False, {
                 "squad_physics_step": True,
                 "deferred_terminal": True,
@@ -3639,8 +3841,20 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                 ),
             }
 
+        outcome = {}
+        if done or truncated:
+            outcome = self._episode_outcome_flags(
+                p1_lost=p1_lost,
+                p2_lost=p2_lost,
+                p1_army_lost=p1_army_lost,
+                p2_army_lost=p2_army_lost,
+                all_units_gone=all_units_gone,
+                timeout=timeout,
+                r_conf=r_conf,
+            )
         return obs, reward, done, truncated, {
             "squad_physics_step": True,
+            **outcome,
             **self._economic_info(step_economic, done, truncated),
             **self._heal_cast_info(
                 heal_casts,
@@ -3759,9 +3973,21 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         # trainee's SC2 owner is player 2. Deferring here would drop the real
         # trainee-perspective reward.
         self._cache_squad_action_mask(obs, self.current_trainee_pool_index)
+        outcome = {}
+        if done or truncated:
+            outcome = self._episode_outcome_flags(
+                p1_lost=p1_lost,
+                p2_lost=p2_lost,
+                p1_army_lost=p1_army_lost,
+                p2_army_lost=p2_army_lost,
+                all_units_gone=all_units_gone,
+                timeout=timeout,
+                r_conf=r_conf,
+            )
         return obs, reward, done, truncated, self._attach_action_masks({
             "squad_physics_step": True,
             "squad_pointer": True,
+            **outcome,
             **self._economic_info(step_economic, done, truncated),
             **self._heal_cast_info(
                 heal_casts,
@@ -3996,7 +4222,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             # fall through to hard reset
         else:
             # --- Hard reset: full teardown + relaunch (map rotation + opponent sync) ---
-            # New SC2 session clears debug cheats; re-arm resource free costs on next spawn.
+            # New SC2 session. The free-cost cheat stays off (it waives ability energy).
             self._ctf_resource_free_enabled = False
             if session_alive:
                 resets_done = self.episode_counter // every_k
@@ -4051,28 +4277,22 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             self.bot.prime_combat_reward_baselines()
 
     def _has_combat_units(self, owner_id: int) -> bool:
-        """
-        Robustly checks if a player has any combat-capable mobile units left.
-        """
+        """True when ``owner_id`` still has combat-capable mobile units."""
         if not hasattr(self.bot, "all_units") or not self.bot.all_units:
             return False
-            
-        ignored_types = {
-            UnitTypeId.LARVA, 
-            UnitTypeId.EGG, 
-            UnitTypeId.OVERLORD, 
-            UnitTypeId.PROBE, 
-            UnitTypeId.SCV, 
-            UnitTypeId.DRONE,
-            UnitTypeId.PYLON,
-            # Leftover Interceptors after the Carrier dies must not keep the army "alive".
-            UnitTypeId.INTERCEPTOR,
-        }
-        
-        # In SingleClientEnv (God Mode), self.bot.all_units contains ALL units on the map
-        combat_units = self.bot.all_units.filter(lambda u: u.owner_id == owner_id and not u.is_structure and u.type_id not in ignored_types and u.health > 0)
-        
-        return combat_units.amount > 0
+        if not self._can_scan_all_units():
+            return False
+        ignored_types = self._combat_ignore_types()
+        try:
+            combat_units = self.bot.all_units.filter(
+                lambda u: u.owner_id == owner_id
+                and not u.is_structure
+                and u.type_id not in ignored_types
+                and u.health > 0
+            )
+            return int(combat_units.amount) > 0
+        except (TypeError, AttributeError, ValueError):
+            return False
 
     async def _async_step(self, action_p_active):
         # Phantom terminal step: flush deferred reward into the training buffer.
@@ -4081,13 +4301,16 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             reward = self._deferred_p1_terminal_reward
             done = self._deferred_done
             truncated = self._deferred_truncated
+            outcome = dict(getattr(self, "_deferred_outcome", None) or {})
             self._deferred_done = False
             self._deferred_truncated = False
             self._deferred_p1_terminal_reward = 0.0
             self._deferred_terminal_obs = None
+            self._deferred_outcome = {}
             return obs, reward, done, truncated, {
                 "squad_physics_step": True,
                 "phantom_terminal": True,
+                **outcome,
                 **self._heal_cast_info(0, done, truncated, step_attempts=0),
             }
 

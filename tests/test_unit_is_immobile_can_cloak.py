@@ -172,6 +172,12 @@ def test_can_repair_requires_minerals_without_ability_cache():
     bot.minerals = 50
     assert unit_can_repair(scv, bot) is True
 
+    other = _unit(UnitTypeId.SCV)
+    other.tag = 9
+    other.owner_id = 2
+    other.is_using_ability = lambda abilities: False
+    assert unit_can_repair(other, bot) is False
+
 
 def test_can_repair_prefers_sc2_ability_cache():
     from sc2.ids.ability_id import AbilityId

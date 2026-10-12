@@ -761,35 +761,74 @@ def test_pop_collector_profile_cache_hit_rates(squad_env):
     assert CaptureTheFlagSingleEnv.pop_collector_profile_means(squad_env) == {}
 
 
-def test_controller_pointer_appends_stolen_spellcaster_after_native_tags():
+def test_stolen_unit_moves_from_the_original_pointer_to_the_thief():
     from sc2.ids.buff_id import BuffId
     from sc2.ids.unit_typeid import UnitTypeId
 
     from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
 
     env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
-    env.unit_pools_config = [{"race": "zerg"}]
-    env._pool_alive_tags = lambda idx: [30, 10]
-    env._pool_player_id = lambda pool: 1
+    env.unit_pools_config = [{"race": "zerg"}, {"race": "protoss"}]
+
+    def _alive(idx):
+        return [30, 10, 20] if idx == 0 else [40]
+
+    def _player(pool):
+        return 1 if pool.get("race") == "zerg" else 2
+
+    env._pool_alive_tags = _alive
+    env._pool_player_id = _player
     templar = MagicMock()
     templar.tag = 20
     templar.type_id = UnitTypeId.HIGHTEMPLAR
-    templar.owner_id = 1
+    templar.owner_id = 2
     templar.is_structure = False
     templar.buffs = {BuffId.NEURALPARASITE}
     zealot = MagicMock()
     zealot.tag = 21
     zealot.type_id = UnitTypeId.ZEALOT
-    zealot.owner_id = 1
+    zealot.owner_id = 2
     zealot.is_structure = False
     zealot.buffs = {BuffId.NEURALPARASITE}
     env._all_units_by_tag = lambda: {20: templar, 21: zealot}
-    assert CaptureTheFlagSingleEnv._squad_pointer_tags(env, 0) == [10, 30, 20]
+    assert CaptureTheFlagSingleEnv._squad_pointer_tags(env, 0) == [10, 30]
+    assert CaptureTheFlagSingleEnv._squad_pointer_tags(env, 1) == [20, 21, 40]
+
+
+def test_full_squad_pointer_drops_a_ling_to_keep_an_ultralisk():
+    from sc2.ids.unit_typeid import UnitTypeId
+
+    from src.agent.squad_constants import MAX_SQUAD_UNITS
+    from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
+
+    env = CaptureTheFlagSingleEnv.__new__(CaptureTheFlagSingleEnv)
+    env.unit_pools_config = [{"race": "zerg"}]
+    ling_tags = list(range(1, MAX_SQUAD_UNITS + 1))
+    env._pool_alive_tags = lambda idx: ling_tags + [900]
+    env._pool_player_id = lambda pool: 1
+    units = {}
+    for tag in ling_tags:
+        ling = MagicMock()
+        ling.tag = tag
+        ling.type_id = UnitTypeId.ZERGLING
+        ling.buffs = set()
+        units[tag] = ling
+    ultra = MagicMock()
+    ultra.tag = 900
+    ultra.type_id = UnitTypeId.ULTRALISK
+    ultra.buffs = set()
+    units[900] = ultra
+    env._all_units_by_tag = lambda: units
+    kept = CaptureTheFlagSingleEnv._squad_pointer_tags(env, 0)
+    assert 900 in kept
+    assert len(kept) == MAX_SQUAD_UNITS
+    assert max(ling_tags) not in kept
 
 
 def test_stolen_caster_snipe_is_issued_only_for_the_controller():
     from sc2.ids.buff_id import BuffId
     from sc2.ids.unit_typeid import UnitTypeId
+    from sc2.position import Point2
 
     from src.agent.ctf_bot import CaptureTheFlagBot
 
@@ -798,7 +837,7 @@ def test_stolen_caster_snipe_is_issued_only_for_the_controller():
     stolen.type_id = UnitTypeId.HIGHTEMPLAR
     stolen.owner_id = 1
     stolen.buffs = {BuffId.NEURALPARASITE}
-    stolen.position = MagicMock()
+    stolen.position = Point2((10.0, 10.0))
     stolen.is_idle = False
     enemy = MagicMock()
     enemy.tag = 8
@@ -806,7 +845,7 @@ def test_stolen_caster_snipe_is_issued_only_for_the_controller():
     enemy.energy_max = 200.0
     enemy.is_structure = False
     enemy.is_biological = False
-    enemy.position = MagicMock()
+    enemy.position = Point2((12.0, 10.0))
     bot = MagicMock()
     bot.all_units.find_by_tag.side_effect = lambda tag: {7: stolen, 8: enemy}[int(tag)]
     bot._unit_last_order = {}

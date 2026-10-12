@@ -126,16 +126,18 @@ class TestComputeP1TerminalRewardTimeout:
         )
         assert r == WIN
 
-    def test_defender_pylon_destroyed_gets_loss_penalty(self, env):
+    def test_defender_pylon_destroyed_alone_does_not_end(self, env):
+        """Flag pylons are anchors only; pylon loss alone is not a terminal loss."""
         _pylon_destroyed(env)
-        # p1_lost checked first → loss_penalty
+        env._has_combat_units = MagicMock(return_value=True)
+        env._enemy_objective_zone_cleared = MagicMock(return_value=False)
         r = env._compute_p1_terminal_reward(
             p1_lost=True, p2_lost=False,
             p1_army_lost=False, p2_army_lost=False,
             all_units_gone=False, timeout=False,
             r_conf=_REWARDS_DEFENDER,
         )
-        assert r == LOSS
+        assert r == 0.0
 
     def test_defender_pylon_intact_flag_disabled_gets_draw(self, env):
         """Without the flag, timeout is still draw_penalty even if pylon alive."""
@@ -164,9 +166,22 @@ class TestComputeP1TerminalRewardTimeout:
         )
         assert r == LOSS
 
-    def test_opponent_army_killed_does_not_give_win(self, env):
-        """Opponent army wipe alone is not a win — attacker must destroy the pylon."""
+    def test_objective_zone_cleared_gives_win(self, env):
+        """Clearing all enemy units and buildings from the objective zone is a win."""
         _pylon_alive(env)
+        env._enemy_objective_zone_cleared = MagicMock(return_value=True)
+        r = env._compute_p1_terminal_reward(
+            p1_lost=False, p2_lost=False,
+            p1_army_lost=False, p2_army_lost=True,
+            all_units_gone=False, timeout=False,
+            r_conf=_REWARDS_DEFENDER,
+        )
+        assert r == WIN
+
+    def test_opponent_army_killed_with_pylon_standing_is_not_win(self, env):
+        """Army wipe alone does not win while the objective building still stands."""
+        _pylon_alive(env)
+        env._enemy_objective_zone_cleared = MagicMock(return_value=False)
         r = env._compute_p1_terminal_reward(
             p1_lost=False, p2_lost=False,
             p1_army_lost=False, p2_army_lost=True,
@@ -186,16 +201,19 @@ class TestComputeP1TerminalRewardTimeout:
         )
         assert r == LOSS
 
-    def test_enemy_pylon_destroyed_gives_win(self, env):
-        """Attacker win condition is destroying the enemy pylon."""
+    def test_enemy_pylon_destroyed_alone_does_not_win(self, env):
+        """Flag pylon is the zone anchor only — destroying it is not a win trophy."""
         _pylon_alive(env)
+        # Keep enemy army "alive" so zone-clear / wipe branches do not fire.
+        env._has_combat_units = MagicMock(return_value=True)
+        env._enemy_objective_zone_cleared = MagicMock(return_value=False)
         r = env._compute_p1_terminal_reward(
             p1_lost=False, p2_lost=True,
             p1_army_lost=False, p2_army_lost=False,
             all_units_gone=False, timeout=False,
             r_conf=_REWARDS_DEFENDER,
         )
-        assert r == WIN
+        assert r == 0.0
 
 
 # ---------------------------------------------------------------------------

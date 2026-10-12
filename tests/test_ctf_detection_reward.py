@@ -61,8 +61,7 @@ def _bot():
                 "defender_enemy_value_reward": 0.0,
                 "defender_own_value_penalty": 0.0,
                 "heal_value_reward": 0.0,
-                "pylon_damage_reward": 0.0,
-                "pylon_damage_penalty": 0.0,
+                "pylon_value_scale": 0.0,
                 "distance_multiplier": 0.0,
                 "step_penalty": 0.0,
                 "cooldown_retreat_scale": 0.0,
@@ -89,7 +88,12 @@ def _wire(bot, own, enemies):
     bot.unit_command_map = {u.tag: "attack" for u in own}
 
 
-def test_coverage_pays_every_step_while_concealed_units_stay_in_range():
+def test_coverage_pays_once_when_a_concealed_unit_enters_range():
+    """Staying in the disc must not farm the unit's full value every step.
+
+    A per-step payout is larger than the win bonus, so the policy keeps the
+    cloaked unit alive, the zone never clears, and the episode times out as a loss.
+    """
     bot = _bot()
     raven = _unit(1, UnitTypeId.RAVEN, 0.0, 0.0, 1, detect_range=11.0)
     banshee = _unit(
@@ -106,7 +110,7 @@ def test_coverage_pays_every_step_while_concealed_units_stay_in_range():
     first = bot.calculate_squad_step_reward([1], perspective_player_id=1)
     second = bot.calculate_squad_step_reward([1], perspective_player_id=1)
     assert first == pytest.approx(BANSHEE)
-    assert second == pytest.approx(BANSHEE)
+    assert second == pytest.approx(0.0)
 
 
 def test_two_concealed_in_range_pay_twice_one():

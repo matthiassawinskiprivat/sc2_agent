@@ -399,6 +399,82 @@ def test_issue_attack_at_point_hard_targets_enemy_in_cell():
     bot.do.assert_called_once()
 
 
+def test_issue_attack_at_point_does_not_hard_target_undetected_cloak():
+    """A rejected cloak hard-target cancels attack-move and stalls the army."""
+    from sc2.position import Point2
+
+    enemy = MagicMock()
+    enemy.tag = 55
+    enemy.position = Point2((12.2, 34.1))
+    enemy.is_alive = True
+    enemy.is_cloaked = True
+    enemy.is_burrowed = False
+    enemy.is_detected = False
+    enemy.type_id = UnitTypeId.DARKTEMPLAR
+
+    bot = MagicMock()
+    bot.enemy_units = [enemy]
+    bot.enemy_structures = []
+    unit = MagicMock()
+    unit.type_id = UnitTypeId.MARINE
+    target = Point2((12.0, 34.0))
+
+    assert issue_attack_at_point(bot, unit, target) is None
+    unit.attack.assert_called_once_with(target)
+
+
+def test_issue_attack_at_point_hard_targets_cloak_inside_detector_disc():
+    from sc2.position import Point2
+
+    enemy = MagicMock()
+    enemy.tag = 55
+    enemy.owner_id = 2
+    enemy.position = Point2((12.2, 34.1))
+    enemy.is_alive = True
+    enemy.is_cloaked = True
+    enemy.is_burrowed = False
+    enemy.is_detected = False
+    enemy.is_revealed = False
+    enemy.type_id = UnitTypeId.DARKTEMPLAR
+    enemy.detect_range = 0.0
+
+    observer = MagicMock()
+    observer.tag = 7
+    observer.owner_id = 1
+    observer.position = Point2((12.0, 34.0))
+    observer.detect_range = 11.0
+    observer.type_id = UnitTypeId.OBSERVER
+
+    bot = MagicMock()
+    bot.enemy_units = [enemy]
+    bot.enemy_structures = []
+    bot.units = [observer]
+    bot.structures = []
+    bot.all_units = [observer, enemy]
+    unit = MagicMock()
+    unit.tag = 3
+    unit.owner_id = 1
+    unit.type_id = UnitTypeId.MARINE
+    target = Point2((12.0, 34.0))
+
+    assert issue_attack_at_point(bot, unit, target) is enemy
+    unit.attack.assert_called_once_with(enemy)
+
+
+def test_unit_is_detected_uses_is_revealed_when_is_detected_is_absent():
+    """python-sc2 has ``is_revealed``, not ``is_detected``."""
+    from types import SimpleNamespace
+
+    from src.utils.unit_feature_helpers import unit_is_detected
+
+    hidden = SimpleNamespace(is_cloaked=True, is_burrowed=False, is_revealed=False)
+    revealed = SimpleNamespace(is_cloaked=True, is_burrowed=False, is_revealed=True)
+    visible = SimpleNamespace(is_cloaked=False, is_burrowed=False, is_revealed=False)
+    assert unit_is_detected(hidden) is False
+    assert unit_is_detected(revealed) is True
+    assert unit_is_detected(visible) is True
+
+
 def test_issue_attack_at_point_falls_back_to_point_when_cell_empty():
     from sc2.position import Point2
 
@@ -1015,9 +1091,11 @@ def test_unit_can_snipe_energy_upgrade_and_types():
 
     neural = frozenset({UpgradeId.NEURALPARASITE})
     yamato = frozenset({UpgradeId.YAMATOCANNON})
+    specialization = frozenset({UpgradeId.BATTLECRUISERENABLESPECIALIZATIONS})
     assert unit_can_snipe(_caster(UnitTypeId.GHOST, 50.0)) is True
     assert unit_can_snipe(_caster(UnitTypeId.GHOST, 49.0)) is False
     assert unit_can_snipe(_caster(UnitTypeId.BATTLECRUISER, 0.0), upgrades=yamato) is True
+    assert unit_can_snipe(_caster(UnitTypeId.BATTLECRUISER, 0.0), upgrades=specialization) is True
     assert unit_can_snipe(_caster(UnitTypeId.BATTLECRUISER, 0.0), upgrades=frozenset()) is False
     assert unit_can_snipe(_caster(UnitTypeId.HIGHTEMPLAR, 50.0)) is True
     assert unit_can_snipe(_caster(UnitTypeId.HIGHTEMPLAR, 49.0)) is False
@@ -1099,10 +1177,12 @@ def test_issue_snipe_stamps_cooldown_by_default():
     ghost = _caster(UnitTypeId.GHOST, 50.0)
     ghost.tag = 33
     ghost.owner_id = 1
+    ghost.position = MagicMock(x=0.0, y=0.0)
     target = MagicMock()
     target.owner_id = 2
     target.is_structure = False
     target.is_biological = True
+    target.position = MagicMock(x=1.0, y=0.0)
     bot = _bot_at_loop(20)
 
     assert issue_snipe_on_unit(bot, ghost, target) is True
@@ -1114,28 +1194,34 @@ def test_stolen_battlecruisers_can_yamato_each_other_but_not_real_friendlies():
     from sc2.ids.buff_id import BuffId
     from src.utils.unit_feature_helpers import issue_snipe_on_unit
 
-    def _bc(tag):
+    def _bc(tag, x):
         unit = MagicMock()
         unit.tag = tag
         unit.type_id = UnitTypeId.BATTLECRUISER
         unit.owner_id = 1
         unit.is_structure = False
         unit.buffs = {BuffId.NEURALPARASITE}
+        unit.position = MagicMock(x=x, y=0.0)
         return unit
 
-    first = _bc(1)
-    second = _bc(2)
+    first = _bc(1, 0.0)
+    second = _bc(2, 2.0)
     friendly = MagicMock()
     friendly.tag = 3
     friendly.type_id = UnitTypeId.MARINE
     friendly.owner_id = 1
     friendly.is_structure = False
     friendly.buffs = set()
+    friendly.position = MagicMock(x=1.0, y=0.0)
     bot = MagicMock()
 
     assert issue_snipe_on_unit(bot, first, second, stamp_cooldown=False) is True
     assert issue_snipe_on_unit(bot, first, friendly, stamp_cooldown=False) is False
     assert issue_snipe_on_unit(bot, first, first, stamp_cooldown=False) is False
+    far = _bc(9, 80.0)
+    far.owner_id = 2
+    far.buffs = set()
+    assert issue_snipe_on_unit(bot, first, far, stamp_cooldown=False) is False
 
 
 def test_issue_aoe_reissue_does_not_restamp():
@@ -1421,11 +1507,12 @@ def test_issue_aoe_at_point_marine_noop():
     unit.move.assert_not_called()
 
 
-def test_borrowed_spellcaster_tags_and_command_gate():
+def test_borrowed_unit_tags_and_command_gate():
     from sc2.ids.buff_id import BuffId
     from src.agent.squad_constants import MAX_SQUAD_UNITS
     from src.utils.unit_feature_helpers import (
-        borrowed_neural_spellcaster_tags,
+        borrowed_neural_unit_tags,
+        native_tags_under_control,
         neural_command_allowed,
         squad_pointer_tags,
     )
@@ -1443,19 +1530,44 @@ def test_borrowed_spellcaster_tags_and_command_gate():
     zealot.is_structure = False
     zealot.buffs = {BuffId.NEURALPARASITE}
 
-    assert borrowed_neural_spellcaster_tags([templar, zealot], 1, [10]) == [20]
-    assert borrowed_neural_spellcaster_tags([templar], 2, [10]) == []
-    assert borrowed_neural_spellcaster_tags([templar], 1, [20]) == []
+    assert borrowed_neural_unit_tags([templar, zealot], 1, [10]) == [20, 21]
+    assert borrowed_neural_unit_tags([templar], 2, [10]) == []
+    assert borrowed_neural_unit_tags([templar], 1, [20]) == []
+    assert native_tags_under_control([10, 20], {20: templar}, 2) == [10]
+    assert native_tags_under_control([10, 20], {20: templar}, 1) == [10, 20]
 
-    tags = squad_pointer_tags([30, 10], [20])
-    assert tags == [10, 30, 20]
+    tags = squad_pointer_tags([30, 10], [20, 21])
+    assert tags == [10, 20, 21, 30]
     full = squad_pointer_tags(list(range(MAX_SQUAD_UNITS)), [99])
     assert 99 not in full
     assert len(full) == MAX_SQUAD_UNITS
 
-    assert neural_command_allowed(templar, 1, "aoe_local") is True
-    assert neural_command_allowed(templar, 1, "snipe") is True
-    assert neural_command_allowed(templar, 1, "move") is False
-    assert neural_command_allowed(templar, 1, "attack_unit") is False
-    assert neural_command_allowed(templar, 2, "aoe_local") is False
-    assert neural_command_allowed(templar, 2, "move") is True
+    for head in ("aoe_local", "snipe", "move", "attack_unit", "cloak_burrow"):
+        assert neural_command_allowed(templar, 1, head) is True
+        assert neural_command_allowed(templar, 2, head) is False
+    assert neural_command_allowed(zealot, 1, "move") is True
+
+
+def test_full_pointer_keeps_expensive_units_and_drops_cheap_ones():
+    from src.agent.squad_constants import MAX_SQUAD_UNITS
+    from src.utils.unit_feature_helpers import squad_pointer_tags
+
+    def _body(tag, type_id):
+        unit = MagicMock()
+        unit.tag = tag
+        unit.type_id = type_id
+        return unit
+
+    lings = list(range(MAX_SQUAD_UNITS))
+    units = {tag: _body(tag, UnitTypeId.ZERGLING) for tag in lings}
+    units[1000] = _body(1000, UnitTypeId.ULTRALISK)
+    units[1001] = _body(1001, UnitTypeId.HIGHTEMPLAR)
+    units[1002] = _body(1002, UnitTypeId.LOCUSTMP)
+    kept = squad_pointer_tags(lings, [1000, 1001, 1002], units_by_tag=units)
+    assert len(kept) == MAX_SQUAD_UNITS
+    assert kept == sorted(kept)
+    assert 1000 in kept
+    assert 1001 in kept
+    assert 1002 not in kept
+    dropped_lings = [tag for tag in lings if tag not in kept]
+    assert dropped_lings == [MAX_SQUAD_UNITS - 2, MAX_SQUAD_UNITS - 1]

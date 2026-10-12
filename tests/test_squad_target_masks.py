@@ -52,6 +52,9 @@ def _unit(
     u.is_burrowed = False
     u.weapon_ready = True
     u.weapon_cooldown = 0.0
+    # Colocated by default so snipe legality sees the tactical crop. Tests that
+    # care about distance replace ``position``.
+    u.position = MagicMock(x=0.0, y=0.0)
     return u
 
 
@@ -314,9 +317,13 @@ def test_structures_are_never_actors():
 
 
 def test_enemy_target_mask_marks_occupied_slots_only():
+    marine = _unit(9, UnitTypeId.MARINE)
     ling = _unit(1, UnitTypeId.ZERGLING)
     roach = _unit(2, UnitTypeId.ROACH)
-    mask = build_enemy_target_mask([ling, roach] + [None] * (MAX_SQUAD_ENEMIES - 2))
+    mask = build_enemy_target_mask(
+        [ling, roach] + [None] * (MAX_SQUAD_ENEMIES - 2),
+        attackers=[marine],
+    )
     assert mask.shape == (MAX_SQUAD_ENEMIES,)
     assert mask[0] == 1.0 and mask[1] == 1.0
     assert not mask[2:].any()
@@ -324,10 +331,41 @@ def test_enemy_target_mask_marks_occupied_slots_only():
 
 @pytest.mark.parametrize("count", [0, 1, MAX_SQUAD_ENEMIES + 5])
 def test_enemy_target_mask_is_shape_stable(count):
+    marine = _unit(0, UnitTypeId.MARINE)
     units = [_unit(i + 1, UnitTypeId.ZERGLING) for i in range(count)]
-    mask = build_enemy_target_mask(units)
+    mask = build_enemy_target_mask(units, attackers=[marine])
     assert mask.shape == (MAX_SQUAD_ENEMIES,)
     assert mask.sum() == min(count, MAX_SQUAD_ENEMIES)
+
+
+def test_attack_unit_target_mask_requires_attacker_fovea():
+    """A hostile outside every ready attacker's crop is not an attack_unit target."""
+    from src.utils.unit_feature_helpers import TACTICAL_FOVEA_MAX_DELTA
+
+    marine = _unit(1, UnitTypeId.MARINE)
+    marine.position = MagicMock(x=10.0, y=10.0)
+    near = _unit(2, UnitTypeId.ZERGLING)
+    near.position = MagicMock(x=10.0 + TACTICAL_FOVEA_MAX_DELTA, y=10.0)
+    far = _unit(3, UnitTypeId.ZERGLING)
+    far.position = MagicMock(x=10.0 + TACTICAL_FOVEA_MAX_DELTA + 1.0, y=10.0)
+    pylon = _unit(4, UnitTypeId.PYLON, is_structure=True)
+    pylon.position = MagicMock(x=12.0, y=10.0)
+    far_pylon = _unit(5, UnitTypeId.PYLON, is_structure=True)
+    far_pylon.position = MagicMock(x=80.0, y=80.0)
+
+    mask = build_enemy_target_mask(
+        [near, far, pylon, far_pylon], attackers=[marine]
+    )
+    assert mask[0] == 1.0
+    assert mask[1] == 0.0
+    assert mask[2] == 1.0
+    assert mask[3] == 0.0
+    assert not build_enemy_target_mask([near], attackers=[]).any()
+
+    escort = _unit(6, UnitTypeId.MARINE)
+    escort.position = MagicMock(x=far.position.x, y=far.position.y)
+    opened = build_enemy_target_mask([near, far], attackers=[marine, escort])
+    assert opened[1] == 1.0
 
 
 def test_masks_are_slot_aligned_with_padding():
@@ -422,6 +460,56 @@ def test_engage_enemy_masks_reports_air_in_one_pass():
     assert has_air2 is False
 
 
+def test_snipe_target_mask_requires_caster_fovea():
+    """A hostile outside every ready caster's crop is not a snipe target."""
+    from src.agent.squad_target_masks import build_snipe_target_mask
+    from src.utils.unit_feature_helpers import TACTICAL_FOVEA_MAX_DELTA
+
+    bc = _unit(1, UnitTypeId.BATTLECRUISER)
+    bc.position = MagicMock(x=10.0, y=10.0)
+    near = _unit(2, UnitTypeId.ZERGLING, owner_id=2)
+    near.position = MagicMock(x=10.0 + TACTICAL_FOVEA_MAX_DELTA, y=10.0)
+    far = _unit(3, UnitTypeId.ZERGLING, owner_id=2)
+    far.position = MagicMock(x=10.0 + TACTICAL_FOVEA_MAX_DELTA + 1.0, y=10.0)
+    enemies = [near, far] + [None] * (MAX_SQUAD_ENEMIES - 2)
+
+    mask = build_snipe_target_mask(enemies, _slots(bc), casters=[bc])
+    assert mask[0] == 1.0
+    assert mask[1] == 0.0
+
+    # A second caster standing on the far squad opens that slot for *that* caster.
+    escort = _unit(4, UnitTypeId.BATTLECRUISER)
+    escort.position = MagicMock(x=far.position.x, y=far.position.y)
+    opened = build_snipe_target_mask(
+        enemies, _slots(bc, escort), casters=[bc, escort]
+    )
+    assert opened[1] == 1.0
+
+
+def test_creep_tumor_cannot_be_snipe_targeted():
+    """Burrowed tumors are not structures, so Yamato would otherwise select them."""
+    from src.agent.squad_target_masks import build_snipe_target_mask
+    from src.utils.unit_feature_helpers import issue_snipe_on_unit
+
+    bc = _unit(1, UnitTypeId.BATTLECRUISER, owner_id=1)
+    tumors = [
+        _unit(2, UnitTypeId.CREEPTUMOR, owner_id=2, is_structure=False),
+        _unit(3, UnitTypeId.CREEPTUMORBURROWED, owner_id=2, is_structure=False),
+        _unit(4, UnitTypeId.CREEPTUMORQUEEN, owner_id=2, is_structure=False),
+    ]
+    ling = _unit(5, UnitTypeId.ZERGLING, owner_id=2)
+    enemies = tumors + [ling] + [None] * (MAX_SQUAD_ENEMIES - 4)
+
+    mask = build_snipe_target_mask(enemies, _slots(bc), casters=[bc])
+    assert mask[0] == mask[1] == mask[2] == 0.0
+    assert mask[3] == 1.0
+
+    bot = MagicMock()
+    for tumor in tumors:
+        assert issue_snipe_on_unit(bot, bc, tumor, stamp_cooldown=False) is False
+    bot.do.assert_not_called()
+
+
 def test_ghost_snipe_target_requires_biological():
     from src.agent.squad_target_masks import build_snipe_target_mask
 
@@ -453,17 +541,23 @@ def test_feedback_snipe_target_requires_energy_bar():
     assert tgt[1] == 0.0
 
 
-def test_yamato_snipe_actor_requires_yamato_cannon_tech():
+def test_yamato_snipe_actor_requires_battlecruiser_specialization():
     from sc2.ids.upgrade_id import UpgradeId
 
     bc = _unit(1, UnitTypeId.BATTLECRUISER, energy=0.0)
     without = build_squad_target_masks(_slots(bc), upgrades=frozenset())
     assert not without["snipe_actor_mask"].any()
 
-    with_tech = build_squad_target_masks(
-        _slots(bc), upgrades=frozenset({UpgradeId.YAMATOCANNON})
-    )
-    assert with_tech["snipe_actor_mask"][0] == 1.0
+    # Older clients reported YamatoCannon. Current ladder reports
+    # BattlecruiserEnableSpecializations and never grants 258.
+    for upgrade in (
+        UpgradeId.YAMATOCANNON,
+        UpgradeId.BATTLECRUISERENABLESPECIALIZATIONS,
+    ):
+        with_tech = build_squad_target_masks(
+            _slots(bc), upgrades=frozenset({upgrade})
+        )
+        assert with_tech["snipe_actor_mask"][0] == 1.0
 
 
 def test_move_actor_excludes_immobile_units():
@@ -572,38 +666,50 @@ def _neuralled(unit, owner_id):
     return unit
 
 
-def test_borrowed_spellcaster_can_aoe_and_snipe_only():
-    """The neural owner may cast with the stolen body, not move or shoot it."""
+def test_borrowed_unit_can_use_every_command_it_has():
+    """The thief commands the stolen body with whatever that unit can do."""
+    from sc2.ids.upgrade_id import UpgradeId
+
     ghost = _neuralled(
         _unit(4, UnitTypeId.GHOST, energy=75.0, owner_id=1), 1
     )
+    zealot = _neuralled(_unit(5, UnitTypeId.ZEALOT, owner_id=1), 1)
     masks, readiness = build_squad_legality(
-        _slots(ghost),
+        _slots(ghost, zealot),
         enemy_race="protoss",
+        upgrades=frozenset({UpgradeId.PERSONALCLOAKING}),
         perspective_player_id=1,
     )
     assert masks["aoe_actor_mask"][0] == 1.0
     assert masks["snipe_actor_mask"][0] == 1.0
+    assert masks["move_actor_mask"][0] == 1.0
+    assert masks["attack_actor_mask"][0] == 1.0
+    assert masks["cloak_actor_mask"][0] == 1.0
     assert readiness["can_aoe"][0] == 1.0
     assert readiness["can_snipe"][0] == 1.0
-    assert masks["move_actor_mask"][0] == 0.0
-    assert masks["attack_actor_mask"][0] == 0.0
+    assert readiness["can_cloak"][0] == 1.0
+    assert masks["aoe_actor_mask"][1] == 0.0
+    assert masks["snipe_actor_mask"][1] == 0.0
+    assert masks["cloak_actor_mask"][1] == 0.0
+    assert masks["move_actor_mask"][1] == 1.0
+    assert masks["attack_actor_mask"][1] == 1.0
 
 
-def test_original_squad_cannot_cast_with_a_stolen_spellcaster():
+def test_original_squad_cannot_order_a_stolen_unit():
     ghost = _neuralled(
         _unit(4, UnitTypeId.GHOST, energy=75.0, owner_id=2), 2
     )
     masks, readiness = build_squad_legality(
         _slots(ghost),
         enemy_race="protoss",
+        upgrades=frozenset(),
         perspective_player_id=1,
     )
-    assert masks["aoe_actor_mask"][0] == 0.0
-    assert masks["snipe_actor_mask"][0] == 0.0
+    for values in masks.values():
+        assert values[0] == 0.0
     assert readiness["can_aoe"][0] == 0.0
     assert readiness["can_snipe"][0] == 0.0
-    assert masks["move_actor_mask"][0] == 1.0
+    assert readiness["can_cloak"][0] == 0.0
 
 
 def test_borrowed_snipe_does_not_target_the_stolen_body():

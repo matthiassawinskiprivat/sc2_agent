@@ -170,30 +170,43 @@ def test_unit_target_heads_are_registered():
 
 def test_attack_unit_focus_fires_the_selected_tag():
     marine = _make_unit(1, UnitTypeId.MARINE, 50.0, 50.0, owner_id=1)
-    far_ling = _make_unit(2, UnitTypeId.ZERGLING, 99.0, 99.0, owner_id=2)
-    near_ling = _make_unit(3, UnitTypeId.ZERGLING, 50.5, 50.0, owner_id=2)
-    bot, _ = _bot(marine, far_ling, near_ling)
+    # Inside the shooter crop, farther than the other ling. The selected tag wins.
+    chosen = _make_unit(2, UnitTypeId.ZERGLING, 62.0, 50.0, owner_id=2)
+    nearer = _make_unit(3, UnitTypeId.ZERGLING, 50.5, 50.0, owner_id=2)
+    bot, _ = _bot(marine, chosen, nearer)
 
-    # Policy chose the *far* zergling. Agent-faithful actuation must honour it
-    # instead of retargeting to the nearest enemy.
     _apply(bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=2)
 
-    marine.attack.assert_called_once_with(far_ling)
+    marine.attack.assert_called_once_with(chosen)
     bot.do.assert_called_once()
     assert 1 in bot._command_attempt_tags["attack"]
     assert bot.last_action_was_move_by_unit[1] is False
 
 
+def test_attack_unit_does_not_issue_outside_shooter_fovea():
+    marine = _make_unit(1, UnitTypeId.MARINE, 50.0, 50.0, owner_id=1)
+    far_ling = _make_unit(2, UnitTypeId.ZERGLING, 99.0, 99.0, owner_id=2)
+    bot, _ = _bot(marine, far_ling)
+
+    ordered = _apply(
+        bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=2
+    )
+
+    marine.attack.assert_not_called()
+    bot.do.assert_not_called()
+    assert ordered == []
+
+
 def test_attack_unit_swarmhost_spawns_locusts_at_target_position():
     host = _make_unit(1, UnitTypeId.SWARMHOSTMP, 40.0, 40.0, owner_id=1)
-    enemy = _make_unit(2, UnitTypeId.ZEALOT, 60.0, 70.0, owner_id=2)
+    enemy = _make_unit(2, UnitTypeId.ZEALOT, 50.0, 40.0, owner_id=2)
     cast_cmd = object()
     host.return_value = cast_cmd
     bot, _ = _bot(host, enemy)
 
     _apply(bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=2)
 
-    host.assert_called_once_with(AbilityId.EFFECT_SPAWNLOCUSTS, Point2((60.0, 70.0)))
+    host.assert_called_once_with(AbilityId.EFFECT_SPAWNLOCUSTS, Point2((50.0, 40.0)))
     bot.do.assert_called_once_with(cast_cmd)
     host.attack.assert_not_called()
 
@@ -386,6 +399,31 @@ def test_unit_target_command_with_missing_target_issues_nothing():
     bot.do.assert_not_called()
     assert ordered == []
     assert bot._unit_last_order == {}
+
+
+def test_attack_unit_corruptor_caustic_sprays_a_building():
+    corruptor = _make_unit(1, UnitTypeId.CORRUPTOR, owner_id=1)
+    pylon = _make_unit(2, UnitTypeId.PYLON, owner_id=2, is_structure=True)
+    spray_cmd = object()
+    corruptor.return_value = spray_cmd
+    bot, _ = _bot(corruptor, pylon)
+
+    _apply(bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=2)
+
+    corruptor.assert_called_once_with(AbilityId.CAUSTICSPRAY_CAUSTICSPRAY, pylon)
+    bot.do.assert_called_once_with(spray_cmd)
+    corruptor.attack.assert_not_called()
+
+
+def test_attack_unit_corruptor_attacks_an_air_unit():
+    corruptor = _make_unit(1, UnitTypeId.CORRUPTOR, owner_id=1)
+    mutalisk = _make_unit(2, UnitTypeId.MUTALISK, owner_id=2)
+    bot, _ = _bot(corruptor, mutalisk)
+
+    _apply(bot, selected=[1], command_idx=CMD_ATTACK_UNIT, target_unit_tag=2)
+
+    corruptor.attack.assert_called_once_with(mutalisk)
+    corruptor.assert_not_called()
 
 
 def test_attack_unit_can_hard_target_enemy_pylon():

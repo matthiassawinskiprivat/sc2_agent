@@ -12,7 +12,7 @@ _CONFIG_DIR = Path(__file__).resolve().parents[1] / "config_universal"
 _ABILITY_TECH_UNITS = {
     "INFESTOR": "NEURALPARASITE",
     "INFESTORBURROWED": "NEURALPARASITE",
-    "BATTLECRUISER": "YAMATOCANNON",
+    "BATTLECRUISER": "BATTLECRUISERENABLESPECIALIZATIONS",
     "HIGHTEMPLAR": "PSISTORMTECH",
 }
 # Banshee cloak is also P1-only. Counting it for every dual-race mix would force
@@ -24,7 +24,7 @@ _CLOAK_RESEARCH_UNITS = {
 _SNIPE_RESEARCH_UNITS = {
     "INFESTOR": "NEURALPARASITE",
     "INFESTORBURROWED": "NEURALPARASITE",
-    "BATTLECRUISER": "YAMATOCANNON",
+    "BATTLECRUISER": "BATTLECRUISERENABLESPECIALIZATIONS",
 }
 
 
@@ -68,12 +68,41 @@ def _needs_reversed_sibling(name: str, cfg: dict) -> bool:
     return False
 
 
-def test_ability_tech_conflict_levels_have_reversed_sibling_with_flipped_p1():
-    """From snipe onward, each conflict level is followed by ``*_reversed``.
+# Phase-1 AoE matchups where player 2 needs a researched upgrade (Ghost cloak /
+# Stim, or Zerg burrow and speed). The Zerg mirror is one race, so it stays unsplit.
+_PHASE1_AOE_P2_UPGRADE = (
+    "aoe_high_templar_zealot_vs_marine_marauder",
+    "aoe_infestor_roach_vs_marine_marauder",
+    "aoe_zergling_infestor_vs_stalker_templar",
+    "aoe_zergling_roach_vs_high_templar_immortal",
+)
 
-    Pre-snipe AoE / heal-revisit stages stay unsplit so a pipeline restart can
-    CONTINUE_TRAINING past already-completed AoE without hitting empty reversed
-    siblings inserted mid-curriculum.
+
+def _assert_flipped_sibling(cm: ConfigManager, name: str) -> None:
+    cfg = _load(name)
+    rev = f"{name}_reversed"
+    assert rev in cm.levels, name
+    assert cm.levels.index(rev) == cm.levels.index(name) + 1, name
+
+    parent_pools = cfg["env"]["unit_pools"]
+    rev_pools = _load(rev)["env"]["unit_pools"]
+    parent_races = get_level_races(parent_pools)
+    rev_races = get_level_races(rev_pools)
+    assert len(parent_races) == 2
+    assert rev_races[0] == parent_races[1]
+    assert rev_races[1] == parent_races[0]
+
+    parent_steps = int(cfg["training"]["training_steps"])
+    rev_steps = int(_load(rev)["training"]["training_steps"])
+    assert parent_steps == rev_steps
+    assert parent_steps <= 250_000
+
+
+def test_ability_tech_conflict_levels_have_reversed_sibling_with_flipped_p1():
+    """Conflict levels are followed by ``*_reversed`` with the other race as player 1.
+
+    Phase-1 AoE splits cover Ghost cloak / Zerg burrow stuck on player 2.
+    The Zerg mirror, the heal revisit, and ctf_level_09 stay unsplit.
     """
     cm = ConfigManager(str(_CONFIG_DIR))
     snipe_start = cm.levels.index("snipe_ghost_marauder_vs_roach_hydra")
@@ -87,30 +116,17 @@ def test_ability_tech_conflict_levels_have_reversed_sibling_with_flipped_p1():
         if not _needs_reversed_sibling(name, cfg):
             continue
         conflict_parents.append(name)
-        rev = f"{name}_reversed"
-        assert rev in cm.levels, name
-        assert cm.levels.index(rev) == cm.levels.index(name) + 1, name
+        _assert_flipped_sibling(cm, name)
 
-        parent_pools = cfg["env"]["unit_pools"]
-        rev_pools = _load(rev)["env"]["unit_pools"]
-        parent_races = get_level_races(parent_pools)
-        rev_races = get_level_races(rev_pools)
-        assert len(parent_races) == 2
-        assert rev_races[0] == parent_races[1]
-        assert rev_races[1] == parent_races[0]
-
-        parent_steps = int(cfg["training"]["training_steps"])
-        rev_steps = int(_load(rev)["training"]["training_steps"])
-        assert parent_steps == rev_steps
-        # Split halves a 250k budget; allow other base budgets but require equality.
-        assert parent_steps <= 250_000
+    for name in _PHASE1_AOE_P2_UPGRADE:
+        _assert_flipped_sibling(cm, name)
 
     assert "snipe_ghost_marauder_vs_roach_hydra" in conflict_parents
     assert "snipe_ghost_marauder_vs_roach_hydra_reversed" in cm.levels
     assert "scenario_queen_vs_banshee" in conflict_parents
     assert "scenario_queen_vs_banshee_reversed" in cm.levels
     assert "scenario_banshee_viking_vs_voidray_carrier" in conflict_parents
-    assert "aoe_zergling_infestor_vs_stalker_templar_reversed" not in cm.levels
+    assert "aoe_infestor_ling_vs_infestor_ling_reversed" not in cm.levels
     assert "scenario_queen_vs_battlecruiser_reversed" not in cm.levels
     assert "ctf_level_09_reversed" not in cm.levels
     assert len(conflict_parents) >= 18

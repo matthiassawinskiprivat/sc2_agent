@@ -34,7 +34,9 @@ from src.utils.unit_feature_helpers import (
     resolve_air_hostile_at_point,
     SNIPE_CAST_ANIMATION_SECONDS,
     SNIPE_CAST_RANGE,
+    unit_in_tactical_fovea,
     unit_is_neuraled,
+    uses_caustic_spray_on_structures,
     uses_purification_nova_for_attack,
     uses_spawn_locusts_for_attack,
 )
@@ -53,7 +55,10 @@ from src.agent.ctf_economic_rewards import (
     build_value_snapshot,
     apply_neural_reward_buckets,
     objective_credit_scale,
+    pylon_fraction_credit,
+    pylon_max_vitality,
     retained_value_fraction,
+    snapshot_total_value,
     unit_economic_value,
     value_delta,
 )
@@ -180,6 +185,10 @@ class CaptureTheFlagBot(BotAI):
         # always were. See src/agent/ctf_economic_rewards.py.
         self.prev_enemy_value_snapshot: Dict[int, Dict[int, UnitValue]] = {1: {}, 2: {}}
         self.prev_own_value_snapshot: Dict[int, Dict[int, UnitValue]] = {1: {}, 2: {}}
+        # Frozen at ``prime_combat_reward_baselines``: owner → spawn army value /
+        # pylon max vitality. Pylon damage pays fraction × scale × army value.
+        self._episode_army_value: Dict[int, float] = {1: 0.0, 2: 0.0}
+        self._episode_pylon_max_vitality: Dict[int, float] = {1: 0.0, 2: 0.0}
         # Per-step economic telemetry, popped by the env for TensorBoard.
         self._step_economic_metrics: Dict[str, float] = dict(EMPTY_ECONOMIC_METRICS)
         self.prev_dist_to_pylon = {1: None, 2: None}
@@ -344,6 +353,8 @@ class CaptureTheFlagBot(BotAI):
         self.prev_enemy_combat_snapshot = {1: {}, 2: {}}
         self.prev_enemy_value_snapshot = {1: {}, 2: {}}
         self.prev_own_value_snapshot = {1: {}, 2: {}}
+        self._episode_army_value = {1: 0.0, 2: 0.0}
+        self._episode_pylon_max_vitality = {1: 0.0, 2: 0.0}
         self._step_economic_metrics = dict(EMPTY_ECONOMIC_METRICS)
         self.prev_dist_to_pylon = {1: None, 2: None}
         self.prev_dist_per_unit = {}
@@ -357,6 +368,7 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_dist_to_defend_pylon = {}
         self._pre_action_vitality = {}
         self._step_aoe_land_value = 0.0
+        self._detection_paid_tags = set()
         self.last_action_was_move_by_unit = {}
         self.last_action_was_attack_by_unit = {}
         self._pre_action_attacked_prev_step = {}
@@ -390,6 +402,7 @@ class CaptureTheFlagBot(BotAI):
         econ = EconomicRewardConfig.from_rewards_conf(
             self.training_conf.get("rewards", {})
         )
+        self._detection_paid_tags = set()
         for p_id in (1, 2):
             own_units, enemy_units, own_structs, enemy_structs = self._perspective_unit_groups(
                 p_id
@@ -407,6 +420,15 @@ class CaptureTheFlagBot(BotAI):
                 enemy_units,
                 config=econ,
                 include_filter=counts_for_combat_hp_reward,
+            )
+            # Freeze spawn army value by SC2 owner so pylon credit stays proportional
+            # to the army that was fielded, not the remnants after the fight starts.
+            enemy_owner = 2 if p_id == 1 else 1
+            self._episode_army_value[p_id] = snapshot_total_value(
+                self.prev_own_value_snapshot[p_id]
+            )
+            self._episode_army_value[enemy_owner] = snapshot_total_value(
+                self.prev_enemy_value_snapshot[p_id]
             )
             self.prev_own_units_health[p_id] = self._mobile_combat_hp_sum(
                 own_units, include_filter=counts_for_combat_hp_reward
@@ -436,9 +458,13 @@ class CaptureTheFlagBot(BotAI):
             enemy_hp = 0.0
             if own_pylon is not None:
                 own_hp = float(own_pylon.health) + float(getattr(own_pylon, "shield", 0.0) or 0.0)
+                self._episode_pylon_max_vitality[p_id] = pylon_max_vitality(own_pylon)
             if enemy_pylon is not None:
                 enemy_hp = float(enemy_pylon.health) + float(
                     getattr(enemy_pylon, "shield", 0.0) or 0.0
+                )
+                self._episode_pylon_max_vitality[enemy_owner] = pylon_max_vitality(
+                    enemy_pylon
                 )
             if p_id == 1:
                 self.prev_pylon_health[1] = own_hp
@@ -643,13 +669,15 @@ class CaptureTheFlagBot(BotAI):
         ``heal_unit`` needs a ready healer *and* a wounded compatible ally,
         ``load_unit`` needs a load-capable actor *and* a compatible partner,
         ``attack_unit`` / ``attack_local`` need a weapon-ready attacker,
-        ``attack_unit`` also needs a visible **mobile** hostile, ``attack_local`` /
+        ``attack_unit`` also needs a hostile inside that attacker's tactical
+        crop, ``attack_local`` /
         ``aoe_local`` a mobile *or building* within tactical half-width of any
         living ally (``engage_enemy_mask`` — buildings are not pointer slots but
         spatial attack already hard-targets them), ``aoe_local`` also a ready
         caster (Viper needs air in that engage fovea), ``snipe`` a ready snipe
-        caster *and* an eligible hostile (bio for Ghost, energy unit for
-        Feedback, any mobile for Yamato / Neural),
+        caster *and* an eligible hostile inside that caster's tactical crop
+        (bio for Ghost, energy unit for Feedback, any mobile for Yamato /
+        Neural),
         ``unload_local`` a loaded transport, ``cloak_burrow`` a unit that can
         conceal, and ``uncloak_unburrow`` a currently concealed unit.
         """
@@ -926,8 +954,9 @@ class CaptureTheFlagBot(BotAI):
         there is no cell geometry to get wrong and no hidden retargeting: the
         order goes to exactly that tag. Per-caster legality is still re-checked
         (an SCV cannot repair a Marine; a full Medivac cannot load; Ghost Snipe
-        needs bio), because the observation's target masks only guarantee *some*
-        actor in the squad matches.
+        needs bio; a new snipe or ``attack_unit`` target must lie in that
+        actor's tactical crop), because the observation's target masks only
+        guarantee *some* actor in the squad matches.
 
         Returns tags that received an order or are held under an in-flight
         heal/snipe/aoe lock. A null/missing target, or a per-caster no-op
@@ -998,18 +1027,29 @@ class CaptureTheFlagBot(BotAI):
         Weaponless casters whose spatial attack already remaps (Swarm Host →
         Spawn Locusts, Disruptor → Purification Nova) cast at ``target.position``
         so ``attack_unit`` stays agent-faithful to the same ability mapping.
+        A Corruptor aimed at a building casts Caustic Spray, matching the
+        spatial attack on a structure footprint.
 
-        Returns ``True`` when an order was issued.
+        Returns ``True`` when an order was issued. A target outside this
+        shooter's tactical crop is refused so the unit is not walked across
+        the map.
         """
         if int(getattr(target, "owner_id", 0) or 0) == int(
             getattr(unit, "owner_id", 0) or 0
         ) and not unit_is_neuraled(target):
+            return False
+        if not unit_in_tactical_fovea(unit, target):
             return False
         if uses_spawn_locusts_for_attack(unit):
             self.do(unit(AbilityId.EFFECT_SPAWNLOCUSTS, target.position))
             return True
         if uses_purification_nova_for_attack(unit):
             self.do(unit(AbilityId.EFFECT_PURIFICATIONNOVA, target.position))
+            return True
+        if uses_caustic_spray_on_structures(unit) and bool(
+            getattr(target, "is_structure", False)
+        ):
+            self.do(unit(AbilityId.CAUSTICSPRAY_CAUSTICSPRAY, target))
             return True
         self.do(unit.attack(target))
         return True
@@ -1280,7 +1320,11 @@ class CaptureTheFlagBot(BotAI):
         """
         continuing = CaptureTheFlagBot._continuing_snipe_lock(self, unit, target)
         issued = issue_snipe_on_unit(
-            self, unit, target, stamp_cooldown=not continuing
+            self,
+            unit,
+            target,
+            stamp_cooldown=not continuing,
+            require_fovea=not continuing,
         )
         if issued:
             CaptureTheFlagBot._record_snipe_cast(self, unit, target)
@@ -2280,17 +2324,23 @@ class CaptureTheFlagBot(BotAI):
         r_conf: dict,
         econ: EconomicRewardConfig,
     ) -> float:
-        """Pay for every concealed hostile currently inside an allied detector disc.
+        """Pay once per concealed hostile when it first enters an allied detector disc.
 
-        The payout is ``detection_reward ×`` the sum of those units' economic
-        values, so two Dark Templar in range pay twice one, and a Banshee pays
-        more than a Zergling. Visible (uncloaked/unburrowed) hostiles never
-        count. Proto ``is_detected`` alone is not enough — the detector has to
-        actually cover them.
+        The payout is ``detection_reward ×`` that unit's economic value, so two
+        Dark Templar pay twice one, and a Banshee pays more than a Zergling.
+        Paying the full value on every later step made keeping them alive worth
+        more than killing them or winning (a Dark Templar is ~3 per step versus
+        a win of 15), so the policy stalled the zone clear and timed out as a
+        loss. Visible hostiles never count. The detector has to actually cover
+        them.
         """
         detect_scale = float(r_conf.get("detection_reward", 0.0))
         if detect_scale == 0.0:
             return 0.0
+        paid = getattr(self, "_detection_paid_tags", None)
+        if not isinstance(paid, set):
+            paid = set()
+            self._detection_paid_tags = paid
         reward = 0.0
         for unit in enemy_units or []:
             if unit is None or getattr(unit, "is_structure", False) is True:
@@ -2299,6 +2349,10 @@ class CaptureTheFlagBot(BotAI):
                 continue
             if not self._allied_detector_covers(unit, own_units, own_structs):
                 continue
+            tag = getattr(unit, "tag", None)
+            if tag is None or tag in paid:
+                continue
+            paid.add(tag)
             reward += detect_scale * unit_economic_value(
                 unit,
                 vespene_weight=econ.vespene_weight,
@@ -2427,25 +2481,6 @@ class CaptureTheFlagBot(BotAI):
         
         curr_pylon_hp_map = {1: p1_pylon_hp, 2: p2_pylon_hp}
         
-        # Pylon Damage Rewards (Signal for acting player)
-        if curr_pylon_hp_map[enemy_global_idx] < self.prev_pylon_health[enemy_global_idx]:
-            reward += (self.prev_pylon_health[enemy_global_idx] - curr_pylon_hp_map[enemy_global_idx]) * r_conf.get("pylon_damage_reward", 2.0)
-            
-        if curr_pylon_hp_map[own_global_idx] < self.prev_pylon_health[own_global_idx]:
-            # Pylon protection: a defender squad pays a heavier price for letting
-            # its own pylon be hit, since protecting it *is* the defender's job.
-            pylon_penalty = float(r_conf.get("pylon_damage_penalty", 2.0))
-            if self._squad_is_defend(squad_tags, self.unit_command_map):
-                pylon_penalty *= float(r_conf.get("defender_pylon_penalty_scale", 1.5))
-            reward -= (
-                self.prev_pylon_health[own_global_idx]
-                - curr_pylon_hp_map[own_global_idx]
-            ) * pylon_penalty
-
-        # Update global health tracking
-        self.prev_pylon_health[1] = p1_pylon_hp
-        self.prev_pylon_health[2] = p2_pylon_hp
-        
         # 2. Combat Rewards — resource-weighted economic trades
         #
         # Value flows, not hit points: damage pays the *fraction of a unit's
@@ -2457,6 +2492,49 @@ class CaptureTheFlagBot(BotAI):
         squad_is_melee = self._squad_has_melee_unit(squad_tags, mobile_enemies_for_melee)
         econ = EconomicRewardConfig.from_rewards_conf(r_conf)
         metrics = dict(EMPTY_ECONOMIC_METRICS)
+
+        # Pylon damage — same economic units as army trades. Full destroy of the
+        # enemy pylon pays ``pylon_value_scale × enemy_spawn_army_value ×
+        # attacker_enemy_value_reward`` (frozen at prime). Own-pylon hits use
+        # ``pylon_own_value_penalty`` (× defender scale when defending).
+        army_ref = getattr(self, "_episode_army_value", None) or {}
+        pylon_max = getattr(self, "_episode_pylon_max_vitality", None) or {}
+        enemy_delta = (
+            self.prev_pylon_health[enemy_global_idx] - curr_pylon_hp_map[enemy_global_idx]
+        )
+        if enemy_delta > 0.0:
+            max_vit = float(pylon_max.get(enemy_global_idx, 0.0) or 0.0)
+            if max_vit <= 1e-9:
+                max_vit = float(self.prev_pylon_health[enemy_global_idx])
+            reward += pylon_fraction_credit(
+                enemy_delta,
+                max_vitality=max_vit,
+                reference_army_value=float(army_ref.get(enemy_global_idx, 0.0) or 0.0),
+                value_scale=econ.pylon_value_scale,
+                coefficient=econ.attacker_enemy_value_reward,
+            )
+
+        own_delta = (
+            self.prev_pylon_health[own_global_idx] - curr_pylon_hp_map[own_global_idx]
+        )
+        if own_delta > 0.0:
+            max_vit = float(pylon_max.get(own_global_idx, 0.0) or 0.0)
+            if max_vit <= 1e-9:
+                max_vit = float(self.prev_pylon_health[own_global_idx])
+            own_coeff = float(econ.pylon_own_value_penalty)
+            if self._squad_is_defend(squad_tags, self.unit_command_map):
+                own_coeff *= float(econ.defender_pylon_penalty_scale)
+            reward -= pylon_fraction_credit(
+                own_delta,
+                max_vitality=max_vit,
+                reference_army_value=float(army_ref.get(own_global_idx, 0.0) or 0.0),
+                value_scale=econ.pylon_value_scale,
+                coefficient=own_coeff,
+            )
+
+        # Update global health tracking
+        self.prev_pylon_health[1] = p1_pylon_hp
+        self.prev_pylon_health[2] = p2_pylon_hp
         squad_is_defend = self._squad_is_defend(squad_tags, self.unit_command_map)
 
         # Permanent army only (timed summons carry no purchased value). Shots

@@ -97,8 +97,7 @@ _HEAL_ZERO = {
     "defender_own_value_penalty": 0.0,
     "defender_retained_value_bonus": 0.0,
     "melee_multiplier": 0.0,
-    "pylon_damage_reward": 0.0,
-    "pylon_damage_penalty": 0.0,
+    "pylon_value_scale": 0.0,
     "distance_multiplier": 0.0,
     "step_penalty": 0.0,
 }

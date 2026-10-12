@@ -1,134 +1,154 @@
-import pytest
+"""Fog-of-war behaviour for CTF pylon HP and distance shaping."""
 from unittest.mock import MagicMock
-from sc2.position import Point2
+
+import pytest
 from sc2.ids.unit_typeid import UnitTypeId
+from sc2.position import Point2
+
 from src.agent.ctf_bot import CaptureTheFlagBot
+from src.agent.ctf_economic_rewards import (
+    DEFAULT_VALUE_NORM,
+    DEFAULT_VESPENE_WEIGHT,
+)
 
-class MockUnit:
-    def __init__(self, tag, pos, is_structure=False):
-        self.tag = tag
-        self.position = pos
-        self.is_structure = is_structure
-        self.health = 100
-        self.shield = 50
-        self.unit_type = UnitTypeId.ZERGLING
 
-    def distance_to(self, other):
-        if hasattr(other, 'position'):
-            return self.position.distance_to(other.position)
-        return self.position.distance_to(other)
+def econ_value(minerals: float, vespene: float = 0.0) -> float:
+    return (minerals + DEFAULT_VESPENE_WEIGHT * vespene) / DEFAULT_VALUE_NORM
 
-@pytest.fixture
-def bot():
-    training_conf = {"rewards": {"distance_multiplier": 1.0, "pylon_damage_reward": 5.0, "pylon_damage_penalty": 5.0}}
-    bot = CaptureTheFlagBot(player_id=1, training_conf=training_conf)
-    
-    bot.prev_pylon_health = {1: 20.0, 2: 20.0}
-    bot.prev_enemy_units_health = {1: 0, 2: 0}
-    bot.prev_own_units_health = {1: 0, 2: 0}
-    
-    # Mocking collections
-    empty = MagicMock()
-    empty.exists = False
-    empty.first = None
-    empty.__iter__.return_value = []
-    
-    # Own structures (Pylon alive)
-    own_pylon = MockUnit(999, Point2((0,0)), is_structure=True)
-    own_pylon.health = 10.0
-    own_pylon.shield = 10.0 # Total 20
-    
-    own_structs = MagicMock()
-    own_structs.exists = True
-    own_structs.first = own_pylon
-    own_structs.__iter__.return_value = [own_pylon]
-    own_structs.return_value = own_structs # Handle filtering
-    
-    bot.structures = MagicMock(return_value=own_structs)
-    
-    # Enemy structures (Default empty/hidden)
-    bot.enemy_structures = MagicMock(return_value=empty)
-    
-    bot.units = MagicMock(return_value=empty)
-    bot.enemy_units = MagicMock(return_value=empty)
-    bot.all_units = MagicMock()
-    
-    bot.is_visible = MagicMock(return_value=True) # Default
+
+ZERGLING = econ_value(25, 0)
+ENEMY_COEFF = 3.0
+PYLON_MAX = 40.0
+
+
+def _make_unit(tag, pos, *, type_id=UnitTypeId.ZERGLING, owner_id=1, is_structure=False):
+    u = MagicMock()
+    u.tag = tag
+    u.position = pos
+    u.owner_id = owner_id
+    u.is_structure = is_structure
+    u.health = PYLON_MAX if is_structure else 35.0
+    u.health_max = PYLON_MAX if is_structure else 35.0
+    u.shield = 0.0
+    u.shield_max = 0.0
+    u.type_id = UnitTypeId.PYLON if is_structure else type_id
+    u.passengers = []
+    return u
+
+
+def _make_bot(**reward_overrides):
+    rewards = {
+        "distance_multiplier": 1.0,
+        "pylon_value_scale": 1.0,
+        "pylon_own_value_penalty": 0.0,
+        "attacker_enemy_value_reward": ENEMY_COEFF,
+        "attacker_own_value_penalty": 0.0,
+        "defender_enemy_value_reward": 0.0,
+        "defender_own_value_penalty": 0.0,
+        "melee_multiplier": 0.0,
+        "heal_value_reward": 0.0,
+        "step_penalty": 0.0,
+        "cooldown_retreat_scale": 0.0,
+        "defender_zone_leave_penalty": 0.0,
+        "detection_reward": 0.0,
+        "aoe_land_reward": 0.0,
+        "objective_credit_min_scale": 1.0,
+    }
+    rewards.update(reward_overrides)
+    bot = CaptureTheFlagBot(
+        player_id=1,
+        training_conf={
+            "agent_architecture": "squad",
+            "action_heads": ["move"],
+            "categorical_heads": [],
+            "rewards": rewards,
+        },
+    )
+    bot.unit_command_map = {}
+    bot.unit_target_map = {}
+    bot.prev_dist_per_squad = {}
+    bot.enemy_pylon_pos = {1: None, 2: None}
     return bot
 
-def test_distance_reward_fog_of_war(bot):
-    """
-    Test distance reward works when pylon is hidden (via persistent position).
-    EXPECTED TO FAIL on current codebase: The bot currently skips reward if pylon is not visible.
-    """
-    pylon_pos = Point2((50, 50))
-    unit_tag = 101
-    
-    # 1. Setup Persistent Position (simulate previously seen)
+
+def test_distance_reward_fog_of_war():
+    """Attacker CoM distance shaping uses the persistent enemy-pylon position in fog."""
+    bot = _make_bot(pylon_value_scale=0.0, attacker_enemy_value_reward=0.0)
+    pylon_pos = Point2((50.0, 50.0))
+    start_pos = Point2((10.0, 10.0))
+    closer_pos = Point2((20.0, 20.0))
+
+    own = _make_unit(101, closer_pos, type_id=UnitTypeId.REAPER, owner_id=1)
+    own_pylon = _make_unit(888, Point2((0.0, 0.0)), owner_id=1, is_structure=True)
+    enemy_pylon = _make_unit(999, pylon_pos, owner_id=2, is_structure=True)
+
+    bot.units = [own]
+    bot.enemy_units = []
+    bot.structures = [own_pylon]
+    bot.enemy_structures = [enemy_pylon]
+    bot.unit_command_map = {101: "attack"}
+    bot.active_unit_tag = 101
+    bot.prime_combat_reward_baselines()
+
+    # Hide the enemy pylon but keep the remembered objective.
+    bot.enemy_structures = []
     bot.enemy_pylon_pos[1] = pylon_pos
-    
-    # 2. Setup Enemy Pylon MISSING from observation (Fog)
-    bot.enemy_structures.return_value.exists = False
-    
-    # Mock Not Visible (Fog)
-    bot.is_visible.side_effect = lambda p: False if p == pylon_pos else True
-    
-    # 3. Setup Active Unit
-    start_pos = Point2((10, 10))
-    closer_pos = Point2((20, 20))
-    unit = MockUnit(unit_tag, closer_pos)
-    bot.active_unit_tag = unit_tag
-    bot.all_units.find_by_tag.return_value = unit
-    
-    # 4. Setup Prev Distance
-    bot.prev_dist_per_unit[unit_tag] = start_pos.distance_to(pylon_pos)
-    
-    # Execute
-    reward = bot.calculate_reward()
-    
-    # Assert
+    bot.is_visible = MagicMock(return_value=False)
+    bot.prev_dist_per_squad[(1, "attack")] = start_pos.distance_to(pylon_pos)
+
+    reward = bot.calculate_squad_step_reward([101], perspective_player_id=1)
     dist_change = start_pos.distance_to(pylon_pos) - closer_pos.distance_to(pylon_pos)
     assert reward == pytest.approx(dist_change * 1.0)
 
-def test_hp_reward_fog_of_war(bot):
-    """
-    Test NO HP reward when pylon is missing but position is NOT visible (Hidden).
-    EXPECTED TO FAIL on current codebase: The bot incorrectly thinks HP dropped to 0.
-    """
-    pylon_pos = Point2((50, 50))
-    bot.enemy_pylon_pos[1] = pylon_pos
-    bot.prev_pylon_health[2] = 20.0
-    
-    # Enemy Pylon Missing
-    bot.enemy_structures.return_value.exists = False
-    
-    # Position NOT Visible
-    bot.is_visible.side_effect = lambda p: False if p == pylon_pos else True
-    
-    reward = bot.calculate_reward()
-    
-    # Should maintain previous HP, so reward is 0. 
-    # Current code gives (20-0)*5 = 100
-    assert reward == 0.0
-    assert bot.prev_pylon_health[2] == 20.0
 
-def test_hp_reward_pylon_dead(bot):
-    """
-    Test HP reward triggers when pylon is missing AND position IS visible (Confirmed Dead).
-    This should PASS on both versions, but ensures we don't break the valid destruction case.
-    """
-    pylon_pos = Point2((50, 50))
+def test_hp_reward_fog_of_war():
+    """Missing enemy pylon in fog must not count as destroyed."""
+    bot = _make_bot()
+    pylon_pos = Point2((50.0, 50.0))
+    own = _make_unit(101, Point2((0.0, 0.0)), type_id=UnitTypeId.REAPER, owner_id=1)
+    enemy = _make_unit(50, Point2((40.0, 40.0)), type_id=UnitTypeId.ZERGLING, owner_id=2)
+    own_pylon = _make_unit(888, Point2((0.0, 0.0)), owner_id=1, is_structure=True)
+    enemy_pylon = _make_unit(999, pylon_pos, owner_id=2, is_structure=True)
+
+    bot.units = [own, enemy]
+    bot.enemy_units = []
+    bot.structures = [own_pylon]
+    bot.enemy_structures = [enemy_pylon]
+    bot.unit_command_map = {101: "attack"}
+    bot.active_unit_tag = 101
+    bot.prime_combat_reward_baselines()
+
+    bot.enemy_structures = []
     bot.enemy_pylon_pos[1] = pylon_pos
-    bot.prev_pylon_health[2] = 20.0
-    
-    # Enemy Pylon Missing
-    bot.enemy_structures.return_value.exists = False
-    
-    # Position IS Visible
-    bot.is_visible.return_value = True
-    
-    reward = bot.calculate_reward()
-    
-    # Should update HP to 0, reward = 20 * 5.0 = 100
-    assert reward == 100.0
-    assert bot.prev_pylon_health[2] == 0.0
+    bot.is_visible = MagicMock(side_effect=lambda p: False if p == pylon_pos else True)
+
+    reward = bot.calculate_squad_step_reward([101], perspective_player_id=1)
+    assert reward == pytest.approx(0.0)
+    assert bot.prev_pylon_health[2] == pytest.approx(PYLON_MAX)
+
+
+def test_hp_reward_pylon_dead():
+    """Visible empty cell at the remembered pylon position = confirmed destroy."""
+    bot = _make_bot()
+    pylon_pos = Point2((50.0, 50.0))
+    own = _make_unit(101, Point2((0.0, 0.0)), type_id=UnitTypeId.REAPER, owner_id=1)
+    enemy = _make_unit(50, Point2((40.0, 40.0)), type_id=UnitTypeId.ZERGLING, owner_id=2)
+    own_pylon = _make_unit(888, Point2((0.0, 0.0)), owner_id=1, is_structure=True)
+    enemy_pylon = _make_unit(999, pylon_pos, owner_id=2, is_structure=True)
+
+    bot.units = [own, enemy]
+    bot.enemy_units = []
+    bot.structures = [own_pylon]
+    bot.enemy_structures = [enemy_pylon]
+    bot.unit_command_map = {101: "attack"}
+    bot.active_unit_tag = 101
+    bot.prime_combat_reward_baselines()
+    frozen = bot._episode_army_value[2]
+
+    bot.enemy_structures = []
+    bot.enemy_pylon_pos[1] = pylon_pos
+    bot.is_visible = MagicMock(return_value=True)
+
+    reward = bot.calculate_squad_step_reward([101], perspective_player_id=1)
+    assert reward == pytest.approx(ENEMY_COEFF * frozen)
+    assert bot.prev_pylon_health[2] == pytest.approx(0.0)

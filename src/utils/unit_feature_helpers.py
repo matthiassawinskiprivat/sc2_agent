@@ -188,6 +188,20 @@ _SNIPE_ABILITIES: dict = (
     else {}
 )
 
+# Burrowed creep tumors report ``is_structure=False``, so Yamato and Neural
+# would otherwise treat them as hostile mobiles.
+_SNIPE_EXCLUDED_TARGETS: frozenset = (
+    frozenset(
+        {
+            UnitTypeId.CREEPTUMOR,
+            UnitTypeId.CREEPTUMORBURROWED,
+            UnitTypeId.CREEPTUMORQUEEN,
+        }
+    )
+    if _SC2_AVAILABLE
+    else frozenset()
+)
+
 # Energy gate for ``snipe`` (Yamato is cooldown-only).
 _SNIPE_ENERGY_COST: dict = (
     {
@@ -202,11 +216,20 @@ _SNIPE_ENERGY_COST: dict = (
 )
 
 # Snipe spells that require research before the ability exists.
+# A frozenset means any one of those upgrades unlocks the spell.
+# Current ladder Yamato is ``BattlecruiserEnableSpecializations`` (76).
+# ``YamatoCannon`` (258) is the old id; ``debug_upgrade`` no longer grants it,
+# so a 258-only check left every Battlecruiser unable to snipe.
 _SNIPE_REQUIRED_UPGRADE: dict = (
     {
         UnitTypeId.INFESTOR: UpgradeId.NEURALPARASITE,
         UnitTypeId.INFESTORBURROWED: UpgradeId.NEURALPARASITE,
-        UnitTypeId.BATTLECRUISER: UpgradeId.YAMATOCANNON,
+        UnitTypeId.BATTLECRUISER: frozenset(
+            {
+                UpgradeId.YAMATOCANNON,
+                UpgradeId.BATTLECRUISERENABLESPECIALIZATIONS,
+            }
+        ),
     }
     if _SC2_AVAILABLE
     else {}
@@ -441,11 +464,11 @@ def unit_is_neuraled(unit: "Unit") -> bool:
 
 
 def neural_spell_role(unit: "Unit", perspective_player_id: Optional[int]) -> str:
-    """Who may cast with a Neural Parasite body from this squad's point of view.
+    """Who commands a Neural Parasite body from this squad's point of view.
 
     ``own`` — not neuralled, or the caller did not pass a perspective.
-    ``borrowed`` — live owner is this squad, so it may cast the stolen spells.
-    ``stolen_away`` — the body still sits in the original squad, which must not cast.
+    ``borrowed`` — live owner is this squad, so the body is in this pointer.
+    ``stolen_away`` — this squad spawned the body, but the other player controls it.
     """
     if perspective_player_id is None or not unit_is_neuraled(unit):
         return "own"
@@ -461,35 +484,50 @@ def neural_spell_role(unit: "Unit", perspective_player_id: Optional[int]) -> str
 def neural_command_allowed(
     unit: "Unit", perspective_player_id: Optional[int], head_name: str
 ) -> bool:
-    """Spell orders follow the live neural owner; other orders do not.
+    """True when this squad may issue ``head_name`` on ``unit``.
 
-    The controller may issue ``aoe_local`` / ``snipe`` on the stolen caster and
-    nothing else. The original squad keeps move and attack, but not those spells.
+    The player who stole the body may use every command that unit can perform
+    (move, attack, cloak, heal, load, ``aoe_local``, ``snipe``, and the rest).
+    Per-unit readiness still decides which of those heads do anything: a stolen
+    Ghost can cloak, a stolen Zealot cannot. The squad that lost the body
+    cannot order it.
     """
-    role = neural_spell_role(unit, perspective_player_id)
-    if role == "own":
-        return True
-    is_spell = "aoe" in str(head_name) or "snipe" in str(head_name)
-    if role == "borrowed":
-        return is_spell
-    return not is_spell
+    del head_name  # any configured head; unit type gates the rest
+    return neural_spell_role(unit, perspective_player_id) != "stolen_away"
 
 
-def unit_is_squad_spellcaster(unit: "Unit") -> bool:
-    """True when this type has an ``aoe_local`` or ``snipe`` ability."""
-    tid = getattr(unit, "type_id", None)
-    return tid in _AOE_ENERGY_COST or tid in _SNIPE_ENERGY_COST
+def native_tags_under_control(
+    native_tags: Sequence[int],
+    units_by_tag: Any,
+    perspective_player_id: int,
+) -> List[int]:
+    """Spawn tags this squad still commands.
+
+    A body under Neural Parasite whose live owner is the other player is left
+    out. It is commanded from the thief's pointer instead.
+    """
+    lookup = units_by_tag if isinstance(units_by_tag, dict) else {}
+    kept: List[int] = []
+    for tag in native_tags:
+        unit = lookup.get(int(tag))
+        if (
+            unit is not None
+            and neural_spell_role(unit, perspective_player_id) == "stolen_away"
+        ):
+            continue
+        kept.append(int(tag))
+    return kept
 
 
-def borrowed_neural_spellcaster_tags(
+def borrowed_neural_unit_tags(
     units: Sequence[Any],
     perspective_player_id: int,
     native_tags: Sequence[int],
 ) -> List[int]:
-    """Tags of spellcasters this player controls via Neural Parasite.
+    """Tags of units this player controls via Neural Parasite.
 
-    Native pool tags are excluded. Non-casters (a neuralled Zealot) are excluded
-    so they do not take a pointer slot the policy cannot cast with.
+    Native tags this squad still commands are excluded. Every stolen mobile is
+    included, not only spellcasters: a neuralled Zealot can still move and attack.
     """
     native = {int(tag) for tag in native_tags}
     found: List[int] = []
@@ -497,8 +535,6 @@ def borrowed_neural_spellcaster_tags(
         if unit is None or not unit_is_neuraled(unit):
             continue
         if getattr(unit, "is_structure", False):
-            continue
-        if not unit_is_squad_spellcaster(unit):
             continue
         if neural_spell_role(unit, perspective_player_id) != "borrowed":
             continue
@@ -513,38 +549,77 @@ def borrowed_neural_spellcaster_tags(
     return found
 
 
+def pointer_unit_priority(unit: Any) -> Tuple[int, float]:
+    """Fixed keep-rank for the squad pointer cap. Higher is kept.
+
+    Tier 2 is a purchased army unit, tier 1 is an unknown type, tier 0 is a
+    temporary summon (Locust, Broodling, …). Value is minerals plus 1.5 times
+    vespene of the purchased type, the same weight as combat rewards, so an
+    Ultralisk or High Templar outranks a Zergling. Current health and energy
+    are ignored: an empty caster is still the only unit that can cast.
+    """
+    from train.envs.ctf.game_data import (
+        get_unit_cost,
+        is_temporary_unit_type,
+        resolve_type_id,
+    )
+
+    if unit is None:
+        return (1, 0.0)
+    type_id = getattr(unit, "type_id", None)
+    raw = getattr(type_id, "value", type_id)
+    try:
+        canonical = resolve_type_id(int(raw))
+    except (TypeError, ValueError):
+        return (1, 0.0)
+    if is_temporary_unit_type(canonical):
+        return (0, 0.0)
+    minerals, vespene = get_unit_cost(canonical)
+    if minerals <= 0 and vespene <= 0:
+        return (1, 0.0)
+    return (2, float(minerals) + 1.5 * float(vespene))
+
+
 def squad_pointer_tags(
     native_tags: Sequence[int],
     borrowed_tags: Sequence[int],
     *,
     limit: Optional[int] = None,
+    units_by_tag: Optional[dict] = None,
 ) -> List[int]:
-    """Native squad tags first, then borrowed spellcasters in the leftover slots.
+    """Tags this squad commands, ordered by unit tag.
 
-    Appending keeps existing slot indices stable when a neural link starts.
-    A full squad does not drop a native unit to make room.
+    Slot order is the tag number, lowest first, so the observation and the
+    order that applies an action name the same unit. When more units are
+    alive than ``limit``, the lowest purchased-value units are left out.
+    Equal value keeps the smaller tag, so a newly spawned Zergling does not
+    evict one already in the pointer. Without unit objects the lowest tags
+    are kept.
     """
     if limit is None:
         from src.agent.squad_constants import MAX_SQUAD_UNITS
 
         limit = MAX_SQUAD_UNITS
-    native: List[int] = []
     seen = set()
-    for tag in sorted(int(t) for t in native_tags):
-        if tag in seen:
+    candidates: List[int] = []
+    for tag in list(native_tags) + list(borrowed_tags):
+        tag_i = int(tag)
+        if tag_i in seen:
             continue
-        seen.add(tag)
-        native.append(tag)
-        if len(native) >= limit:
-            return native
-    extra: List[int] = []
-    for tag in sorted(int(t) for t in borrowed_tags):
-        if tag in seen:
-            continue
-        seen.add(tag)
-        extra.append(tag)
-    room = limit - len(native)
-    return native + extra[:room]
+        seen.add(tag_i)
+        candidates.append(tag_i)
+    if len(candidates) <= limit:
+        return sorted(candidates)
+    lookup = units_by_tag if isinstance(units_by_tag, dict) else None
+
+    def _keep_key(tag: int) -> Tuple[int, float, int]:
+        if lookup is None:
+            return (0, 0.0, tag)
+        tier, value = pointer_unit_priority(lookup.get(tag))
+        return (-tier, -value, tag)
+
+    kept = sorted(candidates, key=_keep_key)[:limit]
+    return sorted(kept)
 
 
 def unit_neural_remaining(unit: "Unit") -> float:
@@ -587,8 +662,9 @@ def unit_can_snipe(
     """True when this unit can usefully issue ``snipe`` this step.
 
     Energy-gated for Ghost / Infestor / High Templar. Battlecruiser Yamato is
-    cooldown-only but requires ``YAMATOCANNON`` research. Infestor Neural
-    Parasite requires ``NEURALPARASITE``. When ``bot._available_abilities_by_tag``
+    cooldown-only and requires ``BATTLECRUISERENABLESPECIALIZATIONS`` (current
+    builds) or ``YAMATOCANNON`` (older builds). Infestor Neural Parasite
+    requires ``NEURALPARASITE``. When ``bot._available_abilities_by_tag``
     is present (opt-in ``query_spell_abilities``), the spell ability must appear
     there (CD only — energy is checked above). CTF skips that RPC by default.
     """
@@ -599,7 +675,9 @@ def unit_can_snipe(
         return False
     required = _SNIPE_REQUIRED_UPGRADE.get(tid)
     if required is not None:
-        if required not in (upgrades or frozenset()):
+        owned = upgrades or frozenset()
+        needed = required if isinstance(required, frozenset) else frozenset({required})
+        if needed.isdisjoint(owned):
             return False
     energy = float(getattr(unit, "energy", 0.0) or 0.0)
     if energy < float(_SNIPE_ENERGY_COST[tid]):
@@ -621,9 +699,13 @@ def snipe_target_is_eligible(caster: "Unit", target: "Unit") -> bool:
 
     Ghost Steady Targeting needs a biological non-structure; Feedback needs an
     energy unit; Neural / Yamato accept any hostile mobile (structures stay off
-    the enemy pointer). Ownership is checked by the caller.
+    the enemy pointer). Creep tumors are never legal, including the burrowed
+    form that the client does not mark as a structure. Ownership is checked by
+    the caller.
     """
     if caster is None or target is None:
+        return False
+    if getattr(target, "type_id", None) in _SNIPE_EXCLUDED_TARGETS:
         return False
     if bool(getattr(target, "is_structure", False)):
         return False
@@ -670,18 +752,29 @@ def snipe_same_owner_blocked(caster: "Unit", target: "Unit") -> bool:
 
 
 def issue_snipe_on_unit(
-    bot: Any, unit: "Unit", target: "Unit", *, stamp_cooldown: bool = True
+    bot: Any,
+    unit: "Unit",
+    target: "Unit",
+    *,
+    stamp_cooldown: bool = True,
+    require_fovea: bool = True,
 ) -> bool:
     """Issue the caster's ``snipe`` ability on *target*. Returns True if issued.
 
     ``stamp_cooldown`` records a local ready-at loop (Yamato / Snipe CD). Pass
     ``False`` on reissue so the timer is not reset every physics step.
+    ``require_fovea`` keeps a new cast inside the caster's tactical crop so the
+    unit is not ordered to walk across the map. A continuing prep lock passes
+    ``False``: the target may leave the crop during the channel, and dropping
+    the order would cancel Yamato.
     """
     if bot is None or unit is None or target is None:
         return False
     if snipe_same_owner_blocked(unit, target):
         return False
     if not snipe_target_is_eligible(unit, target):
+        return False
+    if require_fovea and not unit_in_tactical_fovea(unit, target):
         return False
     tid = getattr(unit, "type_id", None)
     ability = _SNIPE_ABILITIES.get(tid)
@@ -1186,9 +1279,16 @@ def resolve_enemy_at_point(
     Returns ``None`` when the cell is empty (caller should attack-move / P2 move).
     ``caster`` selects the hostile list (owner-filtered God-mode armies).
     """
+    allies = None
+    if caster is not None:
+        caster_owner = _player_owner_id(caster)
+        if caster_owner is not None:
+            allies = allied_candidates_for_owner(bot, caster_owner)
     best = None
     best_dist_sq = float("inf")
     for enemy in _enemy_attack_candidates(bot, caster):
+        if not weapons_can_hit_unit(enemy, allies):
+            continue
         dist_sq = _enemy_dist_sq_in_cell(enemy, target, cell_half)
         if dist_sq is None:
             continue
@@ -1824,8 +1924,9 @@ def _owner_can_afford_repair(bot: Any, unit: "Unit") -> bool:
             return int(getattr(bot, "minerals", 0) or 0) >= _SCV_REPAIR_MIN_MINERALS
         except (TypeError, ValueError):
             return False
-    # CTF heal mode grants P2 ``debug_free``; no per-owner mineral obs on the bot.
-    return True
+    # The client cannot spend another owner's minerals. ``debug_free`` would
+    # skip that check, but it also makes ability energy free.
+    return False
 
 
 async def refresh_healer_ability_cache(
@@ -1915,6 +2016,109 @@ def unit_is_immobile(unit: "Unit", upgrades: frozenset | None = None) -> bool:
         return False
     # Burrowed Zerg (and Widow Mine handled above): immobile without claws.
     return True
+
+
+def _strict_bool(unit: Any, name: str) -> Optional[bool]:
+    """Bool attribute, or None when missing or a non-bool mock."""
+    value = getattr(unit, name, None)
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def unit_is_concealed(unit: Any) -> bool:
+    """True for cloak or burrow. Non-bool mock attributes do not count."""
+    if unit is None:
+        return False
+    if _strict_bool(unit, "is_cloaked") is True or _strict_bool(unit, "is_burrowed") is True:
+        return True
+    type_name = getattr(getattr(unit, "type_id", None), "name", None)
+    return isinstance(type_name, str) and "BURROWED" in type_name.upper()
+
+
+def unit_is_detected(unit: Any) -> bool:
+    """True when weapons can connect on *unit*.
+
+    python-sc2 units have no ``is_detected``. ``Unit.is_revealed`` is
+    ``CloakState.CloakedDetected``. An explicit bool ``is_detected`` (tests)
+    wins. Concealed units with neither bit are undetected; visible units are
+    detected.
+    """
+    if not unit_is_concealed(unit):
+        return True
+    explicit = _strict_bool(unit, "is_detected")
+    if explicit is not None:
+        return explicit
+    revealed = _strict_bool(unit, "is_revealed")
+    if revealed is not None:
+        return revealed
+    return False
+
+
+def cloak_sensor_type_ids() -> FrozenSet:
+    """Observer / Raven / Overseer — free cloak-curriculum detectors, not army."""
+    if not _SC2_AVAILABLE:
+        return frozenset()
+    found = []
+    for name in (
+        "OBSERVER",
+        "OBSERVERSIEGEMODE",
+        "RAVEN",
+        "OVERSEER",
+        "OVERSEERSIEGEMODE",
+    ):
+        tid = getattr(UnitTypeId, name, None)
+        if tid is not None:
+            found.append(tid)
+    return frozenset(found)
+
+
+def unit_blocks_objective_clear(unit: Any) -> bool:
+    """False for a free cloak detector, which is not a fighting unit.
+
+    Cloak levels plant an Observer, Raven, or Overseer on the flag. The agent
+    often has nothing that can kill that sensor, so it must not hold the zone
+    shut. Cloaked and burrowed combat units still count like any other unit.
+    """
+    if unit is None:
+        return False
+    if getattr(unit, "type_id", None) in cloak_sensor_type_ids():
+        return False
+    return True
+
+
+def _detector_covers_point(detectors, x: float, y: float) -> bool:
+    for detector in detectors or []:
+        if detector is None:
+            continue
+        try:
+            rng = float(getattr(detector, "detect_range", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if rng <= 0.0:
+            continue
+        pos = getattr(detector, "position", None)
+        if pos is None:
+            continue
+        if (float(pos.x) - x) ** 2 + (float(pos.y) - y) ** 2 <= rng * rng + 1e-6:
+            return True
+    return False
+
+
+def weapons_can_hit_unit(unit: Any, allies=None) -> bool:
+    """False for concealed units that are not revealed and not in a detector disc.
+
+    A hard-target on those units is rejected by the engine and cancels the
+    previous attack-move, so the army stalls in front of a Dark Templar.
+    """
+    if unit is None:
+        return False
+    if not unit_is_concealed(unit) or unit_is_detected(unit):
+        return True
+    pos = getattr(unit, "position", None)
+    if pos is None:
+        return False
+    return _detector_covers_point(allies, float(pos.x), float(pos.y))
 
 
 def unit_can_cloak(unit: "Unit", upgrades: frozenset | None = None) -> bool:

@@ -148,8 +148,7 @@ def test_kill_penalty_scales_with_cargo_on_transport_death():
             "damage_reward": 0.0,
             "damage_penalty": 0.0,
             "heal_reward": 0.0,
-            "pylon_damage_reward": 0.0,
-            "pylon_damage_penalty": 0.0,
+            "pylon_value_scale": 0.0,
             "distance_multiplier": 0.0,
             "step_penalty": 0.0,
         }

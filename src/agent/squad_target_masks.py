@@ -169,43 +169,51 @@ def build_squad_legality(
             can_snipe = unit_can_snipe(unit, upgrades=upg, bot=bot)
             readiness["can_snipe"][slot] = float(can_snipe)
 
-        # Neural Parasite: the live owner borrows aoe/snipe only. The original
-        # squad keeps the slot for move/attack but must not spend the spell.
+        # A body stolen from this squad is not commanded here. The thief's
+        # pointer gets the normal per-unit masks: cloak, move, attack, spells.
         spell_role = neural_spell_role(unit, perspective_player_id)
         if spell_role == "stolen_away":
-            readiness["can_aoe"][slot] = 0.0
-            readiness["can_snipe"][slot] = 0.0
+            for key in (
+                "can_heal",
+                "can_repair",
+                "can_aoe",
+                "can_snipe",
+                "can_load",
+                "can_unload",
+                "can_cloak",
+            ):
+                readiness[key][slot] = 0.0
+            continue
 
         controllable = _is_controllable(unit)
         if not controllable:
             continue
 
-        borrowed = spell_role == "borrowed"
-        if not borrowed:
-            if compute_heal and (can_heal or can_repair):
-                heal_actor[slot] = 1.0
-                healers.append(unit)
-            if compute_load and can_load:
-                load_candidates.append((slot, unit))
-            if compute_attack and unit_can_attack(unit, upg):
-                attack_actor[slot] = 1.0
-            if compute_unload and can_unload:
-                unload_actor[slot] = 1.0
-            if compute_cloak and (can_cloak or unit_can_burrow(unit, upg)):
-                cloak_actor[slot] = 1.0
-            if compute_uncloak and unit_can_reveal(unit):
-                uncloak_actor[slot] = 1.0
-            if compute_move and not is_immobile:
-                move_actor[slot] = 1.0
-        if spell_role != "stolen_away":
-            if compute_aoe and can_aoe:
-                aoe_actor[slot] = 1.0
-            if compute_snipe and can_snipe:
-                snipe_actor[slot] = 1.0
+        if compute_heal and (can_heal or can_repair):
+            heal_actor[slot] = 1.0
+            healers.append(unit)
+        if compute_load and can_load:
+            load_candidates.append((slot, unit))
+        if compute_attack and unit_can_attack(unit, upg):
+            attack_actor[slot] = 1.0
+        if compute_unload and can_unload:
+            unload_actor[slot] = 1.0
+        if compute_cloak and (can_cloak or unit_can_burrow(unit, upg)):
+            cloak_actor[slot] = 1.0
+        if compute_uncloak and unit_can_reveal(unit):
+            uncloak_actor[slot] = 1.0
+        if compute_move and not is_immobile:
+            move_actor[slot] = 1.0
+        if compute_aoe and can_aoe:
+            aoe_actor[slot] = 1.0
+        if compute_snipe and can_snipe:
+            snipe_actor[slot] = 1.0
 
     if compute_heal and healers:
         for slot, unit in enumerate(slots):
             if unit is None or not unit_is_wounded(unit):
+                continue
+            if neural_spell_role(unit, perspective_player_id) == "stolen_away":
                 continue
             unit_tag = getattr(unit, "tag", None)
             for healer in healers:
@@ -218,6 +226,8 @@ def build_squad_legality(
     for actor_slot, actor in load_candidates:
         for target_slot, target in enumerate(slots):
             if target is None:
+                continue
+            if neural_spell_role(target, perspective_player_id) == "stolen_away":
                 continue
             if load_pair_is_eligible(actor, target):
                 load_actor[actor_slot] = 1.0
@@ -281,7 +291,8 @@ def build_squad_target_masks(
 
     ``snipe_actor_mask`` marks ready unit-target special casters (Ghost Snipe,
     Yamato, Neural Parasite, Feedback). Command gating for ``snipe`` also needs
-    ``snipe_target_mask`` (an eligible hostile for *some* ready caster).
+    ``snipe_target_mask`` (an eligible hostile inside *some* ready caster's
+    tactical crop).
 
     ``move_actor_mask`` marks controllable units that can walk (not sieged /
     burrowed immobile). Used to narrow move actors; the move command stays open.
@@ -312,13 +323,28 @@ def build_squad_target_masks(
     return masks
 
 
-def build_enemy_target_mask(enemies: Sequence[Optional[Any]]) -> np.ndarray:
-    """Legality of each visible-enemy slot as an ``attack_unit`` target."""
+def build_enemy_target_mask(
+    enemies: Sequence[Optional[Any]],
+    attackers: Sequence[Optional[Any]] | None = None,
+) -> np.ndarray:
+    """Enemy slots an ``attack_unit`` order may select.
+
+    A hostile is legal only when some ready attacker has it inside that
+    attacker's tactical crop (17-unit half-width, same box as the 32×32 local
+    map). Otherwise the engine walks the shooter across the map. No ready
+    attacker means every slot stays closed.
+    """
     mask = np.zeros(MAX_SQUAD_ENEMIES, dtype=np.float32)
+    ready = [u for u in (attackers or ()) if u is not None]
+    if not ready:
+        return mask
     for slot, unit in enumerate(list(enemies)[:MAX_SQUAD_ENEMIES]):
         if unit is None:
             continue
-        mask[slot] = 1.0
+        for attacker in ready:
+            if unit_in_tactical_fovea(attacker, unit):
+                mask[slot] = 1.0
+                break
     return mask
 
 
@@ -332,8 +358,11 @@ def build_snipe_target_mask(
 ) -> np.ndarray:
     """Enemy slots that **some** ready snipe caster in this squad can legally hit.
 
-    Per-caster biology / energy-bar rules are re-checked at actuation, matching
-    the heal_target_mask pattern for mixed squads.
+    The hostile must sit in that caster's tactical crop (same 17-unit half-width
+    as the 32×32 local map). A Battlecruiser must not be offered a squad on the
+    other side of the map: the engine would walk it there. Per-caster biology /
+    energy-bar rules are re-checked at actuation, matching the heal_target_mask
+    pattern for mixed squads.
 
     Pass ``casters`` (already-ready units from ``snipe_actor_mask``) to avoid a
     second ``unit_can_snipe`` pass over the squad.
@@ -359,6 +388,8 @@ def build_snipe_target_mask(
             if not snipe_target_is_eligible(caster, enemy):
                 continue
             if snipe_same_owner_blocked(caster, enemy):
+                continue
+            if not unit_in_tactical_fovea(caster, enemy):
                 continue
             mask[slot] = 1.0
             break

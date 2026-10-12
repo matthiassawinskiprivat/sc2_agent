@@ -64,25 +64,24 @@ def test_grants_all_resources_when_both_empty():
     bot.client.debug_all_resources.assert_awaited_once()
 
 
-def test_enables_free_for_opponent_once():
+def test_does_not_enable_debug_free():
+    """debug_free also waives ability energy, so Transfusion would not spend it."""
     bot = _bot()
 
     free = asyncio.run(apply_ctf_resources(bot=bot, free_enabled=False))
-    assert free is True
-    bot.client.debug_free.assert_awaited_once()
-    bot.client.debug_all_resources.assert_awaited_once()
 
-    free2 = asyncio.run(apply_ctf_resources(bot=bot, free_enabled=True))
-    assert free2 is True
-    assert bot.client.debug_free.await_count == 1
+    assert free is False
+    bot.client.debug_free.assert_not_awaited()
+    bot.client.debug_all_resources.assert_awaited_once()
 
 
 def test_grants_without_heal_mode_and_for_any_race():
     """Resources are unconditional — not gated on heal mode or Terran pools."""
     bot = _bot()
-    asyncio.run(apply_ctf_resources(bot=bot, free_enabled=False))
+    free = asyncio.run(apply_ctf_resources(bot=bot, free_enabled=False))
+    assert free is False
     bot.client.debug_all_resources.assert_awaited_once()
-    bot.client.debug_free.assert_awaited_once()
+    bot.client.debug_free.assert_not_awaited()
 
 
 def test_skips_topup_when_both_banks_at_or_above_floor():
@@ -104,6 +103,6 @@ def test_env_grants_resources_without_heal_mode():
     asyncio.run(env._apply_ctf_resources())
 
     env.bot.client.debug_all_resources.assert_awaited_once()
-    env.bot.client.debug_free.assert_awaited_once()
-    assert env._ctf_resource_free_enabled is True
+    env.bot.client.debug_free.assert_not_awaited()
+    assert env._ctf_resource_free_enabled is False
     env._refresh_bot_state.assert_awaited_once()

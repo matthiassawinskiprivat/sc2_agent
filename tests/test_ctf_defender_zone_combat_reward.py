@@ -56,8 +56,7 @@ def _make_pylon(tag, x, y, owner_id):
 
 def _make_bot(**reward_overrides) -> CaptureTheFlagBot:
     rewards = {
-        "pylon_damage_reward": 0.0,
-        "pylon_damage_penalty": 0.0,
+        "pylon_value_scale": 0.0,
         "attacker_enemy_value_reward": 0.0,
         "attacker_own_value_penalty": 0.0,
         "defender_enemy_value_reward": 0.0,
@@ -289,21 +288,33 @@ def test_defender_own_death_costs_value_outside_the_zone(trainee_pid):
 # ---------------------------------------------------------------------------
 
 def test_defender_pays_a_heavier_pylon_damage_penalty_than_an_attacker():
-    """Protecting the pylon is the defender's job, so letting it be hit costs more."""
+    """Protecting the pylon is the defender's job, so letting it be hit costs more.
+
+    Pylon credit is now spawn-army-scaled (see test_ctf_pylon_value_scale); the
+    defender still pays ``defender_pylon_penalty_scale`` on top of the base own
+    pylon coefficient.
+    """
     def _pylon_hit(role: str) -> float:
-        bot = _make_bot(pylon_damage_penalty=1.0, defender_pylon_penalty_scale=1.5)
+        bot = _make_bot(
+            pylon_value_scale=1.0,
+            pylon_own_value_penalty=1.0,
+            defender_pylon_penalty_scale=1.5,
+        )
         pylon = Point2((0.0, 0.0))
-        unit = _make_unit(101, 2.0, 0.0)
+        unit = _make_unit(101, 2.0, 0.0, type_id=UnitTypeId.HYDRALISK)
         bot.unit_command_map = {101: role}
         bot.unit_target_map = {101: pylon}
         bot.active_unit_tag = 101
         _seed(bot, [unit], [], pylon, trainee_pid=1)
-        bot.prev_pylon_health[1] = 20.0
-        bot.structures[0].health = 12.0  # own pylon took 8 damage
-        return bot.calculate_squad_step_reward([101], perspective_player_id=1)
+        army = bot._episode_army_value[1]
+        max_vit = bot._episode_pylon_max_vitality[1]
+        bot.structures[0].health = max_vit * 0.5  # 50% removed
+        return bot.calculate_squad_step_reward([101], perspective_player_id=1), army
 
-    assert _pylon_hit("attack") == pytest.approx(-8.0)
-    assert _pylon_hit("defend") == pytest.approx(-12.0)
+    attack_r, army = _pylon_hit("attack")
+    defend_r, _ = _pylon_hit("defend")
+    assert attack_r == pytest.approx(-0.5 * army)
+    assert defend_r == pytest.approx(-0.5 * 1.5 * army)
 
 
 def test_terminal_retained_value_bonus_scales_with_army_value_preserved():

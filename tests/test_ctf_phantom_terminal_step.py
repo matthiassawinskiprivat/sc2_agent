@@ -90,22 +90,25 @@ def _make_alive_pylon_group():
 # _compute_p1_terminal_reward
 # ---------------------------------------------------------------------------
 
-def test_p1_terminal_reward_p1_lost(env):
+def test_p1_terminal_reward_pylon_loss_alone_is_not_terminal(env):
+    env._has_combat_units = MagicMock(return_value=True)
+    env._enemy_objective_zone_cleared = MagicMock(return_value=False)
     r_conf = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
     result = env._compute_p1_terminal_reward(
         p1_lost=True, p2_lost=False, p1_army_lost=False, p2_army_lost=False,
         all_units_gone=False, timeout=False, r_conf=r_conf
     )
-    assert result == -5.0, "P1 loses when its pylon is destroyed"
+    assert result == 0.0, "Flag pylon loss alone no longer ends the episode"
 
 
-def test_p1_terminal_reward_p2_lost(env):
+def test_p1_terminal_reward_zone_clear_is_win(env):
+    env._enemy_objective_zone_cleared = MagicMock(return_value=True)
     r_conf = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
     result = env._compute_p1_terminal_reward(
-        p1_lost=False, p2_lost=True, p1_army_lost=False, p2_army_lost=False,
+        p1_lost=False, p2_lost=False, p1_army_lost=False, p2_army_lost=True,
         all_units_gone=False, timeout=False, r_conf=r_conf
     )
-    assert result == 15.0, "P1 wins when P2's pylon is destroyed"
+    assert result == 15.0, "P1 wins when the objective zone is fully cleared"
 
 
 def test_p1_terminal_reward_army_draw(env):
@@ -137,11 +140,13 @@ def test_p1_terminal_reward_timeout_no_attackers(env):
     assert result == -2.0, "Timeout without P1 attackers alive → draw penalty"
 
 
-def test_p1_terminal_reward_opponent_army_wipe_is_not_win(env):
-    """Wiping the opponent army alone must not award win_reward (pylon required)."""
+def test_p1_terminal_reward_enemy_pylon_alone_is_not_win(env):
+    """Destroying the enemy flag pylon alone must not award win_reward."""
+    env._has_combat_units = MagicMock(return_value=True)
+    env._enemy_objective_zone_cleared = MagicMock(return_value=False)
     r_conf = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
     result = env._compute_p1_terminal_reward(
-        p1_lost=False, p2_lost=False, p1_army_lost=False, p2_army_lost=True,
+        p1_lost=False, p2_lost=True, p1_army_lost=False, p2_army_lost=False,
         all_units_gone=False, timeout=False, r_conf=r_conf
     )
     assert result == 0.0
@@ -161,7 +166,7 @@ def test_p1_terminal_reward_own_army_wipe_is_loss(env):
 # ---------------------------------------------------------------------------
 
 def test_deferred_state_set_when_p1_wins_during_opponent_step(env):
-    """When P2's pylon is destroyed during the opponent's physics step, the
+    """When the enemy army is wiped during the opponent's physics step, the
     terminal state should be deferred and the step should return done=False."""
     env.training_conf["rewards"] = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
     env.unit_pools_config = [
@@ -169,13 +174,12 @@ def test_deferred_state_set_when_p1_wins_during_opponent_step(env):
         {"agent": False, "high_level_command": "defend"},
     ]
 
-    # P2's pylon is destroyed → P2 lost
     alive_group = _make_alive_pylon_group()
-    dead_group = _make_empty_pylon_group()
-    env.bot.structures.return_value = alive_group      # P1 pylon alive
-    env.bot.enemy_structures.return_value = dead_group  # P2 pylon destroyed
-    # Both armies still alive → no army-loss branch
-    env._has_combat_units = MagicMock(return_value=True)
+    env.bot.structures.return_value = alive_group
+    env.bot.enemy_structures.return_value = alive_group
+    # P1 army alive, P2 army wiped + zone cleared → attacker win.
+    env._has_combat_units = MagicMock(side_effect=lambda owner_id: owner_id == 1)
+    env._enemy_objective_zone_cleared = MagicMock(return_value=True)
 
     async def run():
         obs, reward, done, truncated, info = await env._finalize_squad_physics_step(
@@ -197,18 +201,20 @@ def test_deferred_state_set_when_p1_wins_during_opponent_step(env):
 
 
 def test_deferred_state_set_when_p1_loses_during_opponent_step(env):
-    """When P1's pylon is destroyed during the opponent's physics step."""
+    """When P1's army is wiped during the opponent's physics step."""
     env.training_conf["rewards"] = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
     env.unit_pools_config = [
         {"agent": True, "high_level_command": "defend"},
         {"agent": False, "high_level_command": "attack"},
     ]
 
-    dead_group = _make_empty_pylon_group()
     alive_group = _make_alive_pylon_group()
-    env.bot.structures.return_value = dead_group       # P1 pylon destroyed
-    env.bot.enemy_structures.return_value = alive_group # P2 pylon alive
-    env._has_combat_units = MagicMock(return_value=True)
+    env.bot.structures.return_value = alive_group
+    env.bot.enemy_structures.return_value = alive_group
+    # P1 army wiped, P2 army alive; zone clear lets the actor's step terminate
+    # so the deferred trainee path can apply P1's army-wipe loss.
+    env._has_combat_units = MagicMock(side_effect=lambda owner_id: owner_id == 2)
+    env._enemy_objective_zone_cleared = MagicMock(return_value=True)
 
     async def run():
         return await env._finalize_squad_physics_step(
@@ -280,13 +286,13 @@ def test_no_deferral_when_agent_step_terminates(env):
     ]
     env.squad_unit_tags = [(1, [100])]
     env.active_player_id = 1
-    env._has_combat_units = MagicMock(return_value=True)
+    # P2 army wiped + zone cleared → P1 wins.
+    env._has_combat_units = MagicMock(side_effect=lambda owner_id: owner_id == 1)
+    env._enemy_objective_zone_cleared = MagicMock(return_value=True)
 
-    # P2 pylon destroyed → P2 lost, P1 wins
     alive_group = _make_alive_pylon_group()
-    dead_group = _make_empty_pylon_group()
     env.bot.structures.return_value = alive_group
-    env.bot.enemy_structures.return_value = dead_group
+    env.bot.enemy_structures.return_value = alive_group
 
     async def run():
         return await env._finalize_squad_physics_step(
@@ -304,13 +310,14 @@ def test_no_deferral_when_agent_step_terminates(env):
 
 
 def test_p1_terminal_reward_swaps_when_perspective_is_p2(env):
+    """P2 trainee loses when its own army is wiped (perspective flip)."""
     r_conf = {"win_reward": 15.0, "loss_penalty": -5.0, "draw_penalty": -2.0}
     result = env._compute_p1_terminal_reward(
-        p1_lost=False, p2_lost=True, p1_army_lost=False, p2_army_lost=False,
+        p1_lost=False, p2_lost=False, p1_army_lost=False, p2_army_lost=True,
         all_units_gone=False, timeout=False, r_conf=r_conf,
         perspective_player_id=2,
     )
-    assert result == -5.0, "P2 trainee loses when its (P2) pylon is destroyed"
+    assert result == -5.0, "P2 trainee loses when its army is wiped"
 
 
 def test_no_deferral_when_p2_trainee_step_terminates(env):
@@ -324,12 +331,12 @@ def test_no_deferral_when_p2_trainee_step_terminates(env):
     ]
     env.squad_unit_tags = [(2, [200])]
     env.active_player_id = 2
-    env._has_combat_units = MagicMock(return_value=True)
+    # P2 army wiped → P2 trainee loss.
+    env._has_combat_units = MagicMock(side_effect=lambda owner_id: owner_id == 1)
 
     alive_group = _make_alive_pylon_group()
-    dead_group = _make_empty_pylon_group()
     env.bot.structures.return_value = alive_group
-    env.bot.enemy_structures.return_value = dead_group
+    env.bot.enemy_structures.return_value = alive_group
 
     async def run():
         return await env._finalize_squad_physics_step(
@@ -339,7 +346,7 @@ def test_no_deferral_when_p2_trainee_step_terminates(env):
     obs, reward, done, truncated, info = asyncio.run(run())
 
     assert done is True
-    assert reward == -5.0  # P2 trainee lost its pylon
+    assert reward == -5.0  # P2 trainee army wiped
     assert env._deferred_done is False
     assert info.get("deferred_terminal") is None
 
@@ -355,12 +362,13 @@ def test_deferred_when_opponent_p1_terminates_p2_trainee_episode(env):
     ]
     env.squad_unit_tags = [(1, [100])]
     env.active_player_id = 1
-    env._has_combat_units = MagicMock(return_value=True)
+    # P2 army wiped while P1 acts; zone clear terminates so P2 trainee loss defers.
+    env._has_combat_units = MagicMock(side_effect=lambda owner_id: owner_id == 1)
+    env._enemy_objective_zone_cleared = MagicMock(return_value=True)
 
     alive_group = _make_alive_pylon_group()
-    dead_group = _make_empty_pylon_group()
     env.bot.structures.return_value = alive_group
-    env.bot.enemy_structures.return_value = dead_group
+    env.bot.enemy_structures.return_value = alive_group
 
     async def run():
         return await env._finalize_squad_physics_step(
@@ -374,7 +382,7 @@ def test_deferred_when_opponent_p1_terminates_p2_trainee_episode(env):
     assert reward == 0.0
     assert info.get("deferred_terminal") is True
     assert env._deferred_done is True
-    assert env._deferred_p1_terminal_reward == -5.0  # P2 trainee lost pylon
+    assert env._deferred_p1_terminal_reward == -5.0  # P2 trainee army wiped
 
 
 def test_reset_clears_deferred_state(env):

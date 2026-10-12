@@ -176,16 +176,45 @@ def test_snipe_is_a_unit_target_head():
 
 def test_ghost_snipe_issues_steady_targeting_on_selected_tag():
     ghost = _make_unit(1, UnitTypeId.GHOST, owner_id=1)
-    far_bio = _make_unit(2, UnitTypeId.ZERGLING, 99.0, 99.0, owner_id=2, is_biological=True)
-    near_bio = _make_unit(3, UnitTypeId.HYDRALISK, 50.5, 50.0, owner_id=2, is_biological=True)
-    bot, agent = _bot(ghost, far_bio, near_bio)
+    # Inside the caster crop, farther than the other body. The selected tag wins.
+    chosen = _make_unit(2, UnitTypeId.ZERGLING, 62.0, 50.0, owner_id=2, is_biological=True)
+    nearer = _make_unit(3, UnitTypeId.HYDRALISK, 50.5, 50.0, owner_id=2, is_biological=True)
+    bot, agent = _bot(ghost, chosen, nearer)
 
     _apply_snipe(bot, selected=[1], target_unit_tag=2)
 
-    ghost.assert_called_once_with(AbilityId.EFFECT_GHOSTSNIPE, far_bio)
+    ghost.assert_called_once_with(AbilityId.EFFECT_GHOSTSNIPE, chosen)
     bot.do.assert_called_once()
     agent.convert_spatial_action_to_world.assert_not_called()
     assert 1 in bot._command_attempt_tags["snipe"]
+    assert bot._snipe_lock[1][0] == 2
+
+
+def test_snipe_does_not_issue_outside_caster_fovea():
+    """A selected tag outside the crop must not start a cross-map walk."""
+    bc = _make_unit(1, UnitTypeId.BATTLECRUISER, owner_id=1)
+    far = _make_unit(2, UnitTypeId.CORRUPTOR, 99.0, 99.0, owner_id=2)
+    bot, _ = _bot(bc, far)
+
+    _apply_snipe(bot, selected=[1], target_unit_tag=2)
+
+    bc.assert_not_called()
+    bot.do.assert_not_called()
+    assert 1 not in bot._snipe_lock
+
+
+def test_yamato_reissue_keeps_target_that_leaves_the_fovea():
+    """Prep lock still reaffirms the same target after it steps out of the crop."""
+    bc = _make_unit(1, UnitTypeId.BATTLECRUISER, owner_id=1)
+    corruptor = _make_unit(2, UnitTypeId.CORRUPTOR, owner_id=2)
+    bot, _ = _bot(bc, corruptor)
+    _apply_snipe(bot, selected=[1], target_unit_tag=2)
+    corruptor.position = Point2((99.0, 99.0))
+    bot.state.game_loop = 5
+
+    _apply_snipe(bot, selected=[1], target_unit_tag=2)
+
+    assert bc.call_count == 2
     assert bot._snipe_lock[1][0] == 2
 
 
@@ -337,7 +366,8 @@ def test_yamato_lock_expires_after_cast_window():
 def test_yamato_lock_includes_walk_into_cast_range():
     bc = _make_unit(1, UnitTypeId.BATTLECRUISER, 50.0, 50.0, owner_id=1)
     bc.movement_speed = 2.62
-    far = _make_unit(2, UnitTypeId.CORRUPTOR, 70.0, 50.0, owner_id=2)
+    # Inside the tactical crop (half-width 17) but outside Yamato range (10).
+    far = _make_unit(2, UnitTypeId.CORRUPTOR, 66.0, 50.0, owner_id=2)
     bot, _ = _bot(bc, far)
     _apply_snipe(bot, selected=[1], target_unit_tag=2)
 

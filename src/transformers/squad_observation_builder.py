@@ -337,12 +337,18 @@ class SquadObservationBuilder:
         (``perspective_unit_groups``), not alliance buckets: under
         ``debug_control_enemy`` both armies look allied to the P1 client.
         """
-        _, vis_enemies, _, vis_structs = perspective_unit_groups(
+        own_units, vis_enemies, _, vis_structs = perspective_unit_groups(
             bot, int(perspective_player_id)
         )
+        from src.utils.unit_feature_helpers import weapons_can_hit_unit
+
         mobile_tags: List[int] = []
         for unit in vis_enemies or []:
             if unit is None or getattr(unit, "is_structure", False):
+                continue
+            # Concealed and not revealed: attack-by-tag is rejected and the
+            # squad stops shooting the units it can actually damage.
+            if not weapons_can_hit_unit(unit, own_units):
                 continue
             tag = getattr(unit, "tag", None)
             if tag is not None:
@@ -496,7 +502,6 @@ class SquadObservationBuilder:
             engage_enemy_mask, has_engage_air_enemy = build_engage_enemy_masks(
                 enemy_units, ally_units, extra_hostiles=enemy_structures
             )
-            enemy_mask = build_enemy_target_mask(enemy_units)
             target_masks, actor_readiness = build_squad_legality(
                 ally_units,
                 bot=bot,
@@ -514,6 +519,13 @@ class SquadObservationBuilder:
                 compute_move=self._compute_can_move,
                 perspective_player_id=int(perspective_player_id),
             )
+            # attack_unit may only name a hostile inside some ready attacker's crop.
+            attack_actors = [
+                ally_units[slot]
+                for slot, flag in enumerate(target_masks["attack_actor_mask"])
+                if flag > 0.5 and ally_units[slot] is not None
+            ]
+            enemy_mask = build_enemy_target_mask(enemy_units, attack_actors)
             # Reuse ready casters from snipe_actor_mask — do not re-run unit_can_snipe.
             if self._compute_can_snipe:
                 snipe_casters = [
@@ -782,7 +794,20 @@ class SquadObservationBuilder:
         is_burrowed = bool(getattr(unit, "is_burrowed", False))
         is_cloaked  = bool(getattr(unit, "is_cloaked", False))
         catalog[_F[USC.IS_CONCEALED]] = float(is_burrowed or is_cloaked)
-        catalog[_F[USC.IS_DETECTED]]  = float(bool(getattr(unit, "is_detected", False)))
+        # Explicit bool ``is_detected`` (tests) wins. Real units have no such
+        # attribute; concealed ones use ``is_revealed`` via ``unit_is_detected``.
+        # Visible units stay 0 when the attribute is absent so trained weights
+        # that learned a constant 0 on this channel do not all flip at once.
+        from src.utils.unit_feature_helpers import unit_is_concealed, unit_is_detected
+
+        explicit_detected = getattr(unit, "is_detected", None)
+        if isinstance(explicit_detected, bool):
+            detected = explicit_detected
+        elif unit_is_concealed(unit):
+            detected = unit_is_detected(unit)
+        else:
+            detected = False
+        catalog[_F[USC.IS_DETECTED]] = float(detected)
 
         # --- Group I: Immobility / cloak readiness ---
         # Prefer values from build_squad_legality (same unit_can_* pass as masks).

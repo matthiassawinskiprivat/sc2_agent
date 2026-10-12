@@ -677,7 +677,12 @@ class ObservationTransformer:
             return False
         if allied_detector_covers:
             return False
-        if getattr(unit, "is_detected", True):
+        # Real units have ``is_revealed``, not ``is_detected``. Missing the bit
+        # used to default to "detected", so cloaked enemies were always painted
+        # and the policy clicked units the engine would not let it shoot.
+        from src.utils.unit_feature_helpers import unit_is_detected
+
+        if unit_is_detected(unit):
             return False
         return not getattr(unit, "is_snapshot", False)
 

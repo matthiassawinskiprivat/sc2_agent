@@ -30,8 +30,7 @@ def _make_bot(role_map: dict, target_map: dict, active_tag: int) -> CaptureTheFl
         "categorical_heads": [],
         "rewards": {
             "distance_multiplier": 1.0,
-            "pylon_damage_reward": 0.0,
-            "pylon_damage_penalty": 0.0,
+            "pylon_value_scale": 0.0,
             "damage_reward": 0.0,
             "damage_penalty": 0.0,
             "step_penalty": 0.0,

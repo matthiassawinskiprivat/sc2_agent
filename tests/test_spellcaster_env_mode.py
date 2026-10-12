@@ -7,12 +7,16 @@ import yaml
 
 from train.envs.capture_the_flag_single_env import CaptureTheFlagSingleEnv
 from train.envs.ctf.pool_assignment import static_spawn_player_id
+from sc2.ids.unit_typeid import UnitTypeId
+
 from train.envs.ctf.spellcaster import (
+    QUEEN_HEAL_START_ENERGY,
     RACE_SPELLCASTER_UNIT,
     SPELLCASTER_CAST_UPGRADES,
     SPELLCASTER_UPGRADE_CALLS,
-    apply_max_energy,
+    apply_caster_start_energy,
     apply_spell_upgrades,
+    caster_start_energy_table,
     energy_units,
 )
 
@@ -20,11 +24,12 @@ _CONFIG_DIR = Path(__file__).resolve().parents[1] / "config_universal"
 _CASTERS = ("HIGHTEMPLAR", "GHOST", "INFESTOR")
 
 
-def _unit(tag, energy_max, energy=0.0):
+def _unit(tag, energy_max, energy=0.0, type_id=None):
     u = MagicMock()
     u.tag = tag
     u.energy_max = energy_max
     u.energy = energy
+    u.type_id = type_id
     return u
 
 
@@ -56,16 +61,46 @@ def test_energy_units_skips_no_bar_and_bad_tags():
     assert energy_units(MagicMock(all_units=[ht, marine, ghost])) == [(1, 200.0)]
 
 
-def test_apply_max_energy_groups_by_energy_max():
-    bot = _bot([_unit(1, 200.0), _unit(2, 200.0), _unit(3, 50.0), _unit(4, 0.0)])
-    filled = asyncio.run(apply_max_energy(bot))
-    assert filled == 3
-    calls = bot.client.debug_set_unit_value.await_args_list
-    by_value = {call.args[2]: set(call.args[0]) for call in calls}
-    assert by_value[200.0] == {1, 2}
-    assert by_value[50.0] == {3}
-    for call in calls:
+def test_apply_caster_start_energy_is_two_casts_not_a_full_bar():
+    """Known casters get a limited budget. Unknown energy units are left alone."""
+    bot = _bot(
+        [
+            _unit(1, 200.0, type_id=UnitTypeId.QUEEN),
+            _unit(2, 200.0, type_id=UnitTypeId.HIGHTEMPLAR),
+            _unit(3, 200.0, type_id=UnitTypeId.VIPER),
+            _unit(4, 200.0, type_id=UnitTypeId.BATTLECRUISER),
+            _unit(5, 100.0, type_id=UnitTypeId.SHIELDBATTERY),
+            _unit(6, 200.0, type_id=UnitTypeId.MEDIVAC),
+            _unit(7, 200.0),  # energy bar, no caster type
+            _unit(8, 0.0, type_id=UnitTypeId.MARINE),
+        ]
+    )
+    filled = asyncio.run(apply_caster_start_energy(bot))
+    assert filled == 6
+    by_value = {call.args[2]: set(call.args[0]) for call in bot.client.debug_set_unit_value.await_args_list}
+    table = caster_start_energy_table()
+    assert 1 in by_value[table[UnitTypeId.QUEEN]]
+    assert 2 in by_value[table[UnitTypeId.HIGHTEMPLAR]]
+    assert 3 in by_value[table[UnitTypeId.VIPER]]
+    assert 4 in by_value[table[UnitTypeId.BATTLECRUISER]]
+    assert 5 in by_value[table[UnitTypeId.SHIELDBATTERY]]
+    assert 6 in by_value[table[UnitTypeId.MEDIVAC]]
+    assert 7 not in {tag for tags in by_value.values() for tag in tags}
+    assert table[UnitTypeId.QUEEN] == 100.0
+    assert table[UnitTypeId.HIGHTEMPLAR] == 150.0
+    assert table[UnitTypeId.VIPER] == 125.0
+    assert table[UnitTypeId.BATTLECRUISER] == 125.0
+    assert table[UnitTypeId.SHIELDBATTERY] == 50.0
+    assert max(table.values()) < 200.0
+    for call in bot.client.debug_set_unit_value.await_args_list:
         assert call.args[1] == 1
+        assert call.args[2] < 200.0
+
+
+def test_caster_start_energy_caps_at_energy_max():
+    bot = _bot([_unit(1, 80.0, type_id=UnitTypeId.HIGHTEMPLAR)])
+    asyncio.run(apply_caster_start_energy(bot))
+    bot.client.debug_set_unit_value.assert_awaited_once_with([1], 1, 80.0)
 
 
 def test_apply_spell_upgrades_runs_ladder():
@@ -92,11 +127,13 @@ def test_apply_spell_upgrades_skips_when_ladder_already_done():
 
 def test_spellcaster_env_runs_upgrades_and_energy():
     env = _make_env("heal,cloak,upgrades,spellcaster")
-    env.bot.all_units = [_unit(11, 200.0)]
+    env.bot.all_units = [_unit(11, 200.0, type_id=UnitTypeId.HIGHTEMPLAR)]
     asyncio.run(env._apply_spellcaster_env_mode_upgrades())
     asyncio.run(env._apply_spellcaster_energy())
     assert env.bot.client.debug_upgrade.await_count == SPELLCASTER_UPGRADE_CALLS
-    env.bot.client.debug_set_unit_value.assert_awaited()
+    env.bot.client.debug_set_unit_value.assert_awaited_once_with(
+        [11], 1, caster_start_energy_table()[UnitTypeId.HIGHTEMPLAR]
+    )
 
 
 def test_spellcaster_skips_upgrade_ladder_when_cloak_already_ran_it():
@@ -112,14 +149,69 @@ def test_upgrades_mode_skipped_when_spellcaster_present():
     env.bot.client.debug_upgrade.assert_not_called()
 
 
-def test_heal_mode_applies_max_energy_without_spell_upgrades():
-    """Queens spawn at 25 energy; Transfuse costs 50, so heal fills bars."""
+def test_heal_mode_caps_every_energy_caster():
+    """Heal and spellcaster share one budget. No caster is filled to energy_max."""
     env = _make_env("heal")
-    env.bot.all_units = [_unit(11, 200.0)]
+    env.bot.all_units = [
+        _unit(11, 200.0, type_id=UnitTypeId.QUEEN),
+        _unit(12, 100.0, type_id=UnitTypeId.SHIELDBATTERY),
+        _unit(13, 200.0, type_id=UnitTypeId.MEDIVAC),
+    ]
     asyncio.run(env._apply_spellcaster_env_mode_upgrades())
     asyncio.run(env._apply_spellcaster_energy())
     env.bot.client.debug_upgrade.assert_not_called()
-    env.bot.client.debug_set_unit_value.assert_awaited()
+    by_value = {
+        call.args[2]: set(call.args[0])
+        for call in env.bot.client.debug_set_unit_value.await_args_list
+    }
+    table = caster_start_energy_table()
+    assert 11 in by_value[table[UnitTypeId.QUEEN]]
+    assert 12 in by_value[table[UnitTypeId.SHIELDBATTERY]]
+    assert 13 in by_value[table[UnitTypeId.MEDIVAC]]
+    assert QUEEN_HEAL_START_ENERGY == 100.0
+
+
+def test_burrowed_casters_use_the_same_budget():
+    queen_burrowed = getattr(UnitTypeId, "QUEENBURROWED", None)
+    infestor_burrowed = getattr(UnitTypeId, "INFESTORBURROWED", None)
+    units = [
+        _unit(1, 200.0, type_id=UnitTypeId.QUEEN),
+        _unit(3, 200.0, type_id=UnitTypeId.MEDIVAC),
+        _unit(0, 200.0, type_id=UnitTypeId.QUEEN),
+    ]
+    if queen_burrowed is not None:
+        units.append(_unit(2, 200.0, type_id=queen_burrowed))
+    if infestor_burrowed is not None:
+        units.append(_unit(4, 200.0, type_id=infestor_burrowed))
+    bot = _bot(units)
+    n = asyncio.run(apply_caster_start_energy(bot))
+    expected = 2 + (queen_burrowed is not None) + (infestor_burrowed is not None)
+    assert n == expected
+    by_value = {call.args[2]: set(call.args[0]) for call in bot.client.debug_set_unit_value.await_args_list}
+    queen_tags = {1}
+    if queen_burrowed is not None:
+        queen_tags.add(2)
+    assert by_value[QUEEN_HEAL_START_ENERGY] == queen_tags
+    assert 3 in by_value[50.0]
+
+
+def test_spellcaster_mode_uses_the_same_limited_budget():
+    env = _make_env("heal,spellcaster")
+    env.bot.all_units = [
+        _unit(1, 200.0, type_id=UnitTypeId.QUEEN),
+        _unit(2, 200.0, type_id=UnitTypeId.HIGHTEMPLAR),
+        _unit(3, 200.0, type_id=UnitTypeId.GHOST),
+    ]
+    asyncio.run(env._apply_spellcaster_energy())
+    by_value = {
+        call.args[2]: set(call.args[0])
+        for call in env.bot.client.debug_set_unit_value.await_args_list
+    }
+    table = caster_start_energy_table()
+    assert 1 in by_value[table[UnitTypeId.QUEEN]]
+    assert 2 in by_value[table[UnitTypeId.HIGHTEMPLAR]]
+    assert 3 in by_value[table[UnitTypeId.GHOST]]
+    assert 200.0 not in by_value
 
 
 def test_phase1_cloak_ladder_runs_for_player_one_and_spellcaster_skips():

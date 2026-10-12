@@ -94,8 +94,8 @@ env:
     defender_pylon_penalty_scale: 1.5
     defender_retained_value_bonus: 4.0
     heal_value_reward: 4.0
-    pylon_damage_reward: 2.0
-    pylon_damage_penalty: 0.9
+    pylon_value_scale: 1.0
+    pylon_own_value_penalty: 1.0
     melee_multiplier: 0.5
     distance_multiplier: 2.0
     defender_zone_radius: 10.0
@@ -124,6 +124,7 @@ model:
       features_dim: 512
       thinking_steps: 3
       use_self_attention: true
+      use_relational_decode: true
     lstm_hidden_size: 512
     net_arch: []
   gamma: 0.99

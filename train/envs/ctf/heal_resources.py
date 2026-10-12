@@ -1,4 +1,4 @@
-"""CTF mineral/vespene grants for agent and opponent (all races)."""
+"""CTF mineral/vespene grant for player 1."""
 
 from __future__ import annotations
 
@@ -31,17 +31,21 @@ async def apply_ctf_resources(
     bot: Any,
     free_enabled: bool,
 ) -> bool:
-    """Grant minerals and vespene to both CTF players, all races.
+    """Grant minerals and vespene to player 1.
 
-    Returns the updated ``free_enabled`` flag (``debug_free`` is a toggle).
+    Returns ``free_enabled`` unchanged. ``debug_free`` is not used.
 
-    The python-sc2 bot is always the player-1 client; the trainee policy may
-    control P1 or P2. Resource cheats are per SC2 owner, not per trainee seat:
+    That cheat is documented as waiving mineral and gas, but on the current
+    client it also waives ability energy. A Queen set to 100 energy then
+    Transfuses for free and the bar never falls, so spell timing cannot be
+    learned. Player 1 gets a real bank from ``debug_all_resources`` instead.
+    There is no per-player resource cheat for player 2, and ``debug_control_enemy``
+    cannot spend player 2's bank, so opponent repair and morph costs are not
+    waived.
 
-    - Player 1: ``debug_all_resources`` when P1 minerals *or* vespene is
-      below ``CTF_RESOURCE_FLOOR`` (100). ``debug_gas`` alone does not work in
-      python-sc2 / SC2.
-    - Player 2: ``debug_free`` once (no per-player resource cheat in the API).
+    ``debug_gas`` alone does not work in python-sc2 / SC2. Top up with
+    ``debug_all_resources`` when player 1 minerals *or* vespene is below
+    ``CTF_RESOURCE_FLOOR`` (100).
     """
     if bot is None:
         return free_enabled
@@ -55,9 +59,6 @@ async def apply_ctf_resources(
         vespene = int(getattr(bot, "vespene", 0) or 0)
         if minerals < CTF_RESOURCE_FLOOR or vespene < CTF_RESOURCE_FLOOR:
             await client.debug_all_resources()
-        if not free_enabled:
-            await client.debug_free()
-            free_enabled = True
     except Exception as exc:
         logger.warning(f"CTF resource grant failed: {exc}")
         return free_enabled
