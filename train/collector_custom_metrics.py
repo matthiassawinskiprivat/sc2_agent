@@ -34,6 +34,9 @@ ROLLOUT_SUM_INFO_KEYS: FrozenSet[str] = frozenset(
         "aoe_land_value",
         "detection_reward",
         "defender_zone_shaping",
+        "snipe_target_value",
+        "spellcaster_retreat",
+        "conceal_shaping",
     }
 )
 

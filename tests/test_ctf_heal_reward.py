@@ -134,8 +134,9 @@ def test_healing_an_expensive_unit_pays_more_than_a_cheap_one():
     scv_reward = _heal(UnitTypeId.SCV, SCV)
 
     assert bc_reward == pytest.approx(HEAL_COEFF * 0.5 * BATTLECRUISER)
-    assert scv_reward == pytest.approx(HEAL_COEFF * 0.5 * SCV)
-    assert bc_reward > 15 * scv_reward
+    # SCVs are priced at twice their mineral cost.
+    assert scv_reward == pytest.approx(HEAL_COEFF * SCV)
+    assert bc_reward > 8 * scv_reward
 
 
 @pytest.mark.parametrize("trainee_pid", [1, 2])

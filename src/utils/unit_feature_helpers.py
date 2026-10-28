@@ -763,10 +763,10 @@ def issue_snipe_on_unit(
 
     ``stamp_cooldown`` records a local ready-at loop (Yamato / Snipe CD). Pass
     ``False`` on reissue so the timer is not reset every physics step.
-    ``require_fovea`` keeps a new cast inside the caster's tactical crop so the
-    unit is not ordered to walk across the map. A continuing prep lock passes
-    ``False``: the target may leave the crop during the channel, and dropping
-    the order would cancel Yamato.
+    ``require_fovea`` keeps a new cast inside the 16×16 snipe crop (half the
+    32×32 tactical window) so the unit is not ordered to walk across the map.
+    A continuing prep lock passes ``False``: the target may leave the crop
+    during the channel, and dropping the order would cancel Yamato.
     """
     if bot is None or unit is None or target is None:
         return False
@@ -774,7 +774,9 @@ def issue_snipe_on_unit(
         return False
     if not snipe_target_is_eligible(unit, target):
         return False
-    if require_fovea and not unit_in_tactical_fovea(unit, target):
+    if require_fovea and not unit_in_tactical_fovea(
+        unit, target, half=SNIPE_FOVEA_MAX_DELTA
+    ):
         return False
     tid = getattr(unit, "type_id", None)
     ability = _SNIPE_ABILITIES.get(tid)
@@ -2073,16 +2075,103 @@ def cloak_sensor_type_ids() -> FrozenSet:
     return frozenset(found)
 
 
-def unit_blocks_objective_clear(unit: Any) -> bool:
-    """False for a free cloak detector, which is not a fighting unit.
+def air_unit_type_ids() -> FrozenSet:
+    """Unit types that fly, including siege/hover modes that clear ``is_flying``.
 
-    Cloak levels plant an Observer, Raven, or Overseer on the flag. The agent
-    often has nothing that can kill that sensor, so it must not hold the zone
-    shut. Cloaked and burrowed combat units still count like any other unit.
+    ``Unit.is_flying`` is the live proto flag. It is false for fog snapshots and
+    for a Liberator in defender mode, so the type list is what keeps air from
+    holding the objective after the ground army and pylon are gone. Landed
+    Vikings (``VIKINGASSAULT``) are ground and are not listed.
+    """
+    if not _SC2_AVAILABLE:
+        return frozenset()
+    found = []
+    for name in (
+        "MUTALISK",
+        "CORRUPTOR",
+        "BROODLORD",
+        "VIPER",
+        "OVERLORD",
+        "OVERSEER",
+        "OVERSEERSIEGEMODE",
+        "MEDIVAC",
+        "BANSHEE",
+        "RAVEN",
+        "LIBERATOR",
+        "LIBERATORAG",
+        "VIKINGFIGHTER",
+        "BATTLECRUISER",
+        "OBSERVER",
+        "OBSERVERSIEGEMODE",
+        "WARPPRISM",
+        "PHOENIX",
+        "VOIDRAY",
+        "ORACLE",
+        "TEMPEST",
+        "CARRIER",
+        "MOTHERSHIP",
+        "INTERCEPTOR",
+        "LOCUSTMPFLYING",
+    ):
+        tid = getattr(UnitTypeId, name, None)
+        if tid is not None:
+            found.append(tid)
+    return frozenset(found)
+
+
+def objective_summon_type_ids() -> FrozenSet:
+    """Timed summons that must not keep an episode alive after the army is gone.
+
+    Locusts, broodlings, changelings, and infested marines are not purchased
+    units. A Swarm Host or Brood Lord outside the objective can refill them
+    forever; counting them as zone holders means a cleared pylon never wins.
+    """
+    if not _SC2_AVAILABLE:
+        return frozenset()
+    extra = []
+    for name in (
+        "MULE",
+        "KD8CHARGE",
+        "INFESTEDTERRAN",
+        "BROODLINGESCORT",
+        "LOCUSTMPPRECURSOR",
+    ):
+        tid = getattr(UnitTypeId, name, None)
+        if tid is not None:
+            extra.append(tid)
+    return _TEMPORARY_ATTRITION_UNIT_TYPES | frozenset(extra)
+
+
+def unit_is_air(unit: Any) -> bool:
+    """True for a flying body, even when the proto ``is_flying`` flag is missing."""
+    if unit is None:
+        return False
+    # ``is True`` avoids MagicMock truthiness in unit tests.
+    if getattr(unit, "is_flying", False) is True:
+        return True
+    return getattr(unit, "type_id", None) in air_unit_type_ids()
+
+
+def unit_blocks_objective_clear(unit: Any) -> bool:
+    """False when *unit* must not hold the enemy objective shut.
+
+    Free cloak detectors, timed summons, fog snapshots, and air units do not
+    block. Cloaked and burrowed ground combat units still count. Structures
+    (the flag pylon, batteries, bunkers) still count; creep tumors are skipped
+    by the caller.
     """
     if unit is None:
         return False
-    if getattr(unit, "type_id", None) in cloak_sensor_type_ids():
+    if getattr(unit, "is_snapshot", False) is True:
+        return False
+    type_id = getattr(unit, "type_id", None)
+    if type_id in cloak_sensor_type_ids():
+        return False
+    if type_id in objective_summon_type_ids():
+        return False
+    if getattr(unit, "is_structure", False) is True:
+        return True
+    if unit_is_air(unit):
         return False
     return True
 
@@ -2377,6 +2466,8 @@ def unit_can_unload(unit: "Unit") -> bool:
 
 # Half-width of the 32×32 tactical crop in game units (matches CTF / Level7 bots).
 TACTICAL_FOVEA_MAX_DELTA = 17.0
+# Snipe uses a 16×16 crop: half the tactical window, same world-unit scale.
+SNIPE_FOVEA_MAX_DELTA = TACTICAL_FOVEA_MAX_DELTA / 2.0
 
 
 def unit_weapon_ready(unit: "Unit") -> bool:

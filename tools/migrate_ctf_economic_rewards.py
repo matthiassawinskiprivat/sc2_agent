@@ -52,7 +52,7 @@ ECONOMIC_BLOCK = """\
     economic_vespene_weight: 1.5
     economic_value_norm: 100.0
     attacker_enemy_value_reward: 3.0
-    attacker_own_value_penalty: 1.0
+    attacker_own_value_penalty: 2.0
     defender_enemy_value_reward: 2.5
     defender_own_value_penalty: 3.0
     defender_pylon_penalty_scale: 1.5

@@ -50,10 +50,6 @@ _RACE_UNITS = {
     },
 }
 
-# Levels 06+ grow beyond the early ≤3 unit-type curriculum pools.
-_CTF_LARGE_POOL_MIN_NUMBER = 6
-
-
 def _load_env(level_name: str) -> dict:
     data = yaml.safe_load((_CONFIG_DIR / f"{level_name}.yaml").read_text(encoding="utf-8"))
     return data["env"]
@@ -155,7 +151,7 @@ def test_ctf_level_01_zergling_attack_vs_marine_defend():
     assert pools[0]["mineral_budget"] == 200
     assert pools[1]["race"] == "terran"
     assert pools[1]["high_level_command"] == "defend"
-    assert pools[1]["unit_pool"] == ["MARINE"]
+    assert pools[1]["unit_pool"] == ["MARINE", "REAPER"]
     assert pools[1]["mineral_budget"] == 150
     assert pools[0]["region"] == pools[1]["region"] == "A"
     assert env["squad_selection"]["min_selected_units"] == 3
@@ -217,32 +213,86 @@ def test_ctf_unit_pools_match_declared_race():
             assert units <= _RACE_UNITS[race], f"{level} {race} pool has {units - _RACE_UNITS[race]}"
 
 
-def test_ctf_levels_use_at_most_three_unit_types_per_pool_before_large_pools():
-    import re
+# Protoss defender structure. Attack pools neither keep it nor add it to the
+# shared roster that later pools of that race must still field.
+_DEFENDER_ONLY_UNITS = frozenset({"SHIELDBATTERY"})
 
+
+def test_ctf_unit_rosters_grow_monotonically():
+    """A unit fielded for a race stays in every later ctf_ pool of that race.
+
+    Order is the pipeline, not the numeric level id. Reversed and mirror
+    levels count. The first level that fields a unit is the one that adds it.
+    Shield batteries are Protoss-defender only, so an attack pool neither has
+    to keep ``SHIELDBATTERY`` nor introduces it into the shared roster.
+    """
     cm = ConfigManager(str(_CONFIG_DIR))
-    ctf_levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_level_")]
-    for level in ctf_levels:
-        m = re.match(r"ctf_level_(\d+)", level)
-        if m and int(m.group(1)) >= _CTF_LARGE_POOL_MIN_NUMBER:
-            continue
+    levels = [lvl for lvl in cm.levels if lvl.startswith("ctf_")]
+    seen: dict[str, set[str]] = {}
+    for level in levels:
         for pool in _load_unit_pools(level):
-            assert len(pool.get("unit_pool", [])) <= 3, level
+            race = pool["race"]
+            units = set(pool.get("unit_pool") or [])
+            required = set(seen.get(race, set()))
+            if pool.get("high_level_command") == "attack":
+                required -= _DEFENDER_ONLY_UNITS
+            missing = required - units
+            assert not missing, f"{level} {race} dropped {sorted(missing)}"
+        for pool in _load_unit_pools(level):
+            added = set(pool.get("unit_pool") or [])
+            if pool.get("high_level_command") == "attack":
+                added -= _DEFENDER_ONLY_UNITS
+            seen.setdefault(pool["race"], set()).update(added)
 
 
-def test_ctf_level_12_adds_remaining_air_dps_layers():
+def test_shield_battery_only_on_protoss_defenders():
+    """No attacker squad lists a shield battery; only Protoss defenders may."""
+    for path in sorted(_CONFIG_DIR.glob("*.yaml")):
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for i, pool in enumerate((data.get("env") or {}).get("unit_pools") or []):
+            units = {str(u).upper() for u in (pool.get("unit_pool") or [])}
+            if "SHIELDBATTERY" not in units:
+                continue
+            race = str(pool.get("race", "")).lower()
+            command = pool.get("high_level_command", "attack")
+            assert race == "protoss" and command == "defend", (
+                f"{path.name} pool {i} is {race} {command} but lists SHIELDBATTERY"
+            )
+
+
+_NON_BASE_DPS_LAYERS = (
+    "allied_g_dps_light",
+    "enemy_g_dps_light",
+    "allied_g_dps_armor",
+    "enemy_g_dps_armor",
+    "allied_g_dps_massive",
+    "enemy_g_dps_massive",
+    "allied_a_dps_light",
+    "enemy_a_dps_light",
+    "allied_a_dps_armor",
+    "enemy_a_dps_armor",
+    "allied_a_dps_massive",
+    "enemy_a_dps_massive",
+)
+
+
+def test_pipeline_keeps_only_base_dps_layers():
+    """Ground and air bonus-damage channels stay out of the observation stack.
+
+    Base channels (``*_g_dps_base``, ``*_a_dps_base``) remain. Light, armored,
+    and massive DPS overlays are not accumulated on any pipeline level.
+    """
     cm = ConfigManager(str(_CONFIG_DIR))
-    prior = set(cm.get_cumulative_active_layers("ctf_level_11"))
+    for level in cm.levels:
+        layers = cm.get_cumulative_active_layers(level)
+        tactical = cm.get_cumulative_active_tactical_layers(level)
+        for name in _NON_BASE_DPS_LAYERS:
+            assert name not in layers, (level, name)
+            assert name not in tactical, (level, name)
+
+    prior = cm.get_cumulative_active_layers("ctf_level_11")
     at_12 = cm.get_cumulative_active_layers("ctf_level_12")
-    added = [layer for layer in at_12 if layer not in prior]
-    assert added == [
-        "allied_a_dps_light",
-        "enemy_a_dps_light",
-        "allied_a_dps_armor",
-        "enemy_a_dps_armor",
-        "allied_a_dps_massive",
-        "enemy_a_dps_massive",
-    ]
+    assert at_12 == prior
 
 
 def test_ctf_levels_12_14_budgets_and_matchups():
@@ -269,9 +319,9 @@ def test_ctf_levels_12_14_budgets_and_matchups():
 
 
 def test_ctf_levels_15_17_mirror_12_14_matchups_and_budgets():
-    """15–17 reuse 12–14 full-army PvT / ZvP / ZvT pools and budgets.
+    """15–17 reuse 12–14 full-army PvT / ZvP / ZvT unit sets and budgets.
 
-    Zerg pools on 16–17 also include BANELING (splash curriculum).
+    Baneling stays in every zerg pool from the level that introduced it.
     """
     expected = {
         "ctf_level_15": ("protoss", "terran"),
@@ -294,18 +344,11 @@ def test_ctf_levels_15_17_mirror_12_14_matchups_and_budgets():
         assert a_defend["mineral_budget"] == 1500
         mirrored = _load_unit_pools(mirrors[level])
         for pool, mirror_pool in zip(pools, mirrored):
+            # Baneling is already in the earlier roster, so 16–17 keep the same
+            # zerg units as 13–14. Order can differ when a later level inserts it.
+            assert set(pool["unit_pool"]) == set(mirror_pool["unit_pool"]), level
             if pool["race"] == "zerg":
                 assert "BANELING" in pool["unit_pool"], level
-                expected_pool = list(mirror_pool["unit_pool"])
-                if "BANELING" not in expected_pool:
-                    if "ZERGLING" in expected_pool:
-                        idx = expected_pool.index("ZERGLING") + 1
-                        expected_pool.insert(idx, "BANELING")
-                    else:
-                        expected_pool.insert(0, "BANELING")
-                assert pool["unit_pool"] == expected_pool, level
-            else:
-                assert pool["unit_pool"] == mirror_pool["unit_pool"], level
 
 
 def test_ctf_pipeline_inserts_mirror_matchups_after_level_17():
@@ -328,23 +371,19 @@ def test_ctf_pipeline_inserts_mirror_matchups_after_level_17():
 
 def test_ctf_level_17_mirror_matchups_reuse_level_17_config_and_prior_pools():
     """Mirror TvT / ZvZ / PvP after 17: level-17 budgets/rewards, pools from 14–16."""
-    source_pools = {
-        "terran": next(
-            p["unit_pool"]
-            for p in _load_unit_pools("ctf_level_14")
-            if p["race"] == "terran"
-        ),
-        "zerg": next(
-            p["unit_pool"]
-            for p in _load_unit_pools("ctf_level_16")
-            if p["race"] == "zerg"
-        ),
-        "protoss": next(
-            p["unit_pool"]
-            for p in _load_unit_pools("ctf_level_15")
-            if p["race"] == "protoss"
-        ),
+    source_level = {
+        "terran": "ctf_level_14",
+        "zerg": "ctf_level_16",
+        "protoss": "ctf_level_15",
     }
+
+    def source_units(race: str, command: str) -> list:
+        return next(
+            p["unit_pool"]
+            for p in _load_unit_pools(source_level[race])
+            if p["race"] == race and p["high_level_command"] == command
+        )
+
     env_17 = _load_env("ctf_level_17")
     for race in ("terran", "zerg", "protoss"):
         level = f"ctf_level_17_mirror_{race}"
@@ -358,7 +397,9 @@ def test_ctf_level_17_mirror_matchups_reuse_level_17_config_and_prior_pools():
         assert len(pools) == 4, level
         for pool in pools:
             assert pool["race"] == race, level
-            assert pool["unit_pool"] == source_pools[race], level
+            assert pool["unit_pool"] == source_units(
+                race, pool["high_level_command"]
+            ), level
         a_attack = next(p for p in pools if p["region"] == "A" and p["high_level_command"] == "attack")
         a_defend = next(p for p in pools if p["region"] == "A" and p["high_level_command"] == "defend")
         assert a_attack["mineral_budget"] == 2000, level
@@ -444,7 +485,7 @@ def test_ctf_level_01_zergling_vs_marine_inherits_layers_without_adding():
 def test_ctf_level_01_adds_no_map_layers_phase1_defers_detail():
     """Phase-1 ctf_level_01 keeps the grafted attack-5 channel set unchanged.
 
-    Biological / light / mechanical overlays land on ctf_level_02 when phase 2 begins.
+    Biological and mechanical overlays land on ctf_level_02 when phase 2 begins.
     """
     cm = ConfigManager(str(_CONFIG_DIR))
     prior = cm.get_cumulative_active_layers("level_attack_5")
@@ -460,7 +501,5 @@ def test_ctf_level_01_adds_no_map_layers_phase1_defers_detail():
     assert added == [
         "allied_unit_biological",
         "enemy_unit_biological",
-        "allied_g_dps_light",
-        "enemy_g_dps_light",
         "allied_unit_mechanical",
     ]

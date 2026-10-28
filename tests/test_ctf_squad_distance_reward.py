@@ -7,6 +7,7 @@ single unit's position.
 import math
 import pytest
 from unittest.mock import MagicMock, patch
+from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 
 from src.agent.ctf_bot import CaptureTheFlagBot
@@ -150,6 +151,79 @@ def test_com_uses_all_squad_units():
 
     reward = bot.calculate_reward(perspective_player_id=1)
     assert abs(reward - 1.0) < 0.01, f"Expected reward ≈ 1.0, got {reward}"
+
+
+@pytest.mark.parametrize(
+    "caster_type",
+    [
+        UnitTypeId.GHOST,
+        UnitTypeId.HIGHTEMPLAR,
+        UnitTypeId.INFESTOR,
+        UnitTypeId.INFESTORBURROWED,
+        UnitTypeId.VIPER,
+    ],
+)
+def test_backline_spellcasters_are_excluded_from_attacker_com(caster_type):
+    """Ghost, High Templar, and Infestor must not pull the distance center of mass."""
+    target = Point2((0.0, 0.0))
+    marine = _make_unit(1, 0.0, 0.0, "attack")
+    marine.type_id = UnitTypeId.MARINE
+    caster = _make_unit(2, 10.0, 0.0, "attack")
+    caster.type_id = caster_type
+    bot = _make_bot({1: "attack", 2: "attack"}, {1: target, 2: target}, active_tag=1)
+    _wire_bot(bot, own_units=[marine, caster], enemy_units=[])
+    # Marine-only distance to the target is 0. Seed a farther baseline.
+    bot.prev_dist_per_squad[(1, "attack")] = 2.0
+
+    reward = bot.calculate_reward(perspective_player_id=1)
+    assert reward == pytest.approx(2.0)
+
+
+def test_swarm_host_on_cooldown_is_excluded_from_attacker_com():
+    """A cooling Swarm Host must not pull the distance center of mass."""
+    target = Point2((0.0, 0.0))
+    marine = _make_unit(1, 0.0, 0.0, "attack")
+    marine.type_id = UnitTypeId.MARINE
+    marine.weapon_cooldown = 0.0
+    host = _make_unit(2, 10.0, 0.0, "attack")
+    host.type_id = UnitTypeId.SWARMHOSTMP
+    host.weapon_cooldown = 40.0
+    bot = _make_bot({1: "attack", 2: "attack"}, {1: target, 2: target}, active_tag=1)
+    _wire_bot(bot, own_units=[marine, host], enemy_units=[])
+    bot.prev_dist_per_squad[(1, "attack")] = 2.0
+
+    reward = bot.calculate_reward(perspective_player_id=1)
+    assert reward == pytest.approx(2.0)
+
+
+def test_ready_swarm_host_stays_in_attacker_com():
+    """Locusts ready: the host is pulled toward the objective with the army."""
+    target = Point2((0.0, 0.0))
+    marine = _make_unit(1, 0.0, 0.0, "attack")
+    marine.type_id = UnitTypeId.MARINE
+    marine.weapon_cooldown = 0.0
+    host = _make_unit(2, 10.0, 0.0, "attack")
+    host.type_id = UnitTypeId.SWARMHOSTMP
+    host.weapon_cooldown = 0.0
+    bot = _make_bot({1: "attack", 2: "attack"}, {1: target, 2: target}, active_tag=1)
+    _wire_bot(bot, own_units=[marine, host], enemy_units=[])
+    bot.prev_dist_per_squad[(1, "attack")] = 2.0
+
+    reward = bot.calculate_reward(perspective_player_id=1)
+    assert reward == pytest.approx(2.0 - 5.0)
+
+
+def test_spellcaster_only_army_gets_no_distance_reward():
+    target = Point2((0.0, 0.0))
+    ghost = _make_unit(1, 6.0, 0.0, "attack")
+    ghost.type_id = UnitTypeId.GHOST
+    bot = _make_bot({1: "attack"}, {1: target}, active_tag=1)
+    _wire_bot(bot, own_units=[ghost], enemy_units=[])
+    bot.prev_dist_per_squad[(1, "attack")] = 4.0
+
+    reward = bot.calculate_reward(perspective_player_id=1)
+    assert reward == pytest.approx(0.0)
+    assert (1, "attack") not in bot.prev_dist_per_squad
 
 
 def test_baseline_stored_after_first_step():

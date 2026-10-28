@@ -2,10 +2,10 @@
 
 Applies to every ``config_universal/*.yaml`` with ``agent_architecture: squad``:
 
-* ``model.gamma`` → 0.99
+* ``model.gamma`` → 0.993
 * ``model.n_epochs`` → 4
 * ``training.training_steps`` → half the current value
-* ``env.max_steps`` → 100
+* ``env.max_steps`` → 150
 * ``env.every_k_episodes`` → 200
 * ``env.rewards`` → the canonical ``ctf_level_01`` economic block
   (drops per-level ``heal_cast_reward`` annealing and other divergences)
@@ -20,9 +20,9 @@ from pathlib import Path
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config_universal"
 
-CANONICAL_GAMMA = 0.99
+CANONICAL_GAMMA = 0.993
 CANONICAL_N_EPOCHS = 4
-CANONICAL_MAX_STEPS = 100
+CANONICAL_MAX_STEPS = 150
 CANONICAL_EVERY_K = 200
 
 # Same block as config_universal/ctf_level_01.yaml (economic shaping + outcomes).
@@ -31,7 +31,7 @@ CANONICAL_REWARDS = """\
     economic_vespene_weight: 1.5
     economic_value_norm: 100.0
     attacker_enemy_value_reward: 3.0
-    attacker_own_value_penalty: 1.0
+    attacker_own_value_penalty: 2.0
     defender_enemy_value_reward: 2.5
     defender_own_value_penalty: 3.0
     defender_pylon_penalty_scale: 1.5
@@ -40,7 +40,7 @@ CANONICAL_REWARDS = """\
     pylon_value_scale: 1.0
     pylon_own_value_penalty: 1.0
     melee_multiplier: 0.5
-    distance_multiplier: 2.0
+    distance_multiplier: 1.0
     defender_zone_radius: 10.0
     attacker_objective_radius: 12.0
     objective_credit_falloff: 15.0
@@ -50,6 +50,12 @@ CANONICAL_REWARDS = """\
     cooldown_retreat_scale: 0.6
     aoe_land_reward: 0.75
     detection_reward: 1.0
+    snipe_value_reward: 1.0
+    spellcaster_retreat_scale: 0.6
+    low_hp_conceal_reward: 1.0
+    low_hp_reveal_reward: 0.75
+    ambush_burrow_reward: 0.25
+    ambush_unburrow_reward: 0.5
     win_reward: 15.0
     loss_penalty: -12.5
     draw_penalty: -10.0

@@ -22,6 +22,46 @@ UNIT_DATA = {
 }
 
 
+def test_backline_casters_are_capped_at_two_each():
+    rng = random.Random(2)
+    data = {
+        **UNIT_DATA,
+        "GHOST": {"cost": {"minerals": 200, "vespene": 100}},
+        "HIGHTEMPLAR": {"cost": {"minerals": 50, "vespene": 150}},
+        "INFESTOR": {"cost": {"minerals": 100, "vespene": 150}},
+        "VIPER": {"cost": {"minerals": 100, "vespene": 200}},
+        "MARINE": {"cost": {"minerals": 50, "vespene": 0}},
+    }
+    spawns = calculate_budgeted_spawns(
+        ["GHOST", "HIGHTEMPLAR", "INFESTOR", "VIPER", "MARINE"],
+        data,
+        minerals=8000,
+        vespene=8000,
+        rng=rng,
+    )
+    for caster in ("GHOST", "HIGHTEMPLAR", "INFESTOR", "VIPER"):
+        assert spawns.count(caster) == 2
+    assert spawns.count("MARINE") > 2
+
+
+def test_medivac_capped_at_two_per_squad():
+    rng = random.Random(3)
+    data = {
+        **UNIT_DATA,
+        "MEDIVAC": {"cost": {"minerals": 100, "vespene": 100}},
+        "MARINE": {"cost": {"minerals": 50, "vespene": 0}},
+    }
+    spawns = calculate_budgeted_spawns(
+        ["MEDIVAC", "MARINE"],
+        data,
+        minerals=8000,
+        vespene=8000,
+        rng=rng,
+    )
+    assert spawns.count("MEDIVAC") == 2
+    assert spawns.count("MARINE") > 2
+
+
 def test_mothership_capped_at_one_even_with_huge_budget():
     rng = random.Random(0)
     spawns = calculate_budgeted_spawns(

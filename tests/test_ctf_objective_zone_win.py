@@ -24,13 +24,23 @@ _REWARDS = {
 }
 
 
-def _unit(tag, x, y, *, owner_id, type_id=UnitTypeId.ZERGLING, is_structure=False):
+def _unit(
+    tag,
+    x,
+    y,
+    *,
+    owner_id,
+    type_id=UnitTypeId.ZERGLING,
+    is_structure=False,
+    is_flying=False,
+):
     u = MagicMock()
     u.tag = tag
     u.position = Point2((x, y))
     u.owner_id = owner_id
     u.type_id = type_id
     u.is_structure = is_structure
+    u.is_flying = is_flying
     u.health = 50.0
     return u
 
@@ -127,6 +137,140 @@ def test_clearing_all_units_and_buildings_from_zone_is_win(env):
     )
     assert term is True
     assert delta == WIN
+
+
+def test_flying_units_in_the_zone_do_not_block_the_win(env):
+    """Ground units and the pylon must die. Air left in the zone does not."""
+    reaper = _unit(10, 48, 48, owner_id=1, type_id=UnitTypeId.REAPER)
+    mutalisk = _unit(
+        20, 50, 50, owner_id=2, type_id=UnitTypeId.MUTALISK, is_flying=True
+    )
+    _set_units(env, [reaper, mutalisk])
+    env.label_to_defender_pos = {"A": Point2((50.0, 50.0))}
+
+    assert env._enemy_objective_zone_cleared(1, _REWARDS) is True
+
+    ling = _unit(21, 50, 50, owner_id=2, type_id=UnitTypeId.ZERGLING, is_flying=False)
+    _set_units(env, [reaper, mutalisk, ling])
+    assert env._enemy_objective_zone_cleared(1, _REWARDS) is False
+
+    pylon = _unit(99, 50, 50, owner_id=2, type_id=UnitTypeId.PYLON, is_structure=True)
+    _set_units(env, [reaper, mutalisk, pylon])
+    assert env._enemy_objective_zone_cleared(1, _REWARDS) is False
+
+
+def test_air_unit_with_missing_flying_flag_does_not_block(env):
+    """Liberator defender mode and fog snapshots leave ``is_flying`` false."""
+    reaper = _unit(10, 48, 48, owner_id=1, type_id=UnitTypeId.REAPER)
+    mutalisk = _unit(
+        20, 50, 50, owner_id=2, type_id=UnitTypeId.MUTALISK, is_flying=False
+    )
+    liberator = _unit(
+        21, 51, 50, owner_id=2, type_id=UnitTypeId.LIBERATORAG, is_flying=False
+    )
+    _set_units(env, [reaper, mutalisk, liberator])
+    env.label_to_defender_pos = {"A": Point2((50.0, 50.0))}
+
+    assert env._enemy_objective_zone_cleared(1, _REWARDS) is True
+
+
+def test_landed_viking_still_blocks_the_zone(env):
+    reaper = _unit(10, 40, 40, owner_id=1, type_id=UnitTypeId.REAPER)
+    viking = _unit(
+        20, 50, 50, owner_id=2, type_id=UnitTypeId.VIKINGASSAULT, is_flying=False
+    )
+    _set_units(env, [reaper, viking])
+    env.label_to_defender_pos = {"A": Point2((50.0, 50.0))}
+
+    assert env._enemy_objective_zone_cleared(1, _REWARDS) is False
+
+
+def test_locust_and_broodling_do_not_hold_a_cleared_zone(env):
+    """Summons from a host outside the zone must not veto the win."""
+    reaper = _unit(10, 40, 40, owner_id=1, type_id=UnitTypeId.REAPER)
+    locust = _unit(21, 50, 50, owner_id=2, type_id=UnitTypeId.LOCUSTMP)
+    broodling = _unit(22, 51, 50, owner_id=2, type_id=UnitTypeId.BROODLING)
+    _set_units(env, [reaper, locust, broodling])
+    env.label_to_defender_pos = {"A": Point2((50.0, 50.0))}
+
+    assert env._has_combat_units(2) is False
+    assert env._enemy_objective_zone_cleared(1, _REWARDS) is True
+    term, delta = env._pylon_army_outcome(
+        p1_lost=False,
+        p2_lost=True,
+        p1_army_lost=False,
+        p2_army_lost=True,
+        perspective_player_id=1,
+        r_conf=_REWARDS,
+    )
+    assert term is True
+    assert delta == WIN
+
+
+def test_snapshot_of_a_dead_ground_unit_does_not_block(env):
+    reaper = _unit(10, 40, 40, owner_id=1, type_id=UnitTypeId.REAPER)
+    ghost = _unit(20, 50, 50, owner_id=2, type_id=UnitTypeId.ZERGLING)
+    ghost.is_snapshot = True
+    _set_units(env, [reaper, ghost])
+    env.label_to_defender_pos = {"A": Point2((50.0, 50.0))}
+
+    assert env._enemy_objective_zone_cleared(1, _REWARDS) is True
+
+
+def test_p2_trainee_wins_when_only_air_remains_in_the_enemy_zone(env):
+    """Player-2 trainee still wins after the enemy ground army and pylon are gone."""
+    env.unit_pools_config = [
+        {"agent": True, "high_level_command": "defend", "region": "A"},
+        {"high_level_command": "attack", "region": "A"},
+    ]
+    mutalisk = _unit(
+        10, 50, 50, owner_id=1, type_id=UnitTypeId.MUTALISK, is_flying=False
+    )
+    reaper = _unit(20, 80, 80, owner_id=2, type_id=UnitTypeId.REAPER)
+    _set_units(env, [mutalisk, reaper])
+    env.label_to_defender_pos = {"A": Point2((50.0, 50.0))}
+
+    term, delta = env._pylon_army_outcome(
+        p1_lost=False,
+        p2_lost=True,
+        p1_army_lost=False,
+        p2_army_lost=False,
+        perspective_player_id=2,
+        r_conf=_REWARDS,
+    )
+    assert term is True
+    assert delta == WIN
+
+
+def test_missing_anchor_with_empty_enemy_board_is_a_win(env):
+    env.unit_pools_config = []
+    env.label_to_defender_pos = {}
+    env.bot.enemy_pylon_pos = {1: None, 2: None}
+    reaper = _unit(10, 40, 40, owner_id=1, type_id=UnitTypeId.REAPER)
+    _set_units(env, [reaper])
+
+    assert env._enemy_objective_zone_cleared(1, _REWARDS) is True
+    term, delta = env._pylon_army_outcome(
+        p1_lost=False,
+        p2_lost=False,
+        p1_army_lost=False,
+        p2_army_lost=True,
+        perspective_player_id=1,
+        r_conf=_REWARDS,
+    )
+    assert term is True
+    assert delta == WIN
+
+
+def test_missing_anchor_with_an_enemy_ling_is_not_a_win(env):
+    env.unit_pools_config = []
+    env.label_to_defender_pos = {}
+    env.bot.enemy_pylon_pos = {1: None, 2: None}
+    reaper = _unit(10, 40, 40, owner_id=1, type_id=UnitTypeId.REAPER)
+    ling = _unit(20, 10, 10, owner_id=2)
+    _set_units(env, [reaper, ling])
+
+    assert env._enemy_objective_zone_cleared(1, _REWARDS) is False
 
 
 def test_enemy_unit_inside_zone_blocks_win(env):

@@ -190,15 +190,32 @@ def unit_cost(unit: Any) -> Tuple[int, int]:
     return minerals, vespene
 
 
+def _is_scv(unit: Any) -> bool:
+    """SCVs are repair bots; losing one costs the minerals and the repair."""
+    type_id = getattr(unit, "type_id", None)
+    try:
+        from sc2.ids.unit_typeid import UnitTypeId
+    except ImportError:
+        return False
+    return type_id == UnitTypeId.SCV
+
+
 def unit_economic_value(
     unit: Any,
     *,
     vespene_weight: float = DEFAULT_VESPENE_WEIGHT,
     value_norm: float = DEFAULT_VALUE_NORM,
 ) -> float:
-    """Normalised ``minerals + vespene_weight * vespene`` for one unit."""
+    """Normalised ``minerals + vespene_weight * vespene`` for one unit.
+
+    SCVs are priced at twice that cost. A repair bot is worth the unit and the
+    hit points it can put back on the army, so damage, death, and healing all
+    treat an SCV as 100 minerals instead of 50.
+    """
     minerals, vespene = unit_cost(unit)
     raw = float(minerals) + float(vespene_weight) * float(vespene)
+    if _is_scv(unit):
+        raw *= 2.0
     norm = float(value_norm) if abs(float(value_norm)) > 1e-6 else DEFAULT_VALUE_NORM
     return raw / norm
 

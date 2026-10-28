@@ -8,9 +8,17 @@ from typing import Dict, List, Mapping, MutableMapping, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
-# Soft uniqueness caps when spending mineral/vespene budgets (SC2: one Mothership).
+# Soft uniqueness caps when spending mineral/vespene budgets.
+# One Mothership. At most two of each backline caster (Ghost, High Templar,
+# Infestor, Viper) and at most two Medivacs, so a budget cannot fill the squad
+# with casters or transports.
 DEFAULT_UNIT_SPAWN_CAPS: Dict[str, int] = {
     "MOTHERSHIP": 1,
+    "GHOST": 2,
+    "HIGHTEMPLAR": 2,
+    "INFESTOR": 2,
+    "VIPER": 2,
+    "MEDIVAC": 2,
 }
 
 
@@ -40,7 +48,9 @@ def calculate_budgeted_spawns(
         if u not in unit_data:
             logger.error("Unit %s not found in unit_data.json. Skipping.", u)
             return False
-        if counts.get(u, 0) >= int(spawn_caps.get(u, 10**9)):
+        key = str(u).upper()
+        cap = int(spawn_caps.get(key, spawn_caps.get(u, 10**9)))
+        if counts.get(key, 0) >= cap:
             return False
         cost = unit_data[u]["cost"]
         return cost["minerals"] <= m and cost["vespene"] <= v
@@ -49,7 +59,8 @@ def calculate_budgeted_spawns(
     while affordable:
         u = choose(affordable)
         spawns.append(u)
-        counts[u] = counts.get(u, 0) + 1
+        key = str(u).upper()
+        counts[key] = counts.get(key, 0) + 1
         cost = unit_data[u]["cost"]
         m -= cost["minerals"]
         v -= cost["vespene"]

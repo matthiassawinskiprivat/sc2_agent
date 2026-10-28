@@ -463,14 +463,14 @@ def test_engage_enemy_masks_reports_air_in_one_pass():
 def test_snipe_target_mask_requires_caster_fovea():
     """A hostile outside every ready caster's crop is not a snipe target."""
     from src.agent.squad_target_masks import build_snipe_target_mask
-    from src.utils.unit_feature_helpers import TACTICAL_FOVEA_MAX_DELTA
+    from src.utils.unit_feature_helpers import SNIPE_FOVEA_MAX_DELTA
 
     bc = _unit(1, UnitTypeId.BATTLECRUISER)
     bc.position = MagicMock(x=10.0, y=10.0)
     near = _unit(2, UnitTypeId.ZERGLING, owner_id=2)
-    near.position = MagicMock(x=10.0 + TACTICAL_FOVEA_MAX_DELTA, y=10.0)
+    near.position = MagicMock(x=10.0 + SNIPE_FOVEA_MAX_DELTA, y=10.0)
     far = _unit(3, UnitTypeId.ZERGLING, owner_id=2)
-    far.position = MagicMock(x=10.0 + TACTICAL_FOVEA_MAX_DELTA + 1.0, y=10.0)
+    far.position = MagicMock(x=10.0 + SNIPE_FOVEA_MAX_DELTA + 1.0, y=10.0)
     enemies = [near, far] + [None] * (MAX_SQUAD_ENEMIES - 2)
 
     mask = build_snipe_target_mask(enemies, _slots(bc), casters=[bc])

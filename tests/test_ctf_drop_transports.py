@@ -156,6 +156,31 @@ def test_drop_transport_is_extra_when_budget_already_rolled_one():
     assert [c[0] for c in transports] == [UnitTypeId.MEDIVAC]
 
 
+def test_drop_transport_does_not_make_a_third_medivac():
+    """Two Medivacs from the pool already fill the squad cap."""
+    pools = [
+        {
+            "high_level_command": "attack",
+            "race": "terran",
+            "region": "A",
+            "agent": True,
+            "unit_pool": ["MARINE", "MEDIVAC"],
+            "mineral_budget": 650,
+            "vespene_budget": 400,
+        }
+    ]
+    env = _make_env(pools, env_mode="drop")
+    env._calculate_spawns_for_pool = MagicMock(
+        return_value=["MARINE", "MEDIVAC", "MEDIVAC"]
+    )
+
+    _, _, _, _, transports = _spawn(env)
+
+    army_types = [c[0] for c in _all_create_cmds(env)]
+    assert army_types.count(UnitTypeId.MEDIVAC) == 2
+    assert transports == []
+
+
 def test_without_drop_mode_no_free_transport():
     env = _make_env(_pools(), env_mode="heal,cloak,spellcaster")
     env._calculate_spawns_for_pool = MagicMock(

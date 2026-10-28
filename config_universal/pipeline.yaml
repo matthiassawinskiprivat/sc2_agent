@@ -160,7 +160,7 @@ levels:
   - "snipe_battlecruiser_marine_vs_corruptor_hydra_reversed"
 
   # ========= CTF phase 2: detailed layers and harder compositions ==========
-  # biological / light / mechanical overlays
+  # biological / mechanical overlays
   - "ctf_level_02"
   - "scenario_ravager_roach_vs_siegetank_marine"
   - "scenario_hellion_cyclone_vs_ling_bane"
@@ -194,7 +194,7 @@ levels:
   - "scenario_hydra_vs_tempest_reversed"
   - "scenario_swarmhost_vs_zealot"
   - "scenario_swarmhost_vs_zealot_reversed"
-  # air dps non-base
+  # full-army flying matchups (base air DPS only)
   - "ctf_level_12"
   - "ctf_level_12_reversed"
   - "ctf_level_13"

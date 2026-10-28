@@ -11,10 +11,6 @@ from sc2.ids.unit_typeid import UnitTypeId
 from sc2.position import Point2
 
 from src.agent.ctf_bot import CaptureTheFlagBot, UNIT_TARGET_COMMAND_HEADS
-from src.utils.unit_feature_helpers import (
-    SNIPE_CAST_ANIMATION_SECONDS,
-    SNIPE_CAST_RANGE,
-)
 
 ACTION_HEADS = [
     "move_global",
@@ -177,7 +173,8 @@ def test_snipe_is_a_unit_target_head():
 def test_ghost_snipe_issues_steady_targeting_on_selected_tag():
     ghost = _make_unit(1, UnitTypeId.GHOST, owner_id=1)
     # Inside the caster crop, farther than the other body. The selected tag wins.
-    chosen = _make_unit(2, UnitTypeId.ZERGLING, 62.0, 50.0, owner_id=2, is_biological=True)
+    # Inside the 16×16 snipe crop (half-width 8.5), still farther than the other body.
+    chosen = _make_unit(2, UnitTypeId.ZERGLING, 56.0, 50.0, owner_id=2, is_biological=True)
     nearer = _make_unit(3, UnitTypeId.HYDRALISK, 50.5, 50.0, owner_id=2, is_biological=True)
     bot, agent = _bot(ghost, chosen, nearer)
 
@@ -363,19 +360,25 @@ def test_yamato_lock_expires_after_cast_window():
     assert bot._unit_last_order[1][0] == "attack_local"
 
 
-def test_yamato_lock_includes_walk_into_cast_range():
+def test_yamato_snipe_window_is_half_the_tactical_crop():
+    """16×16 around the caster. The old 32×32 edge must not start a walk."""
+    from src.utils.unit_feature_helpers import SNIPE_FOVEA_MAX_DELTA
+
     bc = _make_unit(1, UnitTypeId.BATTLECRUISER, 50.0, 50.0, owner_id=1)
     bc.movement_speed = 2.62
-    # Inside the tactical crop (half-width 17) but outside Yamato range (10).
-    far = _make_unit(2, UnitTypeId.CORRUPTOR, 66.0, 50.0, owner_id=2)
-    bot, _ = _bot(bc, far)
-    _apply_snipe(bot, selected=[1], target_unit_tag=2)
-
-    expected = CaptureTheFlagBot._snipe_lock_until_loop(bot, bc, far)
-    assert bot._snipe_lock[1][1] == expected
-    anim_loops = (
-        SNIPE_CAST_ANIMATION_SECONDS[UnitTypeId.BATTLECRUISER]
-        * CaptureTheFlagBot._HEAL_GAME_LOOPS_PER_SECOND
+    inside = _make_unit(
+        2, UnitTypeId.CORRUPTOR, 50.0 + SNIPE_FOVEA_MAX_DELTA, 50.0, owner_id=2
     )
-    assert expected > anim_loops
-    assert SNIPE_CAST_RANGE[UnitTypeId.BATTLECRUISER] == 10.0
+    bot, _ = _bot(bc, inside)
+    _apply_snipe(bot, selected=[1], target_unit_tag=2)
+    assert bot._snipe_lock[1][0] == 2
+
+    outside = _make_unit(
+        3, UnitTypeId.CORRUPTOR, 50.0 + SNIPE_FOVEA_MAX_DELTA + 1.0, 50.0, owner_id=2
+    )
+    by_tag = {1: bc, 3: outside}
+    bot.all_units.find_by_tag.side_effect = by_tag.get
+    bc.reset_mock()
+    bot.do.reset_mock()
+    _apply_snipe(bot, selected=[1], target_unit_tag=3)
+    bc.assert_not_called()

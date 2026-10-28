@@ -36,6 +36,7 @@ from src.utils.unit_feature_helpers import (
     unit_is_immobile,
     neural_spell_role,
     snipe_same_owner_blocked,
+    SNIPE_FOVEA_MAX_DELTA,
     unit_is_wounded,
 )
 
@@ -358,8 +359,8 @@ def build_snipe_target_mask(
 ) -> np.ndarray:
     """Enemy slots that **some** ready snipe caster in this squad can legally hit.
 
-    The hostile must sit in that caster's tactical crop (same 17-unit half-width
-    as the 32×32 local map). A Battlecruiser must not be offered a squad on the
+    The hostile must sit in that caster's 16×16 snipe crop (half the 32×32
+    tactical window). A Battlecruiser must not be offered a squad on the
     other side of the map: the engine would walk it there. Per-caster biology /
     energy-bar rules are re-checked at actuation, matching the heal_target_mask
     pattern for mixed squads.
@@ -389,7 +390,9 @@ def build_snipe_target_mask(
                 continue
             if snipe_same_owner_blocked(caster, enemy):
                 continue
-            if not unit_in_tactical_fovea(caster, enemy):
+            if not unit_in_tactical_fovea(
+                caster, enemy, half=SNIPE_FOVEA_MAX_DELTA
+            ):
                 continue
             mask[slot] = 1.0
             break

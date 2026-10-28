@@ -163,6 +163,39 @@ def test_protoss_defend_guarantees_battery_when_rng_misses():
     assert deferred[0][0] == UnitTypeId.SHIELDBATTERY
 
 
+def test_protoss_attack_never_spawns_shield_battery():
+    """Attack Protoss does not field a battery even if the pool or budget names one."""
+    pools = [
+        {
+            "high_level_command": "attack",
+            "race": "protoss",
+            "region": "A",
+            "agent": True,
+            "unit_pool": ["ZEALOT", "SHIELDBATTERY"],
+            "mineral_budget": 500,
+            "vespene_budget": 0,
+        },
+        {
+            "high_level_command": "defend",
+            "race": "terran",
+            "region": "A",
+            "unit_pool": ["MARINE"],
+            "mineral_budget": 500,
+            "vespene_budget": 0,
+        },
+    ]
+    env = _make_env(pools, env_mode="heal")
+    env._calculate_spawns_for_pool = MagicMock(
+        side_effect=lambda pool: (
+            ["ZEALOT", "SHIELDBATTERY"] if pool["race"] == "protoss" else ["MARINE"]
+        )
+    )
+    _, _, deferred, _detectors, _transports = _spawn(env)
+    cmds = _all_create_cmds(env)
+    assert deferred == []
+    assert not any(c[0] == UnitTypeId.SHIELDBATTERY for c in cmds)
+
+
 def test_without_heal_mode_no_battery_guarantee():
     pools = [
         {

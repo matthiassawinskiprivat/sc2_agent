@@ -34,6 +34,8 @@ from src.utils.unit_feature_helpers import (
     resolve_air_hostile_at_point,
     SNIPE_CAST_ANIMATION_SECONDS,
     SNIPE_CAST_RANGE,
+    _AOE_ENERGY_COST,
+    _SNIPE_ENERGY_COST,
     unit_in_tactical_fovea,
     unit_is_neuraled,
     uses_caustic_spray_on_structures,
@@ -73,7 +75,63 @@ ECONOMIC_METRIC_KEYS: Tuple[str, ...] = (
     "aoe_land_value",
     "detection_reward",
     "defender_zone_shaping",
+    "snipe_target_value",
+    "spellcaster_retreat",
+    "conceal_shaping",
 )
+
+# Ghost, High Templar, Infestor, and Viper cast from behind the army. They are
+# left out of attacker center-of-mass distance shaping so that reward does not
+# drag them into the objective. Burrowed Infestors stay in the set.
+_BACKLINE_SPELLCASTER_TYPES: frozenset = frozenset(
+    {
+        UnitTypeId.GHOST,
+        UnitTypeId.HIGHTEMPLAR,
+        UnitTypeId.INFESTOR,
+        UnitTypeId.INFESTORBURROWED,
+        UnitTypeId.VIPER,
+    }
+)
+# Swarm Hosts launch locusts and then wait. While that launch is on cooldown
+# they are treated like a caster with no energy: left out of the attacker
+# center of mass, and paid to open space from the nearest enemy. A ready host
+# stays in the center of mass so it can walk into launch range.
+_SWARM_HOST_TYPES: frozenset = frozenset(
+    {
+        UnitTypeId.SWARMHOSTMP,
+        UnitTypeId.SWARMHOSTBURROWEDMP,
+    }
+)
+
+# Planted ambushers. Burrow credit scales with how many enemies sit inside the
+# burrowed attack range. Lurker spines hit ground only (range 8). Widow Mine
+# sentinel missiles hit ground and air (range 5). A reported weapon range above
+# the base (Seismic Spines, for example) wins when the unit exposes one.
+_LURKER_AMBUSH_TYPES: frozenset = frozenset(
+    {
+        UnitTypeId.LURKERMP,
+        UnitTypeId.LURKERMPBURROWED,
+        UnitTypeId.LURKERBURROWED,
+    }
+)
+_AMBUSH_ATTACK_RANGE: Dict[UnitTypeId, float] = {
+    UnitTypeId.LURKERMP: 8.0,
+    UnitTypeId.LURKERMPBURROWED: 8.0,
+    UnitTypeId.LURKERBURROWED: 8.0,
+    UnitTypeId.WIDOWMINE: 5.0,
+    UnitTypeId.WIDOWMINEBURROWED: 5.0,
+}
+_AMBUSH_BURROWED_TYPES: frozenset = frozenset(
+    {
+        UnitTypeId.LURKERMPBURROWED,
+        UnitTypeId.LURKERBURROWED,
+        UnitTypeId.WIDOWMINEBURROWED,
+    }
+)
+# Health fraction at or below this counts as "about to die" for cloak/burrow.
+_LOW_HP_CONCEAL_FRACTION = 0.10
+# Low-energy casters are paid for opening space only until this gap.
+_SPELLCASTER_RETREAT_DISTANCE = 10.0
 EMPTY_ECONOMIC_METRICS: Dict[str, float] = {key: 0.0 for key in ECONOMIC_METRIC_KEYS}
 
 # Command heads whose terminal target is a unit pointer, not a world cell.
@@ -222,7 +280,22 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_enemy_com: Dict[int, Point2] = {}
         self._pre_action_dist_to_defend_pylon: Dict[int, float] = {}
         self._pre_action_vitality: Dict[int, float] = {}
+        # Nearest hostile point, frozen before the order, for low-energy caster
+        # spacing. Distance is to that frozen point so a chase cannot erase it.
+        self._pre_action_nearest_enemy: Dict[int, Point2] = {}
+        self._pre_action_dist_to_nearest_enemy: Dict[int, float] = {}
+        self._pre_action_spell_energy: Dict[int, float] = {}
         self._step_aoe_land_value: float = 0.0
+        # Economic value of enemies a fresh ``snipe`` was aimed at this step.
+        # Each enemy tag is credited at most once per episode.
+        self._step_snipe_target_value: float = 0.0
+        self._snipe_value_paid_tags: Set[int] = set()
+        # Low-HP conceal / ambush burrow payouts accrued at command issue.
+        self._step_conceal_shaping: float = 0.0
+        # Tags that already collected the empty-field unburrow bonus and have
+        # not since planted on an enemy. Stops burrow/unburrow toggling in the
+        # open from farming the bonus every other step.
+        self._ambush_unburrow_disarmed: Set[int] = set()
         # True when this unit's last *policy* order was a move / attack. Attack is
         # snapshotted at record_pre_action time as "fired last step" so the kite
         # window still opens when weapon_cooldown has already ticked to 0 across
@@ -368,6 +441,13 @@ class CaptureTheFlagBot(BotAI):
         self._pre_action_dist_to_defend_pylon = {}
         self._pre_action_vitality = {}
         self._step_aoe_land_value = 0.0
+        self._step_snipe_target_value = 0.0
+        self._snipe_value_paid_tags = set()
+        self._step_conceal_shaping = 0.0
+        self._ambush_unburrow_disarmed = set()
+        self._pre_action_nearest_enemy = {}
+        self._pre_action_dist_to_nearest_enemy = {}
+        self._pre_action_spell_energy = {}
         self._detection_paid_tags = set()
         self.last_action_was_move_by_unit = {}
         self.last_action_was_attack_by_unit = {}
@@ -1328,6 +1408,8 @@ class CaptureTheFlagBot(BotAI):
         )
         if issued:
             CaptureTheFlagBot._record_snipe_cast(self, unit, target)
+            if not continuing:
+                self._credit_snipe_target_value(target)
         return issued
 
     @staticmethod
@@ -1708,11 +1790,16 @@ class CaptureTheFlagBot(BotAI):
         UnitTypeId.LURKERBURROWED: AbilityId.BURROWUP_LURKER,
     }
 
-    def _issue_cloak_burrow(self, unit: Unit, *, conceal: bool) -> None:
-        """Shared categorical head: cloak↔burrow / uncloak↔unburrow by unit type."""
+    def _issue_cloak_burrow(self, unit: Unit, *, conceal: bool) -> bool:
+        """Shared categorical head: cloak↔burrow / uncloak↔unburrow by unit type.
+
+        Returns True when an order was actually issued. Conceal shaping is
+        credited here, before physics, so the bonus sees the pre-step cloak,
+        burrow, and health state.
+        """
         tid = unit.type_id
         if tid == UnitTypeId.DARKTEMPLAR:
-            return  # permanently cloaked
+            return False  # permanently cloaked
         if tid == UnitTypeId.GHOST:
             ability = (
                 AbilityId.BEHAVIOR_CLOAKON_GHOST
@@ -1720,7 +1807,8 @@ class CaptureTheFlagBot(BotAI):
                 else AbilityId.BEHAVIOR_CLOAKOFF_GHOST
             )
             self.do(unit(ability))
-            return
+            self._credit_conceal_command(unit, conceal=conceal)
+            return True
         if tid == UnitTypeId.BANSHEE:
             ability = (
                 AbilityId.BEHAVIOR_CLOAKON_BANSHEE
@@ -1728,19 +1816,24 @@ class CaptureTheFlagBot(BotAI):
                 else AbilityId.BEHAVIOR_CLOAKOFF_BANSHEE
             )
             self.do(unit(ability))
-            return
+            self._credit_conceal_command(unit, conceal=conceal)
+            return True
         if tid == UnitTypeId.MOTHERSHIP:
             if conceal:
                 self.do(unit(AbilityId.MOTHERSHIPCLOAK_ORACLECLOAKFIELD))
+                self._credit_conceal_command(unit, conceal=True)
+                return True
             # No reliable cancel id for mothership field in LotV API — no-op on reveal.
-            return
+            return False
         if conceal:
             ability = self._BURROW_DOWN_BY_TYPE.get(tid)
         else:
             ability = self._BURROW_UP_BY_TYPE.get(tid)
         if ability is None:
-            return
+            return False
         self.do(unit(ability))
+        self._credit_conceal_command(unit, conceal=conceal)
+        return True
 
     async def apply_action(self, unit_tag: int, action):
         if not self.agent_system or "active_agent" not in self.agent_system.unit_agents:
@@ -1974,6 +2067,9 @@ class CaptureTheFlagBot(BotAI):
             self._pre_action_attacked_prev_step.pop(unit_tag, None)
             self._pre_action_dist_to_defend_pylon.pop(unit_tag, None)
             self._pre_action_vitality.pop(unit_tag, None)
+            self._pre_action_nearest_enemy.pop(unit_tag, None)
+            self._pre_action_dist_to_nearest_enemy.pop(unit_tag, None)
+            self._pre_action_spell_energy.pop(unit_tag, None)
             return
 
         # python-sc2 returns -1 when the unit cannot attack.
@@ -2008,6 +2104,8 @@ class CaptureTheFlagBot(BotAI):
                 self._pre_action_dist_to_defend_pylon.pop(unit_tag, None)
         else:
             self._pre_action_dist_to_defend_pylon.pop(unit_tag, None)
+
+        self._snapshot_spellcaster_spacing(unit)
 
     @staticmethod
     def _raw_vitality(unit: Any) -> float:
@@ -2316,6 +2414,401 @@ class CaptureTheFlagBot(BotAI):
                 return True
         return False
 
+    @staticmethod
+    def _is_backline_spellcaster(unit: Any) -> bool:
+        """Ghost, High Templar, Infestor (including burrowed), and Viper."""
+        return getattr(unit, "type_id", None) in _BACKLINE_SPELLCASTER_TYPES
+
+    @staticmethod
+    def _is_swarm_host(unit: Any) -> bool:
+        """Swarm Host, burrowed or not. Locusts are a separate summoned unit."""
+        return getattr(unit, "type_id", None) in _SWARM_HOST_TYPES
+
+    def _swarm_host_on_cooldown(self, unit: Any) -> bool:
+        """True when this host's locust launch was cooling down before the step.
+
+        Spawn Locusts reports through ``weapon_cooldown``. The pre-action
+        snapshot wins, so a cooldown that expires during the physics step still
+        counts as the state the host decided from. A missing snapshot falls
+        back to the live cooldown.
+        """
+        tag = getattr(unit, "tag", None)
+        try:
+            tag = int(tag) if tag is not None else None
+        except (TypeError, ValueError):
+            tag = None
+        stored = None
+        if tag is not None:
+            stored = self._pre_action_weapon_cd_by_unit.get(tag)
+        raw = stored if stored is not None else getattr(unit, "weapon_cooldown", 0.0)
+        try:
+            return float(raw or 0.0) > 1e-6
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _spellcaster_energy_floor(type_id: Any) -> float:
+        """Energy below which this caster has no offensive spell left.
+
+        The floor is the cheaper of ``snipe`` and ``aoe_local`` (Ghost Snipe 50
+        vs EMP 75, Feedback 50 vs Storm 75, Fungal 75 vs Neural 100, Viper
+        Parasitic Bomb 125). At or above the floor the unit can still cast, so
+        it is not paid to run.
+        """
+        costs = []
+        for table in (_SNIPE_ENERGY_COST, _AOE_ENERGY_COST):
+            raw = table.get(type_id)
+            if raw is None:
+                continue
+            try:
+                cost = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if cost > 0.0:
+                costs.append(cost)
+        if not costs:
+            return 0.0
+        return min(costs)
+
+    @staticmethod
+    def _safe_energy(unit: Any) -> Optional[float]:
+        try:
+            value = getattr(unit, "energy", None)
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _health_fraction(unit: Any) -> float:
+        """Current health / max health in ``[0, 1]``. Shields are not health.
+
+        Missing or non-numeric bars count as full, so a mock without a health
+        bar does not look like a dying unit.
+        """
+        try:
+            health = float(getattr(unit, "health", 0.0) or 0.0)
+            health_max = float(getattr(unit, "health_max", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 1.0
+        if health_max <= 1e-6:
+            return 1.0
+        return max(0.0, min(1.0, health / health_max))
+
+    @staticmethod
+    def _is_ambush_unit(unit: Any) -> bool:
+        return getattr(unit, "type_id", None) in _AMBUSH_ATTACK_RANGE
+
+    @staticmethod
+    def _ambush_is_burrowed(unit: Any) -> bool:
+        if getattr(unit, "type_id", None) in _AMBUSH_BURROWED_TYPES:
+            return True
+        return getattr(unit, "is_burrowed", False) is True
+
+    def _ambush_attack_range(self, unit: Any) -> float:
+        """Burrowed weapon range, or a larger range the unit already reports."""
+        base = float(_AMBUSH_ATTACK_RANGE.get(getattr(unit, "type_id", None), 0.0))
+        reported = 0.0
+        for attr in ("ground_range", "air_range"):
+            try:
+                reported = max(reported, float(getattr(unit, attr, 0.0) or 0.0))
+            except (TypeError, ValueError):
+                continue
+        return max(base, reported)
+
+    def _enemy_detector_covers(self, unit: Any) -> bool:
+        """True when a hostile detector disc covers *unit*."""
+        pos = getattr(unit, "position", None)
+        if pos is None:
+            return False
+        ux, uy = float(pos.x), float(pos.y)
+        for other in _hostile_candidates(self, unit):
+            if other is None:
+                continue
+            try:
+                rng = float(getattr(other, "detect_range", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if rng <= 0.0:
+                continue
+            opos = getattr(other, "position", None)
+            if opos is None:
+                continue
+            if math.hypot(ux - float(opos.x), uy - float(opos.y)) <= rng + 1e-6:
+                return True
+        return False
+
+    def _hostiles_in_ambush_range(self, unit: Any) -> int:
+        """Non-structure hostiles inside this mine or lurker's attack range.
+
+        Lurkers do not count air units. Widow Mines count both.
+        """
+        pos = getattr(unit, "position", None)
+        if pos is None:
+            return 0
+        reach = self._ambush_attack_range(unit)
+        if reach <= 0.0:
+            return 0
+        tid = getattr(unit, "type_id", None)
+        ground_only = tid in _LURKER_AMBUSH_TYPES
+        ux, uy = float(pos.x), float(pos.y)
+        count = 0
+        for other in _hostile_candidates(self, unit):
+            if other is None or getattr(other, "is_structure", False) is True:
+                continue
+            if ground_only and getattr(other, "is_flying", False) is True:
+                continue
+            opos = getattr(other, "position", None)
+            if opos is None:
+                continue
+            dist = math.hypot(ux - float(opos.x), uy - float(opos.y))
+            if dist <= reach + 1e-6:
+                count += 1
+        return count
+
+    def _nearest_hostile_mobile_point(self, unit: Any) -> Optional[Point2]:
+        pos = getattr(unit, "position", None)
+        if pos is None:
+            return None
+        ux, uy = float(pos.x), float(pos.y)
+        best: Optional[Point2] = None
+        best_d: Optional[float] = None
+        for other in _hostile_candidates(self, unit):
+            if other is None or getattr(other, "is_structure", False) is True:
+                continue
+            opos = getattr(other, "position", None)
+            if opos is None:
+                continue
+            dist = math.hypot(ux - float(opos.x), uy - float(opos.y))
+            if best_d is None or dist < best_d:
+                best_d = dist
+                best = Point2((float(opos.x), float(opos.y)))
+        return best
+
+    def _snapshot_spellcaster_spacing(self, unit: Any) -> None:
+        """Freeze nearest-enemy point and energy for low-energy caster spacing."""
+        tag = getattr(unit, "tag", None)
+        if tag is None:
+            return
+        tag = int(tag)
+        # Casters always snapshot. Swarm Hosts snapshot too, so a host that is
+        # on cooldown can be paid for the same open-space move.
+        if not self._is_backline_spellcaster(unit) and not self._is_swarm_host(unit):
+            self._pre_action_nearest_enemy.pop(tag, None)
+            self._pre_action_dist_to_nearest_enemy.pop(tag, None)
+            self._pre_action_spell_energy.pop(tag, None)
+            return
+        if not self._is_backline_spellcaster(unit):
+            self._pre_action_spell_energy.pop(tag, None)
+            nearest = self._nearest_hostile_mobile_point(unit)
+            if nearest is None:
+                self._pre_action_nearest_enemy.pop(tag, None)
+                self._pre_action_dist_to_nearest_enemy.pop(tag, None)
+                return
+            self._pre_action_nearest_enemy[tag] = nearest
+            self._pre_action_dist_to_nearest_enemy[tag] = self._dist_to_point(
+                unit, nearest
+            )
+            return
+        energy = self._safe_energy(unit)
+        if energy is None:
+            self._pre_action_spell_energy.pop(tag, None)
+        else:
+            self._pre_action_spell_energy[tag] = energy
+        nearest = self._nearest_hostile_mobile_point(unit)
+        if nearest is None:
+            self._pre_action_nearest_enemy.pop(tag, None)
+            self._pre_action_dist_to_nearest_enemy.pop(tag, None)
+            return
+        self._pre_action_nearest_enemy[tag] = nearest
+        self._pre_action_dist_to_nearest_enemy[tag] = self._dist_to_point(unit, nearest)
+
+    def _add_conceal_shaping(self, amount: float) -> None:
+        try:
+            prev = float(getattr(self, "_step_conceal_shaping", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            prev = 0.0
+        self._step_conceal_shaping = prev + float(amount)
+
+    def _credit_snipe_target_value(self, target: Any) -> None:
+        """Credit a fresh ``snipe`` by the target's normalised resource cost.
+
+        Higher-cost enemies pay more, in the same units as combat value
+        (``minerals + vespene_weight × vespene``, divided by ``economic_value_norm``).
+        Each enemy tag pays at most once per episode, so re-sniping the same
+        body after the cooldown does not farm the bonus. The coefficient
+        ``snipe_value_reward`` is applied when the step reward is summed.
+        """
+        r_conf = self.training_conf.get("rewards", {})
+        try:
+            coeff = float(r_conf.get("snipe_value_reward", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            coeff = 0.0
+        if coeff == 0.0 or target is None:
+            return
+        tag = getattr(target, "tag", None)
+        if tag is None:
+            return
+        tag = int(tag)
+        paid = getattr(self, "_snipe_value_paid_tags", None)
+        if not isinstance(paid, set):
+            paid = set()
+            self._snipe_value_paid_tags = paid
+        if tag in paid:
+            return
+        econ = EconomicRewardConfig.from_rewards_conf(r_conf)
+        value = unit_economic_value(
+            target,
+            vespene_weight=econ.vespene_weight,
+            value_norm=econ.value_norm,
+        )
+        if value <= 0.0:
+            return
+        paid.add(tag)
+        try:
+            prev = float(getattr(self, "_step_snipe_target_value", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            prev = 0.0
+        self._step_snipe_target_value = prev + value
+
+    def _credit_ambush_command(self, unit: Any, *, conceal: bool, r_conf: dict) -> None:
+        """Widow Mine / Lurker: burrow pays per enemy in range; empty unburrow pays once.
+
+        Burrowing with enemies inside attack range pays
+        ``ambush_burrow_reward × count``. Unburrowing with nobody in that range
+        pays ``ambush_unburrow_reward`` once, then stays quiet until the unit
+        plants on at least one enemy again. Toggling in an empty field therefore
+        pays a single correction, not a loop.
+        """
+        tag = getattr(unit, "tag", None)
+        if tag is None:
+            return
+        tag = int(tag)
+        disarmed = getattr(self, "_ambush_unburrow_disarmed", None)
+        if not isinstance(disarmed, set):
+            disarmed = set()
+            self._ambush_unburrow_disarmed = disarmed
+        if conceal:
+            if self._ambush_is_burrowed(unit):
+                return
+            count = self._hostiles_in_ambush_range(unit)
+            try:
+                per_enemy = float(r_conf.get("ambush_burrow_reward", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                per_enemy = 0.0
+            if count > 0 and per_enemy != 0.0:
+                self._add_conceal_shaping(per_enemy * count)
+                disarmed.discard(tag)
+            return
+        if not self._ambush_is_burrowed(unit):
+            return
+        if self._hostiles_in_ambush_range(unit) > 0:
+            return
+        if tag in disarmed:
+            return
+        try:
+            bonus = float(r_conf.get("ambush_unburrow_reward", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            bonus = 0.0
+        if bonus == 0.0:
+            return
+        disarmed.add(tag)
+        self._add_conceal_shaping(bonus)
+
+    def _credit_conceal_command(self, unit: Any, *, conceal: bool) -> None:
+        """Shape cloak / burrow at the moment the order is issued.
+
+        Units at or below 10% health are paid ``low_hp_conceal_reward`` for
+        cloaking or burrowing outside enemy detector range, and
+        ``low_hp_reveal_reward`` for revealing while a detector covers them.
+        Widow Mines and Lurkers skip that rule and use ambush credit instead.
+        """
+        if unit is None:
+            return
+        r_conf = self.training_conf.get("rewards", {}) or {}
+        if self._is_ambush_unit(unit):
+            self._credit_ambush_command(unit, conceal=conceal, r_conf=r_conf)
+            return
+        low_hp_limit = _LOW_HP_CONCEAL_FRACTION
+        try:
+            low_hp_limit = float(r_conf.get("low_hp_conceal_fraction", low_hp_limit))
+        except (TypeError, ValueError):
+            low_hp_limit = _LOW_HP_CONCEAL_FRACTION
+        if self._health_fraction(unit) > low_hp_limit + 1e-6:
+            return
+        covered = self._enemy_detector_covers(unit)
+        if conceal:
+            if self._unit_is_concealed(unit) or covered:
+                return
+            try:
+                bonus = float(r_conf.get("low_hp_conceal_reward", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                bonus = 0.0
+        else:
+            if not self._unit_is_concealed(unit) or not covered:
+                return
+            try:
+                bonus = float(r_conf.get("low_hp_reveal_reward", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                bonus = 0.0
+        if bonus != 0.0:
+            self._add_conceal_shaping(bonus)
+
+    def calculate_spellcaster_retreat_reward(self, unit_tag: int) -> float:
+        """Pay a backline unit for opening space when it cannot act.
+
+        Ghost, High Templar, Infestor, and Viper qualify when pre-action energy
+        is below the cheapest offensive spell. A Swarm Host qualifies when its
+        locust launch was on cooldown. Moving away from the frozen nearest
+        enemy pays ``spellcaster_retreat_scale × Δdist``, and only for the part
+        of that gap that is still inside 10. Standing still, moving closer, or
+        already being 10 away pays nothing.
+        """
+        if unit_tag is None:
+            return 0.0
+        r_conf = self.training_conf.get("rewards", {}) or {}
+        try:
+            scale = float(r_conf.get("spellcaster_retreat_scale", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            scale = 0.0
+        if scale == 0.0:
+            return 0.0
+        try:
+            cap = float(
+                r_conf.get("spellcaster_retreat_distance", _SPELLCASTER_RETREAT_DISTANCE)
+            )
+        except (TypeError, ValueError):
+            cap = _SPELLCASTER_RETREAT_DISTANCE
+        if cap <= 0.0:
+            return 0.0
+
+        unit = self.all_units.find_by_tag(unit_tag)
+        if unit is None:
+            return 0.0
+        if self._is_backline_spellcaster(unit):
+            floor = self._spellcaster_energy_floor(getattr(unit, "type_id", None))
+            if floor <= 0.0:
+                return 0.0
+            energy = self._pre_action_spell_energy.get(unit_tag)
+            if energy is None or float(energy) >= floor:
+                return 0.0
+        elif self._is_swarm_host(unit):
+            if not self._swarm_host_on_cooldown(unit):
+                return 0.0
+        else:
+            return 0.0
+        prev_dist = self._pre_action_dist_to_nearest_enemy.get(unit_tag)
+        frozen = self._pre_action_nearest_enemy.get(unit_tag)
+        if prev_dist is None or frozen is None:
+            return 0.0
+        curr_dist = self._dist_to_point(unit, frozen)
+        # Only the slice of the move that is still inside the cap counts.
+        opened = min(float(curr_dist), cap) - min(float(prev_dist), cap)
+        if opened <= 1e-3:
+            return 0.0
+        return scale * opened
+
     def _detection_step_reward(
         self,
         enemy_units: Iterable,
@@ -2422,6 +2915,7 @@ class CaptureTheFlagBot(BotAI):
         ``objective_credit_min_scale``). Own-loss penalties are never scaled.
         """
         self._step_cooldown_retreat_reward = 0.0
+        self._step_spellcaster_retreat = 0.0
         p_id = perspective_player_id if perspective_player_id is not None else self.player_id
 
         reward = 0.0
@@ -2667,6 +3161,22 @@ class CaptureTheFlagBot(BotAI):
             reward += aoe_land_coeff * aoe_land_value
         metrics["aoe_land_value"] = aoe_land_value
 
+        snipe_value = float(getattr(self, "_step_snipe_target_value", 0.0) or 0.0)
+        self._step_snipe_target_value = 0.0
+        try:
+            snipe_coeff = float(r_conf.get("snipe_value_reward", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            snipe_coeff = 0.0
+        if snipe_coeff != 0.0 and snipe_value > 0.0:
+            reward += snipe_coeff * snipe_value
+        metrics["snipe_target_value"] = snipe_value
+
+        conceal = float(getattr(self, "_step_conceal_shaping", 0.0) or 0.0)
+        self._step_conceal_shaping = 0.0
+        if conceal != 0.0:
+            reward += conceal
+        metrics["conceal_shaping"] = conceal
+
         detection = self._detection_step_reward(
             enemy_units, own_units, own_structs, r_conf, econ
         )
@@ -2682,8 +3192,19 @@ class CaptureTheFlagBot(BotAI):
         active_unit_role = self.unit_command_map.get(self.active_unit_tag, "attack") if self.active_unit_tag else "attack"
 
         if active_unit_role == "attack":
-            squad_units = [u for u in own_units if not u.is_structure
-                           and self.unit_command_map.get(u.tag, "attack") == "attack"]
+            # Casters always stay out of this center of mass. A Swarm Host stays
+            # out only while locusts are on cooldown; a ready host is pulled in
+            # so it can walk to launch range.
+            squad_units = [
+                u
+                for u in own_units
+                if not u.is_structure
+                and self.unit_command_map.get(u.tag, "attack") == "attack"
+                and not self._is_backline_spellcaster(u)
+                and not (
+                    self._is_swarm_host(u) and self._swarm_host_on_cooldown(u)
+                )
+            ]
             squad_target = next(
                 (self.unit_target_map[u.tag] for u in squad_units if u.tag in self.unit_target_map),
                 target_pos,
@@ -2720,11 +3241,19 @@ class CaptureTheFlagBot(BotAI):
                 float(getattr(self, "_step_cooldown_retreat_reward", 0.0)) + float(retreat)
             )
             reward += retreat
+            spacing = self.calculate_spellcaster_retreat_reward(tag)
+            self._step_spellcaster_retreat = (
+                float(getattr(self, "_step_spellcaster_retreat", 0.0)) + float(spacing)
+            )
+            reward += spacing
             zone = self.calculate_defender_zone_penalty(tag, own_pylon_pos)
             zone_total += float(zone)
             reward += zone
         self.active_unit_tag = saved_active
         metrics["defender_zone_shaping"] = zone_total
+        metrics["spellcaster_retreat"] = float(
+            getattr(self, "_step_spellcaster_retreat", 0.0) or 0.0
+        )
         self._step_economic_metrics = metrics
 
         # Both roles pay the step penalty. The old per-step defender_step_reward is

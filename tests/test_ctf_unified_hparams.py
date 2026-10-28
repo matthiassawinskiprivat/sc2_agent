@@ -9,7 +9,7 @@ _CANONICAL_REWARDS = {
     "economic_vespene_weight": 1.5,
     "economic_value_norm": 100.0,
     "attacker_enemy_value_reward": 3.0,
-    "attacker_own_value_penalty": 1.0,
+    "attacker_own_value_penalty": 2.0,
     "defender_enemy_value_reward": 2.5,
     "defender_own_value_penalty": 3.0,
     "defender_pylon_penalty_scale": 1.5,
@@ -18,7 +18,7 @@ _CANONICAL_REWARDS = {
     "pylon_value_scale": 1.0,
     "pylon_own_value_penalty": 1.0,
     "melee_multiplier": 0.5,
-    "distance_multiplier": 2.0,
+    "distance_multiplier": 1.0,
     "defender_zone_radius": 10.0,
     "attacker_objective_radius": 12.0,
     "objective_credit_falloff": 15.0,
@@ -28,6 +28,12 @@ _CANONICAL_REWARDS = {
     "cooldown_retreat_scale": 0.6,
     "aoe_land_reward": 0.75,
     "detection_reward": 1.0,
+    "snipe_value_reward": 1.0,
+    "spellcaster_retreat_scale": 0.6,
+    "low_hp_conceal_reward": 1.0,
+    "low_hp_reveal_reward": 0.75,
+    "ambush_burrow_reward": 0.25,
+    "ambush_unburrow_reward": 0.5,
     "win_reward": 15.0,
     "loss_penalty": -12.5,
     "draw_penalty": -10.0,
@@ -49,9 +55,9 @@ def test_ctf_squad_levels_share_unified_hparams_and_rewards():
     for path, data in _squad_levels():
         env = data["env"]
         model = data["model"]
-        assert model.get("gamma") == 0.99, path.name
+        assert model.get("gamma") == 0.993, path.name
         assert model.get("n_epochs") == 4, path.name
-        assert env.get("max_steps") == 100, path.name
+        assert env.get("max_steps") == 150, path.name
         assert env.get("every_k_episodes") == 200, path.name
         assert env.get("rewards") == _CANONICAL_REWARDS, path.name
         assert "heal_cast_reward" not in (env.get("rewards") or {}), path.name

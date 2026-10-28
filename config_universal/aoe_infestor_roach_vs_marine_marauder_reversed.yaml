@@ -10,7 +10,7 @@ training:
   rollout_buffer: disk
 env:
   env_class: CaptureTheFlagEnv
-  max_steps: 100
+  max_steps: 150
   headless: true
   every_k_episodes: 200
   alternate_trainee_race: true
@@ -61,7 +61,7 @@ env:
     economic_vespene_weight: 1.5
     economic_value_norm: 100.0
     attacker_enemy_value_reward: 3.0
-    attacker_own_value_penalty: 1.0
+    attacker_own_value_penalty: 2.0
     defender_enemy_value_reward: 2.5
     defender_own_value_penalty: 3.0
     defender_pylon_penalty_scale: 1.5
@@ -70,7 +70,7 @@ env:
     pylon_value_scale: 1.0
     pylon_own_value_penalty: 1.0
     melee_multiplier: 0.5
-    distance_multiplier: 2.0
+    distance_multiplier: 1.0
     defender_zone_radius: 10.0
     attacker_objective_radius: 12.0
     objective_credit_falloff: 15.0
@@ -80,6 +80,12 @@ env:
     cooldown_retreat_scale: 0.6
     aoe_land_reward: 0.75
     detection_reward: 1.0
+    snipe_value_reward: 1.0
+    spellcaster_retreat_scale: 0.6
+    low_hp_conceal_reward: 1.0
+    low_hp_reveal_reward: 0.75
+    ambush_burrow_reward: 0.25
+    ambush_unburrow_reward: 0.5
     win_reward: 15.0
     loss_penalty: -12.5
     draw_penalty: -10.0
@@ -99,7 +105,7 @@ model:
       use_self_attention: true
     lstm_hidden_size: 512
     net_arch: []
-  gamma: 0.99
+  gamma: 0.993
   ent_coef: 0.01
   n_epochs: 4
 agent_architecture: squad

@@ -104,7 +104,9 @@ def test_heal_intro_is_queen_vs_queen_no_race_alternate():
     assert len(pools) == 4
     for pool in pools:
         assert pool["race"] == "zerg"
-        assert pool["unit_pool"] == ["QUEEN"]
+        assert "QUEEN" in pool["unit_pool"]
+        # Units fielded before this intro stay in the pool.
+        assert {"ZERGLING", "ROACH", "HYDRALISK"} <= set(pool["unit_pool"])
     assert pools[0].get("agent") is True
     assert "agent" not in pools[1]
     assert pools[2].get("agent") is True
@@ -146,22 +148,14 @@ def test_heal_queen_vs_battlecruiser_scv_is_mixed_race_alternate():
         "ctf_heal_queen_vs_battlecruiser_scv"
     )
     assert len(pools) == 4
-    assert pools[0]["race"] == "zerg" and pools[0]["unit_pool"] == [
-        "QUEEN",
-        "CORRUPTOR",
-        "INFESTOR",
-    ]
-    assert pools[1]["race"] == "terran" and pools[1]["unit_pool"] == [
-        "BATTLECRUISER",
-        "SCV",
-        "GHOST",
-    ]
-    assert pools[2]["race"] == "zerg" and pools[2]["unit_pool"] == ["QUEEN", "INFESTOR"]
-    assert pools[3]["race"] == "terran" and pools[3]["unit_pool"] == [
-        "BATTLECRUISER",
-        "SCV",
-        "GHOST",
-    ]
+    assert pools[0]["race"] == "zerg"
+    assert {"QUEEN", "CORRUPTOR", "INFESTOR", "VIPER"} <= set(pools[0]["unit_pool"])
+    assert pools[1]["race"] == "terran"
+    assert {"BATTLECRUISER", "SCV", "GHOST", "MEDIVAC"} <= set(pools[1]["unit_pool"])
+    assert pools[2]["race"] == "zerg"
+    assert {"QUEEN", "INFESTOR", "VIPER"} <= set(pools[2]["unit_pool"])
+    assert pools[3]["race"] == "terran"
+    assert {"BATTLECRUISER", "SCV", "GHOST", "MEDIVAC"} <= set(pools[3]["unit_pool"])
 
 
 def test_heal_intro_precedes_ctf_level_18():
@@ -226,8 +220,10 @@ def test_phase1_pre_flying_pools_have_no_flyers_or_massives():
     }
     fly_i = cm.levels.index("scenario_queen_vs_battlecruiser")
     mass_i = cm.levels.index("ctf_level_07")
-    # Massive overlay attaches at ctf_07; these levels intentionally spawn Thor/BC
-    # earlier for heal/snipe lessons (flying channels already exist at the heal revisit).
+    thor_i = cm.levels.index("ctf_heal_thor_scv_vs_thor_scv")
+    # Massive overlay attaches at ctf_07. Thor is fielded at the heal intro and
+    # then kept, because a unit added in a ctf_ level stays in later ctf_ pools.
+    # Listed levels spawn a Battlecruiser before that overlay for heal/snipe.
     keep_massive = {
         "ctf_heal_thor_scv_vs_thor_scv",
         "scenario_queen_vs_battlecruiser",
@@ -251,7 +247,9 @@ def test_phase1_pre_flying_pools_have_no_flyers_or_massives():
         if i < fly_i:
             assert not (units & flying), f"{level}: unexpected flyers {units & flying}"
         if i < mass_i and level not in keep_massive:
-            assert not (units & massive), f"{level}: unexpected massives {units & massive}"
+            allowed = {"THOR", "THORAP"} if i > thor_i else set()
+            unexpected = (units & massive) - allowed
+            assert not unexpected, f"{level}: unexpected massives {unexpected}"
 
 
 def test_heal_unit_has_no_click_cells_anywhere():

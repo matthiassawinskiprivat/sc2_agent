@@ -1134,6 +1134,14 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
                     pool.get("unit_pool", []), unit_names
                 ):
                     unit_names.append(extra_healer)
+            # Shield batteries are a Protoss defender structure. Attack squads
+            # never field one, even if the pool list or a budget roll names it.
+            if not (
+                str(pool.get("race", "")).lower() == "protoss" and command == "defend"
+            ):
+                unit_names = [
+                    n for n in unit_names if str(n).upper() != "SHIELDBATTERY"
+                ]
             mobile_names = [n for n in unit_names if str(n).upper() != "SHIELDBATTERY"]
             battery_count = sum(1 for n in unit_names if str(n).upper() == "SHIELDBATTERY")
             for i, name in enumerate(mobile_names):
@@ -1167,7 +1175,18 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             # Deferred like detectors so a long army create list cannot drop it.
             if self._has_env_mode("drop"):
                 transport_name = drop_transport_name(pool.get("race", ""))
-                if transport_name is not None:
+                medivacs_already = sum(
+                    1 for name in unit_names if str(name).upper() == "MEDIVAC"
+                )
+                # Pool Medivacs are capped at two. The free drop transport is
+                # the same unit, so it must not become a third.
+                if (
+                    transport_name is not None
+                    and not (
+                        str(transport_name).upper() == "MEDIVAC"
+                        and medivacs_already >= 2
+                    )
+                ):
                     # Sit one ring slot past the army, and past the cloak detector
                     # when that mode plants one at the same center.
                     slot = max(len(mobile_names), 1)
@@ -3232,7 +3251,10 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
         not fighting units. A leftover detector must not keep a wiped army alive
         or hold the objective zone shut. Cloaked combat units still count.
         """
-        from src.utils.unit_feature_helpers import cloak_sensor_type_ids
+        from src.utils.unit_feature_helpers import (
+            cloak_sensor_type_ids,
+            objective_summon_type_ids,
+        )
 
         return {
             UnitTypeId.LARVA,
@@ -3243,7 +3265,7 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             UnitTypeId.DRONE,
             UnitTypeId.PYLON,
             UnitTypeId.INTERCEPTOR,
-        } | set(cloak_sensor_type_ids())
+        } | set(cloak_sensor_type_ids()) | set(objective_summon_type_ids())
 
     def _flag_zone_anchor(self, owner_id: int):
         """Defend-zone center for ``owner_id`` (live pylon → spawn label → memory)."""
@@ -3291,22 +3313,30 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             return False
 
     def _owner_blocks_objective_zone(
-        self, owner_id: int, center, radius: float
+        self, owner_id: int, center, radius: float, *, anywhere: bool = False
     ) -> bool:
-        """True when ``owner_id`` still has any unit or building in the zone.
+        """True when ``owner_id`` still has a ground unit or building in the zone.
 
+        Flying units do not block the clear: the attacker wins once ground units
+        and the flag pylon are gone, even if Mutalisks or other air remain.
+        Air is decided by type as well as the live ``is_flying`` flag, because
+        fog snapshots and Liberator defender mode leave that flag false.
+        Timed summons (locusts, broodlings, changelings, …) do not block: a
+        host outside the radius can refill them after the objective is clear.
         Workers / larva / interceptors are ignored (same as combat-army checks).
         Heal-mode creep tumors never block clear, including the burrowed form
         when the API omits the Structure attribute. Free cloak detectors
-        (Observer, Raven, Overseer) do not block either: they are not fighting
-        units, and the army may have no weapon that can kill them. Cloaked and
-        burrowed combat units still block. The flag pylon does block clear.
+        (Observer, Raven, Overseer) do not block either. Cloaked and burrowed
+        ground combat units still block. The flag pylon does block clear.
+        ``anywhere`` ignores the radius and matches any such unit on the map.
         """
         from train.envs.ctf.heal_creep import HEAL_TUMOR_TYPE_IDS
         from src.utils.unit_feature_helpers import unit_blocks_objective_clear
 
         bot = getattr(self, "bot", None)
-        if bot is None or center is None or radius < 0.0:
+        if bot is None or radius < 0.0:
+            return False
+        if not anywhere and center is None:
             return False
         if not self._can_scan_all_units():
             return False
@@ -3328,6 +3358,8 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
             is_structure = bool(getattr(unit, "is_structure", False))
             if not is_structure and type_id in ignore:
                 continue
+            if anywhere:
+                return True
             pos = getattr(unit, "position", None)
             if pos is None:
                 continue
@@ -3343,18 +3375,22 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
     ) -> bool:
         """Enemy units and buildings cleared from their defend/objective zone.
 
-        Win requires the zone empty of combat units and buildings (including
-        the flag pylon). Creep tumors are exempt. Pure attackers with no flag
-        zone cannot be cleared this way. Returns False when the unit board
-        cannot be scanned, so incomplete mocks do not false-trigger a win.
+        Win requires the zone empty of ground combat units and buildings
+        (including the flag pylon). Flying units, timed summons, and fog
+        snapshots are exempt. Creep tumors are exempt. With no flag anchor,
+        the same blockers are checked across the whole map, so a wiped enemy
+        still ends the episode. Returns False when the unit board cannot be
+        scanned, so incomplete mocks do not false-trigger a win.
         """
         enemy_id = 2 if int(perspective_player_id) == 1 else 1
-        anchor = self._flag_zone_anchor(enemy_id)
-        if anchor is None:
-            return False
         if not self._can_scan_all_units():
             return False
         radius = float(r_conf.get("attacker_objective_radius", 12.0))
+        anchor = self._flag_zone_anchor(enemy_id)
+        if anchor is None:
+            return not self._owner_blocks_objective_zone(
+                enemy_id, None, radius, anywhere=True
+            )
         return not self._owner_blocks_objective_zone(enemy_id, anchor, radius)
 
     def _pylon_army_outcome(
@@ -3370,8 +3406,9 @@ class CaptureTheFlagSingleEnv(SingleClientEnv):
 
         Returns ``(should_terminate, reward_delta)``.
 
-        Attacker win = every enemy unit and building cleared from the enemy
-        defend zone (``attacker_objective_radius``), including the flag pylon.
+        Attacker win = every enemy ground unit and building cleared from the
+        enemy defend zone (``attacker_objective_radius``), including the flag
+        pylon. Flying units left in the zone do not hold it.
         Heal-mode creep tumors do not have to be cleared. Army wipe alone is
         not enough while the pylon (or any other building) still stands in the
         zone. Own-army wipe is a loss; mutual wipe is a draw.
